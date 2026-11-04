@@ -59,6 +59,7 @@ import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
+import { AzureDevOpsSection } from '@/components/integrations/AzureDevOpsSection';
 import { WizSection } from '@/components/integrations/WizSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
 
@@ -3232,6 +3233,9 @@ export default function IntegrationsPage() {
 
         {/* ServiceNow ITSM Integration Card */}
         <ServiceNowSection selectedOrgId={selectedOrgId} />
+
+        {/* Azure DevOps Boards work item integration */}
+        <AzureDevOpsSection selectedOrgId={selectedOrgId} />
 
         {/* Placeholder integrations */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">

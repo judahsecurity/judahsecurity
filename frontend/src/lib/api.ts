@@ -346,6 +346,132 @@ export interface ServiceNowSyncResult {
   snow_state_label?: string;
 }
 
+// ── Azure DevOps shared types ─────────────────────────────────────────────
+
+export type AzureDevOpsAuthMethod = 'pat' | 'entra_id';
+export type AzureDevOpsCloseAs = 'resolved' | 'mitigated' | 'false_positive' | 'accepted';
+export type AzureDevOpsSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+export interface AzureDevOpsIntegration {
+  id: number;
+  organization_id: number;
+  organization_url: string;
+  auth_method: AzureDevOpsAuthMethod | string;
+  has_pat: boolean;
+  tenant_id?: string | null;
+  client_id?: string | null;
+  has_client_secret: boolean;
+  sync_enabled: boolean;
+  remote_closed_states: string[];
+  accept_close_as: AzureDevOpsCloseAs | string;
+  close_state?: string | null;
+  reopen_state?: string | null;
+  notify_severity_change: boolean;
+  is_active: boolean;
+  last_tested_at?: string | null;
+  last_test_ok?: boolean | null;
+  last_pull_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AzureDevOpsIntegrationCreate {
+  organization_url: string;
+  auth_method?: AzureDevOpsAuthMethod;
+  pat?: string;
+  tenant_id?: string;
+  client_id?: string;
+  client_secret?: string;
+  sync_enabled?: boolean;
+  remote_closed_states?: string[];
+  accept_close_as?: AzureDevOpsCloseAs;
+  close_state?: string | null;
+  reopen_state?: string | null;
+  notify_severity_change?: boolean;
+}
+
+export interface AzureDevOpsIntegrationUpdate extends Partial<AzureDevOpsIntegrationCreate> {
+  is_active?: boolean;
+}
+
+export interface AzureDevOpsTestResult {
+  ok: boolean;
+  message: string;
+  project_count?: number | null;
+}
+
+export interface AzureDevOpsProject {
+  id: string;
+  name: string;
+  description?: string | null;
+}
+
+export interface AzureDevOpsWorkItemType {
+  name: string;
+  reference_name?: string | null;
+  description?: string | null;
+}
+
+export interface AzureDevOpsTemplate {
+  id: number;
+  integration_id: number;
+  name: string;
+  project: string;
+  work_item_type: string;
+  area_path?: string | null;
+  iteration_path?: string | null;
+  extra_tags: string[];
+  auto_create_enabled: boolean;
+  auto_create_min_severity?: AzureDevOpsSeverity | string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AzureDevOpsTemplateCreate {
+  name: string;
+  project: string;
+  work_item_type?: string;
+  area_path?: string | null;
+  iteration_path?: string | null;
+  extra_tags?: string[];
+  auto_create_enabled?: boolean;
+  auto_create_min_severity?: AzureDevOpsSeverity;
+  is_active?: boolean;
+}
+
+export type AzureDevOpsTemplateUpdate = Partial<AzureDevOpsTemplateCreate>;
+
+export interface AzureDevOpsWorkItem {
+  id: number;
+  integration_id: number;
+  template_id?: number | null;
+  vulnerability_id: number;
+  work_item_id: number;
+  work_item_url: string;
+  project?: string | null;
+  work_item_type?: string | null;
+  state?: string | null;
+  assigned_to?: string | null;
+  last_synced_at?: string | null;
+  is_associated: boolean;
+  disconnected_at?: string | null;
+  created_at: string;
+}
+
+export type CreateAzureDevOpsWorkItemRequest =
+  | { template_id: number }
+  | { project: string; work_item_type: string };
+
+export interface AzureDevOpsSyncResult {
+  ok: boolean;
+  message: string;
+  refreshed: number;
+  closed_in_asm: number;
+  errors: number;
+}
+
 export interface JiraProject {
   key: string;
   name: string;
@@ -3069,6 +3195,126 @@ class ApiClient {
   async pullServiceNowDeliveries(orgId?: number): Promise<ServiceNowSyncResult> {
     const params = orgId ? { org_id: orgId } : {};
     const response = await this.client.post('/integrations/servicenow/pull', undefined, { params });
+    return response.data;
+  }
+
+  // ── Azure DevOps Integration ───────────────────────────────────────────────
+
+  async getAzureDevOpsIntegration(orgId?: number): Promise<AzureDevOpsIntegration> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.get('/integrations/azure-devops', { params });
+    return response.data;
+  }
+
+  async createAzureDevOpsIntegration(payload: AzureDevOpsIntegrationCreate, orgId?: number): Promise<AzureDevOpsIntegration> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post('/integrations/azure-devops', payload, { params });
+    return response.data;
+  }
+
+  async updateAzureDevOpsIntegration(payload: AzureDevOpsIntegrationUpdate, orgId?: number): Promise<AzureDevOpsIntegration> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.put('/integrations/azure-devops', payload, { params });
+    return response.data;
+  }
+
+  async deleteAzureDevOpsIntegration(orgId?: number): Promise<void> {
+    const params = orgId ? { org_id: orgId } : {};
+    await this.client.delete('/integrations/azure-devops', { params });
+  }
+
+  async testAzureDevOpsConnection(orgId?: number): Promise<AzureDevOpsTestResult> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post('/integrations/azure-devops/test', undefined, { params });
+    return response.data;
+  }
+
+  async getAzureDevOpsProjects(orgId?: number): Promise<{ projects: AzureDevOpsProject[] }> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.get('/integrations/azure-devops/projects', { params });
+    return response.data;
+  }
+
+  async getAzureDevOpsWorkItemTypes(project: string, orgId?: number): Promise<{ work_item_types: AzureDevOpsWorkItemType[] }> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.get(
+      `/integrations/azure-devops/projects/${encodeURIComponent(project)}/work-item-types`,
+      { params },
+    );
+    return response.data;
+  }
+
+  async getAzureDevOpsTemplates(orgId?: number): Promise<AzureDevOpsTemplate[]> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.get('/integrations/azure-devops/templates', { params });
+    return response.data;
+  }
+
+  async createAzureDevOpsTemplate(payload: AzureDevOpsTemplateCreate, orgId?: number): Promise<AzureDevOpsTemplate> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post('/integrations/azure-devops/templates', payload, { params });
+    return response.data;
+  }
+
+  async updateAzureDevOpsTemplate(templateId: number, payload: AzureDevOpsTemplateUpdate, orgId?: number): Promise<AzureDevOpsTemplate> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.put(`/integrations/azure-devops/templates/${templateId}`, payload, { params });
+    return response.data;
+  }
+
+  async deleteAzureDevOpsTemplate(templateId: number, orgId?: number): Promise<void> {
+    const params = orgId ? { org_id: orgId } : {};
+    await this.client.delete(`/integrations/azure-devops/templates/${templateId}`, { params });
+  }
+
+  async createAzureDevOpsWorkItem(
+    vulnerabilityId: number,
+    payload: CreateAzureDevOpsWorkItemRequest,
+    orgId?: number,
+  ): Promise<AzureDevOpsWorkItem> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post(
+      `/integrations/azure-devops/vulnerabilities/${vulnerabilityId}/work-item`,
+      payload,
+      { params },
+    );
+    return response.data;
+  }
+
+  async associateAzureDevOpsWorkItem(vulnerabilityId: number, workItemId: number, orgId?: number): Promise<AzureDevOpsWorkItem> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post(
+      `/integrations/azure-devops/vulnerabilities/${vulnerabilityId}/associate`,
+      { work_item_id: workItemId },
+      { params },
+    );
+    return response.data;
+  }
+
+  async getAzureDevOpsWorkItemsForVulnerability(vulnerabilityId: number, orgId?: number): Promise<AzureDevOpsWorkItem[]> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.get(
+      `/integrations/azure-devops/vulnerabilities/${vulnerabilityId}/work-items`,
+      { params },
+    );
+    return response.data;
+  }
+
+  async refreshAzureDevOpsWorkItem(linkId: number, orgId?: number): Promise<AzureDevOpsWorkItem> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post(`/integrations/azure-devops/work-items/${linkId}/refresh`, undefined, { params });
+    return response.data;
+  }
+
+  async disconnectAzureDevOpsWorkItem(linkId: number, orgId?: number): Promise<{ ok: boolean; message: string }> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.delete(`/integrations/azure-devops/work-items/${linkId}`, { params });
+    return response.data;
+  }
+
+  async pullAzureDevOpsWorkItems(orgId?: number): Promise<AzureDevOpsSyncResult> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post('/integrations/azure-devops/pull', undefined, { params });
     return response.data;
   }
 

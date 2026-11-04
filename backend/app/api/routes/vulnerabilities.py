@@ -458,6 +458,8 @@ def create_vulnerability(
     _maybe_auto_create_jira_ticket(db, new_vuln, background_tasks, asset.organization_id)
     # Auto-push to ServiceNow if configured
     _maybe_auto_push_servicenow(db, new_vuln, background_tasks, asset.organization_id)
+    # Auto-create Azure DevOps work items for matching templates
+    _maybe_auto_create_azure_devops(db, new_vuln, background_tasks, asset.organization_id)
 
     return new_vuln
 
@@ -611,6 +613,7 @@ def update_vulnerability(
 
     update_data = vuln_data.model_dump(exclude_unset=True)
     old_status = vuln.status.value if vuln.status else "open"
+    old_severity = vuln.severity.value if vuln.severity else "info"
     new_status = update_data.get("status")
 
     if new_status == VulnerabilityStatus.RESOLVED and vuln.status != VulnerabilityStatus.RESOLVED:
@@ -642,6 +645,13 @@ def update_vulnerability(
             changed_by=changed_by,
             background_tasks=background_tasks,
         )
+        background_tasks.add_task(
+            _azure_devops_status_hook, vuln.id, old_status, status_str, changed_by
+        )
+
+    new_severity = vuln.severity.value if vuln.severity else "info"
+    if new_severity != old_severity:
+        background_tasks.add_task(_azure_devops_severity_hook, vuln.id, old_severity, new_severity)
 
     # Manually marking a finding as a false positive is a suppression signal.
     if (
@@ -1594,6 +1604,47 @@ def get_related_findings(
         "related_findings": related_findings,
         "also_affects": also_affects
     }
+
+
+# ── Azure DevOps integration hooks ───────────────────────────────────────────
+
+def _maybe_auto_create_azure_devops(
+    db: Session,
+    vuln: Vulnerability,
+    background_tasks: BackgroundTasks,
+    org_id: int,
+) -> None:
+    """Queue Azure DevOps work item creation for each auto-create template the severity meets."""
+    try:
+        from app.models.azure_devops_integration import AzureDevOpsIntegration
+        from app.services.azure_devops_service import auto_create_background, matching_auto_templates
+
+        integration = (
+            db.query(AzureDevOpsIntegration)
+            .filter(
+                AzureDevOpsIntegration.organization_id == org_id,
+                AzureDevOpsIntegration.is_active == True,
+            )
+            .first()
+        )
+        if not integration:
+            return
+        severity = vuln.severity.value if vuln.severity else "info"
+        if not matching_auto_templates(integration, severity):
+            return
+        background_tasks.add_task(auto_create_background, integration.id, vuln.id)
+    except Exception:
+        logger.exception("Error scheduling Azure DevOps auto-create for vuln %s", vuln.id)
+
+
+def _azure_devops_status_hook(vuln_id: int, old_status: str, new_status: str, changed_by: str) -> None:
+    from app.services.azure_devops_service import status_change_background
+    status_change_background(vuln_id, old_status, new_status, changed_by)
+
+
+def _azure_devops_severity_hook(vuln_id: int, old_severity: str, new_severity: str) -> None:
+    from app.services.azure_devops_service import severity_change_background
+    severity_change_background(vuln_id, old_severity, new_severity)
 
 
 # ── Jira integration hooks ───────────────────────────────────────────────────

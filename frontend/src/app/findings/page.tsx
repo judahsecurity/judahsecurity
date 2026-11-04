@@ -62,9 +62,18 @@ import {
   Bot,
   AlertTriangle,
   Gauge,
+  KanbanSquare,
 } from 'lucide-react';
 import Link from 'next/link';
-import { api, getApiErrorMessage } from '@/lib/api';
+import {
+  api,
+  getApiErrorMessage,
+  type AzureDevOpsProject,
+  type AzureDevOpsTemplate,
+  type AzureDevOpsWorkItem,
+  type AzureDevOpsWorkItemType,
+  type CreateAzureDevOpsWorkItemRequest,
+} from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate, downloadCSV, cn } from '@/lib/utils';
 import { RemediationPanel } from '@/components/remediation/RemediationPanel';
@@ -1090,6 +1099,191 @@ export default function FindingsPage() {
     }
   };
 
+  // Azure DevOps work item state
+  const [adoDialogOpen, setAdoDialogOpen] = useState(false);
+  const [adoDialogMode, setAdoDialogMode] = useState<'create' | 'associate'>('create');
+  const [adoHasIntegration, setAdoHasIntegration] = useState<boolean | null>(null);
+  const [adoLoading, setAdoLoading] = useState(false);
+  const [adoWorkItems, setAdoWorkItems] = useState<AzureDevOpsWorkItem[]>([]);
+  const [adoTemplates, setAdoTemplates] = useState<AzureDevOpsTemplate[]>([]);
+  const [adoSource, setAdoSource] = useState<'template' | 'manual'>('template');
+  const [adoTemplateId, setAdoTemplateId] = useState('');
+  const [adoProjects, setAdoProjects] = useState<AzureDevOpsProject[]>([]);
+  const [adoProjectsLoading, setAdoProjectsLoading] = useState(false);
+  const [adoProject, setAdoProject] = useState('');
+  const [adoTypes, setAdoTypes] = useState<AzureDevOpsWorkItemType[]>([]);
+  const [adoTypesLoading, setAdoTypesLoading] = useState(false);
+  const [adoType, setAdoType] = useState('');
+  const [adoAssociateId, setAdoAssociateId] = useState('');
+  const [adoBusy, setAdoBusy] = useState(false);
+  const [adoRefreshing, setAdoRefreshing] = useState<number | null>(null);
+  const [adoDisconnecting, setAdoDisconnecting] = useState<number | null>(null);
+
+  const loadAdoProjects = async (orgId: number) => {
+    setAdoProjectsLoading(true);
+    try {
+      const data = await api.getAzureDevOpsProjects(orgId);
+      setAdoProjects(data.projects || []);
+    } catch (err) {
+      setAdoProjects([]);
+      toast({ title: 'Could not load Azure DevOps projects', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setAdoProjectsLoading(false);
+    }
+  };
+
+  const handleAdoProjectChange = async (project: string) => {
+    setAdoProject(project);
+    setAdoType('');
+    setAdoTypes([]);
+    if (!project || !selectedFinding?.organization_id) return;
+    setAdoTypesLoading(true);
+    try {
+      const data = await api.getAzureDevOpsWorkItemTypes(project, selectedFinding.organization_id);
+      const types = data.work_item_types || [];
+      setAdoTypes(types);
+      if (types.some((t) => t.name === 'Bug')) setAdoType('Bug');
+    } catch (err) {
+      toast({ title: 'Could not load work item types', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setAdoTypesLoading(false);
+    }
+  };
+
+  const handleAdoSourceChange = (source: 'template' | 'manual') => {
+    setAdoSource(source);
+    if (source === 'manual' && adoProjects.length === 0 && !adoProjectsLoading && selectedFinding?.organization_id) {
+      loadAdoProjects(selectedFinding.organization_id);
+    }
+  };
+
+  const openAzureDevOpsDialog = async (finding: Finding) => {
+    setAdoDialogOpen(true);
+    setAdoDialogMode('create');
+    setAdoHasIntegration(null);
+    setAdoWorkItems([]);
+    setAdoTemplates([]);
+    setAdoTemplateId('');
+    setAdoProjects([]);
+    setAdoProject('');
+    setAdoTypes([]);
+    setAdoType('');
+    setAdoAssociateId('');
+    const orgId = finding.organization_id;
+    if (!orgId) {
+      toast({
+        title: 'Could not load Azure DevOps data',
+        description: 'This finding has no associated organization.',
+        variant: 'destructive',
+      });
+      setAdoDialogOpen(false);
+      return;
+    }
+    setAdoLoading(true);
+    try {
+      const integration = await api.getAzureDevOpsIntegration(orgId).catch((err) => {
+        if (err?.response?.status === 404) return null;
+        throw err;
+      });
+      if (!integration || !integration.is_active) {
+        setAdoHasIntegration(false);
+        return;
+      }
+      setAdoHasIntegration(true);
+      const [items, templates] = await Promise.all([
+        api.getAzureDevOpsWorkItemsForVulnerability(finding.id, orgId),
+        api.getAzureDevOpsTemplates(orgId).catch(() => [] as AzureDevOpsTemplate[]),
+      ]);
+      const active = templates.filter((t) => t.is_active);
+      setAdoWorkItems(items.filter((w) => !w.disconnected_at));
+      setAdoTemplates(active);
+      if (active.length > 0) {
+        setAdoSource('template');
+        setAdoTemplateId(String(active[0].id));
+      } else {
+        setAdoSource('manual');
+        loadAdoProjects(orgId);
+      }
+    } catch (err) {
+      toast({ title: 'Could not load Azure DevOps data', description: getApiErrorMessage(err), variant: 'destructive' });
+      setAdoDialogOpen(false);
+    } finally {
+      setAdoLoading(false);
+    }
+  };
+
+  const handleCreateAzureDevOps = async () => {
+    if (!selectedFinding) return;
+    let payload: CreateAzureDevOpsWorkItemRequest;
+    if (adoSource === 'template') {
+      if (!adoTemplateId) return;
+      payload = { template_id: Number(adoTemplateId) };
+    } else {
+      if (!adoProject || !adoType) return;
+      payload = { project: adoProject, work_item_type: adoType };
+    }
+    setAdoBusy(true);
+    try {
+      const item = await api.createAzureDevOpsWorkItem(selectedFinding.id, payload, selectedFinding.organization_id);
+      toast({
+        title: `Created Azure DevOps work item #${item.work_item_id}`,
+        description: [item.project, item.work_item_type].filter(Boolean).join(' · ') || undefined,
+      });
+      setAdoWorkItems((prev) => [item, ...prev.filter((w) => w.id !== item.id)]);
+    } catch (err) {
+      toast({ title: 'Failed to create work item', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setAdoBusy(false);
+    }
+  };
+
+  const handleAssociateAzureDevOps = async () => {
+    if (!selectedFinding) return;
+    const raw = adoAssociateId.trim().replace(/^#/, '');
+    if (!/^\d+$/.test(raw)) {
+      toast({ title: 'Enter a numeric work item ID, e.g. 1234.', variant: 'destructive' });
+      return;
+    }
+    setAdoBusy(true);
+    try {
+      const item = await api.associateAzureDevOpsWorkItem(selectedFinding.id, Number(raw), selectedFinding.organization_id);
+      toast({ title: `Linked Azure DevOps work item #${item.work_item_id}.` });
+      setAdoWorkItems((prev) => [item, ...prev.filter((w) => w.id !== item.id)]);
+      setAdoAssociateId('');
+      setAdoDialogMode('create');
+    } catch (err) {
+      toast({ title: 'Failed to associate', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setAdoBusy(false);
+    }
+  };
+
+  const handleRefreshAzureDevOps = async (linkId: number) => {
+    setAdoRefreshing(linkId);
+    try {
+      const item = await api.refreshAzureDevOpsWorkItem(linkId, selectedFinding?.organization_id);
+      setAdoWorkItems((prev) => prev.map((w) => (w.id === linkId ? item : w)));
+      toast({ title: `Work item #${item.work_item_id} refreshed`, description: item.state ? `State: ${item.state}` : undefined });
+    } catch (err) {
+      toast({ title: 'Refresh failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setAdoRefreshing(null);
+    }
+  };
+
+  const handleDisconnectAzureDevOps = async (linkId: number, workItemId: number) => {
+    setAdoDisconnecting(linkId);
+    try {
+      await api.disconnectAzureDevOpsWorkItem(linkId, selectedFinding?.organization_id);
+      toast({ title: `Azure DevOps work item #${workItemId} disconnected.` });
+      setAdoWorkItems((prev) => prev.filter((w) => w.id !== linkId));
+    } catch (err) {
+      toast({ title: 'Failed to disconnect', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setAdoDisconnecting(null);
+    }
+  };
+
   const openHackerOneDialog = async (finding: Finding) => {
     setH1DialogOpen(true);
     setH1Links([]);
@@ -1386,6 +1580,27 @@ export default function FindingsPage() {
   const [refiningTemplate, setRefiningTemplate] = useState(false);
   const [templatePattern, setTemplatePattern] = useState<any>(null);
   const openFindingIdRef = useRef<number | null>(null);
+
+  // Deep link: /findings?id=<vulnId> opens that finding's detail on load
+  // (used by links from external trackers such as Azure DevOps work items).
+  useEffect(() => {
+    let raw: string | null = null;
+    try {
+      raw = new URLSearchParams(window.location.search).get('id');
+    } catch {
+      return;
+    }
+    const id = raw && /^\d+$/.test(raw) ? Number(raw) : null;
+    if (!id) return;
+    let cancelled = false;
+    api.getVulnerability(id)
+      .then((full: Finding) => { if (!cancelled) handleSelectFinding(full); })
+      .catch((error: unknown) => {
+        if (!cancelled) toast({ title: 'Could not open finding', description: getApiErrorMessage(error), variant: 'destructive' });
+      });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load the latest validation result whenever a finding is opened.
   useEffect(() => {
@@ -2591,6 +2806,7 @@ export default function FindingsPage() {
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onSelect={() => selectedFinding && openJiraDialog(selectedFinding)}>Jira</DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => selectedFinding && openServiceNowDialog(selectedFinding)}>ServiceNow</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => selectedFinding && openAzureDevOpsDialog(selectedFinding)}>Azure DevOps</DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => selectedFinding && openHackerOneDialog(selectedFinding)}>HackerOne</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -3568,6 +3784,234 @@ export default function FindingsPage() {
                 >
                   {snowPushing ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Shield className="h-4 w-4 mr-2" />}
                   Link record
+                </Button>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* Azure DevOps work item dialog */}
+        <Dialog open={adoDialogOpen} onOpenChange={(v) => { if (!adoBusy) setAdoDialogOpen(v); }}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded bg-[#0078D4] flex items-center justify-center shrink-0">
+                  <KanbanSquare className="w-4 h-4 text-white" />
+                </div>
+                Azure DevOps
+              </DialogTitle>
+              <DialogDescription className="truncate">{selectedFinding?.title || selectedFinding?.name}</DialogDescription>
+            </DialogHeader>
+
+            {adoHasIntegration === true && (
+              <div className="flex gap-1 border-b border-border pb-2">
+                {(['create', 'associate'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setAdoDialogMode(m)}
+                    className={cn(
+                      'px-3 py-1 text-sm rounded-md transition-colors',
+                      adoDialogMode === m
+                        ? 'bg-[#0078D4]/20 text-[#4FA3E8] border border-[#0078D4]/30'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+                    )}
+                  >
+                    {m === 'create' ? 'Create work item' : 'Associate existing'}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-4 py-2">
+              {adoLoading || adoHasIntegration === null ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />Loading…
+                </div>
+              ) : adoHasIntegration === false ? (
+                <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4 text-sm space-y-2">
+                  <p className="text-yellow-300 font-medium flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4" />Azure DevOps not configured
+                  </p>
+                  <p className="text-muted-foreground">
+                    Set up the Azure DevOps integration on the{' '}
+                    <Link href="/integrations" className="text-primary underline">Integrations page</Link>.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {adoWorkItems.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Linked work items</p>
+                      <div className="space-y-1.5">
+                        {adoWorkItems.map((w) => (
+                          <div key={w.id} className="rounded border border-border px-2 py-1.5 text-sm space-y-1">
+                            <div className="flex items-center gap-2">
+                              <a
+                                href={w.work_item_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-1.5 text-[#4FA3E8] hover:underline flex-1 min-w-0"
+                              >
+                                <ExternalLink className="h-3 w-3 shrink-0" />
+                                <span className="font-mono truncate">#{w.work_item_id}</span>
+                              </a>
+                              {w.state && (
+                                <Badge variant="outline" className="text-[10px] h-4 px-1 shrink-0">{w.state}</Badge>
+                              )}
+                              <button
+                                onClick={() => handleRefreshAzureDevOps(w.id)}
+                                disabled={adoRefreshing === w.id}
+                                className="text-muted-foreground hover:text-foreground"
+                                title="Refresh from Azure DevOps"
+                              >
+                                {adoRefreshing === w.id
+                                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                                  : <RefreshCw className="h-3 w-3" />}
+                              </button>
+                              <button
+                                onClick={() => handleDisconnectAzureDevOps(w.id, w.work_item_id)}
+                                disabled={adoDisconnecting === w.id}
+                                className="text-muted-foreground hover:text-red-400"
+                                title="Disconnect work item"
+                              >
+                                {adoDisconnecting === w.id
+                                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                                  : <XCircle className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <p className="text-[11px] text-muted-foreground truncate">
+                              {[w.project, w.work_item_type].filter(Boolean).join(' · ')}
+                              {(w.project || w.work_item_type) && ' · '}
+                              {w.assigned_to ? `Assigned to ${w.assigned_to}` : 'Unassigned'}
+                              {w.is_associated && ' · associated'}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {adoDialogMode === 'create' && (
+                    <div className="space-y-3">
+                      {adoTemplates.length > 0 && (
+                        <div className="flex gap-3 text-sm">
+                          {([
+                            { value: 'template', label: 'From template' },
+                            { value: 'manual', label: 'Pick project & type' },
+                          ] as const).map((o) => (
+                            <label key={o.value} className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="radio"
+                                name="ado-source"
+                                checked={adoSource === o.value}
+                                onChange={() => handleAdoSourceChange(o.value)}
+                                className="accent-[#0078D4]"
+                              />
+                              {o.label}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+
+                      {adoSource === 'template' && adoTemplates.length > 0 ? (
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium">Template</label>
+                          <Select value={adoTemplateId} onValueChange={setAdoTemplateId}>
+                            <SelectTrigger><SelectValue placeholder="Select a template" /></SelectTrigger>
+                            <SelectContent>
+                              {adoTemplates.map((t) => (
+                                <SelectItem key={t.id} value={String(t.id)}>
+                                  {t.name} — {t.project} / {t.work_item_type}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="space-y-1.5">
+                            <label className="text-sm font-medium">Project</label>
+                            <Select value={adoProject || undefined} onValueChange={handleAdoProjectChange} disabled={adoProjectsLoading}>
+                              <SelectTrigger>
+                                <SelectValue placeholder={adoProjectsLoading ? 'Loading projects…' : 'Select a project'} />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {adoProjects.map((p) => (
+                                  <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            {!adoProjectsLoading && adoProjects.length === 0 && (
+                              <p className="text-xs text-yellow-400">
+                                No projects found. Add the service principal or PAT user to the project as Project Contributors in Azure DevOps.
+                              </p>
+                            )}
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-sm font-medium">Work item type</label>
+                            <Select value={adoType || undefined} onValueChange={setAdoType} disabled={!adoProject || adoTypesLoading}>
+                              <SelectTrigger>
+                                <SelectValue placeholder={
+                                  !adoProject ? 'Choose a project first' : adoTypesLoading ? 'Loading types…' : 'Select a type'
+                                } />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {adoTypes.map((t) => (
+                                  <SelectItem key={t.name} value={t.name}>{t.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {adoDialogMode === 'associate' && (
+                    <div className="space-y-3">
+                      <p className="text-sm text-muted-foreground">
+                        Link an existing Azure DevOps work item by its numeric ID so state sync applies to it.
+                      </p>
+                      <Input
+                        placeholder="1234"
+                        inputMode="numeric"
+                        value={adoAssociateId}
+                        onChange={(e) => setAdoAssociateId(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleAssociateAzureDevOps()}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button variant="outline" onClick={() => setAdoDialogOpen(false)} disabled={adoBusy}>
+                {adoHasIntegration === false ? 'Close' : 'Cancel'}
+              </Button>
+              {adoHasIntegration === true && adoDialogMode === 'create' && (
+                <Button
+                  onClick={handleCreateAzureDevOps}
+                  disabled={
+                    adoBusy
+                    || (adoSource === 'template' && adoTemplates.length > 0
+                      ? !adoTemplateId
+                      : !adoProject || !adoType)
+                  }
+                  className="bg-[#0078D4] hover:bg-[#106EBE] text-white"
+                >
+                  {adoBusy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <KanbanSquare className="h-4 w-4 mr-2" />}
+                  Create work item
+                </Button>
+              )}
+              {adoHasIntegration === true && adoDialogMode === 'associate' && (
+                <Button
+                  onClick={handleAssociateAzureDevOps}
+                  disabled={adoBusy || !/^#?\d+$/.test(adoAssociateId.trim())}
+                  className="bg-[#0078D4] hover:bg-[#106EBE] text-white"
+                >
+                  {adoBusy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <KanbanSquare className="h-4 w-4 mr-2" />}
+                  Link work item
                 </Button>
               )}
             </div>

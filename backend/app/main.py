@@ -20,6 +20,7 @@ from app.models.netblock import Netblock  # Import to ensure table creation
 from app.models.finding_exception import FindingException  # Required for Vulnerability relationship resolution
 from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F401 — ensure tables are created
 from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created
+from app.models.azure_devops_integration import AzureDevOpsIntegration, AzureDevOpsTemplate, AzureDevOpsWorkItem  # noqa: F401 — ensure tables are created
 from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
 from app.models.wiz_integration import WizIntegration  # noqa: F401 — ensure table is created
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink  # noqa: F401 — ensure tables are created
@@ -31,6 +32,7 @@ from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: 
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
 from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, scan_profiles, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations
+from app.api.routes import azure_devops as azure_devops_routes
 from app.api.routes import business_apps as business_apps_router
 from app.api.routes import scoring as scoring_router
 from app.api.routes import posture as posture_router
@@ -81,6 +83,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 _evidence_cleanup_task = None
+_azure_devops_pull_task = None
 
 
 async def _evidence_cleanup_loop() -> None:
@@ -94,6 +97,20 @@ async def _evidence_cleanup_loop() -> None:
         except Exception:
             logger.exception("Agent evidence cleanup failed")
         await asyncio.sleep(6 * 3600)
+
+
+async def _azure_devops_pull_loop(interval_minutes: int) -> None:
+    """Pull Azure DevOps work item state back into ASM (closed → finding resolved)."""
+    from app.services.azure_devops_service import pull_all_integrations
+
+    await asyncio.sleep(60)
+    while True:
+        try:
+            # DB access is synchronous; run the whole pull off the event loop.
+            await asyncio.to_thread(lambda: asyncio.run(pull_all_integrations()))
+        except Exception:
+            logger.exception("Azure DevOps periodic pull failed")
+        await asyncio.sleep(interval_minutes * 60)
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -199,6 +216,7 @@ app.include_router(acquisitions.router, prefix=settings.API_PREFIX)
 app.include_router(oracle.router, prefix=settings.API_PREFIX)
 app.include_router(agent.router, prefix=settings.API_PREFIX)
 app.include_router(integrations.router, prefix=settings.API_PREFIX)
+app.include_router(azure_devops_routes.router, prefix=settings.API_PREFIX)
 app.include_router(scoring_router.router, prefix=settings.API_PREFIX)
 app.include_router(posture_router.router, prefix=settings.API_PREFIX)
 app.include_router(threat_intel_router.router, prefix=settings.API_PREFIX)
@@ -346,6 +364,11 @@ async def startup_event():
     ensure_default_scan_profiles()
     global _evidence_cleanup_task
     _evidence_cleanup_task = asyncio.create_task(_evidence_cleanup_loop())
+    global _azure_devops_pull_task
+    if settings.AZURE_DEVOPS_PULL_INTERVAL_MINUTES > 0:
+        _azure_devops_pull_task = asyncio.create_task(
+            _azure_devops_pull_loop(settings.AZURE_DEVOPS_PULL_INTERVAL_MINUTES)
+        )
 
 
 @app.on_event("shutdown")
@@ -353,6 +376,8 @@ async def shutdown_event():
     """Run on application shutdown."""
     if _evidence_cleanup_task is not None:
         _evidence_cleanup_task.cancel()
+    if _azure_devops_pull_task is not None:
+        _azure_devops_pull_task.cancel()
     logger.info("Shutting down application")
 
 

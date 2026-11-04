@@ -24,7 +24,12 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
     API_PREFIX: str = "/api/v1"
-    
+    # Public URL of the web UI (e.g. https://aegis.judahsecurity.io). Used to
+    # link ITSM tickets / work items back to the finding. Empty = no link.
+    PUBLIC_APP_URL: str = ""
+    # How often (minutes) to pull Azure DevOps work item state back into ASM. 0 disables.
+    AZURE_DEVOPS_PULL_INTERVAL_MINUTES: int = 15
+
     # Database
     DATABASE_URL: str = "postgresql://asm_user:asm_password@db:5432/asm_db"
     
