@@ -18,6 +18,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.wiz_integration import WizIntegration
+from app.models.securityscorecard_integration import SecurityScorecardIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
 from app.models.panorama_integration import (
@@ -68,6 +69,13 @@ from app.schemas.wiz_schemas import (
     WizSyncResult,
     WizTestConnectionResponse,
 )
+from app.schemas.securityscorecard_schemas import (
+    SecurityScorecardIntegrationCreate,
+    SecurityScorecardIntegrationResponse,
+    SecurityScorecardIntegrationUpdate,
+    SecurityScorecardSyncResult,
+    SecurityScorecardTestConnectionResponse,
+)
 from app.schemas.hackerone_schemas import (
     AssociateHackerOneReportRequest,
     HackerOneIntegrationCreate,
@@ -117,6 +125,7 @@ from app.services import (
     jira_service,
     censys_asm_service,
     wiz_service,
+    securityscorecard_service,
     hackerone_service,
     akamai_waf_service,
     panorama_service,
@@ -916,6 +925,161 @@ async def sync_wiz_integration(
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
     return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SecurityScorecard — read-only import of portfolio domains, ratings, and issues
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_securityscorecard_integration(
+    db: Session, org_id: int, integration_id: int
+) -> SecurityScorecardIntegration:
+    integration = (
+        db.query(SecurityScorecardIntegration)
+        .filter(
+            SecurityScorecardIntegration.id == integration_id,
+            SecurityScorecardIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="SecurityScorecard connection not found.")
+    return integration
+
+
+@router.get("/securityscorecard", response_model=List[SecurityScorecardIntegrationResponse])
+def list_securityscorecard_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(SecurityScorecardIntegration)
+        .filter(SecurityScorecardIntegration.organization_id == org_id)
+        .order_by(SecurityScorecardIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post(
+    "/securityscorecard",
+    response_model=SecurityScorecardIntegrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_securityscorecard_integration(
+    payload: SecurityScorecardIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    existing = db.query(SecurityScorecardIntegration).filter(
+        SecurityScorecardIntegration.organization_id == org_id,
+        SecurityScorecardIntegration.connection_name == payload.connection_name,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A SecurityScorecard connection named '{payload.connection_name}' already exists.",
+        )
+
+    result = await securityscorecard_service.test_connection(payload.api_key)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = SecurityScorecardIntegration(
+        organization_id=org_id,
+        connection_name=payload.connection_name,
+        import_assets=payload.import_assets,
+        import_vulnerabilities=payload.import_vulnerabilities,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_api_key(payload.api_key)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put(
+    "/securityscorecard/{integration_id}", response_model=SecurityScorecardIntegrationResponse
+)
+async def update_securityscorecard_integration(
+    integration_id: int,
+    payload: SecurityScorecardIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_securityscorecard_integration(db, org_id, integration_id)
+    data = payload.model_dump(exclude_unset=True)
+    api_key = data.pop("api_key", None)
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if api_key:
+        integration.set_api_key(api_key)
+
+    result = await securityscorecard_service.test_connection(integration.get_api_key())
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    if not result["ok"]:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=result["message"])
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/securityscorecard/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_securityscorecard_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_securityscorecard_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post(
+    "/securityscorecard/{integration_id}/test",
+    response_model=SecurityScorecardTestConnectionResponse,
+)
+async def test_securityscorecard_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_securityscorecard_integration(db, org_id, integration_id)
+    result = await securityscorecard_service.test_connection(integration.get_api_key())
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return SecurityScorecardTestConnectionResponse(**result)
+
+
+@router.post(
+    "/securityscorecard/{integration_id}/sync", response_model=SecurityScorecardSyncResult
+)
+async def sync_securityscorecard_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_securityscorecard_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This SecurityScorecard connection is disabled.")
+    return SecurityScorecardSyncResult(
+        **(await securityscorecard_service.sync_integration(db, integration))
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

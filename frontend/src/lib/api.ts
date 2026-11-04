@@ -429,6 +429,41 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+export interface SecurityScorecardIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  import_assets: boolean;
+  import_vulnerabilities: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SecurityScorecardSyncResult {
+  ok: boolean;
+  message: string;
+  portfolios_seen: number;
+  companies_seen: number;
+  companies_skipped: number;
+  factors_unavailable: number;
+  definitions_fetched: number;
+  assets_created: number;
+  assets_updated: number;
+  vulns_created: number;
+  vulns_updated: number;
+  vulns_resolved: number;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3171,6 +3206,52 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  // ── SecurityScorecard Integration ─────────────────────────────────────────
+
+  async getSecurityScorecardIntegrations(): Promise<SecurityScorecardIntegration[]> {
+    const response = await this.client.get('/integrations/securityscorecard');
+    return response.data;
+  }
+
+  async createSecurityScorecardIntegration(payload: {
+    connection_name: string;
+    api_key: string;
+    import_assets: boolean;
+    import_vulnerabilities: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<SecurityScorecardIntegration> {
+    const response = await this.client.post('/integrations/securityscorecard', payload);
+    return response.data;
+  }
+
+  async updateSecurityScorecardIntegration(id: number, payload: Partial<{
+    connection_name: string;
+    api_key: string;
+    import_assets: boolean;
+    import_vulnerabilities: boolean;
+    is_active: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+  }>): Promise<SecurityScorecardIntegration> {
+    const response = await this.client.put(`/integrations/securityscorecard/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteSecurityScorecardIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/securityscorecard/${id}`);
+  }
+
+  async testSecurityScorecardConnection(id: number): Promise<{ ok: boolean; message: string; portfolios_accessible: number }> {
+    const response = await this.client.post(`/integrations/securityscorecard/${id}/test`);
+    return response.data;
+  }
+
+  async syncSecurityScorecardIntegration(id: number): Promise<SecurityScorecardSyncResult> {
+    const response = await this.client.post(`/integrations/securityscorecard/${id}/sync`);
     return response.data;
   }
 
