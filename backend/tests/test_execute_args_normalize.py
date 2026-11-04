@@ -55,6 +55,17 @@ def test_default_args_httpx():
     assert "-u https://t.com" in _default_args_for_tool("execute_httpx", "https://t.com")
 
 
+def test_generated_curl_head_args_match_validator():
+    from aegis_praetorium.augur import _exposure_next
+    from aegis_praetorium.censor import Censor
+
+    default = _default_args_for_tool("execute_curl", "https://app.test/")
+    exposure = _exposure_next({"matched-at": "https://app.test/backup"})
+    assert exposure and exposure.tool_name == "execute_curl"
+    for args in (default, exposure.args):
+        assert Censor().validate("execute_curl", {"args": args}).ok
+
+
 @pytest.mark.asyncio
 async def test_identical_curl_contract_error_is_not_reexecuted(monkeypatch):
     from app.services.agent import action_ledger
@@ -81,3 +92,33 @@ async def test_identical_curl_contract_error_is_not_reexecuted(monkeypatch):
     assert len(calls) == 1
     assert first["success"] is False
     assert second["suppressed_repeat"] is True
+
+
+@pytest.mark.asyncio
+async def test_same_curl_contract_error_on_different_urls_is_not_reexecuted(monkeypatch):
+    from app.services.agent import action_ledger
+    from app.services.agent.tools import ASMToolsManager
+
+    manager = ASMToolsManager()
+    calls = []
+
+    async def rejected(_name, _args):
+        calls.append(1)
+        return {"success": False,
+                "error": "Censor rejected execute_curl.args: unsupported curl argument '-D-'"}
+
+    monkeypatch.setattr(manager, "_execute_recorded", rejected)
+    monkeypatch.setattr(action_ledger, "append_action", lambda *_args, **_kwargs: None)
+    token = action_ledger.active_run_id.set("contract-family-test-run")
+    try:
+        first = await manager.execute("execute_curl", {"args": "-s -D- https://app.test/one"})
+        second = await manager.execute("execute_curl", {"args": "-s -D- https://app.test/two"})
+        valid_shape = await manager.execute("execute_curl", {"args": "-s https://app.test/two"})
+    finally:
+        action_ledger.active_run_id.reset(token)
+
+    assert len(calls) == 2
+    assert first["success"] is False
+    assert second["suppressed_repeat"] is True
+    assert second["error"] == "repeated_curl_contract_error"
+    assert valid_shape.get("suppressed_repeat") is not True
