@@ -39,7 +39,7 @@ PROOFS_BY_CLASS = {
     "path_traversal": frozenset(),
     "csrf": frozenset(),
     "known_cve": frozenset(),
-    "account_enumeration": frozenset(),
+    "account_enumeration": frozenset({"differential_account_enum"}),
 }
 
 
@@ -147,7 +147,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client", "differential_account_enum"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -169,6 +169,7 @@ def validate_proof(
             "scoped_cors_credentialed": "scoped_response_probe",
             "scoped_race_overrun": "scoped_race_probe",
             "scoped_browser_client": "scoped_browser_check_client",
+            "differential_account_enum": "scoped_account_enum",
         }[kind]
         if (not hunter or not verifier or hunter["id"] == verifier["id"]
                 or hunter["kind"] != expected_kind or verifier["kind"] != expected_kind
@@ -253,6 +254,21 @@ def validate_proof(
                 for row in (first, second)
             ):
                 return False, "Client template expression must execute after the HTTP response"
+            return True, ""
+        if kind == "differential_account_enum":
+            from app.services.agent.scoped_assessment.account_enum import account_enum_proof_valid
+            declared = str(getattr(candidate, "vulnerability_class", "") or "").strip().lower()
+            claim = declared or inferred_vulnerability_class(candidate)
+            if (claim != "account_enumeration"
+                    or hunter["identity"] != verifier["identity"]
+                    or not account_enum_proof_valid(first)
+                    or not account_enum_proof_valid(second)
+                    or first.get("parameter") != second.get("parameter")
+                    or not first.get("nonce") or first.get("nonce") == second.get("nonce")
+                    # Both actors must reproduce the same existence oracle.
+                    or first.get("existing_discriminator") != second.get("existing_discriminator")
+                    or first.get("absent_discriminator") != second.get("absent_discriminator")):
+                return False, "Independent controlled existing-vs-absent account oracle is required"
             return True, ""
         if kind == "numeric_boolean_sqli":
             from app.services.agent.scoped_assessment.sqli_boolean import numeric_sql_proof_valid
