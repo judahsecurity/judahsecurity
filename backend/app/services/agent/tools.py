@@ -216,7 +216,7 @@ def _default_args_for_tool(tool_name: str, target: str) -> str:
         return f"-host {host}" if name == "naabu" else host
     if name in ("wafw00f", "whatweb", "wappalyzer", "testssl", "curl"):
         if name == "curl":
-            return f"-sI {target}"
+            return f"-s -I {target}"
         if name == "whatweb":
             return f"{target} -a 1"
         return target
@@ -2544,6 +2544,33 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             args_dict = tool_args if isinstance(tool_args, dict) else {}
             target = str(args_dict.get("target") or args_dict.get("url") or
                          current_seed_target.get() or "")
+            if tool_name == "execute_curl":
+                from aegis_praetorium.censor import Censor
+
+                normalized = normalize_execute_tool_args(
+                    tool_name, args_dict,
+                    fallback_target=str(args_dict.get("_fallback_target") or
+                                        self._fallback_target or current_seed_target.get() or ""),
+                )
+                contract = Censor().validate(tool_name, normalized)
+                if not contract.ok:
+                    cached = self._nonretryable_failures.get(
+                        (run_id, "curl_contract", contract.error.partition(";")[0])
+                    )
+                    if cached:
+                        append_action(
+                            run_id, os.urandom(16).hex(), "skipped", tool_name,
+                            target=target, detail="Suppressed repeated curl contract failure",
+                        )
+                        return {
+                            "success": False,
+                            "output": (
+                                "Repeated curl argument error suppressed. Use separate "
+                                "supported flags or a structured request replay tool."
+                            ),
+                            "error": "repeated_curl_contract_error",
+                            "suppressed_repeat": True,
+                        }
             fingerprint = action_fingerprint(
                 run_id=run_id, tool_name=tool_name, target=target,
                 tool_args=args_dict, secret_key=settings.SECRET_KEY,
@@ -2571,6 +2598,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         or (tool_name == "execute_curl"
                             and error.startswith("Censor rejected execute_curl"))):
                     self._nonretryable_failures[key] = (_time.time(), deepcopy(result))
+                    if tool_name == "execute_curl":
+                        self._nonretryable_failures[
+                            (run_id, "curl_contract", error.partition(";")[0])
+                        ] = (_time.time(), deepcopy(result))
                     if len(self._nonretryable_failures) > 128:
                         self._nonretryable_failures.pop(next(iter(self._nonretryable_failures)))
                 return result

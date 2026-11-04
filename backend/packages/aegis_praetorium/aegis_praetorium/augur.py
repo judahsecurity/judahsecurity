@@ -319,7 +319,7 @@ def _exposure_next(f: Dict[str, Any]) -> Optional[NextStep]:
     if any(p in matched.lower() for p in ("/backup", "/dump.sql", "/db.sql", "/database.sql")):
         return NextStep(
             tool_name="execute_curl",
-            args=f"-sI {matched}",
+            args=f"-s -I {matched}",
             rationale=(
                 f"Augur: backup/database dump surface at {matched}. HEAD the "
                 "file first to gauge size, then GET if reasonable. Treat the "
