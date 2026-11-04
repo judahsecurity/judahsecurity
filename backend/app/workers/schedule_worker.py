@@ -792,6 +792,41 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_blackkite_syncs(self):
+        """Run scheduled Black Kite asset and risk imports when due."""
+        from app.models.blackkite_integration import BlackKiteIntegration
+        from app.services import blackkite_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(BlackKiteIntegration).filter(
+                BlackKiteIntegration.is_active == True,
+                BlackKiteIntegration.continuous_sync_enabled == True,
+            ).all()
+            due = [connection for connection in candidates if connection.is_sync_due(now)]
+            if not due:
+                return
+            logger.info(f"Black Kite: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await blackkite_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Black Kite sync (org {integration.organization_id}): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Black Kite sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    db.rollback()
+        except Exception as exc:
+            logger.error(f"Black Kite continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_akamai_waf_syncs(self):
         """Run continuous Akamai WAF syncs for connections whose interval is due."""
         from app.models.akamai_integration import AkamaiWafIntegration
@@ -1009,6 +1044,9 @@ class ScheduleWorker:
 
                 # Continuous Wiz VM and vulnerability syncs
                 await self.run_wiz_syncs()
+
+                # Continuous Black Kite security-ratings imports
+                await self.run_blackkite_syncs()
 
                 # Continuous Akamai WAF syncs
                 await self.run_akamai_waf_syncs()

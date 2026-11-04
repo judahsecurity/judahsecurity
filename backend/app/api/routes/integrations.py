@@ -18,6 +18,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.wiz_integration import WizIntegration
+from app.models.blackkite_integration import BlackKiteIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
 from app.models.panorama_integration import (
@@ -60,6 +61,13 @@ from app.schemas.censys_schemas import (
     CensysIntegrationUpdate,
     CensysSyncResult,
     CensysTestConnectionResponse,
+)
+from app.schemas.blackkite_schemas import (
+    BlackKiteIntegrationCreate,
+    BlackKiteIntegrationResponse,
+    BlackKiteIntegrationUpdate,
+    BlackKiteSyncResult,
+    BlackKiteTestConnectionResponse,
 )
 from app.schemas.wiz_schemas import (
     WizIntegrationCreate,
@@ -117,6 +125,7 @@ from app.services import (
     jira_service,
     censys_asm_service,
     wiz_service,
+    blackkite_service,
     hackerone_service,
     akamai_waf_service,
     panorama_service,
@@ -916,6 +925,193 @@ async def sync_wiz_integration(
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
     return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Black Kite — security ratings: import the org's own companies' assets & risks
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_blackkite_integration(db: Session, org_id: int, integration_id: int) -> BlackKiteIntegration:
+    integration = (
+        db.query(BlackKiteIntegration)
+        .filter(
+            BlackKiteIntegration.id == integration_id,
+            BlackKiteIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Black Kite connection not found.")
+    return integration
+
+
+async def _bg_sync_blackkite(integration_id: int) -> None:
+    from app.db.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        integration = db.query(BlackKiteIntegration).filter(
+            BlackKiteIntegration.id == integration_id
+        ).first()
+        if integration and integration.is_active:
+            await blackkite_service.sync_integration(db, integration)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Background Black Kite sync failed for %s: %s", integration_id, exc)
+    finally:
+        db.close()
+
+
+@router.get("/blackkite", response_model=List[BlackKiteIntegrationResponse])
+def list_blackkite_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(BlackKiteIntegration)
+        .filter(BlackKiteIntegration.organization_id == org_id)
+        .all()
+    )
+
+
+@router.post(
+    "/blackkite",
+    response_model=BlackKiteIntegrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_blackkite_integration(
+    payload: BlackKiteIntegrationCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    if db.query(BlackKiteIntegration).filter(BlackKiteIntegration.organization_id == org_id).first():
+        raise HTTPException(
+            status_code=409,
+            detail="Black Kite is already connected for this organization. Disconnect it first.",
+        )
+
+    result = await blackkite_service.test_connection(
+        payload.client_id,
+        payload.client_secret,
+        payload.ecosystem_names,
+        payload.company_domains,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = BlackKiteIntegration(
+        organization_id=org_id,
+        ecosystem_names=payload.ecosystem_names,
+        company_domains=payload.company_domains,
+        matched_companies=result["matched_companies"],
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_client_id(payload.client_id)
+    integration.set_client_secret(payload.client_secret)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+
+    # Begin the initial import right away; later syncs run on the schedule.
+    background_tasks.add_task(_bg_sync_blackkite, integration.id)
+    return integration
+
+
+@router.put("/blackkite/{integration_id}", response_model=BlackKiteIntegrationResponse)
+async def update_blackkite_integration(
+    integration_id: int,
+    payload: BlackKiteIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_blackkite_integration(db, org_id, integration_id)
+    data = payload.model_dump(exclude_unset=True)
+    client_id = data.pop("client_id", None)
+    client_secret = data.pop("client_secret", None)
+    for field, value in data.items():
+        if value is not None:
+            setattr(integration, field, value)
+    if client_id:
+        integration.set_client_id(client_id)
+    if client_secret:
+        integration.set_client_secret(client_secret)
+    if not (integration.ecosystem_names or integration.company_domains):
+        db.rollback()
+        raise HTTPException(
+            status_code=422, detail="Provide at least one ecosystem name or company domain."
+        )
+
+    result = await blackkite_service.test_connection(
+        integration.get_client_id(),
+        integration.get_client_secret(),
+        integration.ecosystem_names or [],
+        integration.company_domains or [],
+    )
+    if not result["ok"]:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=result["message"])
+    integration.matched_companies = result["matched_companies"]
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = True
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/blackkite/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_blackkite_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Disconnect Black Kite. Previously imported assets and risks are retained."""
+    org_id = _get_org_id(current_user)
+    integration = _get_blackkite_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/blackkite/{integration_id}/test", response_model=BlackKiteTestConnectionResponse)
+async def test_blackkite_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_blackkite_integration(db, org_id, integration_id)
+    result = await blackkite_service.test_connection(
+        integration.get_client_id(),
+        integration.get_client_secret(),
+        integration.ecosystem_names or [],
+        integration.company_domains or [],
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    if result["ok"]:
+        integration.matched_companies = result["matched_companies"]
+    db.commit()
+    return BlackKiteTestConnectionResponse(**result)
+
+
+@router.post("/blackkite/{integration_id}/sync", response_model=BlackKiteSyncResult)
+async def sync_blackkite_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_blackkite_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Black Kite connection is disabled.")
+    return BlackKiteSyncResult(**(await blackkite_service.sync_integration(db, integration)))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

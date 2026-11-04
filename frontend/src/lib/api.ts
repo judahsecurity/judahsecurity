@@ -429,6 +429,48 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+// ── Black Kite shared types ────────────────────────────────────────────────
+
+export interface BlackKiteMatchedCompany {
+  id: string;
+  name?: string | null;
+  domain?: string | null;
+}
+
+export interface BlackKiteIntegration {
+  id: number;
+  organization_id: number;
+  ecosystem_names: string[];
+  company_domains: string[];
+  matched_companies: BlackKiteMatchedCompany[];
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BlackKiteSyncResult {
+  ok: boolean;
+  message: string;
+  companies_synced: number;
+  assets_created: number;
+  assets_updated: number;
+  vulns_created: number;
+  vulns_updated: number;
+  vulns_resolved: number;
+  subdomains_seen: number;
+  findings_seen: number;
+  fraudulent_domains_seen: number;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3171,6 +3213,52 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Black Kite Integration ─────────────────────────────────────────────────
+
+  async getBlackKiteIntegrations(): Promise<BlackKiteIntegration[]> {
+    const response = await this.client.get('/integrations/blackkite');
+    return response.data;
+  }
+
+  async createBlackKiteIntegration(payload: {
+    client_id: string;
+    client_secret: string;
+    ecosystem_names: string[] | string;
+    company_domains: string[] | string;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<BlackKiteIntegration> {
+    const response = await this.client.post('/integrations/blackkite', payload);
+    return response.data;
+  }
+
+  async updateBlackKiteIntegration(id: number, payload: Partial<{
+    client_id: string;
+    client_secret: string;
+    ecosystem_names: string[] | string;
+    company_domains: string[] | string;
+    is_active: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+  }>): Promise<BlackKiteIntegration> {
+    const response = await this.client.put(`/integrations/blackkite/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteBlackKiteIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/blackkite/${id}`);
+  }
+
+  async testBlackKiteConnection(id: number): Promise<{ ok: boolean; message: string; matched_companies: BlackKiteMatchedCompany[] }> {
+    const response = await this.client.post(`/integrations/blackkite/${id}/test`);
+    return response.data;
+  }
+
+  async syncBlackKiteIntegration(id: number): Promise<BlackKiteSyncResult> {
+    const response = await this.client.post(`/integrations/blackkite/${id}/sync`);
     return response.data;
   }
 

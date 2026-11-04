@@ -60,6 +60,7 @@ import { cn } from '@/lib/utils';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
+import { BlackKiteSection } from '@/components/integrations/BlackKiteSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
@@ -3211,6 +3212,17 @@ export default function IntegrationsPage() {
 
         {/* Wiz cloud exposure integration */}
         <WizSection />
+
+        {/* Security Ratings */}
+        <div id="security-ratings" className="pt-2 space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold">Security Ratings</h2>
+            <p className="text-sm text-muted-foreground">
+              Import your own companies&apos; assets and findings from third-party cyber-risk rating platforms.
+            </p>
+          </div>
+          <BlackKiteSection />
+        </div>
 
         {/* HackerOne Bug Bounty Integration Card */}
         <HackerOneSection />
