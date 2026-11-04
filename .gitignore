@@ -111,3 +111,4 @@ backend/nuclei-templates-generated/
 
 # Production deployment backups
 backups/
+*.tsbuildinfo
