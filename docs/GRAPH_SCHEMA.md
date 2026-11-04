@@ -52,12 +52,38 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 | **Asset**       | **SIGNED_BY**     | **Certificate**   | **TLS certificate linkage**                 |
 | **Certificate** | **ALSO_COVERS**   | **Subdomain**     | **SAN expansion → shadow IT discovery**     |
 | **IP**          | **FORWARDS_TO**   | **IP**            | **LB reachability: VIP → pool member (F5)** |
+| Asset           | HAS_AGENT         | EDRAgent          | Falcon sensor on the host (CrowdStrike)     |
+| Asset           | HAS_INTERFACE     | InternalIP        | Tenant-scoped internal address (CrowdStrike)|
+| InternalIP      | SAME_AS           | IP                | Bridge to a same-org `:IP` (F5, Panorama)   |
+| Asset           | EGRESSES_VIA      | IP                | NAT egress the sensor reports (CrowdStrike) |
+| Asset           | MEMBER_OF_DOMAIN  | ADDomain          | AD machine domain (CrowdStrike)             |
+| Asset           | IN_OU             | OrganizationalUnit| AD OU (CrowdStrike)                         |
+| OrganizationalUnit | PART_OF        | ADDomain          |                                             |
+| Asset           | LOCATED_AT        | NetworkSite       | AD site (CrowdStrike)                       |
 
 **Bold rows** are the discovery provenance relationships added in the June 2026 update.
 
 **SAME_IP_AS** is created between Subdomains that resolve to the same IP (per organization). Use it to answer "what else is on this IP?" and to reason about shared infrastructure (RedAmon-style graph robustness).
 
 **FORWARDS_TO** links an internet-facing VIP IP to internal pool-member IPs discovered via the F5 BIG-IP integration. Edge properties: `source` (`f5`), `pool`, `virtual`, `port`, `organization_id`. Use it to answer "what internal IPs are reachable from the internet through this VIP?"
+
+## Internal / endpoint layer (CrowdStrike Falcon)
+
+Falcon-managed hosts are `:Asset` nodes with `is_public = false` and `edr_managed = true`.
+
+- **Internal addresses are `:InternalIP {organization_id, address}`**, not `:IP`. `:IP` is unique on `address` alone, and RFC1918 space overlaps across tenants, so private addresses of CrowdStrike-only assets are never merged into `:IP` and get no `RESOLVES_TO` edge.
+- **`SAME_AS`** links an `:InternalIP` to an `:IP` with the same address **and the same `organization_id`**. That joins endpoint data to F5 `FORWARDS_TO` members and Panorama objects without crossing tenants.
+- **`EGRESSES_VIA`** is outbound NAT context: the public IP the sensor reports. It does **not** mean inbound reachability.
+- Every CrowdStrike edge has `source: 'crowdstrike'` and is rebuilt on each sync, so DHCP changes and OU moves leave no stale edges.
+- Spotlight findings attach through the normal `Asset -[:HAS_VULNERABILITY]-> Vulnerability -[:REFERENCES]-> CVE` chain.
+
+Internet-reachable internal host with an open critical (exposed via `GET /graph/internal-exposure`):
+
+```cypher
+MATCH (vip:IP {is_internet_facing: true})-[f:FORWARDS_TO]->(:IP)<-[:SAME_AS]-(:InternalIP)
+      <-[:HAS_INTERFACE]-(a:Asset {organization_id: $org_id})-[:HAS_VULNERABILITY]->(v:Vulnerability {severity: 'critical'})
+RETURN vip.address, f.port, a.value, v.title
+```
 
 ## Logical connections (query patterns)
 

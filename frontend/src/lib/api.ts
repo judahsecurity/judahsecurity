@@ -429,6 +429,67 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+// ── CrowdStrike Falcon shared types ────────────────────────────────────────
+
+export type CrowdStrikeRegion = 'us-1' | 'us-2' | 'eu-1' | 'us-gov-1';
+
+export interface CrowdStrikeIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  cloud_region: CrowdStrikeRegion;
+  import_hosts: boolean;
+  import_spotlight: boolean;
+  spotlight_filter_mode: 'prioritized' | 'all';
+  extra_cve_ids?: string[];
+  host_lookback_days: number;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_test_modules?: Record<string, { ok: boolean; message?: string }>;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  last_spotlight_sync_at?: string;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CrowdStrikeIntegrationPayload {
+  connection_name: string;
+  cloud_region: CrowdStrikeRegion;
+  client_id: string;
+  client_secret: string;
+  import_hosts: boolean;
+  import_spotlight: boolean;
+  spotlight_filter_mode: 'prioritized' | 'all';
+  extra_cve_ids: string[];
+  host_lookback_days: number;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  is_active: boolean;
+}
+
+export interface CrowdStrikeSyncResult {
+  ok: boolean;
+  message: string;
+  hosts_seen: number;
+  hosts_skipped: number;
+  assets_created: number;
+  assets_updated: number;
+  findings_seen: number;
+  findings_filtered: number;
+  findings_uncorrelated: number;
+  vulns_created: number;
+  vulns_updated: number;
+  vulns_resolved: number;
+  graph_synced?: number | null;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3171,6 +3232,46 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  // ── CrowdStrike Falcon Integration ─────────────────────────────────────────
+
+  async getCrowdStrikeIntegrations(): Promise<CrowdStrikeIntegration[]> {
+    const response = await this.client.get('/integrations/crowdstrike');
+    return response.data;
+  }
+
+  async createCrowdStrikeIntegration(
+    payload: Omit<CrowdStrikeIntegrationPayload, 'is_active'>,
+  ): Promise<CrowdStrikeIntegration> {
+    const response = await this.client.post('/integrations/crowdstrike', payload);
+    return response.data;
+  }
+
+  async updateCrowdStrikeIntegration(
+    id: number,
+    payload: Partial<CrowdStrikeIntegrationPayload>,
+  ): Promise<CrowdStrikeIntegration> {
+    const response = await this.client.put(`/integrations/crowdstrike/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteCrowdStrikeIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/crowdstrike/${id}`);
+  }
+
+  async testCrowdStrikeConnection(id: number): Promise<{
+    ok: boolean;
+    message: string;
+    modules: Record<string, { ok: boolean; message?: string }>;
+  }> {
+    const response = await this.client.post(`/integrations/crowdstrike/${id}/test`);
+    return response.data;
+  }
+
+  async syncCrowdStrikeIntegration(id: number): Promise<CrowdStrikeSyncResult> {
+    const response = await this.client.post(`/integrations/crowdstrike/${id}/sync`);
     return response.data;
   }
 

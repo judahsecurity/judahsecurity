@@ -9,6 +9,7 @@ Also keeps Asset nodes for API compatibility (get_asset_relationships, get_attac
 """
 
 import hashlib
+import ipaddress
 import logging
 import re
 from typing import Optional, List, Dict, Any
@@ -29,6 +30,23 @@ from app.models.technology import Technology
 from app.services.graph_identity import canonical_script_url, script_key
 
 logger = logging.getLogger(__name__)
+
+
+def _is_private_ip(value: Any) -> bool:
+    try:
+        return not ipaddress.ip_address(str(value).strip()).is_global
+    except ValueError:
+        return False
+
+
+def _is_crowdstrike_internal(asset: Asset) -> bool:
+    """An endpoint this platform learned about only from CrowdStrike."""
+    meta = getattr(asset, "metadata_", None) or {}
+    return (
+        getattr(asset, "discovery_source", None) == "crowdstrike"
+        and isinstance(meta, dict)
+        and isinstance(meta.get("crowdstrike"), dict)
+    )
 
 
 class GraphService:
@@ -135,6 +153,13 @@ class GraphService:
                 "CREATE CONSTRAINT asn_number IF NOT EXISTS FOR (a:ASN) REQUIRE a.asn_number IS UNIQUE",
                 "CREATE CONSTRAINT hosting_provider_name IF NOT EXISTS FOR (h:HostingProvider) REQUIRE h.name IS UNIQUE",
                 "CREATE CONSTRAINT cert_fingerprint IF NOT EXISTS FOR (c:Certificate) REQUIRE c.fingerprint IS UNIQUE",
+                # Internal / endpoint layer (CrowdStrike). Internal IPs are tenant-scoped:
+                # RFC1918 space overlaps across customers, unlike the global :IP identity.
+                "CREATE CONSTRAINT edr_agent_id IF NOT EXISTS FOR (e:EDRAgent) REQUIRE e.agent_id IS UNIQUE",
+                "CREATE CONSTRAINT internal_ip_org_address IF NOT EXISTS FOR (i:InternalIP) REQUIRE (i.organization_id, i.address) IS UNIQUE",
+                "CREATE CONSTRAINT ad_domain_org_name IF NOT EXISTS FOR (d:ADDomain) REQUIRE (d.organization_id, d.name) IS UNIQUE",
+                "CREATE CONSTRAINT ou_org_path IF NOT EXISTS FOR (o:OrganizationalUnit) REQUIRE (o.organization_id, o.domain, o.path) IS UNIQUE",
+                "CREATE CONSTRAINT network_site_org_name IF NOT EXISTS FOR (n:NetworkSite) REQUIRE (n.organization_id, n.name) IS UNIQUE",
             ]
             
             for constraint in constraints:
@@ -182,6 +207,8 @@ class GraphService:
                 "CREATE INDEX hosting_provider_name_idx IF NOT EXISTS FOR (h:HostingProvider) ON (h.name)",
                 "CREATE INDEX cert_org IF NOT EXISTS FOR (c:Certificate) ON (c.organization_id)",
                 "CREATE INDEX ip_internet_facing IF NOT EXISTS FOR (i:IP) ON (i.is_internet_facing)",
+                "CREATE INDEX edr_agent_org IF NOT EXISTS FOR (e:EDRAgent) ON (e.organization_id)",
+                "CREATE INDEX asset_public IF NOT EXISTS FOR (a:Asset) ON (a.is_public)",
                 "CREATE FULLTEXT INDEX graph_knowledge_text IF NOT EXISTS FOR (n:JSResource|Endpoint|SourceFile|Vulnerability) ON EACH [n.url, n.path, n.title]",
             ]
             
@@ -288,6 +315,8 @@ class GraphService:
                 a.country = $country,
                 a.region = $region,
                 a.in_scope = $in_scope,
+                a.is_public = $is_public,
+                a.system_type = $system_type,
                 a.http_status = $http_status,
                 a.has_login_portal = $has_login_portal
         """, {
@@ -312,6 +341,8 @@ class GraphService:
             "country": getattr(asset, 'country', None),
             "region": getattr(asset, 'region', None),
             "in_scope": getattr(asset, 'in_scope', True),
+            "is_public": getattr(asset, 'is_public', True),
+            "system_type": getattr(asset, 'system_type', None),
             "http_status": getattr(asset, 'http_status', None),
             "has_login_portal": getattr(asset, 'has_login_portal', False),
         })
@@ -372,6 +403,10 @@ class GraphService:
             and asset.value.strip()
         ):
             ip_addresses = [asset.value.strip()]
+        # Internal endpoint addresses are modelled as tenant-scoped :InternalIP
+        # (see _sync_crowdstrike_host) instead of the globally-unique :IP node.
+        if _is_crowdstrike_internal(asset):
+            ip_addresses = [ip for ip in ip_addresses if not _is_private_ip(ip)]
         for ip in ip_addresses:
             if ip:
                 ip_type = "ipv6" if ":" in ip else "ipv4"
@@ -833,6 +868,145 @@ class GraphService:
 
         # ===== 16. F5 REACHABILITY: VIP IP FORWARDS_TO pool-member IP =====
         self._sync_f5_forwards_to(session, asset, org_id, ip_addresses)
+
+        # ===== 17. ENDPOINT / INTERNAL LAYER: CrowdStrike Falcon host context =====
+        self._sync_crowdstrike_host(session, asset, org_id)
+
+    def _sync_crowdstrike_host(self, session, asset: Asset, org_id: int) -> None:
+        """Model a Falcon-managed endpoint for internal attack-path analysis.
+
+        (Asset)-[:HAS_AGENT]->(EDRAgent)
+        (Asset)-[:HAS_INTERFACE]->(InternalIP)-[:SAME_AS]->(IP)   # bridge to F5/Panorama IPs, same org only
+        (Asset)-[:EGRESSES_VIA]->(IP {is_internet_facing: true})   # NAT egress seen by the sensor
+        (Asset)-[:MEMBER_OF_DOMAIN]->(ADDomain)
+        (Asset)-[:IN_OU]->(OrganizationalUnit)-[:PART_OF]->(ADDomain)
+        (Asset)-[:LOCATED_AT]->(NetworkSite)
+
+        Edges carry ``source: 'crowdstrike'`` and are rebuilt on every sync so
+        DHCP changes, re-imaged agents and OU moves don't leave stale edges.
+        """
+        meta = getattr(asset, "metadata_", None) or {}
+        cs = meta.get("crowdstrike") if isinstance(meta, dict) else None
+        if not isinstance(cs, dict) or not cs.get("aid"):
+            return
+        try:
+            ou_parts = [str(p) for p in (cs.get("ou") or []) if p]
+            session.run("""
+                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                OPTIONAL MATCH (a)-[old {source: 'crowdstrike'}]->()
+                DELETE old
+                WITH DISTINCT a
+                SET a.edr_managed = true,
+                    a.hostname = $hostname,
+                    a.fqdn = $fqdn,
+                    a.mac_address = $mac_address
+                MERGE (e:EDRAgent {agent_id: $aid})
+                SET e.vendor = 'crowdstrike',
+                    e.organization_id = $org_id,
+                    e.platform = $platform,
+                    e.os_version = $os_version,
+                    e.agent_version = $agent_version,
+                    e.product_type = $product_type,
+                    e.status = $status,
+                    e.first_seen = $first_seen,
+                    e.last_seen = $last_seen,
+                    e.falcon_tags = $falcon_tags,
+                    e.host_groups = $groups
+                MERGE (a)-[ha:HAS_AGENT]->(e)
+                SET ha.source = 'crowdstrike'
+                WITH a
+                FOREACH (addr IN CASE WHEN $local_ip IS NULL THEN [] ELSE [$local_ip] END |
+                    MERGE (iip:InternalIP {organization_id: $org_id, address: addr})
+                    SET iip.is_internet_facing = false
+                    MERGE (a)-[hi:HAS_INTERFACE]->(iip)
+                    SET hi.source = 'crowdstrike', hi.mac_address = $mac_address)
+                FOREACH (addr IN CASE WHEN $external_ip IS NULL THEN [] ELSE [$external_ip] END |
+                    MERGE (pub:IP {address: addr})
+                    SET pub.organization_id = coalesce(pub.organization_id, $org_id),
+                        pub.is_internet_facing = true,
+                        pub.is_egress = true
+                    MERGE (a)-[eg:EGRESSES_VIA]->(pub)
+                    SET eg.source = 'crowdstrike', eg.organization_id = $org_id)
+                FOREACH (dom IN CASE WHEN $machine_domain IS NULL THEN [] ELSE [$machine_domain] END |
+                    MERGE (d:ADDomain {organization_id: $org_id, name: dom})
+                    MERGE (a)-[md:MEMBER_OF_DOMAIN]->(d)
+                    SET md.source = 'crowdstrike')
+                FOREACH (path IN CASE WHEN $ou_path IS NULL THEN [] ELSE [$ou_path] END |
+                    MERGE (o:OrganizationalUnit {organization_id: $org_id, domain: coalesce($machine_domain, ''), path: path})
+                    SET o.name = $ou_leaf
+                    MERGE (a)-[io:IN_OU]->(o)
+                    SET io.source = 'crowdstrike')
+                FOREACH (site IN CASE WHEN $site_name IS NULL THEN [] ELSE [$site_name] END |
+                    MERGE (n:NetworkSite {organization_id: $org_id, name: site})
+                    MERGE (a)-[la:LOCATED_AT]->(n)
+                    SET la.source = 'crowdstrike')
+            """, {
+                "asset_id": asset.id,
+                "org_id": org_id,
+                "aid": cs.get("aid"),
+                "hostname": cs.get("hostname"),
+                "fqdn": cs.get("fqdn"),
+                "mac_address": cs.get("mac_address"),
+                "platform": cs.get("platform_name"),
+                "os_version": cs.get("os_version"),
+                "agent_version": cs.get("agent_version"),
+                "product_type": cs.get("product_type_desc"),
+                "status": cs.get("status"),
+                "first_seen": cs.get("first_seen"),
+                "last_seen": cs.get("last_seen"),
+                "falcon_tags": list(cs.get("falcon_tags") or []),
+                "groups": list(cs.get("groups") or []),
+                "local_ip": cs.get("local_ip") or None,
+                "external_ip": cs.get("external_ip") or None,
+                "machine_domain": cs.get("machine_domain") or None,
+                "ou_path": "/".join(ou_parts) or None,
+                "ou_leaf": ou_parts[0] if ou_parts else None,
+                "site_name": cs.get("site_name") or None,
+            })
+            # OU → domain, and bridge the internal address to any same-tenant :IP
+            # (F5 pool members, Panorama objects) without crossing tenants.
+            session.run("""
+                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                OPTIONAL MATCH (a)-[:IN_OU]->(o:OrganizationalUnit)
+                OPTIONAL MATCH (a)-[:MEMBER_OF_DOMAIN]->(d:ADDomain)
+                FOREACH (_ IN CASE WHEN o IS NULL OR d IS NULL THEN [] ELSE [1] END |
+                    MERGE (o)-[:PART_OF]->(d))
+                WITH a
+                OPTIONAL MATCH (a)-[:HAS_INTERFACE]->(iip:InternalIP)
+                OPTIONAL MATCH (known:IP {address: iip.address, organization_id: $org_id})
+                FOREACH (k IN CASE WHEN known IS NULL THEN [] ELSE [known] END |
+                    MERGE (iip)-[:SAME_AS]->(k))
+            """, {"asset_id": asset.id, "org_id": org_id})
+        except Exception as e:
+            logger.debug(f"CrowdStrike host sync error for asset {getattr(asset, 'id', None)}: {e}")
+
+    def get_internal_exposure(self, organization_id: int, limit: int = 100) -> List[Dict]:
+        """Internal EDR-managed hosts with open high/critical findings, and the
+        internet-facing IPs they are reachable from or egress through.
+
+        Reachability today comes from F5 FORWARDS_TO (VIP → pool member); egress
+        is NAT context from the Falcon sensor, not inbound reachability.
+        """
+        cypher = """
+            MATCH (a:Asset {organization_id: $org_id})-[:HAS_AGENT]->(e:EDRAgent)
+            MATCH (a)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+            WHERE v.severity IN ['critical', 'high'] AND coalesce(v.status, 'open') IN ['open', 'in_progress']
+            OPTIONAL MATCH (a)-[:HAS_INTERFACE]->(:InternalIP)-[:SAME_AS]->(:IP)<-[f:FORWARDS_TO]-(vip:IP)
+            WHERE coalesce(vip.is_internet_facing, false)
+            OPTIONAL MATCH (a)-[:EGRESSES_VIA]->(egress:IP)
+            OPTIONAL MATCH (a)-[:MEMBER_OF_DOMAIN]->(d:ADDomain)
+            WITH a, e, d,
+                 collect(DISTINCT {vuln_id: v.vuln_id, title: v.title, severity: v.severity}) AS vulns,
+                 collect(DISTINCT {vip: vip.address, port: f.port}) AS inbound,
+                 collect(DISTINCT egress.address) AS egress_ips
+            RETURN a.asset_id AS asset_id, a.value AS host, a.system_type AS system_type,
+                   e.agent_id AS agent_id, d.name AS ad_domain, vulns,
+                   [x IN inbound WHERE x.vip IS NOT NULL] AS reachable_from_internet,
+                   egress_ips
+            ORDER BY size(reachable_from_internet) DESC, size(vulns) DESC
+            LIMIT $limit
+        """
+        return self.query(cypher, {"org_id": organization_id, "limit": int(limit)})
 
     def _sync_js_resources(self, session, asset: Asset, org_id: int) -> None:
         """Link observed JS URLs to the asset, endpoints and finding evidence."""

@@ -792,6 +792,42 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_crowdstrike_syncs(self):
+        """Run scheduled CrowdStrike Hosts + Spotlight imports when due."""
+        from app.models.crowdstrike_integration import CrowdStrikeIntegration
+        from app.services import crowdstrike_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(CrowdStrikeIntegration).filter(
+                CrowdStrikeIntegration.is_active == True,
+                CrowdStrikeIntegration.continuous_sync_enabled == True,
+            ).all()
+            due = [connection for connection in candidates if connection.is_sync_due(now)]
+            if not due:
+                return
+            logger.info(f"CrowdStrike: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await crowdstrike_service.sync_integration(db, integration)
+                    logger.info(
+                        f"CrowdStrike sync (org {integration.organization_id}, "
+                        f"'{integration.connection_name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"CrowdStrike sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    db.rollback()
+        except Exception as exc:
+            logger.error(f"CrowdStrike continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_akamai_waf_syncs(self):
         """Run continuous Akamai WAF syncs for connections whose interval is due."""
         from app.models.akamai_integration import AkamaiWafIntegration
@@ -1009,6 +1045,9 @@ class ScheduleWorker:
 
                 # Continuous Wiz VM and vulnerability syncs
                 await self.run_wiz_syncs()
+
+                # Continuous CrowdStrike Hosts + Spotlight syncs (internal inventory)
+                await self.run_crowdstrike_syncs()
 
                 # Continuous Akamai WAF syncs
                 await self.run_akamai_waf_syncs()

@@ -307,6 +307,27 @@ async def get_attack_paths(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/internal-exposure")
+async def get_internal_exposure(
+    organization_id: Optional[int] = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+):
+    """EDR-managed internal hosts with open high/critical findings, plus the
+    internet-facing IPs that forward to them (F5) or that they egress through."""
+    org_id = _resolve_graph_org(current_user, organization_id)
+    if org_id is None:
+        raise HTTPException(status_code=400, detail="User must belong to an organization")
+    try:
+        graph = get_graph_service()
+        if not graph._connected:
+            return {"hosts": [], "error": "Neo4j not connected"}
+        return {"hosts": graph.get_internal_exposure(org_id, limit=limit)}
+    except Exception as e:
+        logger.error(f"Internal exposure query error: {e}")
+        raise HTTPException(status_code=500, detail="Internal exposure query failed")
+
+
 @router.get("/vulnerability/{vuln_id}/impact", response_model=VulnerabilityImpact)
 async def get_vulnerability_impact(
     vuln_id: int,
