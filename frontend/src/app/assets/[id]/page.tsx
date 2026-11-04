@@ -63,6 +63,7 @@ import {
   Plus,
   FileDown,
   Radar,
+  GitBranch,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -255,6 +256,7 @@ const assetTypeIcons: Record<string, any> = {
   service: Cpu,
   certificate: Lock,
   api_endpoint: Database,
+  repository: GitBranch,
 };
 
 const TABS = [

@@ -124,6 +124,12 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
       # GitHub Secret Scanning (optional)
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # GitHub App for Integrations > Source Code Managers (optional; PAT works without it)
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
+      - GITHUB_APP_SLUG=${GITHUB_APP_SLUG:-}
+      - GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID:-}
+      - GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET:-}
+      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:-}
       # WPScan API token — required for --enumerate vp/vt (CVE mapping).
       # Without it, those enum modes abort. Free token: https://wpscan.com/register
       - WPSCAN_API_TOKEN=${WPSCAN_API_TOKEN:-}
@@ -421,6 +427,12 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - REDIS_URL=redis://redis:6379/0
       - SCHEDULE_CHECK_INTERVAL=${SCHEDULE_CHECK_INTERVAL:-60}
+      # GitHub App: links approved install requests and syncs App connections
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
+      - GITHUB_APP_SLUG=${GITHUB_APP_SLUG:-}
+      - GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID:-}
+      - GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET:-}
+      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY:-}
     depends_on:
       db:
         condition: service_healthy
