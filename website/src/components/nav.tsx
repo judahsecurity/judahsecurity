@@ -8,6 +8,7 @@ import { useState } from 'react'
 import { cn } from '@/lib/utils'
 
 const NAV_LINKS = [
+  { href: '/surfaces', label: 'Attack Surfaces' },
   { href: '/research', label: 'Research' },
   { href: '/blog', label: 'Blog' },
   { href: '/tools', label: 'Tools' },

@@ -1,0 +1,248 @@
+---
+title: "Cloud Attack Surface"
+label: "Cloud"
+excerpt: "How Guard connects to your cloud accounts to inventory resources and find public exposures, secrets, and misconfigurations across AWS, Azure, and GCP."
+order: 3
+icon: "Cloud"
+accent: "text-sky-400 border-sky-400/30 bg-sky-400/5"
+tags: ["cloud", "aws", "azure", "gcp", "misconfiguration", "iam"]
+---
+
+## Your Cloud Is Bigger Than You Think
+
+Your cloud footprint spans accounts, subscriptions, and projects across one or more providers. The provider secures the underlying infrastructure; how you configure what runs on it is up to you. Misconfigurations, overprivileged identities, exposed storage, and forgotten resources create an attack surface that grows faster than security teams can track it.
+
+Guard connects to your cloud accounts, continuously inventories your resources, identifies what's publicly exposed, and finds the misconfigurations and secrets that attackers exploit.
+
+---
+
+## Why Cloud Is a Distinct Attack Surface
+
+### The shared responsibility gap is real
+
+Under the shared responsibility model, your cloud provider secures the infrastructure — the hypervisor, the physical hardware, the network backbone. Everything above that line is yours: IAM policies, storage permissions, network security groups, encryption settings, and application configurations.
+
+Most organizations assume their cloud provider is handling more than they actually are. That assumption gap is where breaches happen.
+
+### Misconfigurations are the new vulnerabilities
+
+In traditional environments, attackers exploit software bugs. In the cloud, they exploit configuration mistakes: open storage buckets, permissive security groups, public database endpoints, and overprivileged IAM roles.
+
+Because cloud infrastructure changes constantly — new services spun up, permissions granted, resources created — today's secure configuration can become tomorrow's breach vector without anyone noticing.
+
+### Identity is the new perimeter
+
+In the cloud, there are no firewalls to hide behind. Access is controlled by identity — IAM users, roles, service accounts, and the policies attached to them. Common identity weaknesses include:
+
+- Overprivileged service accounts
+- Long-lived access keys for IAM users and service accounts
+- IAM roles that are no longer used
+- Valid accounts that attackers can abuse once they obtain the credentials
+
+Every unused permission is a potential attack path. Every stale credential is an invitation. Every overprivileged service account is a blast radius multiplier.
+
+### Multi-cloud multiplies complexity
+
+Each cloud provider has its own security model, its own naming conventions, its own IAM system, and its own configuration pitfalls. Organizations running workloads across AWS, Azure, and GCP are maintaining three distinct security postures simultaneously — often with different teams, different tools, and different levels of maturity.
+
+### Attackers know cloud architecture
+
+Attackers who target cloud environments know how to pivot from a compromised credential to cross-account access, how to exploit IAM trust relationships, and how to exfiltrate data through misconfigured storage.
+
+---
+
+## What Guard Does About It
+
+Guard addresses the cloud attack surface through a three-phase approach: **connect your accounts**, **discover and inventory everything**, and **continuously assess security posture**.
+
+### Cloud Account Connection
+
+Guard integrates directly with your cloud providers through native authentication:
+
+| **Provider** | **Authentication** | **What Gets Connected** |
+| --- | --- | --- |
+| **Amazon Web Services** | Cross-account IAM role assumption with external ID, or access key credentials | Individual accounts or entire AWS Organizations (all member accounts discovered automatically) |
+| **Microsoft Azure** | OIDC federated tokens or service principal credentials | Individual subscriptions or all subscriptions across tenants |
+| **Google Cloud Platform** | Service account key files or OIDC credential files | Individual projects or entire organizations (all projects discovered automatically) |
+
+The platform walks you through setup with a guided wizard — generating the IAM policies you need, validating credentials before saving, and testing connectivity before your first scan.
+
+### Resource Discovery
+
+Once connected, Guard automatically inventories your cloud resources across every region and account:
+
+**AWS Resource Discovery:**
+
+- S3 buckets and their access configurations
+- EC2 instances with public IP addresses
+- Lambda functions with public URLs
+- API Gateway endpoints
+- Elastic Load Balancers
+- Route 53 DNS zones and records
+- AWS Organizations structure (accounts, OUs)
+- Network interfaces and elastic IPs
+
+**Azure Resource Discovery:**
+
+- Virtual machines and public IP addresses
+- DNS zones and records (A, AAAA, CNAME)
+- App Services and Web Sites
+- Subscriptions across tenants
+- Storage accounts
+- SQL databases
+- Container registries
+- Key Vaults
+
+**GCP Resource Discovery:**
+
+- Projects across your organization
+- Compute Engine instances
+- Cloud Functions
+- Cloud Run services
+- App Engine applications
+- Cloud Storage buckets
+- Cloud SQL instances
+- Public networking resources (forwarding rules, external addresses)
+
+Every discovered resource is classified by type, region, and account — creating a complete inventory that's always current.
+
+### Security Assessment
+
+With your cloud inventory mapped, Guard runs continuous security assessment across three dimensions:
+
+#### Public Resource Detection
+
+Guard identifies resources that are publicly accessible — the misconfigurations that turn private infrastructure into public attack surface:
+
+- **Storage exposure** — S3 buckets, Azure Blob containers, and GCS buckets with public access enabled
+- **Database exposure** — SQL servers, Cosmos DB, Redis caches, and other data stores accessible from the internet
+- **Compute exposure** — VMs, container instances, and serverless functions with public endpoints
+- **Network exposure** — Unrestricted security groups, public load balancers, and permissive firewall rules
+- **Application exposure** — App services with disabled authentication, anonymous function triggers, and public API endpoints
+- **Management exposure** — Key vaults with public access, automation accounts, and management interfaces
+
+For Azure environments, Guard runs 80+ security assessment templates covering every major service category — from AKS cluster configuration to Event Hub access policies.
+
+#### Secret and Credential Discovery
+
+Guard scans inside your cloud resources for exposed secrets — the credentials that enable lateral movement and privilege escalation:
+
+- **Compute instances** — Environment variables, startup scripts, and metadata containing API keys, passwords, and tokens
+- **Serverless functions** — Lambda/Cloud Functions/Cloud Run environment variables and configuration
+- **Storage objects** — Files in S3/GCS/Blob storage containing credentials, certificates, and configuration secrets
+- **Container images** — Docker registry scanning for embedded secrets in image layers
+- **DevOps pipelines** — Azure DevOps repositories, variable groups, service endpoints, and pipeline configurations
+- **Automation accounts** — Runbooks and scripts containing hardcoded credentials
+
+Secret scanning uses pattern-based detection to find API keys, database connection strings, private keys, OAuth tokens, and other credential types — then validates whether they're still active.
+
+#### IAM and Access Analysis
+
+Guard analyzes your cloud identity configuration to find overprivileged access and dangerous trust relationships:
+
+- **Resource policy analysis** — Identifies overly permissive resource policies across S3, KMS, Lambda, and other services
+- **Organization policy review** — Evaluates Service Control Policies (SCPs) and Resource Control Policies (RCPs) for gaps
+- **IAM graph analysis** — Maps the relationships between identities, roles, and permissions to identify privilege escalation paths
+- **Conditional access review** — Evaluates Azure AD Conditional Access policies for bypasses and gaps
+- **Service account audit** — Identifies overprivileged and unused service accounts across all providers
+- **Cross-account trust analysis** — Maps trust relationships between accounts that could enable lateral movement
+
+#### Infrastructure Vulnerability Detection
+
+Guard identifies cloud-specific vulnerabilities that create risk:
+
+- **CDK bucket takeover** — Missing S3 staging buckets from AWS CDK deployments that can be hijacked
+- **CloudFront-to-S3 domain takeover** — CloudFront distributions pointing to non-existent S3 buckets
+- **Cognito misconfigurations** — Identity pool and user pool settings enabling unauthorized access or privilege escalation
+- **IMDSv1 exposure** — EC2 instances without IMDSv2 enforcement, vulnerable to SSRF-based credential theft
+- **Container escape risks** — ECS credential theft vulnerabilities in EC2 launch type configurations
+- **Subdomain takeover** — Dangling DNS records in Cloud DNS/Route 53 that can be claimed by attackers
+- **Default service account abuse** — GCP instances running with default service accounts that have excessive permissions
+
+---
+
+## The Cloud Discovery-to-Assessment Pipeline
+
+```
+Cloud Account Connected (AWS / Azure / GCP)
+  │
+  ├─→ Organization Discovery ─→ All accounts/subscriptions/projects found
+  │     │
+  │     └─→ Resource Enumeration ─→ Every resource inventoried by region
+  │           ├─→ Compute (VMs, Lambda, Cloud Run, Functions)
+  │           ├─→ Storage (S3, Blob, GCS, databases)
+  │           ├─→ Network (IPs, DNS, load balancers, firewalls)
+  │           └─→ Identity (IAM users, roles, service accounts)
+  │
+  ├─→ Public Exposure Detection ─→ Misconfigured access identified
+  │     ├─→ Open storage ─→ Public buckets/containers flagged
+  │     ├─→ Public compute ─→ Exposed instances/functions flagged
+  │     └─→ Network gaps ─→ Permissive security groups flagged
+  │
+  ├─→ Secret Scanning ─→ Credentials found in resources
+  │     ├─→ Compute secrets ─→ Keys in env vars and metadata
+  │     ├─→ Storage secrets ─→ Credentials in files and objects
+  │     └─→ DevOps secrets ─→ Tokens in pipelines and repos
+  │
+  └─→ IAM Analysis ─→ Access risks mapped
+        ├─→ Overprivileged roles ─→ Excessive permissions flagged
+        ├─→ Stale credentials ─→ Unused keys and accounts flagged
+        └─→ Trust relationships ─→ Cross-account risks identified
+```
+
+This pipeline runs continuously. When new resources appear, permissions change, or configurations drift, Guard detects and assesses the changes automatically.
+
+---
+
+## What Users See in the Platform
+
+### Cloud Integration Setup
+
+A guided wizard for each cloud provider:
+
+- Step-by-step credential configuration with validation
+- IAM policy templates you can copy directly into your cloud console
+- Connection testing before first scan
+- Support for organization-wide or individual account/project connections
+
+### Cloud Asset Inventory
+
+All cloud resources appear in the unified asset inventory with:
+
+- Provider, resource type, region, and account identifiers
+- Public/private classification
+- Associated IP addresses and URLs
+- Rich metadata from cloud provider APIs
+
+### Security Findings
+
+Cloud-specific findings with full context:
+
+- What's misconfigured and why it matters
+- Which resource, in which account, in which region
+- Severity scoring aligned with industry frameworks
+- Remediation guidance specific to each cloud provider
+
+### Multi-Cloud Visibility
+
+A single view across all connected accounts and providers — so you can answer questions like:
+
+- "How many publicly accessible storage resources do we have across all providers?"
+- "Which accounts have the most misconfigurations?"
+- "Where are credentials exposed in our cloud infrastructure?"
+
+---
+
+## Capability Summary
+
+Guard's cloud attack surface scanning covers **three major cloud providers** with **50+ security modules**:
+
+| **Category** | **AWS** | **Azure** | **GCP** |
+| --- | --- | --- | --- |
+| **Resource Discovery** | Accounts, EC2, Lambda, S3, API Gateway, ELB, Route 53, Organizations | Subscriptions, VMs, DNS, App Services, Public IPs | Projects, Compute, Functions, Cloud Run, App Engine, Storage, SQL, Networking |
+| **Public Exposure Detection** | Public resources across all service types | 80+ security assessment templates covering storage, compute, network, database, identity, and application services | Public networking, firewall rules, external addresses |
+| **Secret Scanning** | Secrets across compute, storage, and container images | Secrets in VMs, web apps, automation accounts, key vaults, storage, and DevOps pipelines | Secrets in compute instances, storage buckets, Cloud Run, and Cloud Functions |
+| **IAM Analysis** | Resource policies, organization policies, IAM graph analysis, KMS grants | Role assignments, Conditional Access policies, Entra ID analysis | Default service accounts, primitive role detection, IAM policy analysis |
+| **Infrastructure Vulnerabilities** | CDK takeover, CloudFront-S3 takeover, Cognito misconfig, IMDSv1, ECS escape | Public access misconfigurations across 25+ service types | Subdomain takeover, default service account abuse |
+
+All findings flow into Guard's unified risk management system — prioritized by severity, tracked through remediation, and correlated with your external and internal attack surface findings for a complete security picture.

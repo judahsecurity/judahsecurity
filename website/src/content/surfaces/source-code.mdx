@@ -1,0 +1,256 @@
+---
+title: "Source Code Surface"
+label: "Source Code"
+excerpt: "How Guard discovers your repositories and scans them for vulnerabilities, exposed secrets, and pipeline weaknesses across your software supply chain."
+order: 5
+icon: "Code2"
+accent: "text-amber-400 border-amber-400/30 bg-amber-400/5"
+tags: ["source-code", "supply-chain", "secrets", "sast", "constantine"]
+---
+
+## Your Code Is Under Attack Before It Ships
+
+Software doesn't exist in isolation. An application depends on open source libraries, runs through automated CI/CD pipelines, and inherits the security posture of every dependency, build tool, and package registry it touches. When any link in that chain is compromised, the vulnerability ships directly to your customers.
+
+Guard treats your source code and software supply chain as a distinct attack surface — discovering your repositories, scanning for vulnerabilities and exposed secrets, analyzing CI/CD pipelines for weaknesses, and validating that your code is safe before it reaches production.
+
+---
+
+## Why Source Code Deserves Its Own Attack Surface
+
+### Your code is mostly someone else's code
+
+Most of what you ship is open source code you didn't write, and those dependencies carry their own vulnerabilities and fall out of date.
+
+You're not just responsible for the code you write. You're responsible for every dependency you import.
+
+### Leaked secrets are direct access
+
+Secrets end up in public and private repositories alike, and a leaked secret stays usable until someone revokes it.
+
+Every leaked API key, database credential, cloud access key, and service token is a direct path into your infrastructure. Attackers don't need to find a vulnerability — they just need to find a credential.
+
+### CI/CD pipelines are the new attack vector
+
+Your build system has more access than most of your engineers. CI/CD pipelines routinely hold deployment credentials, cloud provider keys, package registry tokens, and database passwords. When attackers compromise a pipeline — through a malicious GitHub Action, a poisoned dependency, or a compromised maintainer account — they inherit all of that access.
+
+### AI-generated code amplifies the problem
+
+AI coding assistants add code quickly, and that code can contain hardcoded credentials, injection flaws, and missing input sanitization that no human has reviewed.
+
+---
+
+## What Guard Does About It
+
+Guard addresses the source code and supply chain attack surface through five capabilities: **repository discovery**, **vulnerability detection**, **secret scanning**, **CI/CD pipeline analysis**, and **supply chain risk detection**.
+
+### Repository Discovery
+
+Guard integrates with your source code management platforms to automatically discover and inventory every repository in your organization:
+
+| **Platform** | **What Guard Discovers** |
+| --- | --- |
+| **GitHub** | Organization repositories, member repositories, contributor repositories across organizations — automatically filters out forks |
+| **GitLab** | Group projects including subgroups, plus the public personal projects of group members — automatically filters out forks |
+| **Azure DevOps** | Git repositories across an organization or a single project — automatically filters out forks and disabled repositories |
+| **Bitbucket** | Workspace repositories on Bitbucket Cloud, connected with a workspace access token — automatically filters out forks |
+
+For GitHub, GitLab, and Bitbucket, Guard records whether each repository is public or private every time the integration runs, so a newly created public repository is imported as public. Guard does not yet alert you when a private repository is made public.
+
+### Source Code Vulnerability Detection (Constantine)
+
+Constantine is Guard's autonomous source code vulnerability engine. Unlike traditional SAST tools that rely on pattern matching, Constantine uses a five-stage AI-powered pipeline that doesn't just find vulnerabilities — it proves they're exploitable and generates validated patches.
+
+**The Five Stages:**
+
+**1. Ingest** — Acquires the target repository, analyzes the codebase structure, and groups source files into analysis chunks. Supports full repository scans and delta scans (analyzing only commits since the last scan).
+
+**2. Detect** — Multiple detection modules run in parallel to find vulnerabilities:
+
+- **Fast scanning** uses efficient models for broad coverage across all code
+- **Deep scanning** uses advanced models for thorough investigation of suspicious patterns
+- **Two-pass detection** — first pass identifies candidates cheaply, second pass validates with higher confidence
+
+Detection is language-agnostic — the AI scanner can identify vulnerabilities in any language it can reason about, including memory safety issues, injection flaws, authentication bypasses, cryptographic weaknesses, and logic errors.
+
+**3. Exploit** — For each detected vulnerability, Constantine generates proof-of-vulnerability (PoV) exploit code that demonstrates the issue is real. Exploits are self-contained, runnable, and tested in a sandboxed environment. If the first attempt fails, the pipeline retries with feedback — up to three attempts per vulnerability.
+
+This is the critical differentiator: **every reported vulnerability has been proven exploitable**, not just flagged by a pattern match.
+
+**4. Patch** — For confirmed vulnerabilities, Constantine generates fixes using a tiered strategy:
+
+- **Tier 1: Dependency bump** — If the vulnerability is in a dependency, suggest the version upgrade
+- **Tier 2: Simple fix** — Bounds checks, null guards, input validation — minimal code changes
+- **Tier 3: Structural refactor** — Deeper architectural changes for complex issues
+
+Every patch is validated: compiled, tested, and re-run against the PoV to verify the fix actually works.
+
+**5. Report** — Produces structured findings with full evidence chains: the vulnerability description, the exploit that proves it, the patch that fixes it, and the validation that confirms the patch works.
+
+**Key Design:**
+
+- **Configurable pipeline** — Stages defined in YAML; you can customize which modules run, set LLM budgets ($100 default, $250 max), and focus on specific vulnerability types
+- **Three-tier LLM routing** — Uses efficient models for broad scanning, advanced models for deep analysis, keeping costs predictable
+- **Real-time cost tracking** — Per-module and per-stage spending visibility with budget warnings
+- **Manual execution only** — Constantine runs when a security operator triggers it, never automatically
+
+### Secret Scanning (Titus)
+
+Titus is Guard's high-performance secret scanning engine, detecting credentials across source code, git history, binary files, and live applications.
+
+**Detection:**
+
+- **487+ detection rules** covering API keys, tokens, passwords, and credentials for hundreds of services (AWS, GCP, Azure, GitHub, Slack, databases, CI/CD systems, and more)
+- **Accelerated matching** using Hyperscan/Vectorscan regex engines for high throughput, with pure-Go fallback for portability
+- **Full git history scanning** — finds secrets that were committed and later deleted but still exist in history
+- **Binary file extraction** — scans inside Office documents, PDFs, archives, APKs, browser extensions, SQLite databases, and Docker image layers
+
+**Validation:**
+
+- **Live secret validation** against source APIs — confirms whether discovered secrets are still active
+- **138 validators** (13 native Go validators for complex multi-credential services like AWS STS, plus 125 YAML-based HTTP validators for services like Stripe, Twilio, and Shopify)
+- **Three validation states** — Valid (active), Invalid (revoked/expired), Undetermined (cannot verify)
+
+**Output:**
+
+- SARIF format for CI/CD integration with GitHub Advanced Security
+- JSON for programmatic processing
+- Available as CLI, Go library, Burp Suite extension, and Chrome browser extension
+
+### CI/CD Pipeline Security (Trajan)
+
+Trajan scans your CI/CD pipeline configurations for security vulnerabilities that could enable supply chain attacks:
+
+**Supported Platforms:**
+
+- GitHub Actions
+- GitLab CI
+- Azure DevOps Pipelines
+- Bitbucket Pipelines
+- Jenkins
+- JFrog
+
+**Vulnerability Categories:**
+
+- **Injection vulnerabilities** — Untrusted input flowing into shell commands, script contexts, or environment variables
+- **Supply chain risks** — Artifact poisoning, cache poisoning, AI-assisted supply chain attacks
+- **Permission misconfigurations** — Overprivileged workflow permissions, unnecessary write access, missing token restrictions
+
+### GitHub Actions Security (Gato)
+
+Guard includes dedicated GitHub Actions security scanning that goes deeper than configuration analysis:
+
+- **Self-hosted runner detection** — Identifies repositories using self-hosted runners, which can be abused for persistent access
+- **PWN request risks** — Detects workflows using `pull_request_target` triggers that can be exploited by external contributors
+- **Injection risks** — Finds untrusted data flowing into GitHub Actions expressions
+- **Artifact secret scanning** — Discovers hardcoded secrets in GitHub Actions workflow artifacts using pattern-based detection
+
+### Supply Chain Risk Detection
+
+Guard detects supply chain risks through multiple mechanisms:
+
+| **Capability** | **What It Detects** | **Why It Matters** |
+| --- | --- | --- |
+| **Dependency Confusion Scanning** | Identifies packages vulnerable to dependency confusion attacks — where a public package can override a private one | A single dependency confusion vulnerability can inject arbitrary code into your build pipeline |
+| **Malicious Package Detection** | Template-based detection for known compromised packages | Known-bad packages in your dependency tree are an immediate, actionable risk |
+| **Repository Visibility** | Records whether each GitHub, GitLab, and Bitbucket repository is public or private when the integration runs | Public repositories expose their code, and any secrets in it, to anyone |
+
+---
+
+## The Source Code Assessment Pipeline
+
+```
+SCM Integration Connected (GitHub / GitLab / Azure DevOps / Bitbucket)
+  │
+  ├─→ Repository Discovery ─→ All repos inventoried
+  │     ├─→ Organization repos discovered
+  │     ├─→ Member/contributor repos discovered
+  │     └─→ Public/private visibility recorded
+  │
+  ├─→ Titus Secret Scanning ─→ Credentials found
+  │     ├─→ Source code scanning (487+ rules)
+  │     ├─→ Git history scanning (finds deleted secrets)
+  │     ├─→ Binary file extraction (docs, archives, images)
+  │     └─→ Live validation (confirms secrets still active)
+  │
+  ├─→ Constantine Vulnerability Detection ─→ Vulns proven
+  │     ├─→ Detect (multi-pass AI scanning)
+  │     ├─→ Exploit (proof-of-vulnerability generation)
+  │     ├─→ Patch (tiered fix generation + validation)
+  │     └─→ Report (findings with full evidence chains)
+  │
+  ├─→ Trajan CI/CD Analysis ─→ Pipeline risks found
+  │     ├─→ Injection vulnerabilities
+  │     ├─→ Supply chain risks (artifact/cache poisoning)
+  │     └─→ Permission misconfigurations
+  │
+  ├─→ Gato GitHub Actions Scanning ─→ Actions risks found
+  │     ├─→ Self-hosted runner risks
+  │     ├─→ PWN request vulnerabilities
+  │     └─→ Artifact secret exposure
+  │
+  └─→ Supply Chain Detection ─→ Dependency risks found
+        ├─→ Dependency confusion vulnerabilities
+        └─→ Known malicious package detection
+```
+
+Each capability produces findings that flow into Guard's unified risk management system — prioritized by severity, tracked through remediation, and correlated with your external, internal, cloud, and application attack surface findings.
+
+---
+
+## What Users See in the Platform
+
+### Repository Inventory
+
+Every discovered repository appears as an asset with:
+
+- Repository URL, organization, and name
+- Public/private classification (GitHub, GitLab, and Bitbucket)
+- Platform (GitHub, GitLab, Azure DevOps, Bitbucket)
+- Associated secrets, vulnerabilities, and CI/CD findings
+
+### Vulnerability Findings
+
+Source code findings include:
+
+- **CWE classification** — Which weakness category the vulnerability falls under
+- **Severity and verification status** — Whether the vulnerability has been proven exploitable
+- **Full evidence chain** — The vulnerable code, the exploit that proves it, and the patch that fixes it
+- **File and line number** — Exact location in the codebase
+- **Remediation guidance** — Validated patches ready for developer review
+
+### Secret Findings
+
+Secret findings include:
+
+- **Secret type** — API key, token, password, certificate, etc.
+- **Service** — Which service the credential belongs to (AWS, Stripe, GitHub, etc.)
+- **Validation status** — Whether the secret is still active
+- **Location** — File, line number, and commit hash (including deleted commits)
+- **Remediation priority** — Active secrets in public repositories are critical
+
+### CI/CD Findings
+
+Pipeline findings include:
+
+- **Vulnerability type** — Injection, supply chain, permission misconfiguration
+- **Affected pipeline** — Which workflow, job, or step is vulnerable
+- **Attack scenario** — How the vulnerability could be exploited
+- **Remediation guidance** — Specific configuration changes to fix the issue
+
+---
+
+## Capability Summary
+
+Guard's source code and supply chain attack surface coverage:
+
+| **Phase** | **Capabilities** |
+| --- | --- |
+| **Repository Discovery** | GitHub, GitLab, Azure DevOps, and Bitbucket integration with automatic organization-wide discovery, fork filtering, and public/private visibility |
+| **Vulnerability Detection** | Constantine autonomous five-stage pipeline: detect → exploit → patch → report, with PoV-validated findings and tiered patching |
+| **Secret Scanning** | Titus with 487+ rules, Hyperscan-accelerated matching, full git history scanning, binary file extraction, and live secret validation against 138 service APIs |
+| **CI/CD Security** | Trajan pipeline analysis across GitHub Actions, GitLab CI, Azure DevOps, Bitbucket, Jenkins, and JFrog — detecting injection, supply chain, and permission vulnerabilities |
+| **GitHub Actions** | Gato scanning for self-hosted runner risks, PWN request vulnerabilities, injection risks, and artifact secret exposure |
+| **Supply Chain Detection** | Dependency confusion scanning, known malicious package detection, and repository visibility |
+
+All findings flow into Guard's unified risk management system — so your source code security posture is visible alongside your external, internal, cloud, and application attack surfaces.

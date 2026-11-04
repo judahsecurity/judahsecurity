@@ -1,0 +1,47 @@
+---
+title: "Mobile Attack Surface"
+label: "Mobile"
+excerpt: "Upload an Android APK and let Guard decompile it, analyze its manifest, and file findings alongside the rest of your attack surface."
+order: 8
+icon: "Smartphone"
+accent: "text-teal-400 border-teal-400/30 bg-teal-400/5"
+tags: ["mobile", "android", "apk", "decompilation"]
+---
+
+Guard supports mobile as a first-class attack surface. Upload an Android APK, and Guard decompiles it, parses its manifest, and runs its existing scanners against the resulting source — filing findings alongside everything else it discovers.
+
+## How It Works
+
+When an APK is uploaded, Guard processes it through three sequential stages:
+
+1. **Manifest parsing** — Guard reads the binary manifest to extract the package identity and confirm the package name before storing the asset. Misconfigured flags — exported components, debuggable builds, cleartext traffic permissions, and similar issues — are filed as findings immediately at ingest time.
+2. **Decompilation** — Guard uses [jadx](https://github.com/skylot/jadx) to unpack the APK and convert Dalvik bytecode to readable Java source, which is stored and passed to downstream scanners.
+3. **Unified scanning** — The decompiled source is processed by the same repository scanners already in Guard's pipeline, including secret detection and code analysis. Results appear in the same findings view as infrastructure, application, and other surface findings — with the same severity levels, evidence, and triage workflow.
+
+## Attack Surface Coverage
+
+Mobile joins the canonical attack-surface list alongside Internal, External, Cloud, Repository, Application, and LLM. Existing filters, dashboards, and reporting that scope by attack surface work for Mobile without any configuration changes.
+
+## Get Started
+
+1. Navigate to **Assets > Mobile**.
+2. Select **Upload APK**.
+3. Submit an Android APK file.
+
+Guard begins decompilation automatically and files findings as each analysis stage completes. No additional configuration is required.
+
+## Findings
+
+All Mobile findings appear under the **Mobile** attack surface in the findings view. Each finding includes the standard evidence, severity rating, and triage controls available for other attack surfaces.
+
+The following categories of issues are detected:
+
+| Category | Source |
+| --- | --- |
+| Manifest misconfigurations | Binary manifest analysis at upload time |
+| Secrets | Decompiled Java source, via secret detection scanner |
+| Code vulnerabilities | Decompiled Java source, via code analysis scanner |
+
+## Supported File Types
+
+Guard currently accepts Android APK files. iOS and other mobile formats are not yet supported.

@@ -1,0 +1,92 @@
+---
+title: "User Attack Surface"
+label: "User"
+excerpt: "How Guard finds breach-exposed employee email addresses on your domains and flags domains open to email spoofing."
+order: 9
+icon: "Users"
+accent: "text-rose-400 border-rose-400/30 bg-rose-400/5"
+tags: ["user", "social-engineering", "breach", "email-security", "phishing"]
+---
+
+## A Vulnerability With No CVE
+
+Your users are an attack surface in their own right. Social engineering — the art of manipulating people into divulging information, clicking links, or taking actions that compromise security — targets people rather than systems. No firewall, EDR solution, or SIEM can patch the human element.
+
+Guard extends attack surface management to the human layer — opt-in breach enrichment for employee credentials, and an email authentication check for domains open to spoofing.
+
+---
+
+## Why Customers Add the User Attack Surface
+
+### Because attackers target people, not only systems
+
+Phishing, pretexting, and spear phishing exploit trust, urgency, and routine — things no technical control can eliminate.
+
+### Because traditional security tools have a blind spot
+
+Firewalls, EDR, and SIEM systems detect technical indicators of compromise — not human decision-making errors. Even with perfect DMARC enforcement, attackers register look-alike domains that bypass email authentication. AI-generated content and deepfakes are reshaping attack sophistication, making signature-based detection ineffective. When the attack vector is a convincing email from what appears to be your CEO, your security stack watches it sail right through.
+
+### Because employee credentials leak outside your control
+
+Infostealer malware and breaches of third-party services feed employee credentials into dark web marketplaces and combo lists. Every exposed credential is a door waiting to be opened.
+
+### Because the attacks are evolving faster than awareness training
+
+Social engineering is no longer just email phishing. Attackers use voice calls (vishing) and text messages (smishing). QR code phishing (quishing) exploits the perception that scanning a code feels safer than clicking a link. And deepfake audio and video let attackers impersonate executives convincingly enough to request fraudulent transfers.
+
+---
+
+## The Social Engineering Threat Landscape
+
+Guard helps organizations understand and defend against the full spectrum of social engineering techniques targeting their users:
+
+| **Attack Type** | **Vector** |
+| --- | --- |
+| **Phishing** | Email with malicious links or attachments |
+| **Spear Phishing** | Targeted email to specific individuals |
+| **Whaling** | Executive-targeted impersonation |
+| **Business Email Compromise** | Compromised or spoofed business email accounts |
+| **Vishing** | Voice calls with social pretexts or deepfakes |
+| **Smishing** | SMS/text messages with malicious links |
+| **Quishing** | QR codes redirecting to credential harvesting |
+| **Pretexting** | Fabricated scenarios to extract information |
+| **Deepfakes** | AI-generated audio/video impersonation |
+
+---
+
+## What Guard Discovers and Tests
+
+Guard covers this surface with opt-in breach enrichment and an email authentication check. It does not run phishing simulations or track security-awareness training.
+
+### Credential Exposure
+
+Breach enrichment is opt-in. A collection run can search breach data for a domain you name. It does not start on its own, and it does not continuously watch dark web marketplaces.
+
+### Email Authentication
+
+The Email Security check looks for a missing SPF record and a missing or non-enforcing DMARC record on an apex domain. It does not check DKIM. A gap becomes a risk. There is no separate email-posture dashboard.
+
+### What Users See
+
+Credential exposures and email authentication gaps show up as risks, with the same status labels as other findings: Detected, Demonstrated, Resolved, Accepted, and Rejected. Guard has no phishing-simulation or training-completion metric.
+
+---
+
+## Regulatory and Compliance Drivers
+
+The user attack surface has direct regulatory implications across multiple frameworks:
+
+| **Framework** | **Requirement** | **How Guard Helps** |
+| --- | --- | --- |
+| **SEC Cybersecurity Rules** | Material incidents must be disclosed within 4 business days; annual cybersecurity risk reporting required | Continuous monitoring reduces incident likelihood; human risk metrics support annual disclosures |
+| **NIST CSF 2.0** | PR.AT category requires cybersecurity awareness training; phishing-resistant authentication recommended | Email authentication findings document spoofing exposure. Guard does not record training completion or phishing-simulation results |
+| **GDPR** | Breach notification within 72 hours | Early detection of employee data exposure enables proactive response before breach notification triggers |
+| **SOC 2** | Security awareness training and access controls required | Email authentication gaps are risks in the same queue as other findings. Guard does not record training completion |
+
+---
+
+## Summary
+
+The user attack surface is the one most traditional security tools are blind to. Guard brings the same continuous discovery, testing, and risk management methodology to the human layer that security teams already rely on for external, internal, cloud, and application attack surfaces — creating a unified view of organizational risk that accounts for both technical vulnerabilities and human behavior.
+
+Social engineering will always target people. Guard ensures you see the exposure before attackers exploit it.
