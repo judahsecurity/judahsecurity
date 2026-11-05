@@ -19,7 +19,7 @@ from app.services.agent.evidence_store import evidence_store, verification_run
 from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
     authz_proof, body_probe, browser, browser_post_replay, http_observe, planning, query_probe,
-    sqli_boolean, sqli_string, sqli_time, technology,
+    sqli_boolean, sqli_string, sqli_time, sqli_union, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
 
@@ -1410,6 +1410,44 @@ class ScopedAssessmentTools:
             result = and_result
         else:
             result["total_requests_sent"] = int(result.get("requests_sent") or 0) + int(needs_preflight)
+        if (result.get("proof_confirmed") is not True
+                and not browser_ready
+                and sqli_union.union_followup_eligible(or_result)):
+            # When results are rendered, UNION SELECT proves injection outright
+            # by making the database emit a server-owned marker the request never
+            # carried in plaintext. Discover the column layout within a bounded
+            # budget; a wrong family or layout never reflects, so it fails safe.
+            prior_evidence_id = evidence_store(self).record(
+                "scoped_string_sqli", result, target=result["target"], identity=identity,
+                success=False,
+            )
+            union_result = None
+            for family in sqli_union.FAMILIES:
+                try:
+                    self._scoped_claim_gets(
+                        sqli_union.MAX_DISCOVERY + len(sqli_union.UNION_CHECK_ORDER),
+                    )
+                    attempt = await asyncio.to_thread(
+                        sqli_union.probe_string_union,
+                        baseline, parameter=parameter, family=family,
+                        allowed_origins=[allowed], storage_state=state,
+                        before_request=lambda: None,
+                    )
+                except Exception as exc:
+                    result["union_followup_error"] = type(exc).__name__
+                    break
+                if attempt is not None:
+                    union_result = attempt
+                    if attempt.get("proof_confirmed") is True:
+                        break
+            if union_result is not None:
+                union_result["prior_or_evidence_id"] = prior_evidence_id
+                union_result["source"] = observed["source"]
+                union_result["total_requests_sent"] = (
+                    int(result.get("total_requests_sent") or result.get("requests_sent") or 0)
+                    + int(union_result.get("requests_sent") or 0)
+                )
+                result = union_result
         if (result.get("proof_confirmed") is not True
                 and not browser_ready
                 and sqli_time.time_followup_eligible(or_result)):
