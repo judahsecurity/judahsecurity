@@ -307,6 +307,8 @@ def normalize_execute_tool_args(
                 browser_url = browser_spec.get("url") or browser_spec.get("target") or fallback_target
                 normalized_actions = []
                 for item in actions:
+                    if isinstance(item, str):
+                        item = {"action": item}
                     if not isinstance(item, dict):
                         normalized_actions.append(item)
                         continue
@@ -2792,6 +2794,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             try:
                 pilot.check_tool(tool_name)
                 if tool_name == "execute_browser":
+                    tool_args = normalize_execute_tool_args(
+                        tool_name, tool_args, fallback_target=pilot.target,
+                    )
                     if tool_args.get("identity") is not None:
                         raise PilotDenied("Pilot first pass is anonymous only")
                     spec = json.loads(str(tool_args.get("args") or "{}"))

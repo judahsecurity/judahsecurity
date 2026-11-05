@@ -276,7 +276,16 @@ async def test_web_only_pilot_accepts_valid_browser_reads_with_implicit_port(man
                 ]}),
             })
             assert result["success"] is True, result
-        assert len(seen) == 2
+        result = await manager._execute_impl("execute_browser", {
+            "args": json.dumps({"url": "https://app.test/catalog",
+                                "actions": ["navigate", "get_source"]}),
+        })
+        assert result["success"] is True, result
+        assert json.loads(seen[-1][1]["args"])["actions"] == [
+            {"action": "navigate", "url": "https://app.test/catalog"},
+            {"action": "get_source"},
+        ]
+        assert len(seen) == 3
         assert all(json.loads(args["args"])["allowed_origin"].startswith("https://app.test")
                    for _, args in seen)
     finally:
