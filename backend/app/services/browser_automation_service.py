@@ -97,8 +97,11 @@ def _page_surface_summary(content: str, page_url: str) -> tuple[list[str], list[
     from bs4 import BeautifulSoup
     from app.services.agent.evidence_store import origin
 
+    try:
+        expected = origin(page_url)
+    except ValueError:
+        return [], []
     soup = BeautifulSoup(content, "html.parser")
-    expected = origin(page_url)
     links: list[str] = []
     for anchor in soup.select("a[href]"):
         try:

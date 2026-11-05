@@ -1107,7 +1107,7 @@ call list_captured_requests to enumerate the captured GET inputs. Do not repeat
 the same seed navigation. Use structured replay tools for mutations. Give each eligible
 observed input one baseline and one harmless mutation before testing variants.
 Save evidence IDs for both responses. Triage SQLi response differences with
-paired controls and reflected XSS by browser execution context; reflection alone
+paired controls and reflected XSS with execute_browser check_xss; reflection alone
 is not verified execution. Repeat promising results independently within the
 remaining budget. Record blocked and untested inputs with reasons. Do not retry
 the same denied tool call or claim a finding from status alone.
