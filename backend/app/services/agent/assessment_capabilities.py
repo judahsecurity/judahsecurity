@@ -27,6 +27,7 @@ CAPABILITY_TOOLS = (
     "scoped_body_probe",
     "scoped_owner_only",
     "list_scoped_browser_exchanges",
+    "scoped_ingest_caido_exchange",
     "scoped_assessment_summary",
     "complete_scoped_assessment",
     "get_finding_candidate",
