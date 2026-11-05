@@ -90,6 +90,7 @@ async def test_pilot_network_tool_requires_analyst_even_with_auto_policy(monkeyp
             "replay_http_request", {"url": "https://app.test/"}, 7, "pilot",
         )
         assert result["decision"] == "confirm"
+        assert 1 <= store.get(result["token"]).timeout_seconds <= 60
         port_result = await confirmation.gate(
             "probe_pilot_ports", {"protocol": "tcp", "ports": [80, 443]}, 7, "pilot",
         )
@@ -97,6 +98,30 @@ async def test_pilot_network_tool_requires_analyst_even_with_auto_policy(monkeyp
     finally:
         reset_pilot(pilot_token)
         confirmation._autonomous_mode.reset(mode_token)
+
+
+@pytest.mark.asyncio
+async def test_pilot_confirmation_window_extends_but_never_passes_pilot_deadline(monkeypatch):
+    policy_config = default_agent_config()
+    monkeypatch.setattr(confirmation, "_load_policy", lambda _org_id: policy_config)
+    monkeypatch.setattr(confirmation, "_roe_requires_confirmation", lambda _org_id: False)
+    store = confirmation.ConfirmationStore()
+    monkeypatch.setattr(confirmation, "get_store", lambda: store)
+    pilot = PilotPolicy(
+        target="https://app.test:443", source_ip="8.8.8.8",
+        organization_id=7, session_id="pilot",
+        expires_at_ms=int(time.time() * 1000) + 1_800_000,
+    )
+    token = set_pilot(pilot)
+    try:
+        result = await confirmation.gate(
+            "replay_http_request", {"url": "https://app.test/"}, 7, "pilot",
+        )
+        assert result["decision"] == "confirm"
+        assert store.get(result["token"]).timeout_seconds == 900
+        assert result["expires_at"] <= pilot.expires_at_ms / 1000
+    finally:
+        reset_pilot(token)
 
 
 @pytest.mark.asyncio
