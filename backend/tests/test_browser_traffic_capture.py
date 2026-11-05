@@ -13,7 +13,24 @@ from app.services.agent.tools import (
     current_organization_id,
     current_session_id,
 )
-from app.services.browser_automation_service import _request_metadata
+from app.services.browser_automation_service import _page_surface_summary, _request_metadata
+
+
+def test_page_surface_summary_keeps_same_origin_paths_and_form_names_without_values():
+    html = """
+    <a href="/catalog?category=juice">Catalog</a>
+    <a href="https://outside.test/leave?token=secret">External</a>
+    <form action="/search" method="GET"><input name="q" value="private"></form>
+    <form action="/checkout" method="POST"><input name="card" value="secret"></form>
+    """
+    links, forms = _page_surface_summary(html, "https://app.test/")
+    assert links == ["/catalog [query keys: category]"]
+    assert forms == [
+        {"method": "GET", "path": "/search", "input_names": ["q"]},
+        {"method": "POST", "path": "/checkout", "input_names": ["card"]},
+    ]
+    assert "private" not in json.dumps([links, forms])
+    assert "secret" not in json.dumps([links, forms])
 
 
 def test_request_metadata_keeps_method_parameter_names_and_status_slot_without_values():
