@@ -5,6 +5,7 @@ Tools for the AI agent to interact with the ASM platform.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -2545,6 +2546,34 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         run_id = active_run_id.get()
         if (run_id and current_pilot() is not None and not verification_run.get()
+                and tool_name in {"submit_finding_candidate", "record_surface_coverage",
+                                  "record_verify_verdict"}):
+            argument_hash = hashlib.sha256(json.dumps(
+                tool_args, sort_keys=True, default=str,
+            ).encode()).hexdigest()
+            key = (run_id, "pilot_contract", tool_name, argument_hash)
+            cached = self._nonretryable_failures.get(key)
+            if cached:
+                append_action(run_id, os.urandom(16).hex(), "skipped", tool_name,
+                              detail="Suppressed identical pilot tool-contract error")
+                return {
+                    "success": False,
+                    "error": "repeated_tool_contract_error",
+                    "output": (
+                        "This exact call already failed its tool contract. Use the "
+                        "registered signature and valid status values; no call was retried."
+                    ),
+                    "suppressed_repeat": True,
+                }
+            result = await self._execute_recorded(tool_name, tool_args)
+            error = str(result.get("error") or "").lower()
+            if any(marker in error for marker in (
+                "unexpected keyword", "missing required", "unknown coverage status",
+                "invalid_arguments",
+            )):
+                self._nonretryable_failures[key] = (0, deepcopy(result))
+            return result
+        if (run_id and current_pilot() is not None and not verification_run.get()
                 and tool_name == "compare_requests" and isinstance(tool_args, dict)):
             prior = [row for row in self._recent_invocations
                      if row.get("tool") == tool_name and row.get("args") == tool_args
@@ -3104,12 +3133,33 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         browser_proof_allowed = not any(a.get("action") == "execute_js" for a in actions)
                     except (ValueError, AttributeError):
                         browser_proof_allowed = False
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+                from app.services.agent.coverage_cells import observed_xss_cell_for_browser_url
+
+                xss_brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                linked_browser_proof = False
                 for observation in (result.get("browser_evidence") or []) if browser_proof_allowed else []:
+                    cell = (observed_xss_cell_for_browser_url(
+                        xss_brain, str(observation.get("url") or ""),
+                    ) if tool_name == "execute_browser" and isinstance(observation, dict) else None)
                     browser_id = evidence_store(self).record(
                         "browser_xss", observation, target=observation.get("url", ""),
+                        coverage_cell_id=str(cell.get("id") or "") if cell else "",
+                        parameter=str(cell.get("parameter") or "") if cell else "",
+                        test_type="xss" if cell else "",
                         success=bool(observation.get("dialog_triggered")),
                     )
                     evidence_ids.append(browser_id)
+                    if cell:
+                        probes = list(cell.get("probe_artifact_ids") or [])
+                        cell["probe_artifact_ids"] = list(dict.fromkeys([*probes, browser_id]))[-20:]
+                        executed = bool(observation.get("dialog_triggered"))
+                        if executed or cell.get("first_pass_outcome") != "proof_signal":
+                            cell["first_pass_outcome"] = "proof_signal" if executed else "inconclusive"
+                            cell["first_pass_evidence_id"] = browser_id
+                            cell["first_pass_evidence_source"] = "browser"
+                            cell["first_pass_signal"] = "browser_execution" if executed else "browser_no_execution"
+                        linked_browser_proof = True
                     try:
                         from app.services.agent.action_ledger import active_run_id, append_action
 
@@ -3123,6 +3173,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         )
                     except Exception:
                         logger.exception("Could not record browser XSS check")
+                if linked_browser_proof:
+                    self._engagement_brain = xss_brain.to_dict()
                 max_chars = _tool_output_max_chars()
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
                 capability_map = result.get("capability_map")  # deep_crawl / interceptor map
@@ -3416,15 +3468,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         try:
             prior_parameter_map = self._capability_map if tool_name == "discover_parameters" else None
             result = await tool(**tool_args)
+            # Many local tools return a JSON string instead of raising. An
+            # error-shaped JSON result must not become a successful action or
+            # a misleading "completed" verification receipt in the ledger.
+            semantic_error = ""
+            if isinstance(result, str) and result.lstrip().startswith("{"):
+                try:
+                    parsed_result = json.loads(result)
+                except (TypeError, ValueError):
+                    parsed_result = None
+                if isinstance(parsed_result, dict) and parsed_result.get("error"):
+                    semantic_error = str(parsed_result["error"])
             assigned_failure = (
                 tool_name in {"scoped_input_probe_assigned", "scoped_input_sweep_assigned"}
                 and isinstance(result, dict)
                 and result.get("success") is False
             )
             payload = {
-                "success": not assigned_failure,
+                "success": not assigned_failure and not semantic_error,
                 "output": result,
-                "error": result.get("error") if assigned_failure else None,
+                "error": (result.get("error") if assigned_failure else semantic_error) or None,
             }
             if ((tool_name == "scoped_browser_assessment" and self._capability_map) or
                     (tool_name == "discover_parameters"
@@ -4764,6 +4827,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         )
         if not ok:
             return gate_msg
+        from app.services.agent.pilot_policy import current_pilot
+
+        if current_pilot() is not None and not str(gate_msg).startswith("verify_ok:"):
+            return (
+                "INDEPENDENT VERIFY GATE: bounded pilots publish only findings "
+                "with an independently confirmed candidate receipt."
+            )
 
         verified = None
         if str(gate_msg).startswith("verify_ok"):
@@ -9500,9 +9570,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             str(mut_ex.get("evidence_id") or ""),
         ]
         from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.coverage_cells import record_input_first_pass_pair
         from app.services.agent.signal_escalation import queue_signal_escalation
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        if record_input_first_pass_pair(brain, b, m, *evidence_ids):
+            self._engagement_brain = brain.to_dict()
         trace = mut_ex.get("trace") or {}
         escalation = queue_signal_escalation(
             brain,

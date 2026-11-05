@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 CELL_TERMINAL = frozenset({"finding", "tested_clean", "skipped"})
 CELL_OPEN = frozenset({"untested", "in_focus", "inconclusive"})
@@ -676,6 +676,121 @@ def verified_input_paths(brain: Any) -> set[str]:
     }
 
 
+def record_input_first_pass_pair(
+    brain: Any, baseline: dict[str, Any], mutant: dict[str, Any],
+    baseline_evidence_id: str, probe_evidence_id: str,
+) -> bool:
+    """Account for a one-value GET pair without claiming a bug-class probe.
+
+    Inventory is value-free, so a manual comparison cannot prove that its
+    baseline reproduced the observed original value. Keep that provenance
+    explicit and separate from SQLi/XSS coverage cells.
+    """
+    try:
+        if (str(baseline.get("method") or "GET").upper() != "GET"
+                or str(mutant.get("method") or "GET").upper() != "GET"
+                or any(baseline.get(key) != mutant.get(key)
+                       for key in ("headers", "cookies", "body", "identity"))):
+            return False
+        original = urlsplit(str(baseline.get("url") or ""))
+        changed = urlsplit(str(mutant.get("url") or ""))
+        default_port = 443 if original.scheme == "https" else 80
+        if (original.scheme not in {"http", "https"}
+                or original.username or original.password or changed.username or changed.password
+                or (original.scheme, original.hostname, original.port or default_port,
+                    original.path, original.fragment)
+                != (changed.scheme, changed.hostname, changed.port or default_port,
+                    changed.path, changed.fragment)
+                or original.fragment or not original.hostname):
+            return False
+        before = parse_qsl(original.query, keep_blank_values=True, max_num_fields=100)
+        after = parse_qsl(changed.query, keep_blank_values=True, max_num_fields=100)
+        if len(before) != len(after) or [name for name, _ in before] != [name for name, _ in after]:
+            return False
+        differences = [index for index, (left, right) in enumerate(zip(before, after))
+                       if left[1] != right[1]]
+        if len(differences) != 1:
+            return False
+        parameter = before[differences[0]][0]
+        if [name for name, _ in before].count(parameter) != 1:
+            return False
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if not baseline_evidence_id or not probe_evidence_id:
+        return False
+    path = original.path or "/"
+    identity = str(baseline.get("identity") or "anonymous")
+
+    def same_host(cell: dict[str, Any]) -> bool:
+        try:
+            parsed = urlsplit(f"{original.scheme}://{cell.get('host') or ''}")
+            return (parsed.hostname, parsed.port or default_port) == (
+                original.hostname, original.port or default_port,
+            )
+        except ValueError:
+            return False
+
+    matches = [
+        cell for cell in getattr(brain, "coverage_cells", []) or []
+        if isinstance(cell, dict) and cell.get("source") == "parameter_inventory"
+        and cell.get("method") == "GET" and cell.get("path") == path
+        and cell.get("parameter") == f"query:{parameter}"
+        and str(cell.get("identity") or "anonymous") == identity
+        and same_host(cell)
+    ]
+    if not matches:
+        return False
+    key = f"{original.hostname}:{original.port or default_port}|GET|{path}|{identity}|query:{parameter}"
+    rows = getattr(brain, "input_first_pass", None)
+    if not isinstance(rows, list):
+        return False
+    if any(isinstance(row, dict) and row.get("key") == key for row in rows):
+        return False
+    rows.append({
+        "key": key, "host": original.hostname, "method": "GET", "path": path,
+        "identity": identity, "parameter": f"query:{parameter}",
+        "baseline_evidence_id": baseline_evidence_id,
+        "probe_evidence_id": probe_evidence_id,
+        "baseline_provenance": "manual_request",
+    })
+    del rows[:-500]
+    return True
+
+
+def observed_xss_cell_for_browser_url(brain: Any, url: str) -> dict[str, Any] | None:
+    """Resolve a single-query-input browser check to one observed XSS cell."""
+    from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+    try:
+        parsed = urlsplit(url)
+        fields = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=40)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username or parsed.password or parsed.fragment
+                or len(fields) != 1):
+            return None
+        parameter = fields[0][0]
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except (TypeError, ValueError):
+        return None
+    matches = []
+    for cell in getattr(brain, "coverage_cells", []) or []:
+        if (not isinstance(cell, dict) or cell.get("source") != "parameter_inventory"
+                or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
+                or cell.get("test_type") != "xss" or cell.get("method") != "GET"
+                or cell.get("path") != (parsed.path or "/")
+                or cell.get("parameter") != f"query:{parameter}"
+                or str(cell.get("identity") or "anonymous") != "anonymous"):
+            continue
+        try:
+            host = urlsplit(f"{parsed.scheme}://{cell.get('host') or ''}")
+            if (host.hostname, host.port or (443 if parsed.scheme == "https" else 80)) == (
+                    parsed.hostname, port):
+                matches.append(cell)
+        except ValueError:
+            continue
+    return matches[0] if len(matches) == 1 else None
+
+
 def parameter_test_funnel(brain: Any) -> dict[str, Any]:
     """Summarize exact input tests without treating discovery as proof."""
     if isinstance(brain, dict) or brain is None:
@@ -819,8 +934,23 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 "evidence_source": "service" if service_handoff else "local",
                 "error": str(cell.get("first_pass_candidate_handoff_error") or "")[:160],
             })
+    all_candidates = [row for row in getattr(brain, "candidates", []) or []
+                      if isinstance(row, dict) and row.get("id")]
+    # Preserve class-cell counts: an old or unrelated candidate must not
+    # satisfy a new proof handoff. Report run totals separately.
+    input_pairs = [row for row in getattr(brain, "input_first_pass", []) or []
+                   if isinstance(row, dict) and row.get("baseline_evidence_id")
+                   and row.get("probe_evidence_id")]
     return {
         "inputs": len(inputs), **counts, "by_class": by_class,
+        "all_candidates": len({row["id"] for row in all_candidates}),
+        "all_verified": sum(row.get("status") == "confirmed" for row in all_candidates),
+        "all_published": sum(row.get("status") == "confirmed" and bool(row.get("finding_id"))
+                             for row in all_candidates),
+        "inputs_paired": len({str(row.get("key")) for row in input_pairs}),
+        "manual_baselines": sum(row.get("baseline_provenance") == "manual_request"
+                                for row in input_pairs),
+        "unlinked_candidates": sum(not row.get("coverage_cell_id") for row in all_candidates),
         "classes_planned": len(by_class),
         "classes_without_probes": sorted(
             kind for kind, group in by_class.items() if group["probed"] == 0

@@ -75,6 +75,25 @@ def test_fresh_xss_proof_and_stateful_browser_actions_are_not_reused():
         assert prior_identical_browser_action([prior], args) is None
 
 
+def test_pilot_reuses_passive_seed_after_other_work_and_compaction():
+    args = {"args": json.dumps({"actions": [
+        {"action": "navigate", "url": "https://ginandjuice.shop/"},
+        {"action": "get_source"},
+    ]})}
+    seed = {"tool_name": "execute_browser", "tool_args": args,
+            "success": True, "tool_output": "HTTP 200"}
+    intervening = [{"tool_name": "compare_requests", "success": True}] * 14
+    assert prior_identical_browser_action([seed, *intervening], args) is None
+    assert prior_identical_browser_action([seed, *intervening], args,
+                                          across_run=True) is seed
+    compacted, _ = compact_execution_trace([seed, *intervening], keep_recent=8)
+    assert prior_identical_browser_action(compacted, args, across_run=True) is compacted[0]
+    xss = {"args": json.dumps({"actions": [
+        {"action": "check_xss", "url": "https://ginandjuice.shop/catalog?searchTerm=x"},
+    ]})}
+    assert prior_identical_browser_action(compacted, xss, across_run=True) is None
+
+
 def test_prior_hunt_brief_includes_replay_and_last_prompt():
     brief = format_prior_hunt_brief(
         source_session_id="abc123456789",

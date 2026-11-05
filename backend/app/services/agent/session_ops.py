@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,43 +39,46 @@ def over_budget(token_usage: Optional[Dict[str, Any]], limit_usd: float) -> bool
 
 
 def prior_identical_browser_action(
-    trace: List[Dict[str, Any]], tool_args: Dict[str, Any]
+    trace: List[Dict[str, Any]], tool_args: Dict[str, Any], *, across_run: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Reuse only passive browser observations; proof and writes need fresh runs."""
+    wanted = _passive_browser_signature(tool_args)
+    if not wanted:
+        return None
+    steps = reversed(trace if across_run else trace[-24:])
+    for step in steps:
+        if across_run and wanted in (step.get("passive_browser_signatures") or []):
+            return step
+        if step.get("tool_name") != "execute_browser" or not step.get("success"):
+            if across_run:
+                continue
+            break
+        if _passive_browser_signature(step.get("tool_args") or {}) == wanted:
+            return step
+        if not across_run:
+            break
+    return None
+
+
+def _passive_browser_signature(tool_args: Dict[str, Any]) -> str:
     try:
         spec = json.loads(tool_args.get("args") or "{}")
         actions = spec.get("actions")
         if not isinstance(actions, list) or not actions:
-            return None
+            return ""
         # A matching URL is not a duplicate proof: check_xss needs a fresh
         # execution nonce, while clicks, form submits and JS can change state.
         passive = {"navigate", "get_source", "check_response"}
         if any(not isinstance(action, dict) or action.get("action") not in passive
                for action in actions):
-            return None
+            return ""
         identity = spec.get("identity") or tool_args.get("identity") or "anonymous"
-        signature = json.dumps(actions, sort_keys=True, separators=(",", ":"))
+        signature = json.dumps(
+            [identity, actions], sort_keys=True, separators=(",", ":"),
+        )
+        return hashlib.sha256(signature.encode()).hexdigest()
     except (TypeError, ValueError, AttributeError):
-        return None
-
-    # Only collapse an immediate repeat. An intervening tool may have changed
-    # page state, making an otherwise identical observation useful again.
-    for step in reversed(trace[-24:]):
-        if step.get("tool_name") != "execute_browser" or not step.get("success"):
-            break
-        try:
-            prior_args = step.get("tool_args") or {}
-            prior_spec = json.loads(prior_args.get("args") or "{}")
-            prior_actions = prior_spec.get("actions")
-            prior_identity = prior_spec.get("identity") or prior_args.get("identity") or "anonymous"
-            if prior_identity == identity and json.dumps(
-                prior_actions, sort_keys=True, separators=(",", ":")
-            ) == signature:
-                return step
-        except (TypeError, ValueError, AttributeError):
-            break
-        break
-    return None
+        return ""
 
 
 def compact_execution_trace(
@@ -90,7 +94,13 @@ def compact_execution_trace(
     older, recent = steps[:-keep_recent], steps[-keep_recent:]
     tools = Counter()
     findings: List[str] = []
+    passive_signatures: set[str] = set()
     for step in older:
+        passive_signatures.update(step.get("passive_browser_signatures") or [])
+        if step.get("tool_name") == "execute_browser" and step.get("success"):
+            signature = _passive_browser_signature(step.get("tool_args") or {})
+            if signature:
+                passive_signatures.add(signature)
         name = step.get("tool_name")
         if name:
             tools[str(name)] += 1
@@ -115,6 +125,7 @@ def compact_execution_trace(
         "tool_output": brief,
         "success": True,
         "actionable_findings": findings[:8],
+        "passive_browser_signatures": sorted(passive_signatures)[:100],
     }
     return [compact_step, *recent], brief
 

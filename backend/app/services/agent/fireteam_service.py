@@ -1357,6 +1357,19 @@ async def _run_specialist(
         allowed_tools.extend(t for t in ("check_test_identity", "test_authorization_boundary", "run_assessment_workflow") if t not in allowed_tools)
     if "search_memory" not in allowed_tools:
         allowed_tools.append("search_memory")
+    from app.services.agent.pilot_policy import current_pilot
+
+    pilot = current_pilot()
+    if pilot is not None:
+        # A verifier spawned by a pilot must inherit the same tool boundary.
+        # The manager also enforces this at execution time, but filtering here
+        # keeps the fresh verifier from wasting turns on denied tools.
+        allowed_tools = [name for name in allowed_tools if name in pilot.allowed_tools]
+        suffix += (
+            "\n\nBounded pilot: only anonymous GET/HEAD on the exact HTTPS origin "
+            "and port. Every network request needs analyst approval and uses "
+            "the shared request budget. Use only the listed tools."
+        )
 
     memory_block = "None."
     org_id = None

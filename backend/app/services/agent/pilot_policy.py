@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import ipaddress
 import os
 import re
@@ -25,10 +26,49 @@ PILOT_NETWORK_TOOLS = frozenset({
 PILOT_LOCAL_TOOLS = frozenset({
     "list_captured_requests", "plan_intruder_mutations", "get_coverage",
     "get_assessment_coverage", "record_surface_coverage",
-    "submit_finding_candidate", "record_verify_verdict",
+    "submit_finding_candidate", "independent_verify", "record_verify_verdict",
+    "create_finding", "assess_finding_risk", "read_evidence",
 })
 PILOT_ALLOWED_TOOLS = PILOT_NETWORK_TOOLS | PILOT_LOCAL_TOOLS
 PILOT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def pilot_tool_guidance(tools_manager, allowed_tools: frozenset[str]) -> str:
+    """Render the pilot's callable contracts from the live tool registry."""
+    registry = getattr(tools_manager, "tools", {})
+    lines = []
+    for name in sorted(allowed_tools - {"record_verify_verdict"}):
+        tool = registry.get(name) if isinstance(registry, dict) else None
+        if not callable(tool):
+            continue
+        if name == "execute_browser":
+            # The adapter serializes structured actions into its MCP contract.
+            lines.append('  - execute_browser(actions=[{"action":"navigate","url":"https://..."},'
+                         '{"action":"get_source"}])')
+            continue
+        try:
+            parameters = inspect.signature(tool).parameters.values()
+        except (TypeError, ValueError):
+            continue
+        names = [
+            parameter.name + ("?" if parameter.default is not inspect.Parameter.empty else "")
+            for parameter in parameters
+            if parameter.name != "self" and parameter.kind not in {
+                inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD,
+            }
+        ]
+        lines.append(f"  - {name}({', '.join(names)})")
+    lines.extend((
+        "record_surface_coverage.status must be one of: untested, in_focus, "
+        "inconclusive, finding, tested_clean, skipped. A first-pass pair alone "
+        "does not justify tested_clean.",
+        "Only the fresh independent verifier calls record_verify_verdict. "
+        "The hunter calls independent_verify(candidate_id?) after candidate submission, "
+        "then create_finding only when the returned candidate is confirmed.",
+        "Inspect JSON tool results for an error field even when the tool call completed. "
+        "Correct an invalid argument from the listed signature; never guess another key.",
+    ))
+    return "\n".join(lines)
 
 
 class PilotDenied(ValueError):

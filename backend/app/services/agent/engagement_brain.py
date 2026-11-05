@@ -115,6 +115,7 @@ class EngagementBrain:
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     coverage: List[Dict[str, Any]] = field(default_factory=list)
     coverage_cells: List[Dict[str, Any]] = field(default_factory=list)
+    input_first_pass: List[Dict[str, Any]] = field(default_factory=list)
     proof_escalations: List[Dict[str, Any]] = field(default_factory=list)
     verification_receipts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     task_graph: Dict[str, Any] = field(default_factory=dict)
@@ -143,6 +144,7 @@ class EngagementBrain:
             "candidates": list(self.candidates or []),
             "coverage": list(self.coverage or []),
             "coverage_cells": list(self.coverage_cells or []),
+            "input_first_pass": list(self.input_first_pass[-500:]),
             "proof_escalations": list(self.proof_escalations or []),
             "verification_receipts": dict(self.verification_receipts or {}),
             "task_graph": dict(self.task_graph or {}),
