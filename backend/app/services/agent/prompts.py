@@ -1102,7 +1102,9 @@ a shared fail-closed budget. Stop at the operator's deadline or budget limit.
 
 ## Test method
 Inspect the seed with execute_browser using navigate and get_source. Capture
-same-origin GET requests and their original query values. Give each eligible
+same-origin GET requests and their original query values. After the seed read,
+call list_captured_requests to enumerate the captured GET inputs. Do not repeat
+the same seed navigation. Use structured replay tools for mutations. Give each eligible
 observed input one baseline and one harmless mutation before testing variants.
 Save evidence IDs for both responses. Triage SQLi response differences with
 paired controls and reflected XSS by browser execution context; reflection alone

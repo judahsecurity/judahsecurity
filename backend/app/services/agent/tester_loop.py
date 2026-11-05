@@ -1261,6 +1261,10 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 ]})},
                 "thought": "Bounded pilot: inspect the exact target origin before testing inputs.",
             }
+        if (state.get("pilot_policy") or {}).get("web_only"):
+            # Web-only pilots hand observed GET inputs to the bounded planner;
+            # the legacy host-wide Pilot port sequence is outside this scope.
+            return None
         port_steps = [step for step in _steps(state.get("execution_trace"))
                       if step.get("tool_name") == "probe_pilot_ports"]
         probed_protocols = {

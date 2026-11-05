@@ -2394,7 +2394,10 @@ class AgentOrchestrator:
                 pass
 
         # Auth session handoff: seed browser/deep_crawl/replay with prior login
-        auth_sess = state.get("auth_session")
+        # A pilot stays anonymous even when a page sets ordinary session cookies.
+        # The browser's observed cookie jar must not be injected into later
+        # browser calls as an authenticated identity.
+        auth_sess = state.get("auth_session") if state.get("mode") != "pilot" else None
         try:
             self.tool_manager._auth_session = auth_sess
         except Exception:

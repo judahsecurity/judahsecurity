@@ -1019,6 +1019,22 @@ def test_bounded_pilot_never_enters_unavailable_tester_pipeline():
     assert complete_blocked_reason(after_browser) is None
 
 
+def test_web_only_pilot_does_not_force_port_probes():
+    target = "https://ginandjuice.shop:443"
+    state = {
+        "mode": "pilot",
+        "pilot_policy": {"web_only": True},
+        "original_objective": f"Assess {target}",
+        "target_info": {"primary_target": target},
+        "execution_trace": [],
+    }
+    assert forced_next_step(state)["tool_name"] == "execute_browser"
+    after_browser = {**state, "execution_trace": [
+        {"tool_name": "execute_browser", "success": True},
+    ]}
+    assert forced_next_step(after_browser) is None
+
+
 def test_complete_blocked_after_fingerprint_only():
     state = {
         "original_objective": "Assess https://appsmith-dmpc.unifytwin.com",

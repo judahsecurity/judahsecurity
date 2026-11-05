@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field, asdict
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,48 @@ def _request_metadata(request, allowed_origin: Optional[str] = None) -> Optional
         "resource_type": str(getattr(request, "resource_type", "") or "")[:32],
         "in_scope": in_scope,
     }
+
+
+def _page_surface_summary(content: str, page_url: str) -> tuple[list[str], list[dict]]:
+    """Summarize same-origin navigation and form shapes without field values."""
+    from bs4 import BeautifulSoup
+    from app.services.agent.evidence_store import origin
+
+    soup = BeautifulSoup(content, "html.parser")
+    expected = origin(page_url)
+    links: list[str] = []
+    for anchor in soup.select("a[href]"):
+        try:
+            absolute = urljoin(page_url, anchor.get("href") or "")
+            if origin(absolute) != expected:
+                continue
+            parsed = urlsplit(absolute)
+        except ValueError:
+            continue
+        path = (parsed.path or "/")[:180]
+        keys = sorted({key[:80] for key, _ in parse_qsl(parsed.query, keep_blank_values=True)})[:12]
+        label = path + (f" [query keys: {','.join(keys)}]" if keys else "")
+        if label not in links:
+            links.append(label)
+        if len(links) >= 30:
+            break
+
+    forms: list[dict] = []
+    for form in soup.select("form")[:20]:
+        try:
+            action = urljoin(page_url, form.get("action") or page_url)
+            if origin(action) != expected:
+                continue
+            path = (urlsplit(action).path or "/")[:180]
+        except ValueError:
+            continue
+        names = list(dict.fromkeys(
+            str(field.get("name"))[:80] for field in form.select("input[name], select[name], textarea[name]")
+            if field.get("name")
+        ))[:30]
+        forms.append({"method": str(form.get("method") or "GET").upper()[:8],
+                      "path": path, "input_names": names})
+    return links, forms
 
 
 async def execute_browser_actions(actions_json: str, *, capture_callback=None) -> Dict[str, Any]:
@@ -401,9 +443,12 @@ async def _execute_action(
     elif action_type == "get_source":
         content = await page.content()
         truncated = content[:10000]
+        links, forms = _page_surface_summary(content, page.url)
         return ActionResult(action="get_source", success=True, data={
             "length": len(content),
             "content": truncated + ("..." if len(content) > 10000 else ""),
+            "navigation_paths": links,
+            "forms": forms,
         })
 
     elif action_type == "get_cookies":
@@ -569,6 +614,11 @@ def _format_session_output(session: BrowserSessionResult) -> str:
         lines.append(f"--- Action {i}: {r.get('action', '?')} [{status}] ---")
         if r.get("data"):
             for k, v in r["data"].items():
+                if k in {"navigation_paths", "forms"} and isinstance(v, list):
+                    lines.append(f"  {k}:")
+                    for item in v[:30]:
+                        lines.append(f"    {json.dumps(item, default=str)}")
+                    continue
                 selector = str((r.get("data") or {}).get("selector") or "")
                 sensitive = k == "value" and re.search(
                     r"password|passwd|secret|token|otp|totp|one-time|verification|code",
