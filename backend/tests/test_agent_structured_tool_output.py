@@ -139,6 +139,35 @@ async def test_duplicate_passive_browser_action_is_skipped_before_tool_execution
 
 
 @pytest.mark.asyncio
+async def test_pilot_does_not_inject_page_cookies_into_later_browser_read(monkeypatch):
+    orchestrator = AgentOrchestrator()
+    orchestrator.tool_manager = SimpleNamespace(
+        execute=AsyncMock(return_value={"success": True, "output": "Read page"}),
+        _fallback_target="", _auth_session=None,
+    )
+    orchestrator._emit_status = AsyncMock()
+    monkeypatch.setattr(evograph, "record_step", lambda **_kwargs: None)
+    monkeypatch.setattr(evograph, "get_session_chain", lambda _session_id: {})
+    args = {"args": json.dumps({"actions": [
+        {"action": "navigate", "url": "https://ginandjuice.shop/catalog"},
+        {"action": "get_source"},
+    ]})}
+
+    result = await orchestrator._execute_tool_node({
+        "user_id": "1", "organization_id": 1, "session_id": "pilot-anonymous-read",
+        "mode": "pilot", "current_phase": "informational", "current_iteration": 2,
+        "target_info": {"primary_target": "https://ginandjuice.shop"},
+        "auth_session": {"cookies": [{"name": "session", "value": "server-set"}]},
+        "execution_trace": [],
+        "_current_step": {"tool_name": "execute_browser", "tool_args": args},
+    })
+
+    assert result["_current_step"]["success"] is True
+    assert orchestrator.tool_manager._auth_session is None
+    assert orchestrator.tool_manager.execute.await_args.args[1] == args
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error", ["confirmation_denied", "confirmation_expired", "pilot_policy_denied"])
 async def test_denied_pilot_action_stops_without_more_model_calls(error):
     orchestrator = AgentOrchestrator()
