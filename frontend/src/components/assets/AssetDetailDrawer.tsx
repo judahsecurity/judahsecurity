@@ -85,6 +85,9 @@ type AssetDetail = {
   root_domain?: string;
   ip_address?: string;
   ip_addresses?: string[];
+  ip_relationships?: Array<{ ip: string; role: 'cdn_edge' | 'observed'; provider?: string | null }>;
+  parent_domain?: string;
+  resolved_from?: string;
   http_status?: number;
   http_title?: string;
   live_url?: string;
@@ -334,7 +337,13 @@ export function AssetDetailDrawer({ assetId, open, onOpenChange, onAssetChanged 
                   <CardHeader><CardTitle className="text-base">Asset identity</CardTitle></CardHeader>
                   <CardContent className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
                     <Field label="Asset">{asset.value}</Field>
-                    <Field label="IP address">{asset.ip_addresses?.join(', ') || asset.ip_address}</Field>
+                    <Field label="Connected to">{asset.parent_domain || asset.root_domain || asset.resolved_from}</Field>
+                    <Field label="Observed IPs">
+                      {asset.ip_relationships?.length
+                        ? asset.ip_relationships.map(link => `${link.ip}${link.role === 'cdn_edge' ? ' (CDN edge)' : ''}`).join(', ')
+                        : 'Not observed'}
+                    </Field>
+                    <Field label="Origin IP">{asset.ip_relationships?.some(link => link.role === 'cdn_edge') ? 'Unverified behind CDN' : 'Not separately verified'}</Field>
                     <Field label="HTTP">{asset.http_status ? `${asset.http_status}${asset.http_title ? ` · ${asset.http_title}` : ''}` : '—'}</Field>
                     <Field label="Root domain">{asset.root_domain}</Field>
                     <Field label="First seen">{firstSeen ? formatDate(firstSeen) : '—'}</Field>

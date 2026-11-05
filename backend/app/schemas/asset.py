@@ -71,6 +71,8 @@ class AssetResponse(AssetBase):
     organization_id: int
     organization_name: Optional[str] = None  # Populated from relationship
     parent_id: Optional[int] = None
+    parent_domain: Optional[str] = None
+    ip_relationships: List[dict[str, Any]] = Field(default_factory=list)
     status: AssetStatus
     description: Optional[str] = None
     tags: List[str] = []

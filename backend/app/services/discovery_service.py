@@ -161,6 +161,9 @@ class DiscoveryService:
                     "dns_records": dns_records.to_dict()
                 }
             )
+            root_ips = list(dict.fromkeys(dns_records.a_records + dns_records.aaaa_records))
+            if root_ips:
+                root_asset.update_ip_addresses(root_ips)
             result.assets.append(self._asset_to_dict(root_asset))
             progress.assets_found += 1
             
@@ -248,6 +251,8 @@ class DiscoveryService:
                         discovery_source=sub_result.source,
                         status=AssetStatus.VERIFIED if sub_result.is_alive else AssetStatus.UNVERIFIED
                     )
+                    if sub_result.ip_addresses:
+                        sub_asset.update_ip_addresses(sub_result.ip_addresses)
                     subdomain_assets[sub_result.subdomain] = sub_asset
                     result.assets.append(self._asset_to_dict(sub_asset))
                     progress.assets_found += 1

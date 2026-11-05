@@ -982,6 +982,7 @@ class ApiClient {
     has_open_ports?: boolean;
     has_risky_ports?: boolean;
     include_cidr?: boolean;
+    collapse_related_ips?: boolean;
     has_geo?: boolean;
   }) {
     const response = await this.client.get('/assets/', { params });
