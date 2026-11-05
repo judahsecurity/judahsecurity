@@ -18,8 +18,8 @@ from app.services.agent.assessment_sessions import browser_storage_state, identi
 from app.services.agent.evidence_store import evidence_store, verification_run
 from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
-    authz_proof, body_probe, browser, browser_post_replay, http_observe, planning, query_probe,
-    sqli_boolean, sqli_string, sqli_time, technology,
+    authz_proof, body_probe, browser, browser_post_replay, browser_traffic, http_observe,
+    planning, query_probe, sqli_boolean, sqli_string, sqli_time, sqli_union, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
 
@@ -34,6 +34,7 @@ SCOPED_ASSESSMENT_TOOLS = (
     "scoped_body_probe",
     "scoped_owner_only",
     "list_scoped_browser_exchanges",
+    "scoped_ingest_caido_exchange",
     "scoped_assessment_summary",
     "complete_scoped_assessment",
     "get_finding_candidate",
@@ -413,6 +414,59 @@ class ScopedAssessmentTools:
             if row:
                 rows.append({**row["public"], "artifact_id": artifact_id, "identity": row["identity"]})
         return json.dumps({"exchanges": rows[-40:]})
+
+    async def scoped_ingest_caido_exchange(
+        self, method: str, url: str, response_status: int,
+        response_content_type: str = "", request_content_type: str = "",
+        request_body_base64: str = "", response_body_base64: str = "",
+        request_headers: dict[str, str] | None = None,
+        resource_type: str = "xhr", page_url: str = "", identity: str = "anonymous",
+    ) -> str:
+        """Ingest one operator-captured Caido proxy exchange as a scoped replay source.
+
+        Lets the scoped lanes act on traffic the operator proxied through Caido,
+        not only Judah's own browser captures. The exchange is treated exactly
+        like an execution-owned browser capture: the request must be in the
+        assessment origin, only safe non-credential headers are kept (replay
+        credentials come solely from a named identity, so any captured Cookie or
+        Authorization is dropped), and the full URL and bodies stay in the private
+        store. The returned capture feeds the same scoped SQLi/XSS replay — a POST
+        path still needs separate operator approval before body probes run.
+        """
+        import base64
+        import binascii
+
+        allowed = self._scoped_origin(url)
+        if resource_type not in {"xhr", "fetch", "document"}:
+            raise ValueError("Caido capture must be xhr, fetch, or an input-bearing GET document")
+        try:
+            request_body = base64.b64decode(request_body_base64 or "", validate=True)
+            response_body = base64.b64decode(response_body_base64 or "", validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("Caido request and response bodies must be valid base64") from exc
+        public, private = browser_traffic.package_exchange(
+            url=url, expected_origin=allowed, action_ref="caido_ingest",
+            method=method, resource_type=resource_type, status=int(response_status),
+            content_type=response_content_type, request_body=request_body,
+            response_body=response_body, request_content_type=request_content_type,
+            page_url=page_url, request_headers=request_headers,
+        )
+        artifact_id = evidence_store(self).record(
+            "scoped_browser_exchange", public, target=allowed + public["path"],
+            identity=identity,
+        )
+        current = verification_run.get()
+        store_row = {
+            "identity": identity, "private": private, "public": public,
+            "verifier_run_id": current.id if current else None,
+        }
+        private_store = dict(getattr(self, "_scoped_browser_exchanges", None) or {})
+        private_store[artifact_id] = store_row
+        persist_capture(evidence_store(self).namespace, artifact_id, store_row)
+        self._scoped_browser_exchanges = private_store
+        self._scoped_assessment_started = True
+        return json.dumps({**public, "artifact_id": artifact_id,
+                           "identity": identity, "source": "caido"})
 
     async def scoped_browser_assessment(
         self, operation: str, url: str, identity: str = "anonymous",
@@ -1410,6 +1464,44 @@ class ScopedAssessmentTools:
             result = and_result
         else:
             result["total_requests_sent"] = int(result.get("requests_sent") or 0) + int(needs_preflight)
+        if (result.get("proof_confirmed") is not True
+                and not browser_ready
+                and sqli_union.union_followup_eligible(or_result)):
+            # When results are rendered, UNION SELECT proves injection outright
+            # by making the database emit a server-owned marker the request never
+            # carried in plaintext. Discover the column layout within a bounded
+            # budget; a wrong family or layout never reflects, so it fails safe.
+            prior_evidence_id = evidence_store(self).record(
+                "scoped_string_sqli", result, target=result["target"], identity=identity,
+                success=False,
+            )
+            union_result = None
+            for family in sqli_union.FAMILIES:
+                try:
+                    self._scoped_claim_gets(
+                        sqli_union.MAX_DISCOVERY + len(sqli_union.UNION_CHECK_ORDER),
+                    )
+                    attempt = await asyncio.to_thread(
+                        sqli_union.probe_string_union,
+                        baseline, parameter=parameter, family=family,
+                        allowed_origins=[allowed], storage_state=state,
+                        before_request=lambda: None,
+                    )
+                except Exception as exc:
+                    result["union_followup_error"] = type(exc).__name__
+                    break
+                if attempt is not None:
+                    union_result = attempt
+                    if attempt.get("proof_confirmed") is True:
+                        break
+            if union_result is not None:
+                union_result["prior_or_evidence_id"] = prior_evidence_id
+                union_result["source"] = observed["source"]
+                union_result["total_requests_sent"] = (
+                    int(result.get("total_requests_sent") or result.get("requests_sent") or 0)
+                    + int(union_result.get("requests_sent") or 0)
+                )
+                result = union_result
         if (result.get("proof_confirmed") is not True
                 and not browser_ready
                 and sqli_time.time_followup_eligible(or_result)):

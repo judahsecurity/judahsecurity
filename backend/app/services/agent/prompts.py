@@ -892,6 +892,7 @@ TOOL_PHASE_MAP = {
     "scoped_http_get": ["informational", "exploitation", "post_exploitation"],
     "scoped_http_compare": ["informational", "exploitation", "post_exploitation"],
     "list_scoped_browser_exchanges": ["informational", "exploitation", "post_exploitation"],
+    "scoped_ingest_caido_exchange": ["informational", "exploitation", "post_exploitation"],
     "scoped_assessment_summary": ["informational", "exploitation", "post_exploitation"],
     "complete_scoped_assessment": ["informational", "exploitation", "post_exploitation"],
     "get_finding_candidate": ["informational", "exploitation", "post_exploitation"],

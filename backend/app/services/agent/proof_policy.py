@@ -23,7 +23,7 @@ Keep observations, candidates, confirmed findings, refutations, and inconclusive
 # Keep unsupported classes inconclusive until they have their own validator.
 PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
-    "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "post_error_sqli", "post_boolean_sqli"}),
+    "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "oob_callback"}),
     "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
@@ -147,7 +147,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -157,6 +157,7 @@ def validate_proof(
             "string_boolean_sqli": "scoped_string_sqli",
             "string_error_sqli": "scoped_string_sqli",
             "string_time_sqli": "scoped_string_sqli",
+            "string_union_sqli": "scoped_string_sqli",
             "post_error_sqli": "scoped_body_sqli_error",
             "post_boolean_sqli": "scoped_body_sqli_boolean",
             "owner_only": "scoped_owner_only",
@@ -178,7 +179,7 @@ def validate_proof(
         first, second = hunter["payload"], verifier["payload"]
         if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
             return False, "Both actors must prove the same candidate target"
-        if kind in {"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli"} and (
+        if kind in {"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli"} and (
             first.get("replay_mode") == "browser_live_get"
             or second.get("replay_mode") == "browser_live_get"
         ) and (
@@ -327,6 +328,20 @@ def validate_proof(
                     or first.get("nonce") == second.get("nonce")
                     or hunter["identity"] != verifier["identity"]):
                 return False, "Independent matching time-based SQLi proof is required"
+            return True, ""
+        if kind == "string_union_sqli":
+            from app.services.agent.scoped_assessment.sqli_union import union_sql_proof_valid
+            if (not union_sql_proof_valid(first) or not union_sql_proof_valid(second)
+                    or first.get("proof_confirmed") is not True
+                    or second.get("proof_confirmed") is not True
+                    or first.get("parameter") != second.get("parameter")
+                    or first.get("sql_family") != second.get("sql_family")
+                    or first.get("column_count") != second.get("column_count")
+                    or first.get("reflected_position") != second.get("reflected_position")
+                    or first.get("input_encoding", "plain") != second.get("input_encoding", "plain")
+                    or first.get("nonce") == second.get("nonce")
+                    or hunter["identity"] != verifier["identity"]):
+                return False, "Independent matching UNION SQLi proof is required"
             return True, ""
         if kind == "post_error_sqli":
             from app.services.agent.scoped_assessment.body_probe import post_sql_error_proof_valid
