@@ -113,6 +113,19 @@ def test_browser_url_becomes_read_only_navigation():
     ]}
 
 
+def test_browser_action_inherits_top_level_url_when_missing():
+    result = normalize_execute_tool_args(
+        "execute_browser", {
+            "url": "https://ginandjuice.shop/catalog",
+            "actions": [{"action": "navigate"}, {"action": "get_source"}],
+        },
+    )
+    assert json.loads(result["args"])["actions"] == [
+        {"action": "navigate", "url": "https://ginandjuice.shop/catalog"},
+        {"action": "get_source"},
+    ]
+
+
 @pytest.mark.parametrize("supplied", [
     {"args": "--url https://ginandjuice.shop/"},
     {"args": "https://ginandjuice.shop/"},

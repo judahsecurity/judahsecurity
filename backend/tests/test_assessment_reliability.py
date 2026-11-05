@@ -213,6 +213,39 @@ async def test_bounded_pilot_rejects_browser_write_action_before_tool_call(manag
 
 
 @pytest.mark.asyncio
+async def test_pilot_suppresses_third_identical_successful_comparison(manager, monkeypatch):
+    from app.services.agent import action_ledger
+
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="203.0.113.25",
+        organization_id=98765, session_id="assessment-reliability-test",
+        expires_at_ms=int(time.time() * 1000) + 60_000, web_only=True,
+    )
+    calls = []
+    args = {"baseline": "https://app.test/catalog?searchTerm=gin",
+            "mutant": "https://app.test/catalog?searchTerm=ginzz"}
+
+    async def run_once(tool_name, tool_args):
+        calls.append(tool_args)
+        manager.record_invocation(tool_name, tool_args, {"success": True, "artifact_id": "evidence-1"})
+        return {"success": True, "artifact_id": "evidence-1"}
+
+    monkeypatch.setattr(manager, "_execute_recorded", run_once)
+    monkeypatch.setattr(action_ledger, "append_action", lambda *_a, **_kw: None)
+    run_token = action_ledger.active_run_id.set("pilot-comparison-test")
+    pilot_token = set_pilot(policy)
+    try:
+        assert (await manager.execute("compare_requests", args))["success"]
+        assert (await manager.execute("compare_requests", args))["success"]
+        third = await manager.execute("compare_requests", args)
+        assert third["error"] == "repeated_compare_suppressed"
+        assert len(calls) == 2
+    finally:
+        reset_pilot(pilot_token)
+        action_ledger.active_run_id.reset(run_token)
+
+
+@pytest.mark.asyncio
 async def test_web_only_pilot_accepts_valid_browser_reads_with_implicit_port(manager, monkeypatch):
     import app.services.agent.confirmation_service as confirmation
 

@@ -304,6 +304,7 @@ def normalize_execute_tool_args(
                     browser_spec["actions"] = actions
             if isinstance(actions, list):
                 aliases = {"goto": "navigate", "evaluate": "execute_js"}
+                browser_url = browser_spec.get("url") or browser_spec.get("target") or fallback_target
                 normalized_actions = []
                 for item in actions:
                     if not isinstance(item, dict):
@@ -312,6 +313,8 @@ def normalize_execute_tool_args(
                     action = dict(item)
                     action_name = str(action.pop("type", action.get("action") or "")).lower()
                     action["action"] = aliases.get(action_name, action_name)
+                    if action["action"] in {"navigate", "check_response", "check_xss"} and not action.get("url") and browser_url:
+                        action["url"] = browser_url
                     if action["action"] == "execute_js" and not action.get("script"):
                         action["script"] = action.pop("expression", "")
                     normalized_actions.append(action)
@@ -2535,9 +2538,33 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.action_fingerprint import action_fingerprint
         from app.services.agent.action_ledger import active_run_id, append_action
         from app.services.agent.evidence_store import verification_run
+        from app.services.agent.pilot_policy import current_pilot
         from app.services.agent.tool_singleflight import SHAREABLE_TOOLS
 
         run_id = active_run_id.get()
+        if (run_id and current_pilot() is not None and not verification_run.get()
+                and tool_name == "compare_requests" and isinstance(tool_args, dict)):
+            prior = [row for row in self._recent_invocations
+                     if row.get("tool") == tool_name and row.get("args") == tool_args
+                     and row.get("success")]
+            if len(prior) >= 2:
+                evidence = [str(prior[-1].get("artifact_id") or "")]
+                evidence = [item for item in evidence if item]
+                append_action(run_id, os.urandom(16).hex(), "skipped", tool_name,
+                              target=current_seed_target.get() or "",
+                              detail="Third identical Pilot comparison suppressed",
+                              evidence_ids=evidence)
+                return {
+                    "success": False,
+                    "error": "repeated_compare_suppressed",
+                    "output": (
+                        "This exact GET request pair already completed twice. "
+                        "Use its prior evidence, test a different observed input, or complete. "
+                        "No new request was sent."
+                    ),
+                    "evidence_ids": evidence,
+                    "suppressed_repeat": True,
+                }
         if (run_id and not verification_run.get() and tool_name in {
             "execute_browser", "execute_curl", "scoped_input_probe_assigned",
             "scoped_assessment_probe_assigned", "scoped_input_sweep_assigned",
@@ -2777,7 +2804,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         raise PilotDenied("Pilot first pass does not accept credentials")
                     if len(spec["actions"]) > 10:
                         raise PilotDenied("Pilot browser call exceeds ten actions")
-                    allowed_actions = {"navigate", "get_source", "screenshot", "wait", "check_response"}
+                    allowed_actions = {"navigate", "get_source", "screenshot", "wait", "check_response", "check_xss"}
                     if any(not isinstance(action, dict) or action.get("action") not in allowed_actions
                            for action in spec["actions"]):
                         raise PilotDenied("Pilot browser action is outside the read-only allowlist")

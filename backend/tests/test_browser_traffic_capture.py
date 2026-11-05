@@ -33,6 +33,10 @@ def test_page_surface_summary_keeps_same_origin_paths_and_form_names_without_val
     assert "secret" not in json.dumps([links, forms])
 
 
+def test_page_surface_summary_handles_failed_navigation():
+    assert _page_surface_summary("<a href='/catalog'>Catalog</a>", "about:blank") == ([], [])
+
+
 def test_request_metadata_keeps_method_parameter_names_and_status_slot_without_values():
     request = SimpleNamespace(
         method="POST",
