@@ -13,6 +13,13 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 CALLBACK_PLACEHOLDER = "{{callback_url}}"
+CALLBACK_HOST_PLACEHOLDER = "{{callback_host}}"
+
+
+def _apply_placeholders(text: str, payload_url: str, payload_host: str) -> str:
+    return text.replace(CALLBACK_PLACEHOLDER, payload_url).replace(
+        CALLBACK_HOST_PLACEHOLDER, payload_host,
+    )
 
 
 def _inject_callback(
@@ -23,6 +30,7 @@ def _inject_callback(
     field: str,
     headers: dict[str, str] | None,
     body: Any | None,
+    payload_host: str = "",
 ) -> tuple[str, dict[str, str], Any | None]:
     """Place one fresh callback URL into a bounded request shape."""
     location = (location or "query").strip().lower()
@@ -42,6 +50,29 @@ def _inject_callback(
             ),
             request_headers,
             body,
+        )
+
+    if location == "query_template":
+        # The field's value is a caller-built template (e.g. a SQL payload) that
+        # embeds {{callback_url}} and/or {{callback_host}}. Unlike plain query
+        # injection, the observed value is preserved inside the template rather
+        # than replaced, so the callback can ride inside an injection payload.
+        if not field:
+            raise ValueError("field is required for query_template callback injection")
+        template = body if isinstance(body, str) else ""
+        if CALLBACK_PLACEHOLDER not in template and CALLBACK_HOST_PLACEHOLDER not in template:
+            raise ValueError("query_template body must contain a callback placeholder")
+        value = _apply_placeholders(template, payload_url, payload_host)
+        parsed = urlsplit(url)
+        pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        pairs = [(key, existing) for key, existing in pairs if key != field]
+        pairs.append((field, value))
+        return (
+            urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs), parsed.fragment)
+            ),
+            request_headers,
+            None,
         )
 
     if location == "header":
@@ -74,13 +105,15 @@ def _inject_callback(
 
     if location == "raw":
         raw = str(body or "")
-        if CALLBACK_PLACEHOLDER not in raw:
+        if CALLBACK_PLACEHOLDER not in raw and CALLBACK_HOST_PLACEHOLDER not in raw:
             raise ValueError(
                 f"raw callback bodies must contain {CALLBACK_PLACEHOLDER}"
             )
-        return url, request_headers, raw.replace(CALLBACK_PLACEHOLDER, payload_url)
+        return url, request_headers, _apply_placeholders(raw, payload_url, payload_host)
 
-    raise ValueError("location must be query, header, body_json, body_form, or raw")
+    raise ValueError(
+        "location must be query, query_template, header, body_json, body_form, or raw"
+    )
 
 
 async def run_callback_workflow(
@@ -139,6 +172,7 @@ async def run_callback_workflow(
             field=field,
             headers=headers,
             body=body,
+            payload_host=str(registration.get("payload_domain") or ""),
         )
         exchange = await manager._http_exchange(
             method=method,

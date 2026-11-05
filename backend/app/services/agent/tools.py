@@ -8823,15 +8823,27 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         token: Optional[str] = None,
         keep_session: bool = False,
         summary_only: bool = False,
+        sql_family: str = "",
     ) -> str:
         """Run a correlated custom OAST probe using a fresh Interactsh session.
 
         The target request remains subject to assessment scope and identity
-        controls. ``location`` may be query, header, body_json, body_form, or
-        raw; raw bodies must contain ``{{callback_url}}``. A callback returns a
-        proof object ready for ``record_verify_verdict``.
+        controls. ``location`` may be query, query_template, header, body_json,
+        body_form, or raw; raw bodies must contain ``{{callback_url}}``. A
+        callback returns a proof object ready for ``record_verify_verdict``.
+
+        When ``sql_family`` is set (mysql/postgresql/oracle/sqlserver), the
+        server builds a bounded, server-owned out-of-band SQLi payload for the
+        observed ``field`` and injects it via ``query_template`` — the model
+        never supplies the SQL bytes.
         """
         from app.services.agent.oob_callback_workflow import run_callback_workflow
+
+        if sql_family:
+            from app.services.agent.scoped_assessment.sqli_oob import plan_oob_sqli
+
+            field, body = plan_oob_sqli(url, parameter=field, family=sql_family)
+            location, method = "query_template", "GET"
 
         result = await run_callback_workflow(
             self,
