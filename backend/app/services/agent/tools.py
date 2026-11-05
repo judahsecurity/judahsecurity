@@ -2792,6 +2792,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     spec["allowed_origin"] = allowed_origin
                     tool_args["args"] = json.dumps(spec)
             except (PilotDenied, ValueError, TypeError) as exc:
+                logger.warning("Pilot rejected %s before execution: %s", tool_name, exc)
                 return {"success": False, "output": str(exc), "error": "pilot_policy_denied"}
 
         browser_identity = None

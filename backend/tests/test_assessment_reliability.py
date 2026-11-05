@@ -213,6 +213,44 @@ async def test_bounded_pilot_rejects_browser_write_action_before_tool_call(manag
 
 
 @pytest.mark.asyncio
+async def test_web_only_pilot_accepts_valid_browser_reads_with_implicit_port(manager, monkeypatch):
+    import app.services.agent.confirmation_service as confirmation
+
+    async def allow(*_args, **_kwargs):
+        return {"decision": "allow"}
+
+    seen = []
+
+    async def call_tool(name, args):
+        seen.append((name, args))
+        return {"success": True, "output": "Read page"}
+
+    monkeypatch.setattr(confirmation, "gate", allow)
+    manager._mcp_server = SimpleNamespace(call_tool=call_tool)
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="203.0.113.25",
+        organization_id=98765, session_id="pilot-browser-read",
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+        web_only=True,
+    )
+    token = set_pilot(policy)
+    try:
+        for url in ("https://app.test:443/", "https://app.test/"):
+            result = await manager._execute_impl("execute_browser", {
+                "args": json.dumps({"url": url, "actions": [
+                    {"action": "navigate", "url": url},
+                    {"action": "get_source"},
+                ]}),
+            })
+            assert result["success"] is True, result
+        assert len(seen) == 2
+        assert all(json.loads(args["args"])["allowed_origin"].startswith("https://app.test")
+                   for _, args in seen)
+    finally:
+        reset_pilot(token)
+
+
+@pytest.mark.asyncio
 async def test_bounded_pilot_browser_route_checks_each_request(monkeypatch):
     from app.services.agent.assessment_sessions import configure_browser_origin
 
