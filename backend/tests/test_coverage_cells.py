@@ -8,6 +8,7 @@ from app.services.agent.coverage_cells import (
     lead_packet_for_cell,
     migrate_coverage_cells,
     parameter_test_funnel,
+    record_input_first_pass_pair,
     record_sqli_trace,
     recover_expired_coverage_leases,
     release_coverage_cell_lease,
@@ -434,3 +435,31 @@ def test_unconfirmed_published_candidate_does_not_close_input_cell():
     assert brain.coverage_cells[0]["status"] == "inconclusive"
     assert parameter_test_funnel(brain)["published"] == 0
     assert parameter_test_funnel(brain)["open"] == 1
+
+
+def test_manual_get_pair_counts_input_without_claiming_class_coverage():
+    cells = [{
+        "id": f"cell-{kind}", "source": "parameter_inventory",
+        "method": "GET", "host": "app.test", "path": "/catalog",
+        "identity": "anonymous", "parameter": "query:searchTerm",
+        "test_type": kind, "status": "untested",
+    } for kind in ("xss", "sqli")]
+    brain = EngagementBrain(coverage_cells=cells, candidates=[{
+        "id": "candidate-1", "status": "pending", "coverage_cell_id": "",
+    }])
+    baseline = {"method": "GET", "url": "https://app.test/catalog?searchTerm=gin"}
+    mutant = {"method": "GET", "url": "https://app.test/catalog?searchTerm=juice"}
+    assert record_input_first_pass_pair(brain, baseline, mutant, "base-id", "probe-id")
+    assert not record_input_first_pass_pair(brain, baseline, mutant, "base-2", "probe-2")
+    result = parameter_test_funnel(brain)
+    assert result["inputs_paired"] == 1
+    assert result["manual_baselines"] == 1
+    assert result["checks"] == 2
+    assert result["attempted"] == result["probed"] == 0
+    assert result["candidates"] == 0
+    assert result["all_candidates"] == result["unlinked_candidates"] == 1
+    assert not record_input_first_pass_pair(
+        EngagementBrain(coverage_cells=cells), baseline,
+        {"method": "GET", "url": "https://app.test/catalog?searchTerm=juice&other=1"},
+        "base-id", "probe-id",
+    )

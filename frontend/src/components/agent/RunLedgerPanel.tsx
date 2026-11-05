@@ -45,6 +45,8 @@ export type AgentRunLedger = {
   }>;
   input_testing?: {
     inputs: number;
+    inputs_paired?: number;
+    manual_baselines?: number;
     checks: number;
     attempted: number;
     probed: number;
@@ -53,6 +55,10 @@ export type AgentRunLedger = {
     candidate_handoffs_pending?: number;
     service_candidate_handoffs_pending?: number;
     candidates: number;
+    all_candidates?: number;
+    all_verified?: number;
+    all_published?: number;
+    unlinked_candidates?: number;
     verified: number;
     published: number;
     open: number;
@@ -110,7 +116,7 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
           <div className="rounded-md border border-border/60 px-2.5 py-2 space-y-1">
             <p className="font-medium text-foreground">Input testing</p>
             <p className="text-muted-foreground">
-              {run.input_testing!.inputs} inputs · {run.input_testing!.checks} class checks · {run.input_testing!.attempted} attempted · {run.input_testing!.probed} with probe evidence · {run.input_testing!.capture_needed || 0} need browser capture · {run.input_testing!.candidates} candidates · {run.input_testing!.verified} verified · {run.input_testing!.published} published · {run.input_testing!.open} open
+              {run.input_testing!.inputs} inputs · {run.input_testing!.inputs_paired || 0} paired GET inputs{run.input_testing!.manual_baselines ? ` (${run.input_testing!.manual_baselines} manual baselines)` : ''} · {run.input_testing!.checks} class checks · {run.input_testing!.attempted} class checks attempted · {run.input_testing!.probed} with probe evidence · {run.input_testing!.capture_needed || 0} need browser capture · {run.input_testing!.all_candidates ?? run.input_testing!.candidates} candidates{run.input_testing!.unlinked_candidates ? ` (${run.input_testing!.unlinked_candidates} unlinked)` : ''} · {run.input_testing!.all_verified ?? run.input_testing!.verified} verified · {run.input_testing!.all_published ?? run.input_testing!.published} published · {run.input_testing!.open} open
             </p>
             {Boolean(run.input_testing!.proof_signals) && (
               <p className={run.input_testing!.candidate_handoffs_pending ? "text-amber-400" : "text-muted-foreground"}>

@@ -1102,15 +1102,20 @@ a shared fail-closed budget. Stop at the operator's deadline or budget limit.
 
 ## Test method
 Inspect the seed with execute_browser using navigate and get_source. Capture
-same-origin GET requests and their original query values. After the seed read,
-call list_captured_requests to enumerate the captured GET inputs. Do not repeat
-the same seed navigation. Use structured replay tools for mutations. Give each eligible
+same-origin GET requests and their original query values. Call
+list_captured_requests once if browser traffic was captured; an empty XHR list
+does not mean ordinary page links were absent. Do not repeat the same seed
+navigation. Use structured replay tools for mutations. Give each eligible
 observed input one baseline and one harmless mutation before testing variants.
 Save evidence IDs for both responses. Triage SQLi response differences with
 paired controls and reflected XSS with execute_browser check_xss; reflection alone
 is not verified execution. Repeat promising results independently within the
-remaining budget. Record blocked and untested inputs with reasons. Do not retry
-the same denied tool call or claim a finding from status alone.
+remaining budget. Submit a candidate with its evidence IDs, call independent_verify
+for a fresh proof, then create_finding only after a confirmed verifier receipt.
+Record blocked and untested inputs with reasons. A completed tool call whose
+JSON contains an error did not succeed. Correct arguments from the live tool
+contract; do not guess keys or retry the same denied call. If the pilot cannot
+finish coverage, complete with the measured gaps rather than reloading the seed.
 
 ## Decision format
 Output exactly one JSON object and no other text:

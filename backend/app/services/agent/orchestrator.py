@@ -1608,17 +1608,21 @@ class AgentOrchestrator:
             available_tools = get_phase_tools(phase)
             available_tools += self._unavailable_tools_note()
             if state.get("mode") == "pilot":
-                from app.services.agent.pilot_policy import PILOT_ALLOWED_TOOLS, current_pilot
+                from app.services.agent.pilot_policy import (
+                    PILOT_ALLOWED_TOOLS, current_pilot, pilot_tool_guidance,
+                )
                 pilot = current_pilot()
+                allowed = pilot.allowed_tools if pilot is not None else PILOT_ALLOWED_TOOLS
+                contracts = pilot_tool_guidance(self.tool_manager, allowed)
                 if pilot is not None and pilot.web_only:
                     available_tools = (
-                        "Web-only pilot tools: " + ", ".join(sorted(pilot.allowed_tools))
-                        + ". Only anonymous GET/HEAD on the exact HTTPS origin and port."
+                        "Web-only pilot tools (required arguments have no ?):\n" + contracts
+                        + "\nOnly anonymous GET/HEAD on the exact HTTPS origin and port."
                     )
                 else:
                     from app.models.scan_schedule import CRITICAL_PORTS
                     available_tools = (
-                        "Bounded pilot tools only: " + ", ".join(sorted(PILOT_ALLOWED_TOOLS))
+                        "Bounded pilot tools (required arguments have no ?):\n" + contracts
                         + ". Network calls outside these tools are denied. "
                         "Use anonymous GET/HEAD/OPTIONS on the exact target host; "
                         "probe_pilot_ports(protocol='tcp'|'udp', ports=[...]) may check "
@@ -2198,6 +2202,7 @@ class AgentOrchestrator:
 
             prior = prior_identical_browser_action(
                 state.get("execution_trace") or [], safe_args,
+                across_run=state.get("mode") == "pilot",
             )
             if prior is not None:
                 step_data["tool_args"] = safe_args

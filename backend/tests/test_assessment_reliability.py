@@ -9,7 +9,9 @@ import httpx
 import pytest
 
 from app.services.agent.assessment_sessions import cookie_jar, identity_registry
-from app.services.agent.pilot_policy import PilotDenied, PilotPolicy, reset_pilot, set_pilot
+from app.services.agent.pilot_policy import (
+    PilotDenied, PilotPolicy, pilot_tool_guidance, reset_pilot, set_pilot,
+)
 from app.services.agent.evidence_store import (
     VerificationRun,
     evidence_store,
@@ -33,6 +35,175 @@ from app.services.agent.tools import (
     current_organization_id,
     current_session_id,
 )
+
+
+def test_pilot_exposes_safe_verification_chain_with_live_tool_contracts(manager):
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="1.1.1.1",
+        organization_id=98765, session_id="pilot-verifier",
+        expires_at_ms=int(time.time() * 1000) + 60_000, web_only=True,
+    )
+    for name in ("submit_finding_candidate", "independent_verify",
+                 "create_finding", "assess_finding_risk", "read_evidence"):
+        policy.check_tool(name)
+    with pytest.raises(PilotDenied):
+        policy.check_tool("execute_sqlmap")
+    guidance = pilot_tool_guidance(manager, policy.allowed_tools)
+    assert "submit_finding_candidate(title, description?, severity?, target?" in guidance
+    assert "independent_verify(candidate_id?" in guidance
+    assert "record_surface_coverage.status must be one of" in guidance
+    assert "record_verify_verdict(" not in guidance
+
+
+@pytest.mark.asyncio
+async def test_pilot_cannot_publish_low_severity_without_verifier(manager):
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="1.1.1.1",
+        organization_id=98765, session_id="pilot-publication",
+        expires_at_ms=int(time.time() * 1000) + 60_000, web_only=True,
+    )
+    token = set_pilot(policy)
+    try:
+        result = await manager.create_finding(
+            title="Unverified reflection", description="Marker was reflected",
+            severity="low", target="https://app.test/catalog",
+        )
+        assert "independently confirmed candidate receipt" in result
+    finally:
+        reset_pilot(token)
+
+
+@pytest.mark.asyncio
+async def test_json_error_result_is_a_failed_tool_action(manager, monkeypatch):
+    from app.services.agent import confirmation_service
+
+    async def allow_local(*_args, **_kwargs):
+        return {"decision": "allow"}
+
+    monkeypatch.setattr(confirmation_service, "gate", allow_local)
+    result = await manager._execute_impl("record_surface_coverage", {
+        "path": "/catalog", "status": "covered",
+    })
+    assert result["success"] is False
+    assert "Unknown coverage status: covered" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_pilot_suppresses_identical_local_contract_error(manager, monkeypatch):
+    from app.services.agent import action_ledger
+
+    active_run_id = action_ledger.active_run_id
+    monkeypatch.setattr(action_ledger, "append_action", lambda *_args, **_kwargs: None)
+
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="1.1.1.1",
+        organization_id=98765, session_id="pilot-contract",
+        expires_at_ms=int(time.time() * 1000) + 60_000, web_only=True,
+    )
+    calls = []
+
+    async def failed_once(name, args):
+        calls.append((name, args))
+        return {"success": False, "error": "Unknown coverage status: covered",
+                "output": '{"error":"Unknown coverage status: covered"}'}
+
+    monkeypatch.setattr(manager, "_execute_recorded", failed_once)
+    run_token = active_run_id.set("pilot-contract-test")
+    pilot_token = set_pilot(policy)
+    try:
+        args = {"path": "/catalog", "status": "covered"}
+        first = await manager.execute("record_surface_coverage", args)
+        second = await manager.execute("record_surface_coverage", args)
+        assert first["success"] is False
+        assert second["error"] == "repeated_tool_contract_error"
+        assert second["suppressed_repeat"] is True
+        assert len(calls) == 1
+    finally:
+        reset_pilot(pilot_token)
+        active_run_id.reset(run_token)
+
+
+@pytest.mark.asyncio
+async def test_compare_records_observed_input_pair_without_class_claim(manager, transport):
+    from app.services.agent.coverage_cells import parameter_test_funnel
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    transport(lambda request: httpx.Response(200, text=f"result:{request.url}"))
+    manager._engagement_brain = EngagementBrain(coverage_cells=[{
+        "id": f"cell-{kind}", "source": "parameter_inventory",
+        "method": "GET", "host": "app.test", "path": "/catalog",
+        "identity": "anonymous", "parameter": "query:searchTerm",
+        "test_type": kind, "status": "untested",
+    } for kind in ("xss", "sqli")]).to_dict()
+    result = json.loads(await manager.compare_requests(
+        baseline={"method": "GET", "url": "https://app.test/catalog?searchTerm=gin"},
+        mutant={"method": "GET", "url": "https://app.test/catalog?searchTerm=juice"},
+        use_auth_session=False,
+    ))
+    assert "error" not in result
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    progress = parameter_test_funnel(brain)
+    assert progress["inputs_paired"] == 1
+    assert progress["attempted"] == 0
+    assert brain.input_first_pass[0]["baseline_evidence_id"] == result["baseline"]["evidence_id"]
+    assert brain.input_first_pass[0]["probe_evidence_id"] == result["mutant"]["evidence_id"]
+
+
+@pytest.mark.asyncio
+async def test_browser_xss_dialog_links_probe_and_candidate_to_observed_input(manager, monkeypatch):
+    from app.services.agent import confirmation_service
+    from app.services.agent.coverage_cells import coverage_cell_id, parameter_test_funnel
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    async def allow_local(*_args, **_kwargs):
+        return {"decision": "allow"}
+
+    url = "https://app.test/catalog?searchTerm=%5C%27%3Balert(1)%2F%2F"
+
+    async def browser_result(_name, _args):
+        return {"success": True, "output": "Browser check completed", "browser_evidence": [{
+            "url": url, "dialog_triggered": True, "alert_text": "1",
+            "xss_detected": True, "status": 200,
+        }]}
+
+    monkeypatch.setattr(confirmation_service, "gate", allow_local)
+    manager._mcp_server = SimpleNamespace(call_tool=browser_result)
+    cell_id = coverage_cell_id(
+        method="GET", path="/catalog", host="app.test", identity="anonymous",
+        parameter="query:searchTerm", test_type="xss",
+    )
+    manager._engagement_brain = EngagementBrain(coverage_cells=[{
+        "id": cell_id, "source": "parameter_inventory",
+        "observation_source": "browser_link", "method": "GET",
+        "host": "app.test", "path": "/catalog", "identity": "anonymous",
+        "parameter": "query:searchTerm", "test_type": "xss", "status": "untested",
+    }]).to_dict()
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="1.1.1.1",
+        organization_id=98765, session_id="pilot-xss-link",
+        expires_at_ms=int(time.time() * 1000) + 60_000, web_only=True,
+    )
+    token = set_pilot(policy)
+    try:
+        result = await manager._execute_impl("execute_browser", {
+            "actions": [{"action": "check_xss", "url": url}],
+        })
+    finally:
+        reset_pilot(token)
+    assert result["success"] is True
+    browser_ids = [item for item in result["evidence_ids"]
+                   if evidence_store(manager).records[item]["kind"] == "browser_xss"]
+    assert len(browser_ids) == 1
+    assert evidence_store(manager).records[browser_ids[0]]["coverage_cell_id"] == cell_id
+    candidate_result = json.loads(await manager.submit_finding_candidate(
+        title="Reflected XSS in searchTerm", target="https://app.test/catalog",
+        vulnerability_class="xss", evidence_ids=browser_ids,
+    ))
+    assert "candidate" in candidate_result, candidate_result
+    assert candidate_result["candidate"]["coverage_cell_id"] == cell_id
+    progress = parameter_test_funnel(engagement_brain_from_dict(manager._engagement_brain))
+    assert progress["attempted"] == progress["probed"] == progress["candidates"] == 1
+    assert progress["all_candidates"] == 1
 
 
 @pytest.fixture
