@@ -25,6 +25,7 @@ from app.services.geolocation_service import (
     GeoProvider,
     get_geolocation_service_for_org,
 )
+from app.services.asset_relationships import batch_ip_relationships, standalone_asset_filter
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +221,7 @@ def _close_findings_for_asset(db: Session, asset_id: int) -> int:
 def build_asset_response(
     asset: Asset,
     vuln_counts: Optional[Dict[str, int]] = None,
+    ip_relationships: Optional[List[dict]] = None,
 ) -> dict:
     """Build asset response with port service information.
     
@@ -333,6 +335,13 @@ def build_asset_response(
         "organization_id": asset.organization_id,
         "organization_name": org_name,
         "parent_id": safe_get("parent_id"),
+        "parent_domain": (
+            asset.parent.value
+            if asset.parent and asset.parent.organization_id == asset.organization_id
+            and asset.parent.asset_type in (AssetType.DOMAIN, AssetType.SUBDOMAIN)
+            else (asset.root_domain if asset.root_domain != asset.value else None)
+        ),
+        "ip_relationships": ip_relationships or [],
         "status": asset.status,
         "description": safe_get("description"),
         "tags": safe_get("tags", []),
@@ -379,6 +388,9 @@ def build_asset_response(
         # Scope and ownership
         "in_scope": safe_get("in_scope", True),
         "is_owned": safe_get("is_owned", False),
+        "hosting_type": safe_get("hosting_type"),
+        "hosting_provider": safe_get("hosting_provider"),
+        "resolved_from": safe_get("resolved_from"),
         "is_live": safe_get("is_live", False),
         "has_login_portal": safe_get("has_login_portal", False),
         "login_portals": safe_get("login_portals", []),
@@ -425,6 +437,7 @@ def list_assets(
     has_risky_ports: Optional[bool] = None,
     has_geo: Optional[bool] = Query(None, description="Filter for assets with geo data (latitude/longitude)"),
     include_cidr: bool = Query(False, description="Include IP_RANGE/CIDR assets (excluded by default)"),
+    collapse_related_ips: bool = Query(False, description="Omit non-owned DNS-linked or CDN edge IP records as standalone assets"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100000),
     db: Session = Depends(get_db),
@@ -439,6 +452,7 @@ def list_assets(
         selectinload(Asset.organization),
         noload(Asset.vulnerabilities),
         noload(Asset.screenshots),
+        selectinload(Asset.parent),
     )
     
     # Organization filter
@@ -468,8 +482,9 @@ def list_assets(
         query = query.filter(Asset.status == status)
     if search:
         query = query.filter(
-            (Asset.name.ilike(f"%{search}%")) | 
-            (Asset.value.ilike(f"%{search}%"))
+            (Asset.name.ilike(f"%{search}%")) |
+            (Asset.value.ilike(f"%{search}%")) |
+            (Asset.ip_address.ilike(f"%{search}%"))
         )
     
     # Filter by live status
@@ -477,6 +492,8 @@ def list_assets(
         query = query.filter(Asset.is_live == True)
     elif is_live is False:
         query = query.filter(Asset.is_live == False)
+    if collapse_related_ips:
+        query = query.filter(standalone_asset_filter())
     
     # Filter by scope
     if in_scope is True:
@@ -518,11 +535,17 @@ def list_assets(
     if status:
         count_query = count_query.filter(Asset.status == status)
     if search:
-        count_query = count_query.filter((Asset.name.ilike(f"%{search}%")) | (Asset.value.ilike(f"%{search}%")))
+        count_query = count_query.filter(
+            (Asset.name.ilike(f"%{search}%")) |
+            (Asset.value.ilike(f"%{search}%")) |
+            (Asset.ip_address.ilike(f"%{search}%"))
+        )
     if is_live is True:
         count_query = count_query.filter(Asset.is_live == True)
     elif is_live is False:
         count_query = count_query.filter(Asset.is_live == False)
+    if collapse_related_ips:
+        count_query = count_query.filter(standalone_asset_filter())
     if in_scope is True:
         count_query = count_query.filter(Asset.in_scope == True)
     elif in_scope is False:
@@ -567,10 +590,15 @@ def list_assets(
         assets = filtered_assets
 
     vuln_by_asset = _batch_vuln_counts(db, [a.id for a in assets])
+    ip_links_by_asset = batch_ip_relationships(db, assets)
     
     return PaginatedAssetsResponse(
         items=[
-            build_asset_response(asset, vuln_counts=vuln_by_asset.get(asset.id, _empty_vuln_counts()))
+            build_asset_response(
+                asset,
+                vuln_counts=vuln_by_asset.get(asset.id, _empty_vuln_counts()),
+                ip_relationships=ip_links_by_asset.get(asset.id, []),
+            )
             for asset in assets
         ],
         total=total_count,
@@ -890,7 +918,10 @@ def get_asset(
         )
 
     # Build full response with port services and technologies
-    return build_asset_response(asset)
+    return build_asset_response(
+        asset,
+        ip_relationships=batch_ip_relationships(db, [asset]).get(asset.id, []),
+    )
 
 
 @router.get("/{asset_id}/openapi.yaml")
@@ -1955,6 +1986,8 @@ async def probe_assets_live(
 async def resolve_assets_dns(
     organization_id: int = Query(..., description="Organization ID"),
     asset_type: Optional[AssetType] = Query(None, description="Filter by asset type"),
+    refresh_existing: bool = Query(False, description="Refresh DNS answers already stored on assets"),
+    skip: int = Query(0, ge=0, description="Offset when refresh_existing is true"),
     limit: int = Query(100, ge=1, le=500, description="Max assets to resolve"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst)
@@ -1969,17 +2002,16 @@ async def resolve_assets_dns(
         raise HTTPException(status_code=403, detail="Access denied")
     
     # Get assets to resolve
-    query = db.query(Asset).filter(
-        Asset.organization_id == organization_id,
-        (Asset.ip_address.is_(None) | (Asset.ip_address == ''))
-    )
+    query = db.query(Asset).filter(Asset.organization_id == organization_id)
+    if not refresh_existing:
+        query = query.filter(Asset.ip_address.is_(None) | (Asset.ip_address == ''))
     
     if asset_type:
         query = query.filter(Asset.asset_type == asset_type)
     else:
         query = query.filter(Asset.asset_type.in_([AssetType.DOMAIN, AssetType.SUBDOMAIN]))
     
-    assets = query.limit(limit).all()
+    assets = query.order_by(Asset.id).offset(skip if refresh_existing else 0).limit(limit).all()
     
     if not assets:
         return {"resolved": 0, "message": "No assets to resolve"}
@@ -2000,7 +2032,7 @@ async def resolve_assets_dns(
         for asset in assets:
             if asset.value in dns_map:
                 dns_result = dns_map[asset.value]
-                if dns_result.a_records:
+                if dns_result.a_records or dns_result.aaaa_records:
                     all_ips = dns_result.a_records + dns_result.aaaa_records
                     asset.update_ip_addresses(all_ips)
                     asset.last_seen = datetime.utcnow()

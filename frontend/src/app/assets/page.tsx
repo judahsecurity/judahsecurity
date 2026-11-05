@@ -88,6 +88,10 @@ interface Asset {
   value: string;
   ip_address?: string;
   ip_addresses?: string[];  // All resolved IPs (multi-value for load balancers, CDNs)
+  ip_relationships?: Array<{ ip: string; role: 'cdn_edge' | 'observed'; provider?: string | null; source: string }>;
+  parent_domain?: string;
+  root_domain?: string;
+  resolved_from?: string;
   asset_type: string;
   type?: string;
   status: string;
@@ -183,8 +187,7 @@ export default function AssetsPage() {
   const [orgFilter, setOrgFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [liveFilter, setLiveFilter] = useState<string>('live'); // Default to live assets
-  const [viewMode, setViewMode] = useState<'all' | 'by_host' | 'by_technology'>('all'); // Asset-first inventory by default
+  const [viewMode, setViewMode] = useState<'all' | 'by_host' | 'by_technology'>('by_host');
   const [organizations, setOrganizations] = useState<any[]>([]);
   const [sortColumn, setSortColumn] = useState<string>('');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
@@ -205,10 +208,11 @@ export default function AssetsPage() {
     { key: 'screenshot', label: 'Screenshot', visible: true },
     { key: 'type', label: 'Type', visible: true },
     { key: 'hostname', label: 'Host', visible: true },
+    { key: 'parent_domain', label: 'Connected to', visible: true },
     { key: 'is_live', label: 'Live', visible: true },
     { key: 'has_login_portal', label: 'Login', visible: true },
     { key: 'http_status', label: 'HTTP', visible: true },
-    { key: 'ip_address', label: 'IP Address', visible: true },
+    { key: 'ip_address', label: 'Observed IP', visible: true },
     { key: 'ports', label: 'Ports', visible: true },
     { key: 'technologies', label: 'Technologies', visible: true },
     { key: 'labels', label: 'Labels', visible: false },
@@ -221,46 +225,16 @@ export default function AssetsPage() {
     { key: 'created_at', label: 'Last Seen', visible: true },
   ]);
 
-  const [serverStats, setServerStats] = useState<any>(null);
-  const [geoStats, setGeoStats] = useState<any>(null);
   const [probingLive, setProbingLive] = useState(false);
-  const [enrichingGeo, setEnrichingGeo] = useState(false);
-
-  const handleEnrichGeo = async () => {
-    try {
-      setEnrichingGeo(true);
-      const params: { force: boolean; organization_id?: number } = { force: false };
-      if (orgFilter !== 'all') {
-        params.organization_id = parseInt(orgFilter);
-      }
-      const response = await api.request('/assets/enrich-from-netblocks', {
-        method: 'POST',
-        params,
-      });
-      toast({
-        title: 'Geo Enrichment Complete',
-        description: `Enriched ${(response.enriched_from_netblock_link || 0) + (response.enriched_from_cidr_match || 0)} assets from netblock data.`,
-      });
-      fetchData();
-    } catch (error: any) {
-      const detail = error?.response?.data?.detail;
-      const isOrgRequired = typeof detail === 'string' && detail.toLowerCase().includes('organization');
-      toast({
-        title: 'Error',
-        description: isOrgRequired
-          ? 'Select an organization from the filter above (next to Search), then click Enrich Geo to run for that org\'s assets.'
-          : detail || 'Failed to enrich assets',
-        variant: 'destructive',
-      });
-    } finally {
-      setEnrichingGeo(false);
-    }
-  };
 
   const handleProbeLive = async () => {
+    if (orgFilter === 'all') {
+      toast({ title: 'Select an organization', description: 'Choose one organization before probing live status.' });
+      return;
+    }
     try {
       setProbingLive(true);
-      const orgId = orgFilter !== 'all' ? parseInt(orgFilter) : 1;
+      const orgId = parseInt(orgFilter);
       const response = await api.post(`/assets/probe-live?organization_id=${orgId}&limit=500`);
       
       if (response.data) {
@@ -286,26 +260,19 @@ export default function AssetsPage() {
     setLoading(true);
     try {
       const skip = (page - 1) * PAGE_SIZE;
-      const [assetsData, orgsData, summaryData, geoData] = await Promise.all([
+      const [assetsData, orgsData] = await Promise.all([
         api.getAssets({
           organization_id: orgFilter !== 'all' ? parseInt(orgFilter) : undefined,
           asset_type: typeFilter !== 'all' ? typeFilter : undefined,
           status: statusFilter !== 'all' ? statusFilter : undefined,
-          is_live: liveFilter === 'live' ? true : liveFilter === 'not_live' ? false : undefined,
+          is_live: true,
+          collapse_related_ips: true,
           search: search || undefined,
           limit: PAGE_SIZE,
           skip: skip,
         }),
         api.getOrganizations(),
-        api.getAssetsSummary(orgFilter !== 'all' ? parseInt(orgFilter) : undefined),
-        api.request('/assets/geo-stats', {
-          params: { organization_id: orgFilter !== 'all' ? parseInt(orgFilter) : undefined }
-        }).catch(() => null),
       ]);
-      
-      // Store server-side stats for accurate counts
-      setServerStats(summaryData);
-      setGeoStats(geoData);
       
       // Get total count from response
       const total = assetsData.total || assetsData.items?.length || assetsData.length || 0;
@@ -323,7 +290,7 @@ export default function AssetsPage() {
         type: a.asset_type || 'subdomain',
         findingsCount: a.vulnerability_count || 0,
         tags: a.tags || [],
-        lastSeen: new Date(a.updated_at || a.created_at),
+        lastSeen: new Date(a.last_seen || a.updated_at || a.created_at),
         // Use screenshot_id from backend if available (cached from last screenshot capture)
         screenshotUrl: a.screenshot_id ? api.getScreenshotImageUrl(a.screenshot_id) : null,
         screenshotId: a.screenshot_id || null,
@@ -355,27 +322,14 @@ export default function AssetsPage() {
 
   useEffect(() => {
     setCurrentPage(1);
-    fetchData(1);
-  }, [orgFilter, typeFilter, statusFilter, liveFilter]);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (search !== '') {
-        setCurrentPage(1);
-        fetchData(1);
-      }
-    }, 500);
+    const timer = setTimeout(() => fetchData(1), search ? 500 : 0);
     return () => clearTimeout(timer);
-  }, [search]);
-  
-  // Initial load
-  useEffect(() => {
-    fetchData(1);
-  }, []);
+  }, [orgFilter, typeFilter, statusFilter, search]);
 
   // Filter and sort assets; optionally group by host for consolidated view
   const displayedAssets = useMemo((): AssetRow[] => {
     let filtered = assets.filter(asset => {
+      if (asset.is_live !== true) return false;
       const matchesType = typeFilter === 'all' || asset.asset_type === typeFilter || asset.type === typeFilter;
       const matchesStatus = statusFilter === 'all' || asset.status === statusFilter;
       const matchesSearch = search === '' || 
@@ -416,7 +370,7 @@ export default function AssetsPage() {
         rows.push(first);
       } else {
         // Multiple assets for same host: show one consolidated row per host
-        const representative = groupAssets[0];
+        const representative = groupAssets.find(a => ['domain', 'subdomain'].includes((a.asset_type || a.type || '').toLowerCase())) || groupAssets[0];
         const hostDisplay = first.value?.startsWith('http') ? (() => { try { return new URL(first.value).hostname; } catch { return first.value || hostKey; } })() : (first.value || first.name || hostKey);
         rows.push({ _group: true, host: hostDisplay, assets: groupAssets, representative });
       }
@@ -447,20 +401,24 @@ export default function AssetsPage() {
     const rowToAsset = (row: AssetRow): Asset =>
       '_group' in row ? row.representative : row;
     const csv = [
-      ['Type', 'Host', 'IP Address', 'Labels', 'Status', 'Findings', 'Last Seen'],
+      ['Type', 'Host', 'Connected to', 'Observed IPs', 'Origin status', 'Labels', 'Status', 'Findings', 'Last Seen'],
       ...displayedAssets.map((row: AssetRow) => {
         const a = rowToAsset(row);
         return [
           a.type ?? a.asset_type ?? '',
           a.name || a.value,
-          a.ip_address || '',
+          a.parent_domain || a.root_domain || a.resolved_from || '',
+          [...new Map(('_group' in row ? row.assets : [a]).flatMap(asset => asset.ip_relationships || []).map(link => [link.ip, link])).values()]
+            .map(link => `${link.ip}${link.role === 'cdn_edge' ? ' (CDN edge)' : ''}`).join('; '),
+          ('_group' in row ? row.assets : [a]).some(asset => asset.ip_relationships?.some(link => link.role === 'cdn_edge'))
+            ? 'Unverified behind CDN' : 'Not separately verified',
           a.tags?.join('; ') || '',
           a.status,
           (a.findingsCount || 0).toString(),
           a.created_at,
         ];
       }),
-    ].map(r => r.join(',')).join('\n');
+    ].map(r => r.map(value => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\n');
     
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
@@ -587,7 +545,6 @@ export default function AssetsPage() {
     if (key === 'type') setTypeFilter(value);
     if (key === 'status') setStatusFilter(value);
     if (key === 'organization') setOrgFilter(value);
-    if (key === 'live') setLiveFilter(value);
   };
 
   const getStatusColor = (status: string) => {
@@ -623,7 +580,7 @@ export default function AssetsPage() {
       key: 'view',
       label: 'View',
       options: [
-        { label: 'All assets', value: 'all' },
+        { label: 'Individual records', value: 'all' },
         { label: 'By host (consolidated)', value: 'by_host' },
         { label: 'By technology', value: 'by_technology' },
       ],
@@ -632,15 +589,6 @@ export default function AssetsPage() {
       key: 'organization',
       label: 'Organization',
       options: organizations.map((org: { id: number; name: string }) => ({ label: org.name, value: String(org.id) })),
-    },
-    {
-      key: 'live',
-      label: 'Live Status',
-      options: [
-        { label: 'All', value: 'all' },
-        { label: 'Live', value: 'live' },
-        { label: 'Not Live', value: 'not_live' },
-      ],
     },
     {
       key: 'type',
@@ -671,266 +619,29 @@ export default function AssetsPage() {
 
   const visibleColumns = columns.filter(c => c.visible);
 
-  // Calculate attack surface stats - use server stats for accurate totals
-  const attackSurfaceStats = useMemo(() => {
-    // Use server-side stats for accurate counts across all assets
-    if (serverStats) {
-      const total = serverStats.total || totalAssets;
-      const live = serverStats.live?.live || 0;
-      return {
-        total,
-        live,
-        notLive: serverStats.live?.not_live || (total - live),
-        notProbed: serverStats.live?.not_probed || 0,
-        loginPortals: serverStats.login_portals || 0,
-        outOfScope: serverStats.scope?.out_of_scope || 0,
-        totalPorts: serverStats.ports?.open_ports || 0,
-        riskyPorts: serverStats.ports?.risky_ports || 0,
-        withTech: 0, // Not in server stats yet
-        uniqueTech: 0, // Not in server stats yet
-        withEndpoints: 0, // Not in server stats yet
-        withFindings: 0, // Not in server stats yet
-      };
-    }
-    
-    // Fallback to page-level stats
-    const liveAssets = assets.filter(a => a.is_live).length;
-    const notLiveAssets = assets.filter(a => a.is_live === false).length;
-    const loginPortals = assets.filter(a => a.has_login_portal).length;
-    const outOfScope = assets.filter(a => !a.in_scope).length;
-    const totalPorts = assets.reduce((sum, a) => sum + (a.open_ports_count || 0), 0);
-    const riskyPorts = assets.reduce((sum, a) => sum + (a.risky_ports_count || 0), 0);
-    const withTech = assets.filter(a => a.technologies && a.technologies.length > 0).length;
-    const withEndpoints = assets.filter(a => a.endpoints && a.endpoints.length > 0).length;
-    const withFindings = assets.filter(a => (a.findingsCount || 0) > 0).length;
-    
-    // Count unique technologies
-    const techSet = new Set<string>();
-    assets.forEach(a => {
-      a.technologies?.forEach(t => techSet.add(typeof t === 'string' ? t : t.name));
-    });
-    
-    return {
-      total: totalAssets, // Use server's total count, not just current page
-      live: liveAssets,
-      notLive: notLiveAssets,
-      notProbed: 0,
-      loginPortals,
-      outOfScope,
-      totalPorts,
-      riskyPorts,
-      withTech,
-      uniqueTech: techSet.size,
-      withEndpoints,
-      withFindings,
-    };
-  }, [assets, totalAssets, serverStats]);
-
   return (
     <MainLayout>
-      <Header title="Attack Surface" subtitle="Discovered hosts, domains, and services across your organization" />
+      <Header title="Live Assets" subtitle="Assets marked live by stored probe results, with observed DNS relationships. CDN edge IPs are not treated as origins." />
 
       <div className="p-6 space-y-6">
-        {/* Attack Surface Overview Stats */}
-        {!loading && (
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-            <Card 
-              className={`p-4 bg-gradient-to-br from-blue-500/10 to-blue-600/5 border-blue-500/20 cursor-pointer hover:border-blue-500/40 transition-colors ${liveFilter === 'all' ? 'ring-2 ring-blue-500' : ''}`}
-              onClick={() => setLiveFilter('all')}
-            >
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-blue-500/20">
-                  <Globe className="h-5 w-5 text-blue-400" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.total}</p>
-                  <p className="text-xs text-muted-foreground">Total Assets</p>
-                </div>
-              </div>
-            </Card>
-            
-            <Card 
-              className={`p-4 bg-gradient-to-br from-green-500/10 to-green-600/5 border-green-500/20 cursor-pointer hover:border-green-500/40 transition-colors ${liveFilter === 'live' ? 'ring-2 ring-green-500' : ''}`}
-              onClick={() => setLiveFilter('live')}
-            >
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-green-500/20">
-                  <Activity className="h-5 w-5 text-green-400" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.live}</p>
-                  <p className="text-xs text-muted-foreground">Live Assets</p>
-                </div>
-              </div>
-            </Card>
-
-            <Card 
-              className={`p-4 bg-gradient-to-br from-gray-500/10 to-gray-600/5 border-gray-500/20 cursor-pointer hover:border-gray-500/40 transition-colors ${liveFilter === 'not_live' ? 'ring-2 ring-gray-500' : ''}`}
-              onClick={() => setLiveFilter('not_live')}
-            >
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-gray-500/20">
-                  <XCircle className="h-5 w-5 text-gray-400" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.notLive}</p>
-                  <p className="text-xs text-muted-foreground">Not Live</p>
-                </div>
-              </div>
-            </Card>
-
-            <Card 
-              className={`p-4 bg-gradient-to-br from-purple-500/10 to-purple-600/5 border-purple-500/20 cursor-pointer hover:border-purple-500/40 transition-colors ${probingLive ? 'opacity-50' : ''}`}
-              onClick={!probingLive ? handleProbeLive : undefined}
-            >
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-purple-500/20">
-                  {probingLive ? (
-                    <Loader2 className="h-5 w-5 text-purple-400 animate-spin" />
-                  ) : (
-                    <Radar className="h-5 w-5 text-purple-400" />
-                  )}
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-foreground">{probingLive ? 'Probing...' : 'Probe Live'}</p>
-                  <p className="text-xs text-muted-foreground">Check HTTP status</p>
-                </div>
-              </div>
-            </Card>
-            
-            {attackSurfaceStats.loginPortals > 0 && (
-              <Card className="p-4 bg-gradient-to-br from-amber-500/10 to-amber-600/5 border-amber-500/20">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-amber-500/20">
-                    <KeyRound className="h-5 w-5 text-amber-400" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.loginPortals}</p>
-                    <p className="text-xs text-muted-foreground">Login Portals</p>
-                  </div>
-                </div>
-              </Card>
-            )}
-            
-            {/* Geo Coverage Card */}
-            <Card 
-              className={`p-4 bg-gradient-to-br from-teal-500/10 to-teal-600/5 border-teal-500/20 cursor-pointer hover:border-teal-500/40 transition-colors ${enrichingGeo ? 'opacity-50' : ''}`}
-              onClick={!enrichingGeo ? handleEnrichGeo : undefined}
-            >
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-teal-500/20">
-                  {enrichingGeo ? (
-                    <Loader2 className="h-5 w-5 text-teal-400 animate-spin" />
-                  ) : (
-                    <MapPin className="h-5 w-5 text-teal-400" />
-                  )}
-                </div>
-                <div>
-                  {geoStats ? (
-                    <>
-                      <p className="text-2xl font-bold text-foreground">{geoStats.with_geo || 0}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {geoStats.coverage_percent || 0}% geo coverage ({Object.keys(geoStats.by_country || {}).length} countries)
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="text-sm font-bold text-foreground">{enrichingGeo ? 'Enriching...' : 'Enrich Geo'}</p>
-                      <p className="text-xs text-muted-foreground">Add country data</p>
-                    </>
-                  )}
-                </div>
-              </div>
-            </Card>
-            
-            {attackSurfaceStats.outOfScope > 0 && (
-              <Card 
-                className="p-4 bg-gradient-to-br from-red-500/10 to-red-600/5 border-red-500/20 cursor-pointer hover:border-red-500/40 transition-colors"
-                onClick={async () => {
-                  if (confirm(`Delete ${attackSurfaceStats.outOfScope} out-of-scope assets? This cannot be undone.`)) {
-                    try {
-                      const outOfScopeIds = assets.filter(a => !a.in_scope).map(a => a.id);
-                      const result = await api.bulkDeleteAssets(outOfScopeIds);
-                      toast({
-                        title: 'Assets Deleted',
-                        description: `Deleted ${result.deleted} out-of-scope assets.`,
-                      });
-                      fetchData();
-                    } catch (error) {
-                      toast({
-                        title: 'Error',
-                        description: 'Failed to delete assets',
-                        variant: 'destructive',
-                      });
-                    }
-                  }
-                }}
-              >
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-red-500/20">
-                    <Trash2 className="h-5 w-5 text-red-400" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.outOfScope}</p>
-                    <p className="text-xs text-muted-foreground">Out of Scope (click to delete)</p>
-                  </div>
-                </div>
-              </Card>
-            )}
-            
-            <Card className="p-4 bg-gradient-to-br from-cyan-500/10 to-cyan-600/5 border-cyan-500/20">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-cyan-500/20">
-                  <Network className="h-5 w-5 text-cyan-400" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.totalPorts}</p>
-                  <p className="text-xs text-muted-foreground">Open Ports</p>
-                </div>
-              </div>
-            </Card>
-            
-            {attackSurfaceStats.riskyPorts > 0 && (
-              <Card className="p-4 bg-gradient-to-br from-red-500/10 to-red-600/5 border-red-500/20">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-red-500/20">
-                    <AlertTriangle className="h-5 w-5 text-red-400" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.riskyPorts}</p>
-                    <p className="text-xs text-muted-foreground">Risky Ports</p>
-                  </div>
-                </div>
-              </Card>
-            )}
-            
-            <Card className="p-4 bg-gradient-to-br from-purple-500/10 to-purple-600/5 border-purple-500/20">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-purple-500/20">
-                  <Zap className="h-5 w-5 text-purple-400" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.uniqueTech}</p>
-                  <p className="text-xs text-muted-foreground">Technologies</p>
-                </div>
-              </div>
-            </Card>
-            
-            {attackSurfaceStats.withFindings > 0 && (
-              <Card className="p-4 bg-gradient-to-br from-orange-500/10 to-orange-600/5 border-orange-500/20">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-orange-500/20">
-                    <Shield className="h-5 w-5 text-orange-400" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-foreground">{attackSurfaceStats.withFindings}</p>
-                    <p className="text-xs text-muted-foreground">With Findings</p>
-                  </div>
-                </div>
-              </Card>
-            )}
-          </div>
-        )}
+        <div className="grid gap-4 md:grid-cols-3">
+          <Card className="p-4 bg-gradient-to-br from-green-500/10 to-green-600/5 border-green-500/20">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-green-500/20"><Activity className="h-5 w-5 text-green-400" /></div>
+              <div><p className="text-2xl font-bold text-foreground">{totalAssets}</p><p className="text-xs text-muted-foreground">Live asset records in this view</p></div>
+            </div>
+          </Card>
+          <Card className="p-4 bg-gradient-to-br from-purple-500/10 to-purple-600/5 border-purple-500/20 cursor-pointer" onClick={!probingLive ? handleProbeLive : undefined}>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-purple-500/20">{probingLive ? <Loader2 className="h-5 w-5 text-purple-400 animate-spin" /> : <Radar className="h-5 w-5 text-purple-400" />}</div>
+              <div><p className="text-sm font-bold text-foreground">{probingLive ? 'Probing...' : 'Probe Live'}</p><p className="text-xs text-muted-foreground">{orgFilter === 'all' ? 'Select an organization first' : 'Check up to 500 hostnames'}</p></div>
+            </div>
+          </Card>
+          <Card className="p-4 border-amber-500/20 bg-amber-500/5">
+            <p className="text-sm font-medium text-foreground">IP attribution</p>
+            <p className="mt-1 text-xs text-muted-foreground">A DNS answer at Cloudflare or Akamai is an observed edge address. The origin remains unverified until a separate source confirms it.</p>
+          </Card>
+        </div>
 
         {/* Bulk Action Bar */}
         {selectedAssets.size > 0 && (
@@ -985,14 +696,14 @@ export default function AssetsPage() {
           onRefresh={fetchData}
           isLoading={loading}
           filters={filters}
-          filterValues={{ view: viewMode, organization: orgFilter, live: liveFilter, type: typeFilter, status: statusFilter }}
+          filterValues={{ view: viewMode, organization: orgFilter, type: typeFilter, status: statusFilter }}
           onFilterChange={handleFilterChange}
         >
           {viewMode === 'by_technology' ? (
             <TechnologyAssetPivot
               organizationId={orgFilter !== 'all' ? parseInt(orgFilter) : undefined}
               search={search}
-              liveFilter={liveFilter}
+              liveFilter="live"
               onSelectAsset={setSelectedAssetId}
             />
           ) : (
@@ -1152,6 +863,12 @@ export default function AssetsPage() {
                           </TableCell>
                         )}
 
+                        {columns.find(c => c.key === 'parent_domain')?.visible && (
+                          <TableCell className="text-xs text-muted-foreground">
+                            {asset.parent_domain || (asset.root_domain !== asset.value ? asset.root_domain : null) || asset.resolved_from || '—'}
+                          </TableCell>
+                        )}
+
                         {/* Live Status */}
                         {columns.find(c => c.key === 'is_live')?.visible && (
                           <TableCell>
@@ -1207,28 +924,21 @@ export default function AssetsPage() {
                           </TableCell>
                         )}
 
-                        {/* IP Address - must come after HTTP to match column order */}
+                        {/* Observed DNS and discovery links; an edge IP is never an inferred origin. */}
                         {columns.find(c => c.key === 'ip_address')?.visible && (
                           <TableCell className="font-mono text-sm">
                             {(() => {
-                              // For IP_ADDRESS type assets, the IP is in the value field
-                              const assetType = (asset.asset_type || asset.type || '').toLowerCase();
-                              const isIpAsset = assetType === 'ip_address' || assetType === 'ip';
-                              const displayIp = asset.ip_address || (isIpAsset ? asset.value : null);
-                              
-                              if (displayIp) {
-                                return (
-                                  <div className="flex flex-col gap-0.5">
-                                    <span className="text-foreground">{displayIp}</span>
-                                    {asset.ip_addresses && asset.ip_addresses.length > 1 && (
-                                      <span className="text-xs text-muted-foreground">
-                                        +{asset.ip_addresses.length - 1} more
-                                      </span>
-                                    )}
-                                  </div>
-                                );
-                              }
-                              return <span className="text-muted-foreground">—</span>;
+                              const groupAssets = isGroup ? row.assets : [asset];
+                              const links = [...new Map(groupAssets.flatMap(a => a.ip_relationships || []).map(link => [link.ip, link])).values()];
+                              if (!links.length) return <span className="text-muted-foreground">Not observed</span>;
+                              return <div className="flex flex-col gap-1">
+                                {links.slice(0, 2).map(link => <div key={link.ip} className="flex items-center gap-1.5">
+                                  <span className="text-foreground">{link.ip}</span>
+                                  {link.role === 'cdn_edge' && <Badge variant="outline" className="text-[10px] text-amber-400 border-amber-500/30">CDN edge</Badge>}
+                                </div>)}
+                                {links.length > 2 && <span className="text-xs text-muted-foreground">+{links.length - 2} more</span>}
+                                {links.some(link => link.role === 'cdn_edge') && <span className="text-[10px] font-sans text-muted-foreground">Origin IP unverified</span>}
+                              </div>;
                             })()}
                           </TableCell>
                         )}
@@ -1502,7 +1212,8 @@ export default function AssetsPage() {
         {/* Pagination controls */}
         <div className="flex items-center justify-between">
           <div className="text-sm text-muted-foreground">
-            Showing {((currentPage - 1) * PAGE_SIZE) + 1} - {Math.min(currentPage * PAGE_SIZE, totalAssets)} of {totalAssets} assets
+            Showing {totalAssets ? ((currentPage - 1) * PAGE_SIZE) + 1 : 0} - {Math.min(currentPage * PAGE_SIZE, totalAssets)} of {totalAssets} live records
+            {viewMode === 'by_host' && ` · ${displayedAssets.length} host rows on this page`}
           </div>
           <div className="flex items-center gap-2">
             <Button

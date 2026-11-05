@@ -186,6 +186,8 @@ interface Asset {
   dns_records: Record<string, any>;
   ip_address?: string;
   ip_addresses?: string[];
+  ip_relationships?: Array<{ ip: string; role: 'cdn_edge' | 'observed'; provider?: string | null }>;
+  parent_domain?: string;
   ip_history?: Array<{ip: string; first_seen: string; last_seen: string; removed_at?: string}>;
   latitude?: string;
   longitude?: string;
@@ -1021,10 +1023,12 @@ export default function AssetDetailPage() {
                     <span className="font-medium">{asset.is_public !== false ? 'Yes' : 'No'}</span>
                   </div>
                   <div className="flex justify-between py-2 border-b">
-                    <span className="text-muted-foreground">IPv4 Addresses</span>
+                    <span className="text-muted-foreground">Observed IP addresses</span>
                     <span className="font-mono text-sm">
-                      {(asset.ip_addresses?.length ?? 0) > 0 
-                        ? asset.ip_addresses!.join(', ') 
+                      {(asset.ip_relationships?.length ?? 0) > 0
+                        ? asset.ip_relationships!.map(link => `${link.ip}${link.role === 'cdn_edge' ? ' (CDN edge)' : ''}`).join(', ')
+                        : (asset.ip_addresses?.length ?? 0) > 0
+                        ? asset.ip_addresses!.join(', ')
                         : asset.ip_address 
                           ? asset.ip_address 
                           : asset.asset_type === 'ip_address' 
@@ -1032,6 +1036,9 @@ export default function AssetDetailPage() {
                             : '—'}
                     </span>
                   </div>
+                  {asset.ip_relationships?.some(link => link.role === 'cdn_edge') && (
+                    <div className="col-span-2 text-xs text-muted-foreground">Origin IP is unverified. A CDN DNS answer identifies an edge, not the origin.</div>
+                  )}
                   {asset.acs_drivers?.overall_risk && (
                     <div className="col-span-2 flex justify-between py-2 border-b">
                       <span className="text-muted-foreground">Risk Level</span>
@@ -1158,7 +1165,9 @@ export default function AssetDetailPage() {
                   {(() => {
                     // Determine which IPs to show
                     const ips: string[] = [];
-                    if (asset.ip_addresses && asset.ip_addresses.length > 0) {
+                    if (asset.ip_relationships && asset.ip_relationships.length > 0) {
+                      ips.push(...asset.ip_relationships.map(link => link.ip));
+                    } else if (asset.ip_addresses && asset.ip_addresses.length > 0) {
                       ips.push(...asset.ip_addresses);
                     } else if (asset.ip_address) {
                       ips.push(asset.ip_address);
@@ -1168,10 +1177,12 @@ export default function AssetDetailPage() {
                     
                     return ips.length > 0 ? (
                       <div className="col-span-2 flex justify-between py-2 border-b">
-                        <span className="text-muted-foreground">IPv4 Address{ips.length > 1 ? 'es' : ''}</span>
+                        <span className="text-muted-foreground">Observed IP address{ips.length > 1 ? 'es' : ''}</span>
                         <div className="flex flex-wrap gap-1 justify-end">
                           {ips.filter(Boolean).map((ip, idx) => (
-                            <Badge key={idx} variant="outline" className="font-mono text-xs">{ip}</Badge>
+                            <Badge key={idx} variant="outline" className="font-mono text-xs">
+                              {ip}{asset.ip_relationships?.find(link => link.ip === ip)?.role === 'cdn_edge' ? ' · CDN edge' : ''}
+                            </Badge>
                     ))}
                   </div>
                 </div>

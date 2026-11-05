@@ -245,8 +245,7 @@ class Asset(Base):
         self.ip_history = history
         
         # Set primary IP for backward compatibility
-        if new_ips:
-            self.ip_address = new_ips[0]
+        self.ip_address = new_ips[0] if new_ips else None
     
     def add_ip_address(self, ip: str) -> None:
         """Add a single IP address to this asset."""
