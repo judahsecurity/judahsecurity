@@ -19,7 +19,7 @@ from app.services.agent.evidence_store import evidence_store, verification_run
 from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
     authz_proof, body_probe, browser, browser_post_replay, http_observe, planning, query_probe,
-    sqli_boolean, sqli_string, technology,
+    sqli_boolean, sqli_string, sqli_time, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
 
@@ -1328,6 +1328,7 @@ class ScopedAssessmentTools:
             if preflight_issues:
                 result["baseline_preflight_issues"] = preflight_issues
         result["finding"] = False  # One actor's proof is a candidate, never publication.
+        or_result = result
         if result.get("proof_confirmed") is not True and sqli_string.error_followup_eligible(result):
             # A database-specific diagnostic needs a second controlled run;
             # one error response on its own is only a lead.
@@ -1409,6 +1410,45 @@ class ScopedAssessmentTools:
             result = and_result
         else:
             result["total_requests_sent"] = int(result.get("requests_sent") or 0) + int(needs_preflight)
+        if (result.get("proof_confirmed") is not True
+                and not browser_ready
+                and sqli_time.time_followup_eligible(or_result)):
+            # Blind endpoints that neither reflect the query nor surface a
+            # database error can still be proven by differential timing. Try
+            # each family once on the recovered baseline and stop at the first
+            # that sleeps only on the true branch. A wrong family never sleeps,
+            # so the recipe fails safe instead of mis-attributing latency.
+            prior_evidence_id = evidence_store(self).record(
+                "scoped_string_sqli", result, target=result["target"], identity=identity,
+                success=False,
+            )
+            time_result = None
+            for family in sqli_time.FAMILIES:
+                try:
+                    self._scoped_claim_gets(len(sqli_time.TIME_CHECK_ORDER))
+                    _, time_variants, time_nonce = sqli_time.plan_string_time(
+                        baseline, parameter=parameter, allowed_origins=[allowed], family=family,
+                    )
+                    attempt = await asyncio.to_thread(
+                        sqli_time.probe_string_time,
+                        baseline, time_variants, time_nonce,
+                        parameter=parameter, family=family, allowed_origins=[allowed],
+                        storage_state=state, before_request=lambda: None,
+                    )
+                except Exception as exc:
+                    result["time_followup_error"] = type(exc).__name__
+                    break
+                time_result = attempt
+                if attempt.get("proof_confirmed") is True:
+                    break
+            if time_result is not None:
+                time_result["prior_or_evidence_id"] = prior_evidence_id
+                time_result["source"] = observed["source"]
+                time_result["total_requests_sent"] = (
+                    int(result.get("total_requests_sent") or result.get("requests_sent") or 0)
+                    + int(time_result.get("requests_sent") or 0)
+                )
+                result = time_result
         result["source"] = observed["source"]
         result["baseline_source"] = baseline_source
         if artifact_id:

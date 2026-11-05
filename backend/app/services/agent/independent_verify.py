@@ -1215,6 +1215,7 @@ async def _verify_scoped_sql_candidate(
     from app.services.agent.scoped_assessment.sqli_string import (
         string_error_proof_valid, string_sql_proof_valid,
     )
+    from app.services.agent.scoped_assessment.sqli_time import time_sql_proof_valid
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
     if (cand.vulnerability_class or inferred_vulnerability_class(cand)) != "sql_injection":
@@ -1303,9 +1304,11 @@ async def _verify_scoped_sql_candidate(
             else:
                 recipe = result.get("proof_recipe")
                 kind = ("numeric_boolean_sqli" if hunter_kind == "scoped_numeric_sqli" else
-                        "string_error_sqli" if recipe == "string_error_v1" else "string_boolean_sqli")
+                        "string_error_sqli" if recipe == "string_error_v1" else
+                        "string_time_sqli" if recipe == "string_time_v1" else "string_boolean_sqli")
                 valid_recipe = (numeric_sql_proof_valid(result) if kind == "numeric_boolean_sqli" else
                                 string_error_proof_valid(result) if kind == "string_error_sqli" else
+                                time_sql_proof_valid(result) if kind == "string_time_sqli" else
                                 string_sql_proof_valid(result))
                 if not valid_recipe:
                     failure = "SQLi replay receipt failed recipe validation"

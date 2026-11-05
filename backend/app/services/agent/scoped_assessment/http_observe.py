@@ -113,12 +113,17 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
         headers["Cookie"] = cookies
     request = Request(url, headers=headers, method="GET")
     opener = build_opener(*assessment_urllib_handlers(), _NoRedirect())
+    # Wall-clock from first byte sent to full (bounded) body read. Used only as
+    # a coarse timing signal for differential time-based SQLi proofs; never a
+    # precise benchmark. perf_counter is monotonic and unaffected by clock steps.
+    started = time.perf_counter()
     try:
         response = opener.open(request, timeout=15)
     except HTTPError as error:
         response = error
     with response:
         data = response.read(MAX_BODY + 1)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
         truncated = len(data) > MAX_BODY
         data = data[:MAX_BODY]
         content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()[:100]
@@ -147,6 +152,7 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
             "content_type": content_type,
             "bytes_captured": len(data),
             "truncated": truncated,
+            "elapsed_ms": elapsed_ms,
             "body_sha256": hashlib.sha256(data).hexdigest(),
             "json_shape": shape,
             "json_array_lengths": json_array_lengths,
