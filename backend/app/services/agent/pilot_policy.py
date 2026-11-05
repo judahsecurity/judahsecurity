@@ -142,11 +142,15 @@ class PilotPolicy:
     expires_at_ms: int
     max_requests: int = 500
     interval_ms: int = 1000
+    web_only: bool = False
 
     @classmethod
     def from_config(cls, config: dict, organization_id: int, session_id: str) -> "PilotPolicy":
         if not isinstance(config, dict):
             raise PilotDenied("Pilot target and source IP are required")
+        if not isinstance(config.get("web_only", False), bool):
+            raise PilotDenied("Pilot web-only setting must be a boolean")
+        web_only = config.get("web_only", False)
         target = normalize_seed_target(config.get("target"))
         scheme, host, port = exact_origin(target)
         if not host or host.startswith("*."):
@@ -169,21 +173,30 @@ class PilotPolicy:
             target=target, source_ip=source_ip,
             organization_id=int(organization_id), session_id=str(session_id),
             expires_at_ms=expires_at_ms,
+            web_only=web_only,
         )
 
     def as_config(self) -> dict:
         return {"target": self.target, "source_ip": self.source_ip,
-                "expires_at_ms": self.expires_at_ms}
+                "expires_at_ms": self.expires_at_ms, "web_only": self.web_only}
 
     def check_request(self, url: str, method: str) -> None:
-        if request_origin(url)[1] != exact_origin(self.target)[1]:
-            raise PilotDenied("Out-of-scope pilot host blocked")
-        if str(method or "").upper() not in PILOT_METHODS:
-            raise PilotDenied("Pilot first pass allows GET, HEAD, and OPTIONS only")
+        if self.web_only:
+            if request_origin(url) != exact_origin(self.target):
+                raise PilotDenied("Web-only pilot requires the exact HTTPS origin and port")
+            if str(method or "").upper() not in {"GET", "HEAD"}:
+                raise PilotDenied("Web-only pilot allows GET and HEAD only")
+        else:
+            if request_origin(url)[1] != exact_origin(self.target)[1]:
+                raise PilotDenied("Out-of-scope pilot host blocked")
+            if str(method or "").upper() not in PILOT_METHODS:
+                raise PilotDenied("Pilot first pass allows GET, HEAD, and OPTIONS only")
         if int(time.time() * 1000) >= self.expires_at_ms:
             raise PilotDenied("Pilot window expired")
 
     def check_port_probe(self, port: int, protocol: str) -> None:
+        if self.web_only:
+            raise PilotDenied("Web-only pilot does not permit port probes")
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise PilotDenied("Port probe requires a port from 1 to 65535")
         if protocol not in {"tcp", "udp"}:
@@ -192,8 +205,13 @@ class PilotPolicy:
             raise PilotDenied("Pilot window expired")
 
     def check_tool(self, tool_name: str) -> None:
-        if tool_name not in PILOT_ALLOWED_TOOLS:
+        if tool_name not in self.allowed_tools:
             raise PilotDenied(f"Tool '{tool_name}' is unavailable in the bounded pilot")
+
+    @property
+    def allowed_tools(self) -> frozenset[str]:
+        return (PILOT_ALLOWED_TOOLS - {"probe_pilot_ports"}
+                if self.web_only else PILOT_ALLOWED_TOOLS)
 
     @property
     def budget_key(self) -> str:

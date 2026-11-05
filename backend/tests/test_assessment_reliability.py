@@ -268,6 +268,46 @@ async def test_bounded_pilot_browser_route_checks_each_request(monkeypatch):
         reset_pilot(token)
 
 
+def test_web_only_pilot_enforces_exact_origin_methods_and_no_ports():
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="203.0.113.25",
+        organization_id=98765, session_id="web-only-pilot",
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+        web_only=True,
+    )
+    policy.check_request("https://app.test/path", "GET")
+    policy.check_request("https://app.test:443/path", "HEAD")
+    for url, method in (
+        ("https://app.test/path", "POST"),
+        ("https://app.test/path", "OPTIONS"),
+        ("https://app.test:8443/path", "GET"),
+        ("http://app.test/path", "GET"),
+        ("https://other.test/path", "GET"),
+    ):
+        with pytest.raises(PilotDenied):
+            policy.check_request(url, method)
+    with pytest.raises(PilotDenied):
+        policy.check_port_probe(443, "tcp")
+    with pytest.raises(PilotDenied):
+        policy.check_tool("probe_pilot_ports")
+    policy.check_tool("compare_requests")
+    assert policy.as_config()["web_only"] is True
+
+
+def test_new_pilot_defaults_to_web_only_with_shorter_window(monkeypatch):
+    import app.services.agent.pilot_policy as pilot_policy
+    from app.api.routes.agent import _pilot_launch_config, _pilot_question
+
+    monkeypatch.setattr(pilot_policy, "configured_egress_ip", lambda: "1.1.1.1")
+    before = int(time.time() * 1000)
+    config = _pilot_launch_config({"target": "https://app.test"}, 98765, "web-default")
+    assert config["web_only"] is True
+    assert 5_399_000 <= config["expires_at_ms"] - before <= 5_401_000
+    question = _pilot_question("Test observed inputs", config, None, None)
+    assert "GET or HEAD only" in question
+    assert "No port probes" in question
+
+
 @pytest.mark.asyncio
 async def test_scoped_browser_route_blocks_unapproved_post():
     from app.services.agent.assessment_sessions import configure_browser_origin
