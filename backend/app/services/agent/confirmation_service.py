@@ -378,7 +378,8 @@ async def gate(
 
     policy_cfg = _load_policy(organization_id)
     from app.services.agent.pilot_policy import PILOT_NETWORK_TOOLS, current_pilot
-    pilot_network_action = current_pilot() is not None and tool_name in PILOT_NETWORK_TOOLS
+    pilot = current_pilot()
+    pilot_network_action = pilot is not None and tool_name in PILOT_NETWORK_TOOLS
     login_crawl = _is_login_crawl(tool_name, tool_args)
     if not policy_cfg.get("tool_confirmation_enabled", True) and not pilot_network_action and not login_crawl:
         if existing_token:
@@ -476,12 +477,19 @@ async def gate(
         # Unknown token → create a fresh request below.
 
     sanitized = {k: v for k, v in (tool_args or {}).items() if k != "_confirm_token"}
+    timeout_seconds = int(policy_cfg.get("tool_confirmation_timeout_seconds", 300))
+    if pilot_network_action:
+        # Slow model turns can outlast the normal five-minute review window.
+        # A Pilot still requires explicit approval, and its own deadline is
+        # the latest time an outstanding request may remain actionable.
+        remaining_seconds = max(1, int(pilot.expires_at_ms / 1000 - time.time()))
+        timeout_seconds = min(max(timeout_seconds, 900), remaining_seconds)
     pc = store.create(
         tool_name=tool_name,
         tool_args=sanitized,
         organization_id=organization_id,
         session_id=session_id,
-        timeout_seconds=int(policy_cfg.get("tool_confirmation_timeout_seconds", 300)),
+        timeout_seconds=timeout_seconds,
     )
     logger.info(
         "Agent confirmation requested: tool=%s org=%s session=%s token=%s",
