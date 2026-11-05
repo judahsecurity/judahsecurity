@@ -174,10 +174,12 @@ def _pilot_launch_config(raw: Optional[dict], organization_id: int, session_id: 
 
     if not isinstance(raw, dict):
         raise HTTPException(status_code=400, detail="Pilot target is required")
+    web_only = raw.get("web_only", True)
     config = {
         "target": (raw or {}).get("target"),
         "source_ip": configured_egress_ip(),
-        "expires_at_ms": int(time.time() * 1000) + 7_200_000,
+        "expires_at_ms": int(time.time() * 1000) + (5_400_000 if web_only is True else 7_200_000),
+        "web_only": web_only,
     }
     try:
         return PilotPolicy.from_config(config, organization_id, session_id).as_config()
@@ -202,6 +204,13 @@ def _pilot_question(question: str, config: dict, playbook_id: Optional[str],
     """Keep a pilot's seed target and objective tied to its server-validated host."""
     if playbook_id or load_session_id:
         raise HTTPException(status_code=400, detail="A bounded pilot requires a fresh, direct objective")
+    if config.get("web_only"):
+        return (
+            f"Pilot seed: {config['target']}/. Only this exact HTTPS origin and port. "
+            "Use anonymous GET or HEAD only. No port probes, scanners, logins, or writes. "
+            "Every network tool call requires analyst approval.\n"
+            f"Assessment objective: {question}"
+        )
     return (
         f"Pilot seed: {config['target']}/. Only assess this exact hostname or public IP. "
         "The seed is a starting web URL; other ports on this host may be probed within the shared budget. "

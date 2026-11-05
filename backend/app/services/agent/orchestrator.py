@@ -918,7 +918,12 @@ class AgentOrchestrator:
                 kickoff_brief = ""
         
         if mode == "pilot":
+            web_only = bool((state.get("pilot_policy") or {}).get("web_only"))
             kickoff_brief = (
+                "Bounded web-only pilot: automatic kickoff and scanners are disabled. "
+                "Use only anonymous GET/HEAD on the exact HTTPS origin and port; "
+                "no port probes. Every request uses the shared budget."
+                if web_only else
                 "Bounded pilot: automatic kickoff, Interceptor, scanner streams, "
                 "and directory brute force are disabled. Use only the allowed "
                 "browser and captured-request tools. The first pass permits "
@@ -1603,16 +1608,23 @@ class AgentOrchestrator:
             available_tools = get_phase_tools(phase)
             available_tools += self._unavailable_tools_note()
             if state.get("mode") == "pilot":
-                from app.services.agent.pilot_policy import PILOT_ALLOWED_TOOLS
-                from app.models.scan_schedule import CRITICAL_PORTS
-                available_tools = (
-                    "Bounded pilot tools only: " + ", ".join(sorted(PILOT_ALLOWED_TOOLS))
-                    + ". Network calls outside these tools are denied. "
-                    "Use anonymous GET/HEAD/OPTIONS on the exact target host; "
-                    "probe_pilot_ports(protocol='tcp'|'udp', ports=[...]) may check "
-                    "up to 20 ports per approved action under the shared budget. "
-                    "Platform critical-port categories: " + json.dumps(CRITICAL_PORTS)
-                )
+                from app.services.agent.pilot_policy import PILOT_ALLOWED_TOOLS, current_pilot
+                pilot = current_pilot()
+                if pilot is not None and pilot.web_only:
+                    available_tools = (
+                        "Web-only pilot tools: " + ", ".join(sorted(pilot.allowed_tools))
+                        + ". Only anonymous GET/HEAD on the exact HTTPS origin and port."
+                    )
+                else:
+                    from app.models.scan_schedule import CRITICAL_PORTS
+                    available_tools = (
+                        "Bounded pilot tools only: " + ", ".join(sorted(PILOT_ALLOWED_TOOLS))
+                        + ". Network calls outside these tools are denied. "
+                        "Use anonymous GET/HEAD/OPTIONS on the exact target host; "
+                        "probe_pilot_ports(protocol='tcp'|'udp', ports=[...]) may check "
+                        "up to 20 ports per approved action under the shared budget. "
+                        "Platform critical-port categories: " + json.dumps(CRITICAL_PORTS)
+                    )
 
             # Append prior session intelligence to knowledge context
             combined_knowledge = knowledge_context
@@ -1729,6 +1741,7 @@ class AgentOrchestrator:
                 knowledge_context=combined_knowledge,
                 qa_history=qa_history_formatted,
                 tool_recommendations=tool_recommendations,
+                pilot_web_only=bool((state.get("pilot_policy") or {}).get("web_only")),
             )
 
             # Get LLM decision
@@ -2229,8 +2242,11 @@ class AgentOrchestrator:
         # "walk the app first" rule: only promote once the capability map is ready
         # (execute_deep_crawl has produced a usable map).
         auto_promoted_phase: Optional[str] = None
-        from app.services.agent.pilot_policy import PILOT_ALLOWED_TOOLS
-        pilot_allowed = state.get("mode") == "pilot" and tool_name in PILOT_ALLOWED_TOOLS
+        from app.services.agent.pilot_policy import PILOT_ALLOWED_TOOLS, current_pilot
+        pilot = current_pilot()
+        pilot_allowed = state.get("mode") == "pilot" and tool_name in (
+            pilot.allowed_tools if pilot is not None else PILOT_ALLOWED_TOOLS
+        )
         if not pilot_allowed and not is_tool_allowed_in_phase(tool_name, phase):
             allowed_phases = TOOL_PHASE_MAP.get(tool_name, [])
             target_phase = (

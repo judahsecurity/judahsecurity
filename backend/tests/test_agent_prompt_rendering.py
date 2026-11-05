@@ -29,3 +29,10 @@ def test_pilot_prompt_uses_only_its_own_template() -> None:
 
     assert "sample-objective" in rendered
     assert "scoped_numeric_sqli" not in rendered
+
+
+def test_web_only_pilot_prompt_excludes_port_probe_guidance() -> None:
+    rendered = render_system_prompt(mode="pilot", pilot_web_only=True, **CONTEXT)
+    assert "GET and HEAD requests only" in rendered
+    assert "Do not probe ports" in rendered
+    assert "probe_pilot_ports" not in rendered
