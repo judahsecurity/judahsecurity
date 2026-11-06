@@ -495,6 +495,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _proof_plans = SessionValue(dict)
     _captured_proof_plans = SessionValue(dict)
     _request_capture_store = SessionValue(lambda: None)
+    _pilot_request_cookie_headers = SessionValue(dict)
     _scoped_browser_exchanges = SessionValue(dict)
     _scoped_sweep_responses = SessionValue(dict)
     _scoped_link_baselines = SessionValue(dict)
@@ -3044,8 +3045,50 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # Route MCP tools: execute_* and *_help (dynamic CLI + help)
         if tool_name.startswith("execute_") or tool_name.endswith("_help"):
             try:
-                mcp = self._get_mcp_server()
-                result = await mcp.call_tool(tool_name, tool_args)
+                if pilot is not None and tool_name == "execute_browser":
+                    from app.services.browser_automation_service import execute_browser_actions
+
+                    captured_keys = set()
+                    capture_store = self._capture_requests()
+
+                    def capture_pilot_request(request):
+                        # The browser callback supplies observed HTTP
+                        # responses. Store full URLs privately, before any
+                        # redacted result crosses an MCP or model boundary.
+                        if (len(captured_keys) >= 200 or not isinstance(request, dict)
+                                or request.get("method", "").upper() not in {"GET", "HEAD"}):
+                            return
+                        from urllib.parse import urlsplit
+                        if (not urlsplit(str(request.get("url") or "")).query
+                                and request.get("resource_type") not in {"document", "xhr", "fetch"}):
+                            return
+                        try:
+                            pilot.check_request(request["url"], request["method"])
+                        except (KeyError, ValueError, TypeError):
+                            return
+                        key = (request["method"].upper(), request["url"])
+                        if key in captured_keys:
+                            return
+                        captured_keys.add(key)
+                        captured = capture_store.record(
+                            request, identity="anonymous", source="pilot_browser",
+                        )
+                        if captured:
+                            cookie_header = next((str(value) for name, value in
+                                                  (request.get("headers") or {}).items()
+                                                  if str(name).lower() == "cookie"), "")
+                            if cookie_header:
+                                cookies = dict(self._pilot_request_cookie_headers)
+                                cookies[captured["id"]] = cookie_header
+                                self._pilot_request_cookie_headers = cookies
+
+                    result = await execute_browser_actions(
+                        tool_args["args"], capture_callback=capture_pilot_request,
+                        capture_non_2xx=True,
+                    )
+                else:
+                    mcp = self._get_mcp_server()
+                    result = await mcp.call_tool(tool_name, tool_args)
                 from app.services.mcp.cli_results import normalize_cli_result
                 result = normalize_cli_result(tool_name, result)
 
@@ -3247,7 +3290,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                             )
                     except Exception:
                         logger.exception("Could not record crawl parameter evidence")
-                if pilot is not None and tool_name == "execute_browser" and result.get("success"):
+                if pilot is not None and tool_name == "execute_browser":
                     from app.services.agent.pilot_policy import PILOT_METHODS
                     observed = []
                     for item in result.get("network_requests") or []:
@@ -6347,15 +6390,31 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
     async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:
         """Index captured XHR/API samples from the capability map for mutate_captured_request."""
-        from app.services.agent.request_mutate import samples_from_map, summarize_samples
+        from app.services.agent.request_mutate import sample_reference, samples_from_map, summarize_samples
+        from app.services.agent.pilot_policy import current_pilot
+        from urllib.parse import urlsplit, urlunsplit
 
         cmap = self._identity_captures.get(identity, {}) if identity is not None else (getattr(self, "_capability_map", None) or {})
         origin = ""
         if isinstance(cmap, dict):
             origin = str(cmap.get("target") or "")
         origin = origin or (getattr(self, "_fallback_target", None) or "") or (current_seed_target.get() or "")
-        samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
+        pilot = current_pilot()
+        if pilot is not None:
+            identity = None
+            origin = pilot.target
+            capture_store = self._capture_requests()
+            samples = [capture_store.get(row["id"])["request"] | {"capture_id": row["id"]}
+                       for row in capture_store.list() if row.get("source") == "pilot_browser"]
+            samples = list({sample_reference(sample): sample for sample in samples}.values())
+            samples.sort(key=lambda sample: (not bool(urlsplit(sample["url"]).query), sample["url"]))
+        else:
+            samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
         rows = summarize_samples(samples, fallback_origin=origin, limit=max(1, min(int(limit or 40), 80)))
+        if pilot is not None:
+            for row in rows:
+                parts = urlsplit(row["url"])
+                row["url"] = urlunsplit(parts._replace(query="", fragment=""))
         return json.dumps({
             "ok": True,
             "count": len(rows),
@@ -6365,6 +6424,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "next": (
                 "mutate_captured_request(sample_ref='req-...', location='query|header|body_json|body_form|path|method', "
                 "field='url', value='https://<interactsh>') — one field only."
+            ) if pilot is None else (
+                "Use mutate_captured_request with sample_ref, location='query', one listed field, "
+                "and a harmless value. It replays the private original request and its one-field mutation."
+            ) if rows else (
+                "No replayable GET/HEAD request was captured. Browser traffic metadata and XHR capture "
+                "are separate inventories; inspect an observed same-origin link or try a different page."
             ),
         }, indent=2)[:_tool_output_max_chars()]
 
@@ -6479,6 +6544,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         **kwargs: Any,
     ) -> str:
         """Change one field on a captured request and send it (Repeater + one mutation)."""
+        from app.services.agent.pilot_policy import current_pilot
+        from urllib.parse import urlsplit
         from app.services.agent.request_mutate import (
             apply_one_mutation,
             normalize_sample,
@@ -6491,7 +6558,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if isinstance(cmap, dict):
             origin = str(cmap.get("target") or "")
         origin = origin or (getattr(self, "_fallback_target", None) or "") or (current_seed_target.get() or "")
-        samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
+        pilot = current_pilot()
+        if pilot is not None:
+            use_auth_session = False
+            identity = None
+            origin = pilot.target
+            capture_store = self._capture_requests()
+            samples = [capture_store.get(row["id"])["request"] | {"capture_id": row["id"]}
+                       for row in capture_store.list() if row.get("source") == "pilot_browser"]
+            samples = list({sample_reference(sample): sample for sample in samples}.values())
+            samples.sort(key=lambda sample: (not bool(urlsplit(sample["url"]).query), sample["url"]))
+        else:
+            samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
         if sample_ref:
             matches = [(i, row) for i, row in enumerate(samples)
                        if isinstance(row, dict)
@@ -6525,6 +6603,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             )
         except ValueError as exc:
             return json.dumps({"ok": False, "error": str(exc)})
+
+        if pilot is not None:
+            # Browser state came from a fresh anonymous context. Keep any
+            # server-issued cookie paired with the original observed request.
+            compare = True
+            cookie_header = self._pilot_request_cookie_headers.get(str(sample.get("capture_id") or ""))
+            if cookie_header:
+                baseline["headers"]["Cookie"] = cookie_header
+                mutant["headers"]["Cookie"] = cookie_header
 
         if identity is not None and location == "header" and field.lower() in ("cookie", "authorization"):
             return json.dumps({"error": "Use explicit unauthenticated requests for credential-header mutations"})

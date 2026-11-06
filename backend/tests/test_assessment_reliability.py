@@ -160,14 +160,17 @@ async def test_browser_xss_dialog_links_probe_and_candidate_to_observed_input(ma
 
     url = "https://app.test/catalog?searchTerm=%5C%27%3Balert(1)%2F%2F"
 
-    async def browser_result(_name, _args):
+    async def browser_result(_args, *, capture_callback=None, capture_non_2xx=False):
         return {"success": True, "output": "Browser check completed", "browser_evidence": [{
             "url": url, "dialog_triggered": True, "alert_text": "1",
             "xss_detected": True, "status": 200,
         }]}
 
     monkeypatch.setattr(confirmation_service, "gate", allow_local)
-    manager._mcp_server = SimpleNamespace(call_tool=browser_result)
+    monkeypatch.setattr(
+        "app.services.browser_automation_service.execute_browser_actions",
+        browser_result,
+    )
     cell_id = coverage_cell_id(
         method="GET", path="/catalog", host="app.test", identity="anonymous",
         parameter="query:searchTerm", test_type="xss",
@@ -425,12 +428,15 @@ async def test_web_only_pilot_accepts_valid_browser_reads_with_implicit_port(man
 
     seen = []
 
-    async def call_tool(name, args):
-        seen.append((name, args))
+    async def browser_result(args, *, capture_callback=None, capture_non_2xx=False):
+        seen.append(args)
         return {"success": True, "output": "Read page"}
 
     monkeypatch.setattr(confirmation, "gate", allow)
-    manager._mcp_server = SimpleNamespace(call_tool=call_tool)
+    monkeypatch.setattr(
+        "app.services.browser_automation_service.execute_browser_actions",
+        browser_result,
+    )
     policy = PilotPolicy(
         target="https://app.test:443", source_ip="203.0.113.25",
         organization_id=98765, session_id="pilot-browser-read",
@@ -452,13 +458,13 @@ async def test_web_only_pilot_accepts_valid_browser_reads_with_implicit_port(man
                                 "actions": ["navigate", "get_source"]}),
         })
         assert result["success"] is True, result
-        assert json.loads(seen[-1][1]["args"])["actions"] == [
+        assert json.loads(seen[-1])["actions"] == [
             {"action": "navigate", "url": "https://app.test/catalog"},
             {"action": "get_source"},
         ]
         assert len(seen) == 3
-        assert all(json.loads(args["args"])["allowed_origin"].startswith("https://app.test")
-                   for _, args in seen)
+        assert all(json.loads(args)["allowed_origin"].startswith("https://app.test")
+                   for args in seen)
     finally:
         reset_pilot(token)
 

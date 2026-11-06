@@ -1104,9 +1104,11 @@ a shared fail-closed budget. Stop at the operator's deadline or budget limit.
 ## Test method
 Inspect the seed with execute_browser using navigate and get_source. Capture
 same-origin GET requests and their original query values. Call
-list_captured_requests once if browser traffic was captured; an empty XHR list
-does not mean ordinary page links were absent. Do not repeat the same seed
-navigation. Use structured replay tools for mutations. Give each eligible
+list_captured_requests once after browser traffic, including when navigation
+timed out but the result has request records. It lists private, replayable GET
+captures; an empty list does not mean ordinary page links were absent. Do not
+repeat the same seed navigation or read the same evidence page twice. Use
+structured replay tools for mutations. Give each eligible
 observed input one baseline and one harmless mutation before testing variants.
 Save evidence IDs for both responses. Triage SQLi response differences with
 paired controls and reflected XSS with execute_browser check_xss; reflection alone

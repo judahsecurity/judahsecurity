@@ -194,8 +194,7 @@ def apply_one_mutation(
 
 def _set_query(url: str, field: str, value: str) -> str:
     parsed = urlparse(url)
-    pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k != field]
-    pairs.append((field, value))
+    pairs = _replace_first_pair(parse_qsl(parsed.query, keep_blank_values=True), field, value)
     return urlunparse(parsed._replace(query=urlencode(pairs)))
 
 
@@ -221,9 +220,16 @@ def _set_json_field(body: str, field: str, value: str) -> str:
 
 
 def _set_form_field(body: str, field: str, value: str) -> str:
-    pairs = [(k, v) for k, v in parse_qsl(body, keep_blank_values=True) if k != field]
-    pairs.append((field, value))
-    return urlencode(pairs)
+    return urlencode(_replace_first_pair(parse_qsl(body, keep_blank_values=True), field, value))
+
+
+def _replace_first_pair(pairs: list[tuple[str, str]], field: str, value: str) -> list[tuple[str, str]]:
+    """Keep original field order and duplicate siblings when changing one value."""
+    for index, (key, _) in enumerate(pairs):
+        if key == field:
+            pairs[index] = (key, value)
+            return pairs
+    return [*pairs, (field, value)]
 
 
 def _maybe_json_value(value: str) -> Any:
