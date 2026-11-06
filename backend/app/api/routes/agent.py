@@ -108,6 +108,13 @@ class AgentAssessmentPolicy(BaseModel):
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
     owner_only_resources: list[OwnerOnlyResource] = Field(default_factory=list, max_length=8)
     auth_login_path: Optional[str] = None
+    # Explicit operator grants for lanes that are off by default. These arrive
+    # through /agent (operator-controlled), never a model tool, and are read by
+    # run_permissions.oob_callbacks_allowed / credential_testing_allowed, so the
+    # operator can enable them with a structured flag instead of phrasing the
+    # objective to match the authorization regex.
+    oob_callbacks_allowed: bool = False
+    credential_testing_allowed: bool = False
 
     @field_validator("auth_login_path")
     @classmethod

@@ -36,3 +36,23 @@ def test_oob_callbacks_require_a_separate_operator_grant():
     )
     assert oob_callbacks_allowed("I authorize out-of-band callbacks")
     assert oob_callbacks_allowed("Run a full assessment", {"oob_callbacks_allowed": True})
+
+
+def test_agent_policy_model_exposes_structured_grants():
+    """The /agent policy object can carry the grants without objective wording."""
+    from app.api.routes.agent import AgentAssessmentPolicy
+
+    default = AgentAssessmentPolicy().model_dump()
+    assert default["oob_callbacks_allowed"] is False
+    assert default["credential_testing_allowed"] is False
+    assert not oob_callbacks_allowed("Assess https://app.test", default)
+    assert not credential_testing_allowed("Assess https://app.test", default)
+
+    granted = AgentAssessmentPolicy(
+        oob_callbacks_allowed=True, credential_testing_allowed=True,
+    ).model_dump()
+    assert oob_callbacks_allowed("Assess https://app.test", granted)
+    assert credential_testing_allowed("Assess https://app.test", granted)
+
+    # An explicit objective veto still wins over the structured grant.
+    assert not oob_callbacks_allowed("Assess https://app.test. Do not use callbacks.", granted)
