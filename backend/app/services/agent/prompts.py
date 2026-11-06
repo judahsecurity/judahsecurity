@@ -390,7 +390,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **generate_authorization_matrix**, **run_authorization_proof**, **get_assessment_coverage**: Plan and execute identity-specific controlled setup/attack/verify workflows and track all matrix cells.
 - **browse_as_identity**: Browser capture in a fresh origin-bound registered identity context.
 - **validate_js_secret_candidate**: Operator-enabled provider hook; candidates never auto-publish.
-- **run_oob_callback_workflow**: Nuclei-style correlated OAST for one custom in-scope HTTP probe. It creates a fresh Interactsh session, injects the callback into one query/header/JSON/form/raw field, polls with a bounded cooldown, and returns execution-owned `evidence_ids` plus an `oob_callback` proof object for `record_verify_verdict`. Prefer this during independent verification. Raw bodies use `{{callback_url}}`.
+- **run_oob_callback_workflow**: Nuclei-style correlated OAST for one custom in-scope HTTP probe. It creates a fresh Interactsh session, injects the callback into one query/header/JSON/form/raw field, polls with a bounded cooldown, and returns execution-owned `evidence_ids` plus an `oob_callback` proof object for `record_verify_verdict`. Prefer this during independent verification. Raw bodies use `{{callback_url}}`. For **blind out-of-band SQLi** on an observed GET query field (no reflection, error, or timing signal), pass `sql_family` (mysql|postgresql|oracle|sqlserver) and `field=<parameter>`: the server builds a server-owned SQL payload embedding `{{callback_host}}` and injects it via `query_template`. Only when the run authorizes callbacks (operator grant); otherwise it returns `oob_callbacks_not_authorized`.
 - **replay_http_request**: Replay/tamper a captured XHR/API request from the capability map (like Burp Repeater-lite). Args: method, url, headers (dict), body (optional), sample_index (optional int into capability_map.api_samples), use_auth_session (default true — attaches cookies from deep_crawl login). Example: replay_http_request(sample_index=0) or replay_http_request(method="GET", url="https://target.com/api/users?id=1")
 - **mcp_connect**: Attach an external MCP server the operator already runs (Burp/Caido). Args: **url** (e.g. http://127.0.0.1:9876/sse), **name** (default burp). Then mcp_call.
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
@@ -947,10 +947,23 @@ scoped_string_sqli(url, parameter) runs bounded OR Boolean controls on one mappe
 string-valued GET field, including quote-error, escaped-quote, and repeated
 true/false responses. Small JSON result arrays use exact repeated body and
 result-count controls. If OR is unproven and the normal response is stable, it
-repeats a recognized database error or tries AND true/false controls. It can
+repeats a recognized database error or tries AND true/false controls. If those
+are still unproven it escalates automatically on the same baseline: UNION
+(a server-owned encoded marker reflected into the response, with column-count
+and reflected-cell discovery), then time-based (a conditional-sleep differential
+that must repeat). You do not request these separately — call scoped_string_sqli
+and read proof_confirmed; the recipe name (string_union_v1 / string_time_v1)
+shows which lane proved it. It can
 recover an ordinary browser link privately or preflight a one-field observed GET form.
 Use it for string filters such as
 category. A missing baseline leaves the input inconclusive; it is not clean.
+When reflection, error, and timing all stay inconclusive and the run authorizes
+callbacks, use run_oob_callback_workflow(sql_family=..., field=<parameter>) for a
+blind out-of-band proof on the same observed GET input.
+scoped_ingest_caido_exchange ingests one operator-proxied Caido request/response
+as an in-origin capture (credentials dropped; replay auth comes from a named
+identity), so the scoped SQLi/XSS lanes can replay traffic Caido saw, not only
+Judah's own browser captures.
 Its proof_confirmed flag is also one actor's evidence;
 submit a candidate and require a fresh independent verifier proof before
 create_finding. Never treat prior memory or JavaScript-only leads as proof.
@@ -972,9 +985,11 @@ For a scoped proof candidate, include the hunter tool evidence_id in
 submit_finding_candidate. A verifier must repeat the same operation with fresh
 browser capture when required, then call record_verify_verdict with both
 execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|
-"string_error_sqli"|"post_error_sqli"|"post_boolean_sqli"|"owner_only"|
-"public_directory_index"|"scoped_browser_xss",
+"string_error_sqli"|"string_union_sqli"|"string_time_sqli"|"post_error_sqli"|
+"post_boolean_sqli"|"owner_only"|"public_directory_index"|"scoped_browser_xss",
 "hunter_artifact_id":"...","artifact_id":"<fresh verifier evidence>"}.
+A blind OOB SQLi candidate instead uses the correlated callback proof
+{"kind":"oob_callback","register_id":"...","plant_id":"...","poll_id":"..."}.
 The proof gate checks both records, same target, and operation-specific evidence.
 Use scoped_assessment_summary and complete_scoped_assessment before reporting that a full assessment is complete.
 It requires a threat model, accounted coverage, and no pending verifier work.
