@@ -137,7 +137,9 @@ def _page_surface_summary(content: str, page_url: str) -> tuple[list[str], list[
     return links, forms
 
 
-async def execute_browser_actions(actions_json: str, *, capture_callback=None) -> Dict[str, Any]:
+async def execute_browser_actions(
+    actions_json: str, *, capture_callback=None, capture_non_2xx: bool = False,
+) -> Dict[str, Any]:
     """
     Execute a sequence of browser actions for security testing.
 
@@ -290,10 +292,13 @@ async def execute_browser_actions(actions_json: str, *, capture_callback=None) -
                         session.application_operations = merge_operations(
                             session.application_operations, operations
                         )
-                    if capture_callback is None or not 200 <= response.status < 300:
+                    if capture_callback is None or (not capture_non_2xx
+                                                    and not 200 <= response.status < 300):
                         return
                     capture_callback(dict(method=req.method, url=req.url,
-                                          headers=req.headers, body=req.post_data))
+                                          headers=req.headers, body=req.post_data,
+                                          resource_type=req.resource_type,
+                                          status=int(response.status)))
                 except Exception:
                     session.errors.append("Replay template capture failed")
             page.on("response", capture_response)
@@ -400,7 +405,28 @@ async def _execute_action(
         url = spec.get("url", "")
         if not url:
             return ActionResult(action="navigate", success=False, error="'url' required")
-        resp = await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        try:
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        except Exception as exc:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+            if not isinstance(exc, PlaywrightTimeoutError):
+                raise
+            # A slow DOMContentLoaded event can occur after the browser has
+            # already reached the requested page. Preserve that observation
+            # only when a substantive same-origin document is present.
+            from app.services.agent.evidence_store import origin
+            try:
+                same_origin = origin(page.url) == origin(url)
+                source = await asyncio.wait_for(page.content(), timeout=3)
+            except Exception:
+                same_origin, source = False, ""
+            if not same_origin or len(source) < 200:
+                raise
+            return ActionResult(action="navigate", success=True, data={
+                "url": page.url, "status": None, "partial": True,
+                "navigation_timeout": True,
+                "source_bytes": len(source.encode()),
+            })
         await asyncio.sleep(0.5)
         status = resp.status if resp else None
         title = await page.title()
