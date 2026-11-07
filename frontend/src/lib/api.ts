@@ -1186,6 +1186,12 @@ class ApiClient {
     return response.data;
   }
 
+  // Remediation retest: is the finding still reproducible after the fix?
+  async retestFinding(vulnId: number, notes?: string) {
+    const response = await this.client.post(`/vulnerabilities/${vulnId}/retest`, { notes: notes || undefined });
+    return response.data;
+  }
+
   async askLeo(vulnId: number) {
     const response = await this.client.post(`/vulnerabilities/${vulnId}/risk-assessment/ask`);
     return response.data;

@@ -724,6 +724,10 @@ def apply_oracle_migrations():
         "ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS token_usage JSONB",
         "ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION",
         "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS engagement_replay JSONB DEFAULT '[]'",
+        "ALTER TABLE finding_validations ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT 'validate'",
+        "ALTER TABLE finding_validations ADD COLUMN IF NOT EXISTS retest_outcome VARCHAR(30)",
+        "ALTER TABLE finding_validations ADD COLUMN IF NOT EXISTS retest_notes TEXT",
+        "CREATE INDEX IF NOT EXISTS ix_finding_validations_purpose ON finding_validations (purpose)",
         "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS token_usage JSONB",
         "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION",
 

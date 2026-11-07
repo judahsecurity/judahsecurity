@@ -20,6 +20,7 @@ from app.schemas.vulnerability import VulnerabilityCreate, VulnerabilityUpdate, 
 from app.api.deps import get_current_active_user, require_admin, require_analyst
 from app.schemas.finding_triage import FindingTriageWrite
 from app.services.finding_triage import asset_mentions, record_decision, target_host, triage_state
+from app.services.finding_retest import PURPOSE_RETEST, PURPOSE_VALIDATE
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,9 @@ def _validation_to_dict(v: FindingValidation) -> dict:
         "still_open": raw.get("still_open"),
         "logical_mismatch": raw.get("logical_mismatch"),
         "sanity_flags": raw.get("sanity_flags"),
+        "purpose": getattr(v, "purpose", None) or PURPOSE_VALIDATE,
+        "retest_outcome": getattr(v, "retest_outcome", None),
+        "retest_notes": getattr(v, "retest_notes", None),
         "requested_by_user_id": v.requested_by_user_id,
         "created_at": v.created_at,
         "started_at": v.started_at,
@@ -1779,26 +1783,16 @@ class DetectionFeedbackCreate(BaseModel):
     verdict: Optional[str] = "false_positive"
 
 
-@router.post("/{vuln_id}/validate")
-def validate_finding(
-    vuln_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_analyst),
-):
-    """Queue an on-demand revalidation of this finding.
-
-    The scanner worker replays the original detection path (nuclei template,
-    port probes, or stored steps_to_reproduce / evidence) against the live
-    target and writes a verdict back. Returns the queued FindingValidation
-    record; poll GET /vulnerabilities/{id}/validation for the result.
-    """
+def _queue_validation(db: Session, vuln_id: int, current_user: User, *, purpose: str,
+                      notes: Optional[str] = None) -> dict:
     vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
     if not vuln:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vulnerability not found")
     if not check_org_access(db, current_user, vuln.asset_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
-    # Avoid stacking duplicate in-flight validations for the same finding.
+    # Avoid stacking duplicate in-flight runs for the same finding: a retest
+    # and a validation run the same replay, so either one is reused.
     in_flight = db.query(FindingValidation).filter(
         FindingValidation.vulnerability_id == vuln.id,
         FindingValidation.status.in_([ValidationStatus.QUEUED, ValidationStatus.RUNNING]),
@@ -1813,6 +1807,8 @@ def validate_finding(
         vulnerability_id=vuln.id,
         organization_id=organization_id,
         status=ValidationStatus.QUEUED,
+        purpose=purpose,
+        retest_notes=(notes or "").strip()[:4000] or None,
         requested_by_user_id=current_user.id,
     )
     db.add(validation)
@@ -1823,6 +1819,44 @@ def validate_finding(
     send_validation_to_sqs(validation)  # best-effort; DB poll is the fallback
 
     return _validation_to_dict(validation)
+
+
+@router.post("/{vuln_id}/validate")
+def validate_finding(
+    vuln_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Queue an on-demand revalidation of this finding.
+
+    The scanner worker replays the original detection path (nuclei template,
+    port probes, or stored steps_to_reproduce / evidence) against the live
+    target and writes a verdict back. Returns the queued FindingValidation
+    record; poll GET /vulnerabilities/{id}/validation for the result.
+    """
+    return _queue_validation(db, vuln_id, current_user, purpose=PURPOSE_VALIDATE)
+
+
+class RetestRequest(BaseModel):
+    notes: Optional[str] = Field(None, max_length=4000, description="Fixed version, conditions or limits")
+
+
+@router.post("/{vuln_id}/retest")
+def retest_finding(
+    vuln_id: int,
+    body: Optional[RetestRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Queue a remediation retest: is this finding still reproducible after the fix?
+
+    Runs the same replay as validation and concludes still_reproducible,
+    fixed or cannot_confirm. ``fixed`` resolves the finding; a resolved
+    finding that is ``still_reproducible`` is reopened; ``cannot_confirm``
+    leaves the status alone. Poll GET /vulnerabilities/{id}/validation.
+    """
+    return _queue_validation(db, vuln_id, current_user, purpose=PURPOSE_RETEST,
+                             notes=body.notes if body else None)
 
 
 @router.get("/{vuln_id}/validation")
