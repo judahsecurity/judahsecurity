@@ -22,6 +22,9 @@ from urllib.parse import urlsplit
 PILOT_NETWORK_TOOLS = frozenset({
     "execute_browser", "replay_http_request", "compare_requests",
     "mutate_captured_request", "run_intruder_batch", "probe_pilot_ports",
+    # Bounded GET-only SQLi proof recipes. Each request reserves the shared
+    # pilot budget through pilot_request_gate before it is sent.
+    "scoped_string_sqli", "scoped_numeric_sqli",
 })
 PILOT_LOCAL_TOOLS = frozenset({
     "list_captured_requests", "plan_intruder_mutations", "get_coverage",
@@ -65,6 +68,10 @@ def pilot_tool_guidance(tools_manager, allowed_tools: frozenset[str]) -> str:
         "Only the fresh independent verifier calls record_verify_verdict. "
         "The hunter calls independent_verify(candidate_id?) after candidate submission, "
         "then create_finding only when the returned candidate is confirmed.",
+        "SQL injection: a status or size differential from replay/compare is only a lead. "
+        "Run scoped_string_sqli(url, parameter) (or scoped_numeric_sqli for numeric values) "
+        "on the observed GET input and submit a candidate only with its proof_confirmed=true "
+        "evidence_id; otherwise record the cell inconclusive with that receipt.",
         "Inspect JSON tool results for an error field even when the tool call completed. "
         "Correct an invalid argument from the listed signature; never guess another key.",
     ))
@@ -314,3 +321,22 @@ def set_pilot(policy: PilotPolicy | None):
 
 def reset_pilot(token) -> None:
     _pilot_policy.reset(token)
+
+
+def pilot_request_gate(url: str, method: str = "GET"):
+    """Return a synchronous before-request hook for worker-thread probes.
+
+    Scoped proof recipes send their requests from ``asyncio.to_thread``
+    workers, outside the async HTTP exchange that reserves the pilot budget.
+    The returned hook reserves one shared pilot request per call so those
+    recipes obey the same window, rate and budget. Outside a pilot it is a
+    no-op. ``asyncio.to_thread`` copies context, so the pilot is visible here.
+    """
+    pilot = current_pilot()
+    if pilot is None:
+        return lambda: None
+
+    def reserve() -> None:
+        asyncio.run(pilot.acquire(url, method))
+
+    return reserve

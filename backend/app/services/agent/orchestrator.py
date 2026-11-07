@@ -91,6 +91,31 @@ StatusCallback = Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
 # Per-request status callback stored in a ContextVar for thread/task safety.
 # This avoids the race condition of storing it as instance state on the singleton.
 _max_iterations_var: ContextVar[Optional[int]] = ContextVar('_max_iterations_var', default=None)
+
+# A planner that keeps choosing ``complete`` while a completion gate blocks it
+# makes no progress. Show it the block, then close the run as partial.
+MAX_CONSECUTIVE_COMPLETE_BLOCKS = 3
+COMPLETE_GATE_PARTIAL_REASON = (
+    "Completion gate blocked repeatedly; closing with a partial coverage report"
+)
+
+
+def _next_complete_block(state: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    previous = state.get("complete_blocks") or {}
+    return {"count": int(previous.get("count") or 0) + 1, "reason": str(reason or "")[:1500]}
+
+
+def _complete_block_note(complete_blocks: Optional[Dict[str, Any]]) -> str:
+    blocks = complete_blocks or {}
+    count = int(blocks.get("count") or 0)
+    if count < 1:
+        return ""
+    return (
+        f"YOUR LAST `complete` WAS BLOCKED ({count}/{MAX_CONSECUTIVE_COMPLETE_BLOCKS} "
+        "consecutive). Do not choose complete again until the blockers below are "
+        "resolved with a tool call; the run closes as partial at the limit.\n"
+        + str(blocks.get("reason") or "")[:1500]
+    )
 _status_callback_var: ContextVar[StatusCallback] = ContextVar('_status_callback_var', default=None)
 # Monotonic wall-clock deadline (time.monotonic() seconds) for the current turn.
 # Set at the start of every invoke/resume so the ReAct loop stops picking new
@@ -515,6 +540,14 @@ class AgentOrchestrator:
         reserve = getattr(settings, "AGENT_FINAL_REPORT_RESERVE_SECONDS", 90) or 90
         if budget > 0:
             budget = min(budget, max(1, hard_cap - reserve))
+        from app.services.agent.pilot_policy import current_pilot
+        pilot = current_pilot()
+        if pilot is not None:
+            # The bounded window is otherwise checked only when a request is
+            # sent, so a planner that stops calling tools could outlive it.
+            pilot_left = pilot.expires_at_ms / 1000.0 - time.time() - reserve
+            pilot_budget = max(1.0, pilot_left)
+            budget = min(budget, pilot_budget) if budget > 0 else pilot_budget
         if budget > 0:
             _turn_deadline_var.set(time.monotonic() + float(budget))
         else:
@@ -1244,6 +1277,20 @@ class AgentOrchestrator:
                     ))],
                 }
 
+        complete_blocks = state.get("complete_blocks") or {}
+        if int(complete_blocks.get("count") or 0) >= MAX_CONSECUTIVE_COMPLETE_BLOCKS:
+            last_block = str(complete_blocks.get("reason") or "")[:600]
+            return {
+                "task_complete": True,
+                "completion_reason": COMPLETE_GATE_PARTIAL_REASON,
+                "messages": [AIMessage(content=(
+                    "Completion stayed blocked after "
+                    f"{MAX_CONSECUTIVE_COMPLETE_BLOCKS} consecutive attempts. "
+                    "Closing this run with a partial coverage report; open cells remain.\n"
+                    + last_block
+                ))],
+            }
+
         limit_usd = price_limit_usd(get_price_limit(session_id) or state.get("price_limit_usd"))
         if over_budget(state.get("token_usage"), limit_usd):
             spent = float((state.get("token_usage") or {}).get("cost_usd") or 0)
@@ -1750,6 +1797,9 @@ class AgentOrchestrator:
 
             # Get LLM decision
             steer_prompt = "Based on the current state, what is your next action? Output EXACTLY ONE valid JSON object."
+            blocked_note = _complete_block_note(state.get("complete_blocks"))
+            if blocked_note:
+                steer_prompt = blocked_note + "\n\n" + steer_prompt
             if operator_steers:
                 steer_prompt = (
                     "OPERATOR STEER (highest priority this turn):\n"
@@ -1890,6 +1940,8 @@ class AgentOrchestrator:
             "prior_hunt_brief": prior_hunt_brief or None,
             "compacted_brief": compacted_brief or None,
             "price_limit_usd": limit_usd,
+            # Reset unless this step is a blocked complete (set below).
+            "complete_blocks": None,
         }
         if drain_trace_extra or compacted_brief:
             updates["execution_trace"] = merged_trace
@@ -1923,6 +1975,7 @@ class AgentOrchestrator:
                 updates["_decision"] = blocked
                 updates["_current_step"] = step.model_dump()
                 updates["messages"] = [AIMessage(content=tester_block)]
+                updates["complete_blocks"] = _next_complete_block(state, tester_block)
                 return updates
             brain_state = state.get("engagement_brain") or {}
             cmap = state.get("capability_map") or {}
@@ -1959,18 +2012,32 @@ class AgentOrchestrator:
                         blocked["tool_name"] = None
                         updates["_decision"] = blocked
                         updates["_current_step"] = step.model_dump()
-                        updates["messages"] = [AIMessage(content=(
+                        if state.get("pilot_policy"):
+                            remedy = (
+                                "In this bounded pilot, close each open cell with "
+                                "record_surface_coverage (finding | tested_clean | "
+                                "skipped with the reason, e.g. 'inconclusive after "
+                                "bounded probes: <evidence_id>'), "
+                                "independent_verify pending candidates, then complete. "
+                            )
+                        else:
+                            remedy = (
+                                "Prove or kill those cards (update_hypothesis), "
+                                "independent_verify pending candidates, "
+                                "assess_finding_risk on published medium+ findings, and "
+                                "record_surface_coverage for untested inventory "
+                                "(finding | tested_clean | skipped+reason), then complete. "
+                            )
+                        block_text = (
                             "Cannot complete yet — application assessment methodology incomplete.\n"
                             f"{progress.get('summary')}\n"
                             f"Blocking: {blocker_txt}\n\n"
-                            "Prove or kill those cards (update_hypothesis), "
-                            "independent_verify pending candidates, "
-                            "assess_finding_risk on published medium+ findings, and "
-                            "record_surface_coverage for untested inventory "
-                            "(finding | tested_clean | skipped+reason), then complete. "
-                            "Or set completion_reason to include 'defer methodologies' / "
+                            + remedy
+                            + "Or set completion_reason to include 'defer methodologies' / "
                             "'force complete' if intentionally skipping."
-                        ))]
+                        )
+                        updates["messages"] = [AIMessage(content=block_text)]
+                        updates["complete_blocks"] = _next_complete_block(state, block_text)
                         return updates
                 except Exception:
                     logger.exception("methodology complete-gate failed")
@@ -1981,11 +2048,13 @@ class AgentOrchestrator:
                     blocked["tool_name"] = None
                     updates["_decision"] = blocked
                     updates["_current_step"] = step.model_dump()
-                    updates["messages"] = [AIMessage(content=(
+                    gate_text = (
                         "Cannot complete — methodology gate failed closed. Continue the tester loop: "
                         "crawl, directory brute-force, parameter mining, then "
                         "fireteam_dispatch(specialists='auto')."
-                    ))]
+                    )
+                    updates["messages"] = [AIMessage(content=gate_text)]
+                    updates["complete_blocks"] = _next_complete_block(state, gate_text)
                     return updates
             updates["task_complete"] = True
             updates["completion_reason"] = decision.completion_reason or "Task completed"
@@ -3710,7 +3779,7 @@ class AgentOrchestrator:
                 completion_reason = self.tool_manager._scoped_assessment_partial_reason
             partial = partial_closure or any(phrase in completion_reason.lower() for phrase in (
                 "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
-                "planning model unavailable",
+                "planning model unavailable", "completion gate blocked repeatedly",
             )) or completion_reason.startswith("Pilot stopped after ")
             finish_run(run_id, "partial" if partial else ("completed" if response.task_complete else "paused"),
                        completion_reason)
@@ -3833,7 +3902,7 @@ class AgentOrchestrator:
             reason = str(final_state.get("completion_reason") or "")
             partial = any(phrase in reason.lower() for phrase in (
                 "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
-                "planning model unavailable",
+                "planning model unavailable", "completion gate blocked repeatedly",
             ))
             finish_run(run_id, "partial" if partial else ("completed" if result.task_complete else "paused"), reason)
             return result
@@ -3904,7 +3973,7 @@ class AgentOrchestrator:
             reason = str(final_state.get("completion_reason") or "")
             partial = any(phrase in reason.lower() for phrase in (
                 "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
-                "planning model unavailable",
+                "planning model unavailable", "completion gate blocked repeatedly",
             ))
             finish_run(run_id, "partial" if partial else ("completed" if result.task_complete else "paused"), reason)
             return result

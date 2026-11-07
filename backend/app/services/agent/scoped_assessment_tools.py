@@ -16,6 +16,7 @@ from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, url
 from app.services.agent.assessment_scope import assert_url_in_scope
 from app.services.agent.assessment_sessions import browser_storage_state, identity_registry
 from app.services.agent.evidence_store import evidence_store, verification_run
+from app.services.agent.pilot_policy import current_pilot, pilot_request_gate
 from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
     authz_proof, body_probe, browser, browser_post_replay, browser_traffic, http_observe,
@@ -1178,7 +1179,8 @@ class ScopedAssessmentTools:
         self._scoped_assessment_started = True
         state = self._scoped_state(identity, baseline)
         self._scoped_claim_gets(6)
-        if (artifact_id and json.loads(private).get("resource_type") in {"xhr", "fetch"}
+        if (artifact_id and current_pilot() is None
+                and json.loads(private).get("resource_type") in {"xhr", "fetch"}
                 and browser_post_replay.has_replayable_source(private, [allowed])):
             keys = sqli_boolean.CHECK_ORDER
             urls = (baseline, true_url, false_url, true_url, false_url, baseline)
@@ -1196,7 +1198,7 @@ class ScopedAssessmentTools:
                 baseline, true_url, false_url, nonce,
                 parameter=parameter, allowed_origins=[allowed],
                 storage_state=state,
-                before_request=lambda: None,
+                before_request=pilot_request_gate(baseline),
             )
         if artifact_id:
             result["source_artifact_id"] = artifact_id
@@ -1340,12 +1342,18 @@ class ScopedAssessmentTools:
             )
         self._scoped_assessment_started = True
         state = self._scoped_state(identity, baseline)
-        browser_ready = bool(private and json.loads(private).get("resource_type") in {"xhr", "fetch"}
+        # Browser replay bypasses the pilot's per-request reservation, so a
+        # bounded pilot always uses the gated direct GET recipe.
+        browser_ready = bool(private and current_pilot() is None
+                             and json.loads(private).get("resource_type") in {"xhr", "fetch"}
                              and browser_post_replay.has_replayable_source(private, [allowed]))
         self._scoped_claim_gets(9 if needs_preflight else 8)
         preflight = None
         if needs_preflight:
-            preflight = await asyncio.to_thread(http_observe.observe_get, baseline, [allowed], state)
+            gate = pilot_request_gate(baseline)
+            preflight = await asyncio.to_thread(
+                lambda: (gate(), http_observe.observe_get(baseline, [allowed], state))[1]
+            )
         if browser_ready:
             checks = await browser_post_replay.replay_observed_get_controls(
                 private, parameter=parameter, variants=variants,
@@ -1360,7 +1368,7 @@ class ScopedAssessmentTools:
                 baseline, variants, nonce,
                 parameter=parameter, allowed_origins=[allowed],
                 storage_state=state,
-                before_request=lambda: None,
+                before_request=pilot_request_gate(baseline),
             )
         if artifact_id:
             result["source_artifact_id"] = artifact_id
@@ -1407,7 +1415,7 @@ class ScopedAssessmentTools:
                     error_result = await asyncio.to_thread(
                         sqli_string.probe_string_error,
                         baseline, variants, parameter=parameter, allowed_origins=[allowed],
-                        storage_state=state, before_request=lambda: None,
+                        storage_state=state, before_request=pilot_request_gate(baseline),
                     )
             except Exception as exc:
                 result["error_followup_error"] = type(exc).__name__
@@ -1447,7 +1455,7 @@ class ScopedAssessmentTools:
                         baseline, and_variants, and_nonce,
                         parameter=parameter, allowed_origins=[allowed],
                         storage_state=state,
-                        before_request=lambda: None,
+                        before_request=pilot_request_gate(baseline),
                     )
             except Exception as exc:
                 # Preserve the completed OR receipt if the optional second
@@ -1485,7 +1493,7 @@ class ScopedAssessmentTools:
                         sqli_union.probe_string_union,
                         baseline, parameter=parameter, family=family,
                         allowed_origins=[allowed], storage_state=state,
-                        before_request=lambda: None,
+                        before_request=pilot_request_gate(baseline),
                     )
                 except Exception as exc:
                     result["union_followup_error"] = type(exc).__name__
@@ -1525,7 +1533,7 @@ class ScopedAssessmentTools:
                         sqli_time.probe_string_time,
                         baseline, time_variants, time_nonce,
                         parameter=parameter, family=family, allowed_origins=[allowed],
-                        storage_state=state, before_request=lambda: None,
+                        storage_state=state, before_request=pilot_request_gate(baseline),
                     )
                 except Exception as exc:
                     result["time_followup_error"] = type(exc).__name__

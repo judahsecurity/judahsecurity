@@ -663,6 +663,50 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
     )
 
 
+_SQL_HUNTER_RECEIPT_KINDS = frozenset({
+    "scoped_string_sqli", "scoped_numeric_sqli",
+    "scoped_body_sqli_error", "scoped_body_sqli_boolean",
+})
+
+
+def _unprovable_sql_candidate_gap(tools_manager: Any, cand: FindingCandidate) -> str:
+    """Explain why a SQLi candidate cannot be confirmed by a model verifier.
+
+    proof_policy requires a confirmed hunter receipt from a scoped SQLi recipe
+    (or an OOB workflow run) for every sql_injection proof kind. A candidate
+    built only from replay/compare differentials, such as a quote probe that
+    returned 500 against a 200 baseline, can never pass that gate, however many
+    verifier iterations run. Return a next-step message for that case, else "".
+    """
+    from app.services.agent.proof_policy import inferred_vulnerability_class
+
+    if (cand.vulnerability_class or inferred_vulnerability_class(cand)) != "sql_injection":
+        return ""
+    if cand.proof_run_id:
+        return ""
+    from app.services.agent.evidence_store import evidence_store
+
+    records = evidence_store(tools_manager).records
+    for artifact_id in cand.evidence_ids or []:
+        record = records.get(artifact_id)
+        if not record:
+            continue
+        kind = str(record.get("kind") or "")
+        if kind.startswith("oob") or "callback" in kind:
+            return ""
+        payload = record.get("payload") or {}
+        if kind in _SQL_HUNTER_RECEIPT_KINDS and payload.get("proof_confirmed") is True:
+            return ""
+    parameter = str(cand.parameter or "").partition(":")[2] or str(cand.parameter or "") or "<parameter>"
+    return (
+        "SQLi lead has no confirmed hunter proof receipt; a status or size differential "
+        "is a lead, not proof. Next step: run scoped_string_sqli(url="
+        f"{cand.target or '<observed GET URL>'}, parameter={parameter}) "
+        "(or scoped_numeric_sqli for a numeric value) and resubmit with its "
+        "proof_confirmed=true evidence_id."
+    )
+
+
 async def run_independent_verifiers(
     candidates: Iterable[FindingCandidate],
     *,
@@ -722,14 +766,38 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                gap = _unprovable_sql_candidate_gap(tools_manager, cand)
+                if gap:
+                    # Every SQLi proof kind needs a confirmed hunter receipt; a
+                    # model verifier cannot supply it, so do not spend turns.
+                    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                                  evidence=gap)
+                    live = _candidate(_brain(tools_manager), cand.id)
+                    return {
+                        "candidate_id": cand.id,
+                        "title": cand.title,
+                        "status": (live.status if live else "inconclusive"),
+                        "verifier_summary": gap,
+                        "key_findings": [],
+                        "tool_calls": 0,
+                        "error": "",
+                        "next_step": gap,
+                    }
                 report = await _run_specialist(
                     profile, mission, [cand.target], llm, tools_manager,
                 )
                 live = _candidate(_brain(tools_manager), cand.id)
                 if live and live.status == "pending":
                     # Narrative text cannot promote a candidate to confirmed.
-                    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
-                                  evidence="Verifier did not record a supported verdict")
+                    detail = " ".join(str(report.summary or report.error or "").split())[:400]
+                    apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                        evidence=(
+                            "Verifier did not record a supported verdict"
+                            + (f" (verdict={report.verdict})" if report.verdict else "")
+                            + (f": {detail}" if detail else "")
+                        ),
+                    )
                     live = _candidate(_brain(tools_manager), cand.id)
             finally:
                 verification_run.reset(token)

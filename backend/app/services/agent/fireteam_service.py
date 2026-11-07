@@ -1157,6 +1157,32 @@ def _fill_summary_contract(report: SpecialistReport, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+_HUNTER_WORKFLOW = """\
+2. Code-first: list_captured_requests → mutate_captured_request using sample_ref (one field) or run_custom_probe.
+   JS: fetch_lazy_chunks → extract_js_endpoints → ingest_urls_into_map. API profile: fingerprint_api.
+   For lists (paths/params/xss) call mutate_list once — do not ReAct them.
+3. Blind SSRF/XXE: execute_interactsh register, plant payload_url. Never 169.254.169.254 or localhost."""
+
+_HUNTER_REPORTING = """\
+6. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
+   Write demonstrated-compromise reports (description + impact + assets + remediation),
+   not 'login worked' or template-match-only."""
+
+# The verifier cannot call the hunter workflow tools, and its only durable
+# output is record_verify_verdict. A done=true JSON verdict is never applied.
+_VERIFIER_WORKFLOW = """\
+2. Reproduce the candidate with your own requests from the AVAILABLE TOOLS list only.
+   For SQL injection call scoped_string_sqli / scoped_numeric_sqli on the candidate URL and
+   parameter; a bare status or size differential is not proof.
+3. Your verdict counts ONLY when you call record_verify_verdict(candidate_id, verdict, evidence,
+   evidence_ids, proof). verdict is confirmed | refuted | inconclusive."""
+
+_VERIFIER_REPORTING = """\
+6. Before done=true you MUST call record_verify_verdict. If you cannot reproduce the proof within
+   your iterations, call it with verdict=inconclusive, your own evidence_ids, and evidence naming
+   the specific next step. Never call create_finding or submit_finding_candidate."""
+
+
 _SPECIALIST_SYSTEM_PROMPT = """\
 You are {epithet}, a specialist sub-agent in Judah Security's Aegis fireteam.
 Other specialists run in parallel. Stay strictly in your lane.
@@ -1181,10 +1207,7 @@ PALACE / HUNT NOTES (compact — URL, param, hypothesis, next mutation):
 
 INSTRUCTIONS:
 1. Obey the operation directive (goal, PASS/KILL, hypothesis ids).
-2. Code-first: list_captured_requests → mutate_captured_request using sample_ref (one field) or run_custom_probe.
-   JS: fetch_lazy_chunks → extract_js_endpoints → ingest_urls_into_map. API profile: fingerprint_api.
-   For lists (paths/params/xss) call mutate_list once — do not ReAct them.
-3. Blind SSRF/XXE: execute_interactsh register, plant payload_url. Never 169.254.169.254 or localhost.
+{workflow}
 4. Think briefly about which tool(s) will most quickly prove or kill the hypothesis.
 5. Respond ONLY with a JSON object of this shape:
 
@@ -1210,9 +1233,7 @@ INSTRUCTIONS:
      "rewrite_hint": "if retry: what to try differently"
    }}
 
-6. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
-   Write demonstrated-compromise reports (description + impact + assets + remediation),
-   not 'login worked' or template-match-only.
+{reporting}
 7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
 8. Work only on the single leased hypothesis or exact parameter coverage cell in the directive. Return one hypothesis_results entry when a hypothesis ID is leased; sibling tests stay open. Pass hypothesis_id and coverage_cell_id to replay_http_request/compare_requests when available. A scoped_input_probe_assigned receipt belongs to its exact coverage cell and lease; a negative receipt for one technique is inconclusive for the whole input. Only independent verification marks proven.
 9. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
@@ -1401,6 +1422,7 @@ async def _run_specialist(
     except Exception:
         logger.debug("specialist hunt-brief skipped", exc_info=True)
 
+    verifier_profile = profile.name == "independent_verifier"
     sys_prompt = _SPECIALIST_SYSTEM_PROMPT.format(
         epithet=profile.epithet or profile.name,
         role=profile.role,
@@ -1411,6 +1433,8 @@ async def _run_specialist(
         memory=memory_block,
         max_iter=max_iter,
         suffix=suffix,
+        workflow=_VERIFIER_WORKFLOW if verifier_profile else _HUNTER_WORKFLOW,
+        reporting=_VERIFIER_REPORTING if verifier_profile else _HUNTER_REPORTING,
     )
 
     messages: list = [SystemMessage(content=sys_prompt)]

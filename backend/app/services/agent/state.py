@@ -336,6 +336,8 @@ class AgentState(TypedDict, total=False):
     prior_hunt_brief: Optional[str]
     compacted_brief: Optional[str]
     price_limit_usd: Optional[float]
+    # Consecutive blocked `complete` decisions: {count, reason}.
+    complete_blocks: Optional[Dict[str, Any]]
 
 
 def format_todo_list(todo_list: List[Dict[str, Any]]) -> str:

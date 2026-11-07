@@ -4082,7 +4082,18 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
     for cell in cells:
         cell_status = str(cell.get("status") or "untested")
         cell_counts[cell_status] = cell_counts.get(cell_status, 0) + 1
-    open_cells = [cell for cell in cells if cell.get("status") not in CELL_TERMINAL]
+    from app.services.agent.pilot_policy import current_pilot
+
+    bounded_pilot = current_pilot() is not None
+    # A bounded pilot cannot keep retrying: an inconclusive cell that holds
+    # probe evidence is accounted for there (it is still reported as
+    # inconclusive). Untested cells and cells without evidence stay open.
+    open_cells = [
+        cell for cell in cells
+        if cell.get("status") not in CELL_TERMINAL
+        and not (bounded_pilot and cell.get("status") == "inconclusive"
+                 and cell.get("evidence_ids"))
+    ]
     pending_proofs = [
         row
         for row in (brain.proof_escalations or [])
