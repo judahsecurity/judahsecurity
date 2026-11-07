@@ -111,13 +111,9 @@ class PenetrationTaskGraph:
         }
         for n in self.nodes.values():
             waiting_on = [
-                self.nodes[dep_id].title
+                self.nodes[dep_id].title if dep_id in self.nodes else dep_id
                 for dep_id in n.depends_on
-                if dep_id in self.nodes
-                and self.nodes[dep_id].status not in (
-                    _TERMINAL if n.source == "chain"
-                    else _TERMINAL | {NODE_RUNNING, NODE_RETRY}
-                )
+                if not _dependency_ready(self, n, dep_id)
             ]
             row = {
                 "id": n.id,
@@ -132,7 +128,8 @@ class PenetrationTaskGraph:
                 "lease_deadline": n.lease_deadline,
                 "recovery_required": n.recovery_required,
                 "blocked_reason": n.blocked_reason or (
-                    "Waiting for prerequisite: " + ", ".join(waiting_on[:3])
+                    ("Prerequisite not proven: " if n.source == "chain"
+                     else "Waiting for prerequisite: ") + ", ".join(waiting_on[:3])
                     if n.status == NODE_BLOCKED and waiting_on else ""
                 ),
             }
@@ -272,20 +269,20 @@ def _apply_default_dependencies(graph: PenetrationTaskGraph, hyps: Sequence[Any]
         node.depends_on = deps
 
 
+def _dependency_ready(graph: PenetrationTaskGraph, node: TaskNode, dep_id: str) -> bool:
+    dep = graph.nodes.get(dep_id)
+    if dep is None:
+        return False
+    # A follow-up attack chain requires a successful prerequisite. A killed
+    # hypothesis is terminal, but it cannot supply the access or fact needed
+    # by the next step. Other explicit edges retain their existing semantics.
+    if node.source == "chain":
+        return dep.status == NODE_PROVEN
+    return dep.status in _TERMINAL | {NODE_RUNNING, NODE_RETRY}
+
+
 def _deps_satisfied(graph: PenetrationTaskGraph, node: TaskNode) -> bool:
-    for dep_id in node.depends_on:
-        dep = graph.nodes.get(dep_id)
-        if dep is None:
-            continue
-        # Chain cards need a terminal parent. Other explicit parent edges may
-        # proceed after the parent has started, without waiting for a verdict.
-        if node.source == "chain":
-            if dep.status not in _TERMINAL:
-                return False
-        else:
-            if dep.status not in _TERMINAL | {NODE_RUNNING, NODE_RETRY}:
-                return False
-    return True
+    return all(_dependency_ready(graph, node, dep_id) for dep_id in node.depends_on)
 
 
 def _recompute_readiness(graph: PenetrationTaskGraph) -> None:
@@ -301,11 +298,10 @@ def _recompute_readiness(graph: PenetrationTaskGraph) -> None:
             continue
         if node.status in _TERMINAL | {NODE_RUNNING}:
             continue
-        if node.status == NODE_RETRY and node.attempts < node.max_attempts:
-            node.status = NODE_READY
-            continue
         if not _deps_satisfied(graph, node):
             node.status = NODE_BLOCKED
+        elif node.status == NODE_RETRY and node.attempts < node.max_attempts:
+            node.status = NODE_READY
         elif node.status in (NODE_PENDING, NODE_BLOCKED, NODE_READY):
             node.status = NODE_READY
 
