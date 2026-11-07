@@ -211,6 +211,27 @@ class EvidenceStore:
                     return record
         return None
 
+    def search_view(self, artifact_id: str, max_chars: int = 8192) -> dict | None:
+        """Expose bounded redacted text for matching, without copying the payload."""
+        record = self._get_record(artifact_id)
+        if record is None:
+            return None
+        remaining = max(1, min(int(max_chars), 16384))
+        parts: list[str] = []
+        for chunk in json.JSONEncoder(default=str).iterencode(record["payload"]):
+            parts.append(chunk[:remaining])
+            remaining -= len(parts[-1])
+            if remaining <= 0:
+                break
+        searchable = " ".join(str(record.get(key) or "") for key in (
+            "kind", "hypothesis_id", "operation_id", "coverage_cell_id",
+            "parameter", "test_type",
+        ))
+        return {
+            "verifier_run_id": str(record.get("verifier_run_id") or ""),
+            "search_text": searchable + " " + "".join(parts),
+        }
+
     def _load_persisted(self) -> None:
         root = self._root()
         if root is None or not root.exists():
