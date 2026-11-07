@@ -24,6 +24,7 @@ from app.services.agent.penetration_task_graph import (
     ExecutorSummary,
     PenetrationTaskGraph,
     TaskNode,
+    _recompute_readiness,
     apply_executor_summary,
     claim_task_leases,
     compact_scheduler_mission,
@@ -150,6 +151,45 @@ def test_dependency_block_has_an_explainable_snapshot_reason():
                   if row["id"] == "child")
     assert "Map live input" in reason
     assert graph.nodes["child"].blocked_reason == ""
+
+
+def test_chain_waits_for_proven_parent_even_after_retry_or_restart():
+    graph = PenetrationTaskGraph(nodes={
+        "parent": TaskNode(id="parent", title="Establish test identity",
+                           specialist="auth", status="ready"),
+        "child": TaskNode(id="child", title="Test authenticated endpoint",
+                          specialist="api_authz", source="chain", status="retry",
+                          depends_on=["parent"], attempts=1),
+    })
+
+    _recompute_readiness(graph)
+    assert graph.nodes["child"].status == NODE_BLOCKED
+
+    graph.nodes["parent"].status = "killed"
+    _recompute_readiness(graph)
+    assert graph.nodes["child"].status == NODE_BLOCKED
+    assert "Establish test identity" in graph.snapshot()["blocked"][0]["blocked_reason"]
+
+    graph.nodes["parent"].status = "proven"
+    _recompute_readiness(graph)
+    assert graph.nodes["child"].status == NODE_READY
+
+    del graph.nodes["parent"]
+    _recompute_readiness(graph)
+    assert graph.nodes["child"].status == NODE_BLOCKED
+    assert "parent" in graph.snapshot()["blocked"][0]["blocked_reason"]
+
+
+def test_nonchain_dependency_can_start_after_parent_starts():
+    graph = PenetrationTaskGraph(nodes={
+        "parent": TaskNode(id="parent", title="Map inputs", specialist="app_mapper",
+                           status="running"),
+        "child": TaskNode(id="child", title="Probe inputs", specialist="injection",
+                          status="pending", depends_on=["parent"]),
+    })
+
+    _recompute_readiness(graph)
+    assert graph.nodes["child"].status == NODE_READY
 
 
 def test_ready_wave_is_specialists_not_every_card():
