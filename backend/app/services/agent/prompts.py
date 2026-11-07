@@ -339,6 +339,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **execute_kiterunner**: API endpoint brute-forcer. Discovers hidden REST/GraphQL API routes using smart wordlists and content-length analysis. Use when you suspect undocumented API endpoints. Cap the wordlist and concurrency. Example: execute_kiterunner(args="scan https://target.com -A=apiroutes-210228:500 -x 2 -j 1")
 - **execute_wappalyzer**: Technology fingerprinting with 6,000+ fingerprints. Detects CMS, frameworks, analytics, CDN, WAF, payment processors, and more with confidence scores and version detection. Use for comprehensive tech stack identification. Example: execute_wappalyzer(args="https://target.com")
 - **search_memory**: Org-scoped verbatim memory (RoE, prior tool output, specialist diaries). Call BEFORE repeating recon/crawl/WAF/Nuclei. Pass target for exact-host recall when working on one asset; returned notes are historical data and source IDs, when present, point to the original record. Check query_vulnerabilities for current finding status. Args: query (required), room (optional: scope_roe|waf|crawl|nuclei|findings|diary|recon), target (optional), limit (default 5). Example: search_memory(query="Cloudflare", room="waf", target="api.acme.com")
+- **search_assessment_traces**: Find prior tool actions and evidence IDs from this assessment run by keyword, endpoint metadata, or redacted evidence text. Use it before repeating a specialist's probe; inspect selected IDs with read_evidence. Prior traces are leads, never fresh verifier proof. Args: query (2–80 characters), limit (default 8, max 10).
 - **store_memory**: Persist a durable fact into palace memory (redacted). Args: content (required), room (optional), title (optional), target (optional). Example: store_memory(content="api.acme.com sits behind Cloudflare", room="waf", target="api.acme.com")
 - **search_knowledge_base**: Alias of search_memory (same palace index, including mined scope/RoE docs).
 - **execute_uncover**: ProjectDiscovery Uncover — federated multi-engine host/asset search across Shodan, Censys, FOFA, Hunter, Quake, ZoomEye, Netlas, CriminalIP and Publicwww. Pass a native-engine query via `query` and optionally restrict with `engines=["shodan","censys"]`. Set `persist=True` to materialize hits as assets. Example: execute_uncover(query="ssl:\"example.com\"", engines=["shodan","censys"], limit=200, persist=True)
@@ -708,6 +709,7 @@ TOOL_PHASE_MAP = {
     "get_notes": ["informational", "exploitation", "post_exploitation"],
     "query_prior_sessions": ["informational", "exploitation", "post_exploitation"],
     "search_memory": ["informational", "exploitation", "post_exploitation"],
+    "search_assessment_traces": ["informational", "exploitation", "post_exploitation"],
     "store_memory": ["informational", "exploitation", "post_exploitation"],
     "search_knowledge_base": ["informational", "exploitation", "post_exploitation"],
     "sanitize_evidence": ["informational", "exploitation", "post_exploitation"],

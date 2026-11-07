@@ -701,6 +701,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             # Knowledge base (RAG) search — palace-backed
             "search_knowledge_base": self.search_knowledge_base,
             "search_memory": self.search_memory,
+            "search_assessment_traces": self.search_assessment_traces,
             "store_memory": self.store_memory,
             # Offensive workflow tools
             "validate_finding": self.validate_finding,
@@ -6215,6 +6216,27 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             {"query": query, "target": target, "count": len(rows), "results": rows},
             indent=2,
         )[:_tool_output_max_chars()]
+
+    async def search_assessment_traces(self, query: str, limit: int = 8) -> str:
+        """Find prior specialist actions in this run by redacted evidence text."""
+        from app.services.agent.action_ledger import active_run_id
+        from app.services.agent.evidence_store import evidence_store, verification_run
+        from app.services.agent.trace_search import search_assessment_traces
+
+        user_id, org_id = get_tenant_context()
+        session_id = current_session_id.get()
+        run_id = active_run_id.get()
+        if verification_run.get():
+            return json.dumps({"error": "trace search is unavailable during independent verification"})
+        if not all((user_id, org_id, session_id, run_id)):
+            return json.dumps({"error": "active assessment context required"})
+        with SessionLocal() as db:
+            result = search_assessment_traces(
+                db, evidence_store(self), run_id=run_id,
+                organization_id=org_id, user_id=user_id,
+                session_id=session_id, query=query, limit=limit,
+            )
+        return json.dumps(result)[:_tool_output_max_chars()]
 
     async def store_memory(
         self,

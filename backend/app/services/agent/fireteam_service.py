@@ -1357,6 +1357,9 @@ async def _run_specialist(
         allowed_tools.extend(t for t in ("check_test_identity", "test_authorization_boundary", "run_assessment_workflow") if t not in allowed_tools)
     if "search_memory" not in allowed_tools:
         allowed_tools.append("search_memory")
+    if (profile.name not in {"independent_verifier", "finding_judge", "risk_assessor"}
+            and "search_assessment_traces" not in allowed_tools):
+        allowed_tools.append("search_assessment_traces")
     from app.services.agent.pilot_policy import current_pilot
 
     pilot = current_pilot()
