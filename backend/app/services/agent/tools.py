@@ -785,6 +785,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         tools["search_vulnx"] = self.search_vulnx       # single CVE deep-dive by ID
         tools["vulnx_query"] = self.vulnx_query         # search CVEs by technology/query
         tools["search_traffic"] = self.search_traffic   # recorded agent + extension traffic
+        tools["search_run_digest"] = self.search_run_digest  # sibling-specialist leads (read-only)
         tools.update({name: getattr(self, name) for name in CAPABILITY_TOOLS})
         return tools
 
@@ -832,6 +833,55 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             db.rollback()
             logger.debug("finding traffic binding failed", exc_info=True)
             return 0
+
+    async def search_run_digest(
+        self,
+        query: Optional[str] = None,
+        kind: Optional[str] = None,
+        limit: int = 20,
+    ) -> str:
+        """Search what other specialists in this run already tried and concluded (read-only).
+
+        Returns short program-written lines: kind=tried (tool, method path -> status,
+        identity) and kind=outcome (verdict + key findings), plus recon observations.
+        Use it before re-fetching pages or re-testing a hypothesis a sibling already
+        killed. Entries are leads: re-verify before relying on one, and never cite
+        a digest line as proof. Your own lines are not returned.
+        Args: query (substring of target/summary), kind (tried|outcome|observation), limit.
+        """
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.run_digest import current_specialist, run_digest
+
+        limit = max(1, min(int(limit or 20), 50))
+        kind = (kind or "").strip().lower()
+        needle = (query or "").strip().lower()
+        entries = [] if kind == "observation" else run_digest(self).search(
+            query=needle, kind=kind, exclude_specialist=current_specialist.get(), limit=limit,
+        )
+        observations = []
+        if kind in ("", "observation"):
+            from app.services.agent.observability import redact_string
+
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            for row in reversed(brain.recon_observations or []):
+                if not isinstance(row, dict):
+                    continue
+                line = f"{row.get('kind', '')} {row.get('target', '')} {row.get('value', '')}"
+                if needle and needle not in line.lower():
+                    continue
+                observations.append({
+                    "kind": "observation", "observation_kind": row.get("kind"),
+                    "target": redact_string(str(row.get("target") or ""))[:300],
+                    "value": redact_string(str(row.get("value") or ""))[:200],
+                    "source": row.get("source"),
+                })
+                if len(observations) >= limit:
+                    break
+        return json.dumps({
+            "note": "Leads from sibling specialists and recon. Not evidence; re-verify before use.",
+            "entries": entries,
+            "observations": observations,
+        }, default=str)
 
     async def search_traffic(
         self,
