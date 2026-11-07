@@ -2694,6 +2694,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getExplorationGraph(sessionId: string) {
+    const response = await this.client.get(`/agent/conversations/${sessionId}/exploration-graph`);
+    return response.data as ExplorationGraph;
+  }
+
   async deleteAgentConversation(sessionId: string) {
     const response = await this.client.delete(`/agent/conversations/${sessionId}`);
     return response.data;
@@ -3809,6 +3814,31 @@ export interface FindingTrafficRef {
   artifact_id?: string | null;
   exchange: TrafficSummary | null;
   pending: boolean;
+}
+
+export type ExplorationNodeType = 'asset' | 'observation' | 'hypothesis' | 'candidate' | 'finding';
+
+export interface ExplorationCoverage {
+  observations: number; hypotheses: number; proven: number; killed: number; open: number;
+  blocked: number; running: number; candidates: number; findings: number;
+}
+
+export interface ExplorationNode {
+  id: string;
+  type: ExplorationNodeType;
+  label: string;
+  [key: string]: any;
+  coverage?: ExplorationCoverage;
+}
+
+export interface ExplorationGraph {
+  target?: string;
+  phase?: string;
+  saved_at?: number | null;
+  nodes: ExplorationNode[];
+  edges: { source: string; target: string; kind: string }[];
+  counts: Partial<Record<ExplorationNodeType, number>>;
+  truncated: boolean;
 }
 
 export const api = new ApiClient();

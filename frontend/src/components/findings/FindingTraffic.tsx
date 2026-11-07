@@ -91,7 +91,7 @@ export function FindingTraffic({ findingId, host }: { findingId: number; host?: 
                   Exchange {ref.artifact_id?.slice(0, 8)} is still being recorded, or has expired.
                 </span>
               )}
-              <span className="shrink-0 text-[10px] text-muted-foreground">{ref.bound_by}</span>
+              <span className="shrink-0 text-[10px] text-muted-foreground">{ref.bound_by === 'user' ? 'added by analyst' : 'bound by agent'}</span>
               <Button size="icon" variant="ghost" className="h-6 w-6" aria-label="Remove exchange" onClick={() => unbind(ref.ref_id)}>
                 <X className="h-3 w-3" />
               </Button>
