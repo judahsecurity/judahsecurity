@@ -87,6 +87,7 @@ import {
 } from '@/components/ui/select';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
+import { FindingTraffic } from '@/components/findings/FindingTraffic';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -2946,6 +2947,11 @@ export default function FindingsPage() {
               />
               }
               validation={<>
+              {selectedFinding && (
+                <div className="pt-4 border-t border-border">
+                  <FindingTraffic findingId={selectedFinding.id} />
+                </div>
+              )}
               {/* Validate with agent */}
               <div className="space-y-3 pt-4 border-t border-border">
                 <div className="flex items-center justify-between gap-2">

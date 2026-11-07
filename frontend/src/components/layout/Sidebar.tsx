@@ -30,6 +30,7 @@ import {
   FileCode,
   ShieldOff,
   Workflow,
+  Activity,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/store/auth';
@@ -68,6 +69,7 @@ const navigationGroups = [
       { name: 'Ports', href: '/ports', icon: Network },
       { name: 'Discovery', href: '/discovery', icon: Search },
       { name: 'Agents', href: '/agent', icon: MessageSquare },
+      { name: 'Traffic', href: '/traffic', icon: Activity },
       { name: 'Pentest', href: '/pentest', icon: Crosshair },
       { name: 'Integrations', href: '/integrations', icon: Plug },
     ],
