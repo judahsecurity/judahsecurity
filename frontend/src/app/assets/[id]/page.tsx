@@ -78,6 +78,7 @@ import { SitemapInventory } from '@/components/assets/SitemapInventory';
 import { DiscoveryPath } from '@/components/assets/DiscoveryPath';
 import { AddFindingDialog } from '@/components/findings/AddFindingDialog';
 import { LaunchAssessmentDialog } from '@/components/agent/LaunchAssessmentDialog';
+import { CensysMappedFields } from '@/components/integrations/CensysMappedFields';
 
 interface Technology {
   name: string;
@@ -1072,6 +1073,9 @@ export default function AssetDetailPage() {
                     <span className="text-muted-foreground">Device Subclasses</span>
                     <span className="font-medium">{asset.device_subclass || '—'}</span>
                   </div>
+                </div>
+                <div className="mt-4">
+                  <CensysMappedFields values={asset.metadata_?.censys_asm?.custom} />
                 </div>
           </CardContent>
         </Card>

@@ -705,6 +705,7 @@ def apply_oracle_migrations():
         # ── Censys ASM integration schema migrations ──────────────────────────
         "ALTER TABLE censys_asm_integrations ADD COLUMN IF NOT EXISTS continuous_sync_enabled BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE censys_asm_integrations ADD COLUMN IF NOT EXISTS sync_interval_minutes   INTEGER NOT NULL DEFAULT 360",
+        "ALTER TABLE censys_asm_integrations ADD COLUMN IF NOT EXISTS field_mappings JSONB NOT NULL DEFAULT '[]'",
 
         # ── Panorama integration — config export / air-gapped mode ────────────
         "ALTER TABLE panorama_integrations ADD COLUMN IF NOT EXISTS connection_mode     VARCHAR(32) NOT NULL DEFAULT 'api'",

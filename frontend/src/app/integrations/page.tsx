@@ -62,6 +62,7 @@ import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
 import { TenableSection } from '@/components/integrations/TenableSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
+import { CensysFieldMappingDialog } from '@/components/integrations/CensysFieldMappingDialog';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
 
@@ -185,6 +186,7 @@ function CensysSection() {
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CensysIntegration | null>(null);
+  const [mappingTarget, setMappingTarget] = useState<CensysIntegration | null>(null);
 
   useEffect(() => { load(); }, []);
 
@@ -265,7 +267,9 @@ function CensysSection() {
       const result = await api.testCensysConnection(integration.id);
       toast({
         title: result.ok ? 'Connection OK' : 'Connection failed',
-        description: result.message,
+        description: result.workspace_id
+          ? `${result.message} Censys workspace ID: ${result.workspace_id}.`
+          : result.message,
         variant: result.ok ? undefined : 'destructive',
       });
       await load();
@@ -372,9 +376,26 @@ function CensysSection() {
                       )}
                     </div>
                     {c.last_sync_ok && c.last_sync_stats && (
-                      <p className="text-xs text-muted-foreground mt-1">
-                        {c.last_sync_stats.assets_created ?? 0} new assets, {c.last_sync_stats.vulns_created ?? 0} new risks imported.
-                      </p>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        <p>{c.last_sync_stats.assets_created ?? 0} new assets.</p>
+                        {c.import_vulnerabilities && (
+                          <p>
+                            Censys risks: {c.last_sync_stats.risks_seen ?? 0} received,{' '}
+                            {c.last_sync_stats.vulns_created ?? 0} new findings,{' '}
+                            {c.last_sync_stats.vulns_updated ?? 0} updated
+                            {(c.last_sync_stats.risks_without_asset ?? 0) > 0 && (
+                              <> · {c.last_sync_stats.risks_without_asset} without an asset reference</>
+                            )}
+                            {(c.last_sync_stats.risk_assets_unmatched ?? 0) > 0 && (
+                              <> · {c.last_sync_stats.risk_assets_unmatched} unmatched asset references</>
+                            )}
+                            .
+                          </p>
+                        )}
+                        {c.import_vulnerabilities && c.last_sync_stats.risks_seen === 0 && (
+                          <p className="text-amber-400">No active risk instances were returned for this API key&apos;s ASM workspace.</p>
+                        )}
+                      </div>
                     )}
                     {c.last_sync_ok === false && c.last_error && (
                       <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
@@ -391,6 +412,10 @@ function CensysSection() {
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
                     <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setMappingTarget(c)}>
+                    <ArrowLeftRight className="h-4 w-4 mr-2" />Map fields
+                    {!!c.field_mappings?.length && <span className="ml-1 text-muted-foreground">({c.field_mappings.length})</span>}
                   </Button>
                   <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
                     <Trash2 className="h-4 w-4 mr-2" />Remove
@@ -528,6 +553,13 @@ function CensysSection() {
       </Dialog>
 
       {/* Delete Confirmation */}
+      <CensysFieldMappingDialog
+        integration={mappingTarget}
+        open={!!mappingTarget}
+        onOpenChange={(open) => { if (!open) setMappingTarget(null); }}
+        onSaved={load}
+      />
+
       <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>

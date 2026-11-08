@@ -376,8 +376,25 @@ export interface CensysIntegration {
   next_sync_at?: string;
   last_sync_stats?: Record<string, number>;
   last_error?: string;
+  field_mappings: CensysFieldMappingRule[];
   created_at: string;
   updated_at: string;
+}
+
+export interface CensysFieldMappingRule {
+  entity: string;
+  source_path: string;
+  target: string;
+}
+
+export interface CensysMappingCatalog {
+  entities: Record<string, Record<string, string>>;
+  custom_target_prefix: string;
+}
+
+export interface CensysSampleFields {
+  entity: string;
+  fields: { path: string; type: string; example: string }[];
 }
 
 export interface CensysSyncResult {
@@ -392,6 +409,8 @@ export interface CensysSyncResult {
   subdomains_seen: number;
   certificates_seen: number;
   risks_seen: number;
+  risks_without_asset: number;
+  risk_assets_unmatched: number;
 }
 
 export interface WizIntegration {
@@ -3154,6 +3173,21 @@ class ApiClient {
 
   async syncCensysIntegration(id: number): Promise<CensysSyncResult> {
     const response = await this.client.post(`/integrations/censys/${id}/sync`);
+    return response.data;
+  }
+
+  async getCensysMappingCatalog(): Promise<CensysMappingCatalog> {
+    const response = await this.client.get('/integrations/censys/mapping/catalog');
+    return response.data;
+  }
+
+  async updateCensysMappings(id: number, rules: CensysFieldMappingRule[]): Promise<CensysIntegration> {
+    const response = await this.client.put(`/integrations/censys/${id}/mappings`, { rules });
+    return response.data;
+  }
+
+  async getCensysSampleFields(id: number, entity: string): Promise<CensysSampleFields> {
+    const response = await this.client.get(`/integrations/censys/${id}/mappings/sample`, { params: { entity } });
     return response.data;
   }
 
