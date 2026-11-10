@@ -565,6 +565,30 @@ ACCOUNT_ORACLE_VERIFIER_ADDENDUM = (
 )
 
 
+SSTI_VERIFIER_ADDENDUM = (
+    "This is a server-side template injection candidate. Send three fresh "
+    "replay_http_request exchanges to the candidate endpoint, same method and identity: "
+    "a control with the ordinary value, then two probes with different arithmetic "
+    "expressions in the template syntax you suspect, e.g. {{7919*13}} and {{8191*17}} "
+    "(or ${...}, <%= ... %>, #{...}, *{...}, @(...)). Record proof {kind: template_eval, "
+    "baseline_id, artifact_ids: [probe1, probe2]}. Each product must appear in its probe "
+    "response and not in the control. Do not attempt code execution or file reads; "
+    "client-side evaluation (raw {{...}} in the HTTP response) is CSTI, not SSTI."
+)
+
+NOSQL_VERIFIER_ADDENDUM = (
+    "This is a NoSQL operator injection candidate. Send interleaved fresh "
+    "replay_http_request exchanges to the candidate endpoint, same method and identity, "
+    "identical except for the operator: $ne, $eq, $ne, $eq, each against the same value "
+    "aegis-verify-<nonce> (query form param[$ne]=aegis-verify-<nonce>, or JSON "
+    "{\"param\": {\"$ne\": \"aegis-verify-<nonce>\"}}). Record proof {kind: nosql_operator, "
+    "true_ids: [$ne ids], false_ids: [$eq ids]}. The two groups must differ consistently. "
+    "Inject a non-secret field (username, email, id, search); password values are "
+    "redacted from evidence, so a canary there cannot be checked. "
+    "Do not use $where, $function, or other server-side JavaScript operators."
+)
+
+
 def parse_verdict_from_text(text: str) -> str:
     blob = (text or "").lower()
     if re.search(r"\b(verdict\s*[:=]\s*)?(refuted|false positive|not exploitable|killed)\b", blob):
@@ -640,6 +664,10 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         addenda.append(CSRF_VERIFIER_ADDENDUM)
     elif claim_class == "account_enumeration":
         addenda.append(ACCOUNT_ORACLE_VERIFIER_ADDENDUM)
+    elif claim_class == "ssti":
+        addenda.append(SSTI_VERIFIER_ADDENDUM)
+    elif claim_class == "nosql_injection":
+        addenda.append(NOSQL_VERIFIER_ADDENDUM)
     class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
     proof_options = ", ".join(sorted(PROOFS_BY_CLASS.get(claim_class, ()))) or "none yet"
 

@@ -39,6 +39,8 @@ PROOFS_BY_CLASS = {
     "command_injection": frozenset({"oob_callback"}),
     "path_traversal": frozenset({"file_read"}),
     "csrf": frozenset({"csrf_state_change"}),
+    "ssti": frozenset({"template_eval"}),
+    "nosql_injection": frozenset({"nosql_operator"}),
     "known_cve": frozenset(),
     "account_enumeration": frozenset({"account_oracle"}),
 }
@@ -59,6 +61,9 @@ def _post_xhr_match_valid(row: dict) -> bool:
             and len(fields) == len(set(fields)))
 
 _CLAIM_PATTERNS = (
+    ("ssti", r"\bSSTI\b|server[ -]?side template injection"),
+    ("nosql_injection", r"\bNoSQL(?:i| injection)\b|\bMongo(?:DB)? (?:query |operator )?injection\b|"
+     r"\bquery operator injection\b"),
     ("sql_injection", r"\bSQLi\b|\bSQL\s+injection\b"),
     ("xss", r"\bXSS\b|cross[ -]?site scripting|\bscript injection\b"),
     ("crlf", r"\bCRLF\b|\bresponse header injection\b|\bHTTP response splitting\b"),
@@ -159,6 +164,110 @@ def _request_text(request: dict) -> str:
             break
         text = decoded
     return text
+
+
+# Arithmetic inside a template delimiter: {{a*b}}, ${a*b}, <%= a*b %>, #{a*b},
+# *{a*b}, @(a*b). The validator computes the product itself.
+_TEMPLATE_EXPR = re.compile(
+    r"(?:\{\{|\$\{|<%=?|#\{|\*\{|@\()\s*(\d{2,6})\s*\*\s*(\d{2,6})\s*(?:\}\}|\}|%>|\))"
+)
+
+
+def _template_eval_proof(candidate, baseline, probes: list) -> tuple[bool, str]:
+    """Two template expressions evaluate server-side; the control shows neither product."""
+    from app.services.agent.evidence_store import origin
+
+    if not baseline or baseline.get("kind") != "http_exchange":
+        return False, "template_eval needs a fresh control exchange with the ordinary value"
+    if len(probes) < 2 or not all(p and p.get("kind") == "http_exchange" for p in probes):
+        return False, "template_eval needs two fresh probe exchanges with different expressions"
+    b_req = baseline["payload"].get("request", {})
+    control_body = str(baseline["payload"].get("response", {}).get("body") or "")
+    products = set()
+    for probe in probes:
+        p_req = probe["payload"].get("request", {})
+        try:
+            same = ((origin(p_req["url"]), urlsplit(p_req["url"]).path or "/")
+                    == (origin(b_req["url"]), urlsplit(b_req["url"]).path or "/")
+                    == (origin(candidate.target), urlsplit(candidate.target).path or "/"))
+        except (KeyError, ValueError, TypeError):
+            same = False
+        if (not same or p_req.get("method") != b_req.get("method")
+                or probe.get("identity") != baseline.get("identity")):
+            return False, "Control and probes must hit the candidate endpoint with the same method and identity"
+        text = _request_text(p_req)
+        found = _TEMPLATE_EXPR.search(text)
+        if not found:
+            return False, "Each probe must carry a template arithmetic expression such as {{7919*13}}"
+        product = str(int(found.group(1)) * int(found.group(2)))
+        if len(product) < 5:
+            return False, "Use operands whose product has at least five digits"
+        if product in text:
+            return False, "The product must not appear in the probe request"
+        if product in control_body:
+            return False, "The control response already contains the product"
+        if product not in str(probe["payload"].get("response", {}).get("body") or ""):
+            return False, f"The probe response does not contain the evaluated product {product}"
+        products.add(product)
+    if len(products) < 2:
+        return False, "Use two different expressions so a coincidental number cannot confirm"
+    return True, ""
+
+
+_NOSQL_TRUE = re.compile(r"\$ne\b")
+_NOSQL_FALSE = re.compile(r"\$eq\b")
+
+
+def _nosql_operator_proof(candidate, true_rows: list, false_rows: list) -> tuple[bool, str]:
+    """$ne and $eq against the same fresh value give consistently different answers.
+
+    Nothing equals the fresh aegis-verify value, so {$eq: v} matches no record
+    and {$ne: v} matches every record. If the requests differ only in that
+    operator and the responses split, the application evaluated it as a query.
+    """
+    from app.services.agent.evidence_store import origin
+
+    if len(true_rows) < 2 or len(false_rows) < 2 or not all(true_rows + false_rows):
+        return False, "Cite at least two fresh $ne exchanges and two fresh $eq exchanges"
+    rows = true_rows + false_rows
+    if any(item.get("kind") != "http_exchange" for item in rows):
+        return False, "NoSQL operator evidence must be HTTP exchanges"
+    marker = "aegis-verify-" + candidate.nonce
+    shapes = set()
+    try:
+        endpoint = (origin(candidate.target), urlsplit(candidate.target).path or "/")
+        for index, item in enumerate(rows):
+            req = item["payload"].get("request", {})
+            text = _request_text(req)
+            wanted, other = ((_NOSQL_TRUE, _NOSQL_FALSE) if index < len(true_rows)
+                             else (_NOSQL_FALSE, _NOSQL_TRUE))
+            if marker not in text or not wanted.search(text) or other.search(text):
+                return False, ("True probes must use $ne and false probes $eq, each against "
+                               "this candidate's aegis-verify value")
+            if (origin(req["url"]), urlsplit(req["url"]).path or "/") != endpoint:
+                return False, "Every NoSQL probe must hit the candidate endpoint"
+            shapes.add((req.get("method"), item.get("identity"),
+                        re.sub(r"\$(?:ne|eq)\b", "$op", text)))
+    except (KeyError, ValueError, TypeError):
+        return False, "NoSQL proof contains an invalid request URL"
+    if len(shapes) != 1:
+        return False, "The requests must be identical apart from the $ne/$eq operator"
+
+    def fingerprint(item):
+        status, body = _response_fingerprint(item, [marker])
+        return status, re.sub(r"\$?\b(?:ne|eq)\b", "<op>", body)
+
+    true_fp = {fingerprint(item) for item in true_rows}
+    false_fp = {fingerprint(item) for item in false_rows}
+    if len(true_fp) != 1 or len(false_fp) != 1:
+        return False, "Responses are not stable within each operator group"
+    if true_fp == false_fp:
+        return False, "$ne and $eq get the same response, so the operator was not evaluated"
+    t_times = [item["created_at"] for item in true_rows]
+    f_times = [item["created_at"] for item in false_rows]
+    if not (min(t_times) < max(f_times) and min(f_times) < max(t_times)):
+        return False, "Interleave $ne and $eq probes so drift over time cannot explain the split"
+    return True, ""
 
 
 def _response_fingerprint(item: dict, identifiers: list[str]) -> tuple[int, str]:
@@ -842,6 +951,13 @@ def validate_proof(
                     or not xml_request):
                 return False, "XXE requires an observed XML capture and a fresh external-entity callback"
         return True, ""
+    if kind in ("template_eval", "nosql_operator"):
+        def listed(key):
+            ids = proof.get(key) if isinstance(proof.get(key), list) else []
+            return [store.records.get(i) if i in evidence_ids else None for i in ids]
+        if kind == "template_eval":
+            return _template_eval_proof(candidate, row("baseline_id"), listed("artifact_ids"))
+        return _nosql_operator_proof(candidate, listed("true_ids"), listed("false_ids"))
     if kind == "account_oracle":
         def rows_for(key):
             ids = proof.get(key) if isinstance(proof.get(key), list) else []
