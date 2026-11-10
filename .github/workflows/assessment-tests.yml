@@ -2,7 +2,8 @@ name: assessment reliability
 
 on:
   push:
-    branches: [main, 'codex/**']
+    # Agent-authored work lands on claude/** and codex/** branches; test it on push.
+    branches: [main, 'claude/**', 'codex/**']
     paths:
       - 'backend/**'
       - 'harness/**'

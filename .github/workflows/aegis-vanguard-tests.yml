@@ -6,12 +6,15 @@ name: aegis-vanguard tests
 
 on:
   push:
-    branches: [main]
+    # Agent-authored work lands on claude/** and codex/** branches; test it on push.
+    branches: [main, "claude/**", "codex/**"]
     paths:
       - "aegis-vanguard/**"
+      - ".github/workflows/aegis-vanguard-tests.yml"
   pull_request:
     paths:
       - "aegis-vanguard/**"
+      - ".github/workflows/aegis-vanguard-tests.yml"
   workflow_dispatch: {}
 
 jobs:
