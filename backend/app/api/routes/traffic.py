@@ -96,6 +96,10 @@ def ingest_extension_traffic(
     db: Session = Depends(get_db),
 ):
     """Browser-extension upload. Out-of-scope hosts are rejected per entry."""
+    # Require the scope explicitly: an unscoped legacy key must not be able to
+    # write traffic, even though require_scope lets empty scope lists through.
+    if "ingest:traffic" not in (agent_key.scopes or []):
+        raise HTTPException(status_code=403, detail="API key lacks required scope: ingest:traffic")
     return traffic_recorder.ingest_extension_batch(
         db,
         organization_id=agent_key.organization_id,

@@ -67,6 +67,12 @@ def test_ingest_requires_traffic_scope(env):
     assert _ingest(client, [{"url": "https://app.example.com/"}]).status_code == 403
 
 
+def test_ingest_rejects_unscoped_legacy_keys(env):
+    client, _, state = env
+    state["key"] = SimpleNamespace(id=3, organization_id=7, scopes=[])
+    assert _ingest(client, [{"url": "https://app.example.com/"}]).status_code == 403
+
+
 def test_ingest_search_bind_and_unbind(env):
     client, factory, state = env
     state["key"] = SimpleNamespace(id=3, organization_id=7, scopes=["ingest:traffic"])

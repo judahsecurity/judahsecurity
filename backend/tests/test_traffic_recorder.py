@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -162,3 +163,20 @@ def test_create_finding_binds_only_execution_owned_exchanges(db_factory):
     assert bound == 1
     refs = db.query(VulnerabilityTrafficRef).all()
     assert [(r.vulnerability_id, r.artifact_id) for r in refs] == [(5, real)]
+
+
+def test_stored_traffic_hides_session_headers_and_one_time_codes():
+    row = traffic_recorder.normalize_exchange(
+        method="POST",
+        url="https://app.example.com/oauth/callback?code=abc123&promo_code=SPRING&state=xyz",
+        request_headers={"X-Session": "s-998", "X-MFA-Token": "445566", "Accept": "*/*"},
+        request_body="otp=123456&remember=1",
+        response_headers={"Content-Type": "application/json"},
+        response_body='{"user": "alice", "session_id": "sess-1", "refresh_token": "r1", "code": "999"}',
+    )
+    assert row["request_headers"] == {"X-Session": "[redacted]", "X-MFA-Token": "[redacted]", "Accept": "*/*"}
+    assert "abc123" not in row["url"] and "abc123" not in row["path"]
+    assert "promo_code=SPRING" in row["url"] and "state=xyz" in row["url"]
+    assert row["request_body"] == "otp=[redacted]&remember=1"
+    body = json.loads(row["response_body"])
+    assert body == {"user": "alice", "session_id": "[redacted]", "refresh_token": "[redacted]", "code": "[redacted]"}

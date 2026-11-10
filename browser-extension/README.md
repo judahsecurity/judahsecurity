@@ -25,7 +25,8 @@ its *Recorded traffic* panel.
 
 ## Install (Chrome / Edge)
 
-1. Create an API key with the `ingest:traffic` scope (admin):
+1. Create an API key whose scopes explicitly include `ingest:traffic` (admin).
+   Keys with an empty scope list are rejected by the ingest endpoint:
 
    ```bash
    curl -X POST https://<platform>/api/v1/ingest/api-keys \

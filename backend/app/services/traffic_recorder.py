@@ -13,9 +13,11 @@ and truncated to ``MAX_BODY_BYTES`` per body.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
+import re
 import threading
 from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
@@ -40,10 +42,46 @@ def recording_enabled() -> bool:
 # Normalization
 # ---------------------------------------------------------------------------
 
+# Stricter than the evidence-store rules because stored traffic outlives the
+# run: also hide custom session headers, one-time codes, OAuth codes and
+# signatures, which do not match the shared secret-name list.
+_EXTRA_SECRET_HEADER = re.compile(
+    r"(?i)(session|^sess$|^sid$|auth|otp|mfa|2fa|totp|jwt|signature|security-token|id-token|refresh)"
+)
+_EXTRA_SECRET_KEY = re.compile(
+    r"(?i)^(otp|totp|code|mfa_?code|verification_?code|one_?time_?code|session(_?id)?|sid|jwt"
+    r"|id_?token|refresh_?token|signature|sig|x-amz-signature|x-amz-security-token|x-amz-credential)$"
+)
+_EXTRA_SECRET_PARAM = re.compile(
+    r"(?i)((?:^|[?&;])(?:otp|totp|code|mfa_?code|verification_?code|one_?time_?code|session(?:_?id)?|sid"
+    r"|jwt|id_?token|refresh_?token|signature|sig|x-amz-signature|x-amz-security-token|x-amz-credential)=)"
+    r"[^&#\s;]+"
+)
+_REDACTED = "[redacted]"
+
+
+def _redact_extra(value: Any, key: str = "") -> Any:
+    if key and _EXTRA_SECRET_KEY.match(str(key)):
+        return _REDACTED
+    if isinstance(value, dict):
+        return {k: _redact_extra(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_extra(v, key) for v in value]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return _EXTRA_SECRET_PARAM.sub(r"\1" + _REDACTED, value)
+        if isinstance(parsed, (dict, list)):
+            return json.dumps(_redact_extra(parsed))
+        return _EXTRA_SECRET_PARAM.sub(r"\1" + _REDACTED, value)
+    return value
+
+
 def _redact(value: Any) -> Any:
     from app.services.agent.evidence_store import redact_artifact
 
-    return redact_artifact(value)
+    return _redact_extra(redact_artifact(value))
 
 
 def _truncate(text: Any) -> tuple[Optional[str], bool]:
@@ -68,7 +106,8 @@ def _headers(raw: Any) -> dict:
     for name, value in pairs[:MAX_HEADER_COUNT]:
         if not name:
             continue
-        out[str(name)[:200]] = str(value if value is not None else "")[:4000]
+        name = str(name)[:200]
+        out[name] = _REDACTED if _EXTRA_SECRET_HEADER.search(name) else str(value if value is not None else "")[:4000]
     return _redact(out)
 
 

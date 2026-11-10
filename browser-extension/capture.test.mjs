@@ -11,6 +11,11 @@ test('secret headers never leave the browser', () => {
   assert.deepEqual(out, { Cookie: '[redacted]', authorization: '[redacted]', 'X-CSRF-Token': '[redacted]', Accept: '*/*' });
 });
 
+test('custom session and MFA headers are stripped too', () => {
+  const out = stripSecretHeaders({ 'X-Session': 's1', 'X-MFA-Code': '123456', 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'text/plain' });
+  assert.deepEqual(out, { 'X-Session': '[redacted]', 'X-MFA-Code': '[redacted]', 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'text/plain' });
+});
+
 test('host allowlist matches exact hosts and subdomains only', () => {
   assert.equal(hostAllowed('https://app.example.com/x', ['example.com']), true);
   assert.equal(hostAllowed('https://example.com/', ['*.example.com']), true);

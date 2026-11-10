@@ -8,7 +8,7 @@ export const MAX_BATCH = 50;
 export const RECORDED_TYPES = new Set(['Document', 'XHR', 'Fetch', 'Other', 'EventSource', 'WebSocket']);
 
 // Never leave the browser, even though the server redacts again.
-const SECRET_HEADER = /^(cookie|set-cookie|authorization|proxy-authorization|x-api-key|x-auth-token|x-csrf-token|x-xsrf-token)$/i;
+const SECRET_HEADER = /^(cookie|set-cookie|authorization|proxy-authorization|x-api-key|x-csrf-token|x-xsrf-token)$|session|auth|token|secret|otp|mfa|2fa|totp|jwt|signature|password/i;
 
 export function stripSecretHeaders(headers) {
   const out = {};
