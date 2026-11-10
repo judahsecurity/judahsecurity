@@ -154,6 +154,7 @@ _TOOL_ROOMS = {
     "compare_requests": "authz",
     "execute_jwt": "authz",
     "bypass_403": "authz",
+    "test_auth_consistency": "authz",
     "test_credential_spray": "authz",
     "fireteam_dispatch": "fireteam",
     "sync_engagement_brain": "methodology",

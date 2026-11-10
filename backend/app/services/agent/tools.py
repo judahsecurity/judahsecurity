@@ -706,6 +706,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "validate_finding": self.validate_finding,
             "detect_bug_chains": self.detect_bug_chains,
             "bypass_403": self.bypass_403,
+            "test_auth_consistency": self.test_auth_consistency,
             "test_request_smuggling": self.test_request_smuggling,
             "test_cache_poisoning": self.test_cache_poisoning,
             "test_race_condition": self.test_race_condition,
@@ -8292,6 +8293,319 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "all_results": list(results),
         }, indent=2)[:_tool_output_max_chars()]
 
+    async def test_auth_consistency(
+        self,
+        url: str,
+        identifiers: Optional[List[str]] = None,
+        identifier_source_url: str = "",
+        methods: Optional[List[str]] = None,
+        include_override_headers: bool = True,
+        allow_state_changing: bool = False,
+        baseline_method: str = "GET",
+        max_targets: int = 10,
+        coverage_cell_id: str = "",
+        hypothesis_id: str = "",
+        timeout: int = 15,
+    ) -> str:
+        """Check that an anonymously denied URL is denied for every HTTP method.
+
+        Invariant: if anonymous GET is 401/403, anonymous POST/PUT/PATCH (body {})
+        and method-override headers must be denied too. Catches routers that
+        attach auth per verb (e.g. GET-only middleware) on any product.
+        Never sends DELETE; skips write verbs on state-changing path names.
+
+        Args:
+            url: Denied URL. May be templated (/calculate/{model}, /x/:id, /x/EXPR).
+            identifiers: Values to fill a templated slot (names/IDs leaked elsewhere).
+            identifier_source_url: URL of a listing that leaked identifiers; fetched
+                anonymously and harvested when ``url`` is templated.
+            methods: Subset of POST, PUT, PATCH (default all three).
+            include_override_headers: Also try POST + X-HTTP-Method-Override: GET.
+            allow_state_changing: Send write verbs even on delete/reset/... paths.
+                Only with operator approval for that exact path.
+            baseline_method: Method that was denied (default GET).
+            max_targets: Max concrete URLs after template expansion.
+            coverage_cell_id: Optional auth_consistency coverage cell under test.
+            hypothesis_id: Optional engagement hypothesis.
+            timeout: Per-request timeout in seconds.
+        """
+        from urllib.parse import urlsplit as _urlsplit
+        from app.services.agent import auth_consistency as ac
+
+        url = (url or "").strip()
+        if not url:
+            return json.dumps({"error": "url is required"})
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        baseline_method = (baseline_method or "GET").upper()
+        max_targets = max(1, min(int(max_targets or 10), ac.MAX_EXPANSIONS))
+        notes: List[str] = []
+
+        def _exchange_body(ex: Dict[str, Any]) -> str:
+            return ex.pop("_body_text", "") or ""
+
+        async def _get(target: str) -> Optional[Dict[str, Any]]:
+            try:
+                return await self._http_exchange(
+                    "GET", target, use_auth_session=False, follow_redirects=False,
+                    timeout=timeout, hypothesis_id=hypothesis_id or "",
+                    max_response_bytes=4_000_000,
+                )
+            except Exception as exc:
+                notes.append(f"GET {target}: {exc}")
+                return None
+
+        # 1) Resolve concrete targets (templated routes take leaked identifiers).
+        harvested: List[str] = []
+        if ac.is_templated(url):
+            idents = [str(i) for i in (identifiers or []) if str(i).strip()]
+            if identifier_source_url:
+                src = identifier_source_url.strip()
+                if not src.startswith(("http://", "https://")):
+                    src = f"https://{src}"
+                src_ex = await _get(src)
+                if src_ex is not None:
+                    src_body = _exchange_body(src_ex)
+                    if 200 <= int(src_ex["response"]["status"]) < 300:
+                        harvested = ac.harvest_identifiers(src_body)
+                    else:
+                        notes.append(
+                            f"identifier_source_url returned {src_ex['response']['status']}; nothing harvested"
+                        )
+            idents = list(dict.fromkeys([*idents, *harvested]))
+            targets = ac.expand_template(url, idents, limit=max_targets)
+            if not targets:
+                return json.dumps({
+                    "url": url,
+                    "error": "Templated URL needs identifiers",
+                    "template_slots": ac.template_slots(url),
+                    "harvested_identifiers": harvested,
+                    "next_action": (
+                        "Pass identifiers=[...] leaked elsewhere in this run (listings, JS, "
+                        "error bodies), or identifier_source_url=<listing endpoint>. Routes "
+                        "with more than one slot must be filled by hand."
+                    ),
+                    "notes": notes or None,
+                }, indent=2)
+        else:
+            targets = [url]
+
+        # 2) Fingerprint the app shell so SPA catch-all 200s are not bypasses.
+        shells: set = set()
+        for origin_url in dict.fromkeys(
+            f"{_urlsplit(t).scheme}://{_urlsplit(t).netloc}" for t in targets
+        ):
+            # SPA catch-alls serve the same index.html as the root.
+            ex = await _get(origin_url + "/")
+            if ex is None:
+                continue
+            body = _exchange_body(ex)
+            if 200 <= int(ex["response"]["status"]) < 300 and body:
+                shells.add(ac.body_fingerprint(body))
+
+        # 3) Baseline + variants per target.
+        deny_store = getattr(self, "_auth_deny_observations", None)
+        if not isinstance(deny_store, list):
+            deny_store = []
+            self._auth_deny_observations = deny_store
+        target_reports: List[Dict[str, Any]] = []
+        bypass_pairs: List[Dict[str, Any]] = []
+        for target in targets:
+            report: Dict[str, Any] = {"url": target}
+            try:
+                base_ex = await self._http_exchange(
+                    baseline_method, target, use_auth_session=False, follow_redirects=False,
+                    timeout=timeout, hypothesis_id=hypothesis_id or "",
+                    max_response_bytes=4_000_000,
+                )
+            except Exception as exc:
+                report["error"] = f"baseline failed: {exc}"
+                target_reports.append(report)
+                continue
+            base_body = _exchange_body(base_ex)
+            base_status = int(base_ex["response"]["status"])
+            report["baseline"] = {
+                "method": baseline_method, "status": base_status,
+                "evidence_id": base_ex.get("evidence_id"),
+                "body_preview": ac.preview(base_body, 120),
+            }
+            ac.record_deny_observation(
+                deny_store, ac.deny_observation(baseline_method, target, base_status)
+            )
+            if base_status not in ac.DENY_STATUSES:
+                report["verdict"] = "NOT_APPLICABLE"
+                report["why"] = (
+                    f"Anonymous {baseline_method} returned {base_status}; the invariant "
+                    "starts from a 401/403. If this already exposes data, that is a "
+                    "missing-auth finding on its own."
+                )
+                target_reports.append(report)
+                continue
+            path = _urlsplit(target).path or "/"
+            variants, skipped = ac.plan_variants(
+                path, baseline_method=baseline_method, methods=methods,
+                include_override_headers=include_override_headers,
+                allow_state_changing=allow_state_changing,
+            )
+            if skipped:
+                report["skipped"] = skipped
+            results: List[Dict[str, Any]] = []
+            for variant in variants:
+                row: Dict[str, Any] = {"variant": variant.label, "method": variant.method}
+                try:
+                    ex = await self._http_exchange(
+                        variant.method, target, headers=dict(variant.headers),
+                        body=variant.body, use_auth_session=False, follow_redirects=False,
+                        timeout=timeout, hypothesis_id=hypothesis_id or "",
+                        coverage_cell_id=coverage_cell_id or "",
+                        max_response_bytes=4_000_000,
+                    )
+                except Exception as exc:
+                    message = str(exc)
+                    row["outcome"] = (
+                        "blocked_by_policy" if "operator-approved" in message else "error"
+                    )
+                    row["why"] = message[:300]
+                    results.append(row)
+                    continue
+                body = _exchange_body(ex)
+                verdict_row = ac.classify_variant(
+                    baseline_status=base_status, baseline_body=base_body,
+                    variant_status=int(ex["response"]["status"]), variant_body=body,
+                    variant_headers=ex["response"].get("headers") or {},
+                    shell_fingerprints=shells,
+                )
+                row.update(verdict_row)
+                row["evidence_id"] = ex.get("evidence_id")
+                if verdict_row["outcome"] in {"bypass", "handler_reached"}:
+                    row["body_preview"] = ac.preview(body)
+                    if verdict_row["outcome"] == "bypass" and not any(
+                        p.get("body_preview") for p in bypass_pairs if p["url"] == target
+                    ):
+                        pair_preview = ac.preview(body)
+                    else:
+                        pair_preview = None
+                    bypass_pairs.append({
+                        "url": target, "variant": variant.label,
+                        "outcome": verdict_row["outcome"],
+                        "evidence_ids": [base_ex.get("evidence_id"), ex.get("evidence_id")],
+                        "baseline_status": base_status,
+                        "variant_status": verdict_row["status"],
+                        "data_shape": verdict_row["data_shape"],
+                        **({"body_preview": pair_preview} if pair_preview else {}),
+                    })
+                results.append(row)
+            report["variants"] = results
+            report.update(ac.summarize(results) if results else {"verdict": "INCONCLUSIVE"})
+            target_reports.append(report)
+
+        # 4) Record coverage and queue proof work for bypasses.
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.coverage_cells import record_coverage_cell
+        from app.services.agent.signal_escalation import queue_signal_escalation
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        ac.seed_auth_consistency_cells(brain, deny_store)
+        escalations: List[Dict[str, Any]] = []
+        for report in target_reports:
+            parts = _urlsplit(report["url"])
+            for row in report.get("variants") or []:
+                outcome = row.get("outcome")
+                status = {
+                    "bypass": "finding", "handler_reached": "inconclusive",
+                    "consistent": "tested_clean", "not_routed": "tested_clean",
+                    "spa_fallback": "tested_clean", "soft_deny": "tested_clean",
+                    "blocked_by_policy": "blocked",
+                }.get(outcome, "inconclusive")
+                try:
+                    record_coverage_cell(
+                        brain, method=baseline_method, path=parts.path or "/", host=parts.netloc,
+                        status=status, identity="anonymous",
+                        parameter=f"method:{row.get('method')}", test_type=ac.TEST_TYPE,
+                        hypothesis_id=hypothesis_id or "",
+                        evidence_id=str(row.get("evidence_id") or ""),
+                        reason=f"{row.get('variant')}: {row.get('why') or outcome}"[:400],
+                    )
+                except Exception as exc:
+                    notes.append(f"coverage not recorded for {row.get('variant')}: {exc}")
+        for pair in bypass_pairs:
+            escalation = queue_signal_escalation(
+                brain,
+                verdict="MUTANT_BYPASS_CANDIDATE",
+                signals=[f"auth_consistency_{pair['outcome']}", pair["variant"]],
+                evidence_ids=[str(e or "") for e in pair["evidence_ids"]],
+                target=pair["url"],
+                source_tool="test_auth_consistency",
+                coverage_cell_id=coverage_cell_id or "",
+                hypothesis_id=hypothesis_id or "",
+                identity="anonymous",
+                parameter=f"method:{pair['variant']}",
+                test_type=ac.TEST_TYPE,
+                proof={
+                    "lane": ac.TEST_TYPE,
+                    "demonstrated": pair["outcome"] == "bypass",
+                    "baseline_status": pair["baseline_status"],
+                    "mutant_status": pair["variant_status"],
+                    "data_shape": pair["data_shape"],
+                },
+            )
+            if escalation:
+                escalations.append({k: escalation.get(k) for k in ("id", "status", "strategy")})
+        self._engagement_brain = brain.to_dict()
+
+        overall = ac.summarize([
+            {"outcome": "bypass"} if r.get("signal") == "auth_consistency_bypass"
+            else {"outcome": "handler_reached"} if r.get("signal") == "auth_consistency_handler_reached"
+            else {"outcome": "consistent"} if r.get("verdict") == "CONSISTENT"
+            else {"outcome": "not_applicable"} if r.get("verdict") == "NOT_APPLICABLE"
+            else {"outcome": "inconclusive"}
+            for r in target_reports
+        ])
+        out: Dict[str, Any] = {
+            "invariant": "anonymous deny must hold for every method and override header",
+            "url": url,
+            "targets_tested": len(target_reports),
+            "harvested_identifiers": harvested or None,
+            **overall,
+            "bypasses": bypass_pairs,
+            "targets": target_reports,
+            "proof_escalations": escalations or None,
+            "notes": notes or None,
+        }
+        if bypass_pairs:
+            out["next_action"] = (
+                "Each bypass is a candidate: cite both evidence IDs and "
+                "submit_finding_candidate (High; Critical only when the exposed data is "
+                "sensitive or a write is proven). Do not page through or download the "
+                "dataset: the excerpt, row count and columns are the proof. Then "
+                "harvest identifiers from the exposed body and re-run sibling templated "
+                "routes. " + ac.WRITEUP_RULES
+            )
+        serialized = json.dumps(out, indent=2, default=str)
+        if len(serialized) > _tool_output_max_chars():
+            # Per-target detail is in the evidence store; keep verdicts + bypasses.
+            out["targets"] = [
+                {
+                    "url": r.get("url"),
+                    "verdict": r.get("verdict"),
+                    "baseline_status": (r.get("baseline") or {}).get("status"),
+                    "outcomes": {
+                        v.get("variant"): v.get("outcome") for v in r.get("variants") or []
+                    },
+                    **({"skipped": r["skipped"]} if r.get("skipped") else {}),
+                }
+                for r in out["targets"]
+            ]
+            out["output_compacted"] = True
+            serialized = json.dumps(out, indent=2, default=str)
+        if len(serialized) > _tool_output_max_chars():
+            for pair in out["bypasses"][1:]:
+                pair.pop("body_preview", None)
+            out["targets"] = [{"url": r["url"], "verdict": r["verdict"]} for r in out["targets"]]
+            out["next_action"] = str(out.get("next_action") or "")[:400] or None
+            serialized = json.dumps(out, indent=2, default=str)
+        return serialized[:_tool_output_max_chars()]
+
     async def test_request_smuggling(
         self,
         url: str,
@@ -9274,6 +9588,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         body_text = resp.text or ""
         if resp.status_code == 401:
             session["authenticated"] = False
+        if label == "anonymous" and resp.status_code in (401, 403):
+            # Every anonymous deny is a question for the auth-consistency
+            # invariant. Open coverage cells once per denied path so the run
+            # cannot finish with untested verbs on it.
+            try:
+                from app.services.agent import auth_consistency as _ac
+
+                store = getattr(self, "_auth_deny_observations", None)
+                if not isinstance(store, list):
+                    store = []
+                    self._auth_deny_observations = store
+                if (_ac.record_deny_observation(store, _ac.deny_observation(method, url, resp.status_code))
+                        and getattr(self, "_engagement_brain", None)):
+                    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+                    _brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                    _ac.seed_auth_consistency_cells(_brain, [store[-1]])
+                    self._engagement_brain = _brain.to_dict()
+            except Exception:
+                logger.debug("auth-consistency deny observation not recorded", exc_info=True)
         exchange = {
             "request": {"method": method, "url": url, "identity": label,
                         "identity_verified": bool(session.get("authenticated")),
@@ -9774,6 +10108,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap if isinstance(cmap, dict) else {}))
         seed_js_coverage_cells(brain, cmap if isinstance(cmap, dict) else {})
+        from app.services.agent.auth_consistency import seed_auth_consistency_cells
+        seed_auth_consistency_cells(brain, getattr(self, "_auth_deny_observations", None) or [])
         from app.services.agent.runtime_mapper import ingest_capability_map_operations
         ingest_capability_map_operations(brain, cmap if isinstance(cmap, dict) else {})
         graph = sync_graph_from_brain(brain)
@@ -11009,6 +11345,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             from app.services.agent.parameter_inventory import collect_parameter_inventory
             seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap.to_dict()))
             seed_js_coverage_cells(brain, cmap.to_dict())
+            from app.services.agent.auth_consistency import seed_auth_consistency_cells
+            seed_auth_consistency_cells(brain, getattr(self, "_auth_deny_observations", None) or [])
             from app.services.agent.runtime_mapper import ingest_capability_map_operations
             ingest_capability_map_operations(brain, cmap.to_dict())
             self._engagement_brain = brain.to_dict()

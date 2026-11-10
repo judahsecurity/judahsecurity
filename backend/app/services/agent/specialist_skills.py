@@ -40,6 +40,9 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "vuln_type='default_login').\n"
         "- Auth bypass: path/header/method mutations one at a time; bypass_403 only "
         "on concrete 403 paths.\n"
+        "- Deny differential loop: run test_auth_consistency(url=...) on every "
+        "anonymous 401/403 API path (auth_consistency coverage cells list them). "
+        "Fill templated routes with identifiers leaked anywhere in the run.\n"
         "- Never invent credentials; never spray large dictionaries.\n"
         "- ASP.NET /api/Settings/SaveSettings (and mapped Save*/Write*): missing "
         "[Authorize] is proven by sibling write 401 vs unauth 200 void. Hand the "
@@ -250,6 +253,9 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     ),
     "api_authz": (
         "SKILL PACK — IDOR / BOLA proof:\n"
+        "- Invariant first: anonymous 401/403 on GET must hold for POST/PUT/PATCH and "
+        "override headers. test_auth_consistency(url=<denied>, identifier_source_url="
+        "<listing that leaked names/IDs>) for templated routes. Bypass with data = High.\n"
         "- Pick mapped object APIs with IDs (users, orgs, files, invoices).\n"
         "- compare_requests across anonymous / user A / user B (or adjacent IDs).\n"
         "- Prefer plan_intruder_mutations after list_captured_requests; review the bounded queue, then run_intruder_batch or mutate_captured_request (one field).\n"

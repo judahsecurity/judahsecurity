@@ -44,6 +44,7 @@ def _strategy(
             "email_change_ato": "auth_logic",
             "socketio_idor": "api_authz",
             "ml_pipeline_rbac": "business_logic",
+            "auth_consistency": "api_authz",
         }
         return (
             "independent_lane_replay",

@@ -1478,7 +1478,9 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             specialist="api_authz",
             priority="high",
             assumption="First-party APIs trust client role or HTTP method incorrectly",
-            test="compare_requests on mapped APIs; try verb swap GET↔POST/PUT/DELETE; probe unauth access",
+            test=("test_auth_consistency on every anonymously denied API path (verb swap + override "
+                  "headers, templated routes filled with leaked identifiers); compare_requests "
+                  "for identity-based authz"),
             pass_criteria="Privileged data/action without proper authz",
             kill_criteria="Authz holds across identities and methods",
             cwe_ids=["CWE-284", "CWE-863", "CWE-650"],

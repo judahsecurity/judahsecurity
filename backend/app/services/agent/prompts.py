@@ -540,6 +540,18 @@ These tools implement specialized offensive test workflows and require the explo
   Returns baseline status, bypass count, and list of successful techniques.
   Example: bypass_403(url="https://target.com/admin")
 
+- **test_auth_consistency**: Invariant check for ANY anonymously denied URL: if GET is 401/403,
+  POST/PUT/PATCH with body {} and X-HTTP-Method-Override must be denied too (catches per-verb
+  auth middleware on any framework/product). Never sends DELETE; skips write verbs on
+  delete/reset/... paths. Templated URLs (/x/{id}, /x/:id, /x/EXPR) are filled from
+  identifiers=[...] or harvested from identifier_source_url (a listing that leaked names/IDs).
+  Args: **url** (required), identifiers, identifier_source_url, methods, include_override_headers,
+  baseline_method (default GET), max_targets, coverage_cell_id, hypothesis_id.
+  Returns per-target verdicts (bypass / handler_reached / consistent / spa_fallback ...),
+  data shape (rows/keys, never the full dataset) and queued proof escalations.
+  Example: test_auth_consistency(url="https://t/api/reports/{id}/export",
+           identifier_source_url="https://t/api/reports")
+
 - **test_request_smuggling**: Probe for HTTP/1.1 request smuggling via timing-based CL.TE, TE.CL,
   and TE.TE obfuscation detection using raw TCP/TLS sockets.
   Args: **url** (required), technique (cl_te | te_cl | te_te | all, default all), timeout (default 20).
@@ -872,6 +884,7 @@ TOOL_PHASE_MAP = {
     "validate_finding": ["informational", "exploitation", "post_exploitation"],
     "detect_bug_chains": ["informational", "exploitation", "post_exploitation"],
     "bypass_403": ["exploitation", "post_exploitation"],
+    "test_auth_consistency": ["exploitation", "post_exploitation"],
     "test_request_smuggling": ["exploitation", "post_exploitation"],
     "test_cache_poisoning": ["exploitation", "post_exploitation"],
     "test_race_condition": ["exploitation", "post_exploitation"],
