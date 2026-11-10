@@ -75,6 +75,32 @@ query ApplicationEndpointsTable($first: Int, $after: String, $filterBy: Applicat
 }
 """.strip()
 
+GRAPH_SEARCH_QUERY = """
+query GraphSearch($query: GraphEntityQueryInput, $projectId: String!, $first: Int, $after: String, $quick: Boolean = true) {
+  graphSearch(query: $query, projectId: $projectId, first: $first, after: $after, quick: $quick) {
+    maxCountReached
+    pageInfo { endCursor hasNextPage }
+    nodes {
+      entities {
+        id
+        name
+        type
+        properties
+      }
+    }
+  }
+}
+""".strip()
+
+# Ports that should rarely be reachable: remote access, file sharing, mail,
+# directory, databases, caches, queues, container/orchestration APIs, etc.
+CRITICAL_PORTS = [
+    21, 22, 23, 25, 69, 88, 110, 139, 143, 161, 162, 389, 445, 512, 513, 514, 636, 943,
+    1433, 1434, 1521, 1883, 2019, 2049, 2375, 2376, 3000, 3306, 3342, 3389, 5432, 5672,
+    5900, 5901, 5902, 5903, 5984, 6060, 6379, 6432, 6443, 8000, 8080, 8443, 8888, 9200,
+    9300, 10250, 11211, 15672, 27017, 27018,
+]
+
 TEMPLATES: List[Dict[str, Any]] = [
     {
         "key": "application_endpoints",
@@ -87,6 +113,38 @@ TEMPLATES: List[Dict[str, Any]] = [
         "variables": {"filterBy": {}, "orderBy": {"field": "RELATED_ISSUE_SEVERITY", "direction": "DESC"}},
         "connection_path": "applicationEndpoints",
         "asset_host_field": "host",
+    },
+    {
+        "key": "critical_ports",
+        "name": "Critical ports (graph search)",
+        "description": (
+            "Endpoints on high-risk ports (SSH, RDP, SMB, databases, caches, Docker/Kubernetes "
+            "APIs, ...) whose port is not validated as closed, joined to the VM, container or "
+            "database server they serve. Same as the Wiz Security Graph critical-ports view."
+        ),
+        "query": GRAPH_SEARCH_QUERY,
+        "variables": {
+            "projectId": "*",
+            "query": {
+                "type": ["ENDPOINT"],
+                "select": True,
+                "where": {
+                    "port": {"EQUALS": CRITICAL_PORTS},
+                    "portValidationResult": {"NOT_EQUALS": ["Closed"]},
+                },
+                "relationships": [
+                    {
+                        "type": [{"type": "SERVES", "reverse": True}],
+                        "with": {
+                            "select": True,
+                            "type": ["VIRTUAL_MACHINE", "CONTAINER", "DB_SERVER"],
+                        },
+                    }
+                ],
+            },
+        },
+        "connection_path": "graphSearch",
+        "asset_host_field": "entities.0.name",
     },
 ]
 
@@ -178,6 +236,9 @@ def page_variables(
     result = copy.deepcopy(variables or {})
     if _declares(query, "first"):
         result["first"] = page_size
+    if _declares(query, "quick"):
+        # Wiz Graph Search only paginates past the first page with quick=false.
+        result["quick"] = False
     if _declares(query, "after"):
         result["after"] = cursor
     elif cursor is not None:
@@ -263,13 +324,18 @@ async def run_query(
 
 
 def _field_paths(rows: Iterable[Dict[str, Any]], prefix: str = "", depth: int = 0) -> List[str]:
+    """Dotted paths for the preview's field list; lists are shown via their first item (".0.")."""
     paths: List[str] = []
     for row in rows:
         for key, value in row.items():
             path = f"{prefix}{key}"
             if path not in paths:
                 paths.append(path)
-            if isinstance(value, dict) and depth < 2:
+            if depth >= 4:
+                continue
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                value, path = value[0], f"{path}.0"
+            if isinstance(value, dict):
                 for child in _field_paths([value], f"{path}.", depth + 1):
                     if child not in paths:
                         paths.append(child)
@@ -308,6 +374,14 @@ def _external_id(node: Dict[str, Any]) -> str:
     node_id = node.get("id")
     if node_id not in (None, ""):
         return str(node_id)[:500]
+    # Graph Search rows have no id of their own: identify them by the entities
+    # they join (e.g. ENDPOINT + the VM it serves) so property changes such as
+    # updatedAt don't turn the same row into a "new" one on every run.
+    entities = node.get("entities")
+    if isinstance(entities, list):
+        ids = [str(entity.get("id")) for entity in entities if isinstance(entity, dict) and entity.get("id")]
+        if ids:
+            return f"graph:{'|'.join(ids)}"[:500]
     digest = hashlib.sha256(json.dumps(node, sort_keys=True, default=str).encode()).hexdigest()
     return f"sha256:{digest}"
 

@@ -246,3 +246,64 @@ def test_stored_mutation_is_never_sent(db):
     assert result["ok"] is False and "mutation" in result["message"]
     client.graphql.assert_not_awaited()
     assert cq.last_run_ok is False
+
+
+def _graph_page(rows, cursor=None):
+    return {
+        "graphSearch": {
+            "maxCountReached": False,
+            "nodes": rows,
+            "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor},
+        }
+    }
+
+
+def _graph_row(endpoint_id, name, port, vm_id, updated="2026-11-10"):
+    return {
+        "entities": [
+            {"id": endpoint_id, "name": name, "type": "ENDPOINT",
+             "properties": {"port": port, "portValidationResult": "Open", "updatedAt": updated}},
+            {"id": vm_id, "name": "vm-1", "type": "VIRTUAL_MACHINE", "properties": {"cloudPlatform": "Azure"}},
+        ]
+    }
+
+
+def test_critical_ports_template_is_a_valid_paginating_read_query():
+    template = next(t for t in svc.TEMPLATES if t["key"] == "critical_ports")
+    query = svc.validate_query(template["query"])
+    variables = svc.page_variables(query, template["variables"], 500, None)
+    assert variables["quick"] is False and variables["after"] is None and variables["first"] == 500
+    assert variables["projectId"] == "*"
+    assert 3389 in variables["query"]["where"]["port"]["EQUALS"]
+
+
+def test_graph_search_rows_get_stable_ids_and_host_assets(db):
+    template = next(t for t in svc.TEMPLATES if t["key"] == "critical_ports")
+    cq = WizCustomQuery(
+        organization_id=1, integration_id=1, name="Critical ports", query=template["query"],
+        variables=template["variables"], page_size=1, max_pages=10,
+        asset_host_field=template["asset_host_field"],
+    )
+    db.add(cq)
+    db.commit()
+    client = _client(
+        _graph_page([_graph_row("ep1", "20.30.40.50:3389", 3389, "vm1")], "c1"),
+        _graph_page([_graph_row("ep2", "db.acme.com:5432", 5432, "vm2")]),
+    )
+    first = asyncio.run(svc.sync_custom_query(db, cq, client=client))
+    assert first["ok"] and first["records_created"] == 2 and first["assets_created"] == 2
+    assert client.graphql.await_args_list[1].args[1]["quick"] is False
+    assert db.query(Asset).filter_by(value="20.30.40.50").one().asset_type == AssetType.IP_ADDRESS
+    assert db.query(WizCustomQueryRecord).filter_by(external_id="graph:ep1|vm1").one().asset_id
+
+    # Same rows with changed properties must update, not churn into new rows.
+    again = asyncio.run(svc.sync_custom_query(db, cq, client=_client(
+        _graph_page([_graph_row("ep1", "20.30.40.50:3389", 3389, "vm1", updated="2026-11-11"),
+                     _graph_row("ep2", "db.acme.com:5432", 5432, "vm2", updated="2026-11-11")]),
+    )))
+    assert again["records_created"] == 0 and again["records_updated"] == 2 and again["records_gone"] == 0
+
+
+def test_preview_fields_walk_into_lists():
+    fields = svc._field_paths([_graph_row("ep1", "h:22", 22, "vm1")])
+    assert "entities.0.name" in fields and "entities.0.properties.port" in fields
