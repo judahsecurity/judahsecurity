@@ -37,7 +37,7 @@ PROOFS_BY_CLASS = {
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
     # Only an OOB callback that carries a shell-evaluated label; see validate_proof.
     "command_injection": frozenset({"oob_callback"}),
-    "path_traversal": frozenset(),
+    "path_traversal": frozenset({"file_read"}),
     "csrf": frozenset(),
     "known_cve": frozenset(),
     "account_enumeration": frozenset(),
@@ -135,6 +135,71 @@ def _object_field(data: dict, path: str):
 
 
 _SHELL_SUBSTITUTION = re.compile(r"\$\(|`")
+
+# Files whose content has an unambiguous, non-secret-bearing signature. Each
+# entry: (name the probe request must reference, content patterns that must
+# all match). /etc/passwd lines carry no password hashes on modern systems.
+FILE_READ_SIGNATURES = {
+    "/etc/passwd": ("passwd", (re.compile(r"(?m)^root:[^:\n]*:0:0:"),)),
+    "win.ini": ("win.ini", (re.compile(r"(?mi)^\[fonts\]"),
+                            re.compile(r"(?mi)^\[extensions\]"))),
+}
+# A relative traversal, an absolute POSIX path given as a value, or a Windows path.
+_TRAVERSAL = re.compile(r"\.\.[/\\]|[=:]\s*\"?/(?:etc|proc)/|[a-z]:[/\\]windows", re.IGNORECASE)
+
+
+def _request_text(request: dict) -> str:
+    """URL and body with up to three rounds of percent-decoding."""
+    from urllib.parse import unquote
+
+    text = f"{request.get('url') or ''}\n{request.get('body') or ''}"
+    for _ in range(3):
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
+
+
+def _file_read_proof(candidate, baseline: dict | None, probe: dict | None,
+                     file_name: str) -> tuple[bool, str]:
+    """A traversal request returns a known file; a control on the same endpoint does not."""
+    from app.services.agent.evidence_store import origin
+
+    signature = FILE_READ_SIGNATURES.get(str(file_name or ""))
+    if not signature:
+        return False, ("file_read needs file: one of " + ", ".join(sorted(FILE_READ_SIGNATURES)))
+    needle, patterns = signature
+    if (not baseline or not probe or baseline.get("kind") != "http_exchange"
+            or probe.get("kind") != "http_exchange"):
+        return False, "file_read needs a fresh control exchange and a fresh traversal exchange"
+    b_req, p_req = baseline["payload"].get("request", {}), probe["payload"].get("request", {})
+    b_body = str(baseline["payload"].get("response", {}).get("body") or "")
+    p_resp = probe["payload"].get("response", {})
+    try:
+        same_endpoint = (
+            origin(b_req.get("url", "")) == origin(p_req.get("url", "")) == origin(candidate.target)
+            and urlsplit(b_req.get("url", "")).path == urlsplit(p_req.get("url", "")).path
+            == (urlsplit(candidate.target).path or "/")
+        )
+    except (AttributeError, ValueError, TypeError):
+        same_endpoint = False
+    if (not same_endpoint or b_req.get("method") != p_req.get("method")
+            or baseline.get("identity") != probe.get("identity")):
+        return False, "Control and traversal must hit the candidate endpoint with the same method and identity"
+    probe_text, control_text = _request_text(p_req), _request_text(b_req)
+    if needle not in probe_text.lower() or not _TRAVERSAL.search(probe_text):
+        return False, f"The traversal request must contain a path sequence that names {file_name}"
+    if needle in control_text.lower():
+        return False, "The control request must use the ordinary value, not a file path"
+    if not 200 <= int(p_resp.get("status") or 0) < 300:
+        return False, "The traversal response was not successful"
+    body = str(p_resp.get("body") or "")
+    if not all(pattern.search(body) for pattern in patterns):
+        return False, f"The traversal response does not contain {file_name} content"
+    if any(pattern.search(b_body) for pattern in patterns):
+        return False, "The control response already contains the file signature"
+    return True, ""
 
 
 def _command_execution_callback(
@@ -633,6 +698,8 @@ def validate_proof(
                     or not xml_request):
                 return False, "XXE requires an observed XML capture and a fresh external-entity callback"
         return True, ""
+    if kind == "file_read":
+        return _file_read_proof(candidate, row("baseline_id"), row("artifact_id"), proof.get("file"))
     if kind == "response_match":
         item, marker = row("artifact_id"), proof.get("contains")
         claim = candidate.title + " " + candidate.description

@@ -1829,12 +1829,82 @@ async def test_command_injection_rejects_callbacks_that_do_not_prove_execution(
     assert gap in verdict.proof_gap["reason"]
 
 
+PASSWD = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+
+
+async def _path_traversal_verdict(manager, transport, pages, *, probe_url, file="/etc/passwd",
+                                  control_url="https://app.test/config?file=report.pdf"):
+    cand = candidate(manager, "Path traversal in file download")
+    token = verification_run.set(VerificationRun("lfi-run", cand.id, 1, cand.nonce))
+    transport(lambda req: (lambda status, body: httpx.Response(status, text=body))(
+        *pages(str(req.url))))
+    try:
+        control = await manager._http_exchange("GET", control_url)
+        probe = await manager._http_exchange("GET", probe_url)
+        proof = {"kind": "file_read", "baseline_id": control["evidence_id"],
+                 "artifact_id": probe["evidence_id"]}
+        if file:
+            proof["file"] = file
+        verdict = apply_verdict(
+            manager, candidate_id=cand.id, verdict="confirmed",
+            evidence="Traversal returned /etc/passwd; the ordinary value did not",
+            evidence_ids=[control["evidence_id"], probe["evidence_id"]], proof=proof,
+        )
+        return verdict, check(manager, cand)
+    finally:
+        verification_run.reset(token)
+
+
+def _serves_passwd(url):
+    return (200, PASSWD) if "passwd" in url else (200, "%PDF-1.7 report")
+
+
+@pytest.mark.asyncio
+async def test_path_traversal_confirms_with_file_signature_and_clean_control(manager, transport):
+    verdict, receipt = await _path_traversal_verdict(
+        manager, transport, _serves_passwd,
+        probe_url="https://app.test/config?file=..%2F..%2F..%2F..%2Fetc%2Fpasswd",
+    )
+    assert verdict.status == "confirmed" and receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pages,probe_url,file,gap", [
+    # The page always shows the text (e.g. a tutorial about /etc/passwd).
+    (lambda url: (200, PASSWD), "https://app.test/config?file=../../etc/passwd",
+     "/etc/passwd", "control response already contains"),
+    # An error page that echoes the requested path.
+    (lambda url: (200, "File ../../etc/passwd not found"),
+     "https://app.test/config?file=../../etc/passwd", "/etc/passwd", "does not contain"),
+    # A 404 for the traversal.
+    (lambda url: (404, PASSWD) if "passwd" in url else (200, "ok"),
+     "https://app.test/config?file=../../etc/passwd", "/etc/passwd", "not successful"),
+    # Another endpoint that happens to serve the file.
+    (lambda url: (200, PASSWD) if "passwd" in url else (200, "ok"),
+     "https://app.test/static/../../etc/passwd", "/etc/passwd", "candidate endpoint"),
+    # No named file.
+    (lambda url: (200, PASSWD) if "passwd" in url else (200, "ok"),
+     "https://app.test/config?file=../../etc/passwd", None, "file_read needs file"),
+])
+async def test_path_traversal_rejects_echoes_static_pages_and_wrong_endpoints(
+    manager, transport, pages, probe_url, file, gap,
+):
+    verdict, receipt = await _path_traversal_verdict(
+        manager, transport, pages, probe_url=probe_url, file=file,
+    )
+    assert verdict.status == "inconclusive" and not receipt
+    assert gap in verdict.proof_gap["reason"]
+
+
 def test_command_injection_verifier_mission_explains_evaluated_label():
     from app.services.agent.independent_verify import FindingCandidate, verifier_mission
 
     mission = verifier_mission(FindingCandidate(
         id="c", title="OS command injection in ping", target="https://app.test/ping"))
     assert "evaluated_label" in mission and "supported proof kinds: oob_callback" in mission
+    lfi = verifier_mission(FindingCandidate(
+        id="d", title="Path traversal in download", target="https://app.test/dl"))
+    assert "kind: file_read" in lfi and "supported proof kinds: file_read" in lfi
 
 
 @pytest.mark.asyncio

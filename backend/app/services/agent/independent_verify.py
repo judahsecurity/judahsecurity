@@ -523,6 +523,18 @@ COMMAND_INJECTION_VERIFIER_ADDENDUM = (
 )
 
 
+PATH_TRAVERSAL_VERIFIER_ADDENDUM = (
+    "This is a path traversal / file inclusion candidate. Prove it with two fresh "
+    "replay_http_request exchanges on the candidate endpoint, same method and identity: "
+    "a control with the ordinary parameter value, then the traversal value (for example "
+    "../../../../etc/passwd, URL-encoded if needed, or ..\\..\\windows\\win.ini). "
+    "Record proof {kind: file_read, baseline_id: <control>, artifact_id: <traversal>, "
+    "file: \"/etc/passwd\" | \"win.ini\"}. The traversal response must contain the real "
+    "file (a root:...:0:0: line, or [fonts] and [extensions]) and the control must not. "
+    "Read no other files. An error message that echoes the path, or a 404, is not proof."
+)
+
+
 def parse_verdict_from_text(text: str) -> str:
     blob = (text or "").lower()
     if re.search(r"\b(verdict\s*[:=]\s*)?(refuted|false positive|not exploitable|killed)\b", blob):
@@ -592,6 +604,8 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
     claim_class = candidate.vulnerability_class or inferred_vulnerability_class(candidate)
     if claim_class == "command_injection":
         addenda.append(COMMAND_INJECTION_VERIFIER_ADDENDUM)
+    elif claim_class == "path_traversal":
+        addenda.append(PATH_TRAVERSAL_VERIFIER_ADDENDUM)
     class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
     proof_options = ", ".join(sorted(PROOFS_BY_CLASS.get(claim_class, ()))) or "none yet"
 

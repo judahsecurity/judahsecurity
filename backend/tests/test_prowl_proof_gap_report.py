@@ -15,9 +15,9 @@ _spec.loader.exec_module(report_mod)
 def test_summary_flags_unconfirmable_classes_and_open_cells():
     snapshots = [{"engagement_brain": {
         "candidates": [
-            {"id": "a", "status": "inconclusive", "vulnerability_class": "path_traversal",
-             "title": "Path traversal on https://secret.example.test/files",
-             "proof_gap": {"reason": "Missing proof cannot confirm path_traversal"}},
+            {"id": "a", "status": "inconclusive", "vulnerability_class": "csrf",
+             "title": "CSRF on https://secret.example.test/files",
+             "proof_gap": {"reason": "Missing proof cannot confirm csrf"}},
             {"id": "b", "status": "confirmed", "title": "SQL injection in id"},
             {"id": "c", "status": "inconclusive", "title": "SQL injection in q",
              "proof_gap": {"reason": "Verifier recorded no verdict after 2 attempts"}},
@@ -33,7 +33,7 @@ def test_summary_flags_unconfirmable_classes_and_open_cells():
     works = [{"status": "completed", "stop_reason": "no new hypothesis or coverage progress"}]
     report = report_mod.summarize(snapshots, works)
     rows = {row["class"]: row for row in report["candidates_by_class"]}
-    assert rows["path_traversal"]["can_confirm"] is False
+    assert rows["csrf"]["can_confirm"] is False
     assert rows["sql_injection"]["confirmed"] == 1 and rows["sql_injection"]["inconclusive"] == 1
     xss = next(r for r in report["coverage_cells_by_test_type"] if r["test_type"] == "reflected_xss")
     assert xss["open"] == 1 and report["runs_with_open_cells"] == 1
