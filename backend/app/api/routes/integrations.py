@@ -28,6 +28,7 @@ from app.models.panorama_integration import (
 )
 from app.models.f5_integration import F5Integration
 from app.models.netbrain_integration import NetBrainIntegration
+from app.models.netbrain_path import NetBrainPath
 from app.models.cloudflare_integration import CloudflareWafIntegration
 from app.models.user import User
 from app.models.vulnerability import Vulnerability
@@ -114,6 +115,7 @@ from app.schemas.netbrain_schemas import (
     NetBrainIntegrationUpdate,
     NetBrainTestConnectionResponse,
 )
+from app.schemas.netbrain_path_schemas import NetBrainPathCreate, NetBrainPathResponse
 from app.schemas.cloudflare_schemas import (
     CloudflareIntegrationCreate,
     CloudflareIntegrationResponse,
@@ -131,6 +133,7 @@ from app.services import (
     panorama_service,
     f5_service,
     netbrain_service,
+    netbrain_path_service,
     cloudflare_waf_service,
     servicenow_service,
 )
@@ -1965,6 +1968,81 @@ def _get_netbrain_integration(db: Session, org_id: int, integration_id: int) -> 
     if not integration:
         raise HTTPException(status_code=404, detail="NetBrain connection not found.")
     return integration
+
+
+def _get_netbrain_path(db: Session, org_id: int, integration_id: int, path_id: int) -> NetBrainPath:
+    path = db.query(NetBrainPath).filter(
+        NetBrainPath.id == path_id, NetBrainPath.organization_id == org_id,
+        NetBrainPath.integration_id == integration_id,
+    ).first()
+    if path is None:
+        raise HTTPException(status_code=404, detail="NetBrain path not found.")
+    return path
+
+
+@router.get("/netbrain/{integration_id}/paths", response_model=List[NetBrainPathResponse])
+def list_netbrain_paths(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    _get_netbrain_integration(db, org_id, integration_id)
+    return db.query(NetBrainPath).filter(
+        NetBrainPath.organization_id == org_id,
+        NetBrainPath.integration_id == integration_id,
+    ).order_by(NetBrainPath.created_at.desc()).limit(100).all()
+
+
+@router.post("/netbrain/{integration_id}/paths", response_model=NetBrainPathResponse,
+             status_code=status.HTTP_201_CREATED)
+async def calculate_netbrain_path(
+    integration_id: int,
+    payload: NetBrainPathCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_netbrain_integration(db, _get_org_id(current_user), integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This NetBrain connection is disabled.")
+    try:
+        return await netbrain_path_service.start_calculation(db, integration, payload.model_dump())
+    except netbrain_path_service.PathSelectionError as exc:
+        raise HTTPException(status_code=exc.status_code,
+                            detail={"message": str(exc), "options": exc.options or []}) from exc
+    except Exception as exc:
+        logger.exception("NetBrain path calculation failed")
+        raise HTTPException(status_code=502, detail="NetBrain path calculation failed.") from exc
+
+
+@router.post("/netbrain/{integration_id}/paths/{path_id}/refresh",
+             response_model=NetBrainPathResponse)
+async def refresh_netbrain_path(
+    integration_id: int,
+    path_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_netbrain_integration(db, org_id, integration_id)
+    path = _get_netbrain_path(db, org_id, integration_id, path_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This NetBrain connection is disabled.")
+    try:
+        path = await netbrain_path_service.refresh_calculation(db, integration, path)
+    except Exception as exc:
+        logger.exception("NetBrain path refresh failed")
+        raise HTTPException(status_code=502, detail="NetBrain path refresh failed.") from exc
+    if path.status == "succeeded":
+        from app.services.graph_service import sync_asset_to_graph
+        from app.services.netbrain_path_graph import project_netbrain_path
+        sync_asset_to_graph(path.source_asset_id, org_id)
+        sync_asset_to_graph(path.target_asset_id, org_id)
+        if project_netbrain_path(path):
+            path.graph_projected_at = datetime.utcnow()
+            db.commit()
+            db.refresh(path)
+    return path
 
 
 @router.get("/netbrain", response_model=List[NetBrainIntegrationResponse])

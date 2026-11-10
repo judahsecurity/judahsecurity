@@ -44,10 +44,10 @@ REQUEST_TIMEOUT = httpx.Timeout(60.0, connect=15.0)
 
 # destination examples: "10.0.0.1:443", "/Common/10.0.0.1:443", "2001:db8::1.443"
 _DEST_IPV4 = re.compile(
-    r"(?:^|/)(?P<ip>(?:\d{1,3}\.){3}\d{1,3})(?:%\d+)?(?::(?P<port>\d+))?$"
+    r"(?:^|/)(?P<ip>(?:\d{1,3}\.){3}\d{1,3})(?:%(?P<route_domain>\d+))?(?::(?P<port>\d+))?$"
 )
 _DEST_IPV6 = re.compile(
-    r"(?:^|/)(?P<ip>\[[^\]]+\]|[0-9a-fA-F:]+)(?:%\d+)?(?:[.:](?P<port>\d+))?$"
+    r"(?:^|/)(?P<ip>\[[^\]]+\]|[0-9a-fA-F:]+)(?:%(?P<route_domain>\d+))?(?:[.:](?P<port>\d+))?$"
 )
 
 _VIRTUAL_SELECT = "name,fullPath,partition,destination,enabled,disabled,pool"
@@ -72,10 +72,10 @@ def _strip_partition_path(name: str) -> str:
     return name
 
 
-def _parse_destination(destination: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """Return (ip, port) from an LTM virtual destination string."""
+def _parse_destination(destination: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return (ip, port, route domain) from an LTM destination."""
     if not isinstance(destination, str) or not destination.strip():
-        return None, None
+        return None, None, None
     dest = destination.strip()
     # Drop leading partition path: /Common/1.2.3.4:443
     if dest.startswith("/") and dest.count("/") >= 2:
@@ -83,28 +83,29 @@ def _parse_destination(destination: Optional[str]) -> Tuple[Optional[str], Optio
 
     m = _DEST_IPV4.search(dest) if "." in dest and dest.count(":") <= 1 else None
     if m:
-        return m.group("ip"), m.group("port")
+        return m.group("ip"), m.group("port"), m.group("route_domain")
 
     # IPv6 forms: 2001:db8::1.443 or [2001:db8::1]:443
     m6 = _DEST_IPV6.search(dest)
     if m6:
         ip = m6.group("ip").strip("[]")
         if ":" in ip:
-            return ip, m6.group("port")
-    return None, None
+            return ip, m6.group("port"), m6.group("route_domain")
+    return None, None, None
 
 
-def _parse_member_address(raw: Any) -> Optional[str]:
+def _parse_member_address(raw: Any) -> Tuple[Optional[str], Optional[str]]:
     if not isinstance(raw, str) or not raw.strip():
-        return None
+        return None, None
     addr = raw.strip()
-    # address may be "10.1.1.1%0" or "10.1.1.1"
+    route_domain = None
     if "%" in addr:
-        addr = addr.split("%", 1)[0]
+        addr, suffix = addr.split("%", 1)
+        route_domain = suffix.split(":", 1)[0].split(".", 1)[0] or None
     # member name form "10.1.1.1:80"
     if addr.count(":") == 1 and "." in addr:
         addr = addr.split(":", 1)[0]
-    return addr.strip() or None
+    return addr.strip().strip("[]") or None, route_domain
 
 
 def _pool_api_path(pool_ref: str) -> str:
@@ -345,11 +346,34 @@ def _owned_by_this_integration(asset: Asset, integration_id: int) -> bool:
     return asset.discovery_source == DISCOVERY_SOURCE and meta.get("f5_integration_id") is None
 
 
+def _find_f5_asset(
+    db: Session, integration: F5Integration, value: str, role: str,
+    route_domain: str, partition: Optional[str] = None,
+) -> Optional[Asset]:
+    candidates = db.query(Asset).filter(
+        Asset.organization_id == integration.organization_id,
+        Asset.value == value,
+    ).all()
+    for asset in candidates:
+        meta = asset.metadata_ or {}
+        if meta.get("f5_integration_id") != integration.id:
+            continue
+        if meta.get("f5_network_scope", meta.get("f5_route_domain", "0")) != route_domain:
+            continue
+        if f"f5:{role}" not in (asset.tags or []):
+            continue
+        if partition is not None and meta.get("f5_partition") != partition:
+            continue
+        return asset
+    return None
+
+
 def _upsert_vip_asset(
     db: Session,
     integration: F5Integration,
     *,
     vip_ip: str,
+    route_domain: str,
     virtual_names: List[str],
     partition: str,
     pool_names: List[str],
@@ -363,11 +387,7 @@ def _upsert_vip_asset(
         return None
 
     org_id = integration.organization_id
-    existing = (
-        db.query(Asset)
-        .filter(Asset.organization_id == org_id, Asset.value == vip_ip)
-        .first()
-    )
+    existing = _find_f5_asset(db, integration, vip_ip, "vip", route_domain, partition)
 
     primary_virtual = virtual_names[0] if virtual_names else vip_ip
     primary_pool = pool_names[0] if pool_names else None
@@ -376,6 +396,7 @@ def _upsert_vip_asset(
     member_payload = [
         {
             "ip": m.get("ip"),
+            "route_domain": m.get("route_domain", "0"),
             "port": m.get("port"),
             "state": m.get("state"),
             "session": m.get("session"),
@@ -387,6 +408,9 @@ def _upsert_vip_asset(
 
     meta_patch: Dict[str, Any] = {
         "f5_integration_id": integration.id,
+        "f5_route_domain": None if route_domain.startswith("partition:") else route_domain,
+        "f5_network_scope": route_domain,
+        "network_scope_id": f"f5:{integration.id}:{route_domain if route_domain.startswith('partition:') else 'route-domain:' + route_domain}",
         "f5_virtual_name": primary_virtual,
         "f5_virtual_names": virtual_names,
         "f5_partition": partition,
@@ -411,6 +435,7 @@ def _upsert_vip_asset(
 
     if existing:
         existing.last_seen = datetime.utcnow()
+        existing.status = AssetStatus.DISCOVERED
         tags = [t for t in (existing.tags or []) if t not in ("f5:removed", "f5:disabled")]
         # Drop stale f5-pool:* tags owned by prior syncs for this VIP, then re-add.
         if _owned_by_this_integration(existing, integration.id):
@@ -468,27 +493,32 @@ def _upsert_member_asset(
     integration: F5Integration,
     *,
     member_ip: str,
+    route_domain: str,
     member_port: Optional[str],
     vip_ip: str,
     vip_asset: Asset,
     virtual_name: str,
     pool_name: Optional[str],
     member_state: Optional[str],
+    reset_links: bool,
     stats: _Stats,
 ) -> Optional[Asset]:
     member_ip = (member_ip or "").strip()
-    if not member_ip or member_ip == vip_ip:
+    if not member_ip or (
+        member_ip == vip_ip
+        and route_domain == (vip_asset.metadata_ or {}).get("f5_network_scope", (vip_asset.metadata_ or {}).get("f5_route_domain", "0"))
+    ):
         return None
 
     org_id = integration.organization_id
-    existing = (
-        db.query(Asset)
-        .filter(Asset.organization_id == org_id, Asset.value == member_ip)
-        .first()
-    )
+    existing = _find_f5_asset(db, integration, member_ip, "pool-member", route_domain)
 
     meta_patch: Dict[str, Any] = {
         "f5_integration_id": integration.id,
+        "f5_route_domain": None if route_domain.startswith("partition:") else route_domain,
+        "f5_network_scope": route_domain,
+        "network_scope_id": f"f5:{integration.id}:{route_domain if route_domain.startswith('partition:') else 'route-domain:' + route_domain}",
+        "f5_vip_asset_id": vip_asset.id,
         "f5_reachable_via_vip": vip_ip,
         "f5_pool": pool_name,
         "f5_member_port": member_port,
@@ -509,18 +539,30 @@ def _upsert_member_asset(
 
     if existing:
         existing.last_seen = datetime.utcnow()
+        existing.status = AssetStatus.DISCOVERED
         tags = [t for t in (existing.tags or []) if t != "f5:removed"]
+        if reset_links:
+            tags = [t for t in tags if not str(t).startswith(("f5-via-vip:", "f5-pool:"))]
         for t in desired_tags:
             if t not in tags:
                 tags.append(t)
         existing.tags = tags
         meta = dict(existing.metadata_ or {})
+        if reset_links:
+            meta.pop("f5_reachable_via_vip", None)
+            meta.pop("f5_reachable_via_vips", None)
+            meta.pop("f5_vip_links", None)
+            existing.parent_id = vip_asset.id
         via = meta.get("f5_reachable_via_vips") if isinstance(meta.get("f5_reachable_via_vips"), list) else []
         if meta.get("f5_reachable_via_vip") and meta["f5_reachable_via_vip"] not in via:
             via.append(meta["f5_reachable_via_vip"])
         if vip_ip not in via:
             via.append(vip_ip)
         meta_patch["f5_reachable_via_vips"] = via
+        vip_links = [link for link in (meta.get("f5_vip_links") or []) if isinstance(link, dict)]
+        if not any(link.get("asset_id") == vip_asset.id for link in vip_links):
+            vip_links.append({"asset_id": vip_asset.id, "ip": vip_ip})
+        meta_patch["f5_vip_links"] = vip_links
         meta.update(meta_patch)
         existing.metadata_ = meta
         if _owned_by_this_integration(existing, integration.id):
@@ -555,6 +597,7 @@ def _upsert_member_asset(
         metadata_={
             **meta_patch,
             "f5_reachable_via_vips": [vip_ip],
+            "f5_vip_links": [{"asset_id": vip_asset.id, "ip": vip_ip}],
         },
         system_type="server",
         device_class="Server",
@@ -572,9 +615,10 @@ def _upsert_member_asset(
 def _mark_missing_assets(
     db: Session,
     integration: F5Integration,
-    seen_values: set[str],
+    seen_asset_ids: set[int],
     stats: _Stats,
-) -> None:
+) -> set[str]:
+    missing_values: set[str] = set()
     prior = (
         db.query(Asset)
         .filter(
@@ -587,18 +631,23 @@ def _mark_missing_assets(
         meta = asset.metadata_ or {}
         if meta.get("f5_integration_id") != integration.id:
             continue
-        if asset.value not in seen_values:
+        if asset.id not in seen_asset_ids:
             stats.assets_missing_from_source += 1
+            asset.status = AssetStatus.INACTIVE
+            missing_values.add(asset.value)
             tags = list(asset.tags or [])
             if "f5:removed" not in tags:
                 tags.append("f5:removed")
                 asset.tags = tags
+    return missing_values
 
 
 def _parse_pool_members(raw_members: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     parsed: List[Dict[str, Any]] = []
     for raw in raw_members:
-        addr = _parse_member_address(raw.get("address") or raw.get("name"))
+        addr, route_domain = _parse_member_address(raw.get("address") or raw.get("name"))
+        if route_domain is None and isinstance(raw.get("name"), str) and "%" in raw["name"]:
+            _, route_domain = _parse_member_address(raw["name"])
         if not addr:
             continue
         port = None
@@ -617,6 +666,7 @@ def _parse_pool_members(raw_members: List[Dict[str, Any]]) -> List[Dict[str, Any
         parsed.append(
             {
                 "ip": addr,
+                "route_domain": route_domain,
                 "port": port,
                 "state": raw.get("state"),
                 "session": raw.get("session"),
@@ -626,17 +676,17 @@ def _parse_pool_members(raw_members: List[Dict[str, Any]]) -> List[Dict[str, Any
     return parsed
 
 
-async def _collect_vip_aggregates(client: F5Client) -> Dict[str, Dict[str, Any]]:
-    """Pull virtuals/members and aggregate by VIP IP for a consistent sync snapshot."""
+async def _collect_vip_aggregates(client: F5Client) -> Dict[tuple[str, str, str], Dict[str, Any]]:
+    """Pull virtuals/members and aggregate by VIP address and source scope."""
     virtuals = await client.list_virtuals()
     pool_cache: Dict[str, List[Dict[str, Any]]] = {}
-    aggregates: Dict[str, Dict[str, Any]] = {}
+    aggregates: Dict[tuple[str, str, str], Dict[str, Any]] = {}
 
     for virtual in virtuals:
         virtual_name = str(virtual.get("name") or virtual.get("fullPath") or "").strip()
         partition = str(virtual.get("partition") or "Common")
         destination = virtual.get("destination")
-        vip_ip, vip_port = _parse_destination(destination if isinstance(destination, str) else None)
+        vip_ip, vip_port, route_domain = _parse_destination(destination if isinstance(destination, str) else None)
         if not vip_ip:
             logger.debug("Skipping virtual with unparseable destination: %s", destination)
             continue
@@ -657,10 +707,15 @@ async def _collect_vip_aggregates(client: F5Client) -> Dict[str, Dict[str, Any]]
                 pool_cache[pool_ref] = _parse_pool_members(raw_members)
             members = pool_cache[pool_ref]
 
-        agg = aggregates.get(vip_ip)
+        # An omitted route domain can inherit a partition default. Keep it
+        # partition-scoped until the source supplies an explicit domain.
+        route_scope = route_domain if route_domain is not None else f"partition:{partition}"
+        aggregate_key = (vip_ip, route_scope, partition)
+        agg = aggregates.get(aggregate_key)
         if not agg:
             agg = {
                 "vip_ip": vip_ip,
+                "route_domain": route_scope,
                 "vip_ports": set(),
                 "virtual_names": [],
                 "partition": partition,
@@ -671,7 +726,7 @@ async def _collect_vip_aggregates(client: F5Client) -> Dict[str, Dict[str, Any]]
                 "members": {},
                 "virtuals_seen": 0,
             }
-            aggregates[vip_ip] = agg
+            aggregates[aggregate_key] = agg
 
         agg["virtuals_seen"] += 1
         if vip_port:
@@ -684,9 +739,14 @@ async def _collect_vip_aggregates(client: F5Client) -> Dict[str, Dict[str, Any]]
             agg["enabled"] = True
         if pool_name and pool_name not in agg["pool_names"]:
             agg["pool_names"].append(pool_name)
+        pool_partition = partition
+        if pool_ref and pool_ref.startswith("/"):
+            pool_partition = next((part for part in pool_ref.split("/") if part), partition)
         for member in members:
-            key = f"{member.get('ip')}:{member.get('port')}"
-            agg["members"][key] = member
+            member_scope = member.get("route_domain") or f"partition:{pool_partition}"
+            scoped_member = {**member, "route_domain": member_scope}
+            key = f"{member.get('ip')}%{member_scope}:{member.get('port')}"
+            agg["members"][key] = scoped_member
 
     return aggregates
 
@@ -725,14 +785,17 @@ async def sync_integration(db: Session, integration: F5Integration) -> Dict[str,
         stats.mappings_seen = sum(len(a["members"]) for a in aggregates.values())
 
         seen_values: set[str] = set()
-        member_seen: set[str] = set()
+        seen_asset_ids: set[int] = set()
+        member_seen: set[int] = set()
+        member_seen_keys: set[tuple[str, str]] = set()
 
-        for vip_ip, agg in aggregates.items():
+        for (vip_ip, route_domain, _partition), agg in aggregates.items():
             members = list(agg["members"].values())
             vip_asset = _upsert_vip_asset(
                 db,
                 integration,
                 vip_ip=vip_ip,
+                route_domain=route_domain,
                 virtual_names=list(agg["virtual_names"]),
                 partition=str(agg["partition"]),
                 pool_names=list(agg["pool_names"]),
@@ -744,34 +807,57 @@ async def sync_integration(db: Session, integration: F5Integration) -> Dict[str,
             if not vip_asset:
                 continue
             seen_values.add(vip_ip)
+            seen_asset_ids.add(vip_asset.id)
             stats.vips_imported += 1
+            member_asset_ids: dict[tuple[str, str, str], int] = {}
 
             for member in members:
+                member_key = (str(member["ip"]), str(member["route_domain"]))
                 member_asset = _upsert_member_asset(
                     db,
                     integration,
                     member_ip=member["ip"],
+                    route_domain=str(member.get("route_domain") or "0"),
                     member_port=member.get("port"),
                     vip_ip=vip_ip,
                     vip_asset=vip_asset,
                     virtual_name=(agg["virtual_names"][0] if agg["virtual_names"] else vip_ip),
                     pool_name=(agg["pool_names"][0] if agg["pool_names"] else None),
                     member_state=member.get("state"),
+                    reset_links=member_key not in member_seen_keys,
                     stats=stats,
                 )
                 if member_asset:
+                    member_seen_keys.add(member_key)
+                    member_asset_ids[(str(member["ip"]),
+                                      str(member.get("route_domain") or "0"),
+                                      str(member.get("port")))] = member_asset.id
                     seen_values.add(member["ip"])
-                    if member["ip"] not in member_seen:
-                        member_seen.add(member["ip"])
+                    seen_asset_ids.add(member_asset.id)
+                    if member_asset.id not in member_seen:
+                        member_seen.add(member_asset.id)
                         stats.members_imported += 1
+            if member_asset_ids:
+                vip_meta = dict(vip_asset.metadata_ or {})
+                vip_meta["f5_pool_members"] = [
+                    {**member, "asset_id": member_asset_ids.get(
+                        (str(member.get("ip")), str(member.get("route_domain") or "0"),
+                         str(member.get("port")))
+                    )}
+                    for member in (vip_meta.get("f5_pool_members") or [])
+                ]
+                vip_asset.metadata_ = vip_meta
 
-        _mark_missing_assets(db, integration, seen_values, stats)
+        seen_values.update(_mark_missing_assets(db, integration, seen_asset_ids, stats))
 
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = True
         integration.last_error = None
         integration.last_sync_stats = stats.as_dict()
         db.commit()
+
+        from app.services.integration_graph_sync import sync_integration_assets_to_graph
+        await sync_integration_assets_to_graph(org_id, seen_values)
 
         return {
             "ok": True,

@@ -66,6 +66,7 @@ from app.models.workflow import (
 from app.models.wiz_integration import WizIntegration
 from app.models.tenable_integration import TenableVmIntegration
 from app.models.netbrain_integration import NetBrainIntegration
+from app.models.netbrain_path import NetBrainPath
 
 __all__ = [
     "User",
@@ -148,6 +149,7 @@ __all__ = [
     "WizIntegration",
     "TenableVmIntegration",
     "NetBrainIntegration",
+    "NetBrainPath",
     "ScriptLanguage",
 ]
 

@@ -41,6 +41,73 @@ successful fetch. The new JS and source nodes do not copy raw JS or secret
 values into Neo4j. Source files are identified by organization, repository, commit and
 path; they store hashes, symbol names and line numbers, not source text.
 
+ASN, Certificate, DiscoverySource, HostingProvider, Service, and Technology
+are shared reference nodes. Globally routable IPs are shared by default, while
+an explicit network scope takes precedence for any address. Non-global IPs use a
+network-scoped identity; without explicit `metadata.network_scope_id`, each
+asset keeps its own private IP identity. Tenant observations are stored on edges from an
+organization-owned asset or on organization-keyed edges between shared nodes.
+In particular, a finding on an asset is not automatically attributed to every
+technology or service on that asset.
+F5 imports preserve explicit BIG-IP route domain IDs as network scopes. When
+a route domain is omitted, F5 addresses use a partition-scoped fallback because
+the partition may have a default route domain that the import has not resolved.
+Panorama address objects with the same value in different device groups remain separate
+assets. Other private-address sources need a stable network or VRF identifier
+in `metadata.network_scope_id` to establish shared-IP relationships. Without
+that identifier, graph sync intentionally makes no co-hosting inference.
+If a source has already collapsed two networks into one PostgreSQL asset, the
+graph cannot recover that distinction; the importer must first persist separate
+source assets with their network context.
+
+Wiz VM assets retain Wiz resource IDs and provider IDs. The graph projects
+Wiz-reported subscription, region, and internet exposure as cloud context.
+These relationships identify ownership and location; they do not prove that
+two VMs can communicate. The current Wiz query imports vulnerable VMs and
+findings, not Wiz Security Graph network paths. Importing those paths requires
+a verified Wiz API query and explicit endpoint IDs, direction, and evidence.
+Within on-premises and hybrid networks, routing edges should come from a
+network integration that supplies a VRF or route domain, interfaces, routes,
+policy or ACL evaluation, direction, and observation time. The current
+NetBrain integration checks device configuration for specific findings; it does
+not yet import routes or forwarding decisions. F5 VIP-to-member forwarding is
+the one supported internal reachability edge today. Attack-path results use
+Wiz-reported direct internet exposure or an F5 forwarding edge tied to its
+exact VIP and member assets. Shared IP, account, region, ASN, provider, or
+subdomain relationships are context, not proof of network reachability.
+
+Successful Censys ASM, Wiz, HackerOne, Panorama, F5, Akamai WAF, and NetBrain
+imports now project their touched PostgreSQL assets and findings into Neo4j
+after commit, for both manual and scheduled runs. The import still succeeds if
+Neo4j is unavailable; the next graph refresh can catch up. Cloudflare's scanner
+whitelist and Jira/ServiceNow ticket operations do not currently create graph
+entities because they do not import topology or new findings.
+
+### Upgrade an existing graph
+
+Pause scheduled graph writers and graph reads, back up Neo4j, and deploy the
+new backend. Rerun F5 and Panorama imports so their source records capture
+route domains and distinct address objects. Then run the bounded, idempotent
+cleanup once and refresh **every** organization's assets from PostgreSQL.
+The cleanup drops the old address-only IP constraint,
+deletes projected IP nodes and same-IP links, and removes legacy tenant
+properties from shared nodes, unscoped links, and unsupported inferred
+service/technology/finding edges. A refresh restores organization-keyed links
+and per-asset technology observations. Run it for every organization that has
+assets; refreshing just one leaves the others' shared links incomplete.
+
+```sh
+docker exec asm_backend python /app/scripts/migrate_graph_shared_references.py --apply
+docker exec asm_backend python /app/scripts/backfill_graph.py --organization-id 1 --refresh-existing
+```
+
+Repeat the second command with each real organization ID. Use its batch and
+resume flags for a large organization. Do not run the cleanup concurrently
+with scans or graph reads; the graph is partial until all refreshes complete.
+Review previously conflated inventory rows after the F5 and Panorama reimport;
+the importer marks obsolete source rows inactive, and a refresh carries that
+state into the graph.
+
 Existing PostgreSQL data can be backfilled with the authenticated
 `POST /api/v1/graph/sync` endpoint for the current organization. Later
 jsluice scans attach all extracted paths to their source JS resource after the

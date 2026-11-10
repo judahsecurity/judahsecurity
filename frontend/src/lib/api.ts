@@ -707,6 +707,27 @@ export interface NetBrainAssessmentResult {
   unknown: number;
 }
 
+export interface NetBrainPath {
+  id: number;
+  source_asset_id: number;
+  target_asset_id: number;
+  source_ip: string;
+  target_ip: string;
+  source_scope_id: string;
+  target_scope_id: string;
+  gateway_ip: string;
+  gateway_device: string;
+  gateway_interface: string;
+  protocol: number;
+  destination_port: number;
+  is_live: boolean;
+  status: string;
+  hop_list: Array<{ hop_id: string; source_device: string; target_device: string; inbound_interface: string; outbound_interface: string; next_hop_ids: string[] }>;
+  created_at: string;
+  completed_at?: string | null;
+  graph_projected_at?: string | null;
+}
+
 class ApiClient {
   private client: AxiosInstance;
   private token: string | null = null;
@@ -3577,6 +3598,26 @@ class ApiClient {
 
   async assessNetBrainFindings(id: number): Promise<NetBrainAssessmentResult> {
     const response = await this.client.post(`/integrations/netbrain/${id}/assess`);
+    return response.data;
+  }
+
+  async getNetBrainPaths(id: number): Promise<NetBrainPath[]> {
+    const response = await this.client.get(`/integrations/netbrain/${id}/paths`);
+    return response.data;
+  }
+
+  async calculateNetBrainPath(id: number, payload: {
+    source_asset_id: number; target_asset_id: number;
+    source_ip?: string; target_ip?: string;
+    gateway_ip?: string; gateway_device?: string; gateway_interface?: string;
+    protocol?: number; destination_port?: number; is_live?: boolean;
+  }): Promise<NetBrainPath> {
+    const response = await this.client.post(`/integrations/netbrain/${id}/paths`, payload);
+    return response.data;
+  }
+
+  async refreshNetBrainPath(id: number, pathId: number): Promise<NetBrainPath> {
+    const response = await this.client.post(`/integrations/netbrain/${id}/paths/${pathId}/refresh`);
     return response.data;
   }
 
