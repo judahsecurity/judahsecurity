@@ -535,6 +535,22 @@ PATH_TRAVERSAL_VERIFIER_ADDENDUM = (
 )
 
 
+CSRF_VERIFIER_ADDENDUM = (
+    "This is a CSRF candidate. Prove it with four fresh replay_http_request exchanges:\n"
+    "1) write: the state-changing request with identity=<victim> and cross_site=true, "
+    "a form or text/plain body (no JSON, no custom headers, no CSRF token) carrying "
+    "aegis-verify-<nonce>. cross_site sends only cookies a browser attaches from a "
+    "foreign page (SameSite=None and Secure; Lax on GET) with a foreign Origin.\n"
+    "2) control: the same method, URL, and body with use_auth_session=false and no identity; "
+    "it must be rejected (non-2xx or redirected to login).\n"
+    "3) read: a GET with identity=<victim> (not cross_site) that shows the canary.\n"
+    "4) cleanup: restore the value with identity=<victim>.\n"
+    "Record proof {kind: csrf_state_change, write_id, control_id, read_id, cleanup_id, "
+    "value: \"aegis-verify-<nonce>\"}. If the session cookie is SameSite=Lax/Strict or "
+    "unset, a cross-site POST carries no session: refute or mark inconclusive, do not confirm."
+)
+
+
 def parse_verdict_from_text(text: str) -> str:
     blob = (text or "").lower()
     if re.search(r"\b(verdict\s*[:=]\s*)?(refuted|false positive|not exploitable|killed)\b", blob):
@@ -606,6 +622,8 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         addenda.append(COMMAND_INJECTION_VERIFIER_ADDENDUM)
     elif claim_class == "path_traversal":
         addenda.append(PATH_TRAVERSAL_VERIFIER_ADDENDUM)
+    elif claim_class == "csrf":
+        addenda.append(CSRF_VERIFIER_ADDENDUM)
     class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
     proof_options = ", ".join(sorted(PROOFS_BY_CLASS.get(claim_class, ()))) or "none yet"
 

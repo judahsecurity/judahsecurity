@@ -9164,7 +9164,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                              use_auth_session: bool = True, timeout: int = 25,
                              follow_redirects: bool = True, identity: Optional[str] = None,
                              hypothesis_id: str = "", coverage_cell_id: str = "",
-                             max_response_bytes: Optional[int] = None) -> Dict[str, Any]:
+                             max_response_bytes: Optional[int] = None,
+                             cross_site: bool = False) -> Dict[str, Any]:
         import time as _time
         from app.services.agent.assessment_sessions import cookie_jar, identity_registry
         from app.services.agent.evidence_store import evidence_store, verification_run, origin
@@ -9186,13 +9187,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         method = (method or "GET").upper().strip()
         assert_method_allowed(self, url, method)
         raw_body, hdrs = coerce_request_body({"body": body, "headers": headers or {}}, headers or {})
+        if cross_site:
+            from app.services.agent.cross_site import cross_site_headers
+
+            if identity in (None, "anonymous") or cookies:
+                raise ValueError("cross_site replays the victim's browser cookies; name a test identity")
+            hdrs = cross_site_headers(hdrs)
         session = {}
         if identity is not None:
             session = identity_registry(self).resolve(identity, url)
             protected_headers = {k.lower() for k in session.get("headers", {})} | {"host", "cookie", "authorization", "proxy-authorization"}
             if cookies or any(k.lower() in protected_headers for k in hdrs):
                 raise ValueError("Named identities cannot be combined with credential overrides")
-            hdrs = {**session.get("headers", {}), **hdrs}
+            if not cross_site:
+                # A cross-site browser request never carries injected auth headers.
+                hdrs = {**session.get("headers", {}), **hdrs}
         elif use_auth_session:
             session = getattr(self, "_auth_session", None) or {}
         label = identity or ("legacy" if session else "anonymous")
@@ -9222,9 +9231,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         stored = session.get("cookies", [])
         if identity is None and session:
             stored = [c for c in stored if isinstance(c, dict) and c.get("domain")]
+        cookies_sent = []
+        if cross_site:
+            from app.services.agent.cross_site import cross_site_cookies
+
+            stored = cross_site_cookies(stored, method)
+            cookies_sent = sorted({str(c.get("name")) for c in stored})
         jar = cookie_jar(url, stored, cookies)
         run = verification_run.get()
-        if run:
+        if run and not cross_site:
+            # A cross-site browser request cannot add custom headers; freshness
+            # still binds through the verification run id on the evidence.
             hdrs["X-Aegis-Verify"] = run.nonce
         start = _time.monotonic()
         # Follow redirects manually: retain RFC cookie scope and never forward an
@@ -9268,9 +9285,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 nxt.headers.pop("cookie", None)
                 jar.set_cookie_header(nxt)
                 req = nxt
-        if identity not in (None, "anonymous"):
+        if identity not in (None, "anonymous") and not cross_site:
+            # The cross-site jar is a filtered copy; keep the victim's full session.
+            from app.services.agent.cross_site import same_site_of
+
+            prior = {(c.get("name"), str(c.get("domain") or "").lstrip(".")): same_site_of(c)
+                     for c in session.get("cookies", []) if isinstance(c, dict)}
             session["cookies"] = [dict(name=c.name, value=c.value, domain=c.domain, path=c.path,
-                                       secure=c.secure, expires=c.expires) for c in client.cookies.jar]
+                                       secure=c.secure, expires=c.expires,
+                                       sameSite=same_site_of(c) or prior.get((c.name, c.domain.lstrip("."))) or "")
+                                  for c in client.cookies.jar]
         body_text = resp.text or ""
         if resp.status_code == 401:
             session["authenticated"] = False
@@ -9278,7 +9302,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "request": {"method": method, "url": url, "identity": label,
                         "identity_verified": bool(session.get("authenticated")),
                         "principal_id": session.get("identity_check", {}).get("expected"),
-                        "headers": dict(req.headers), "body": raw_body or "", "body_len": len(raw_body or "")},
+                        "headers": dict(req.headers), "body": raw_body or "", "body_len": len(raw_body or ""),
+                        # Names only, never values; the key avoids the redaction pattern for cookies.
+                        **({"cross_site": True, "cross_site_sent_names": cookies_sent} if cross_site else {})},
             "response": {"status": resp.status_code, "url": str(resp.url), "headers": dict(resp.headers),
                          "body": body_text, "body_preview": body_text[:4000], "length": len(resp.content),
                          "elapsed_s": round(_time.monotonic() - start, 3)},
@@ -9343,11 +9369,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         identity: Optional[str] = None,
         hypothesis_id: str = "",
         coverage_cell_id: str = "",
+        cross_site: bool = False,
     ) -> str:
         """Replay a captured HTTP request (tester-style request tampering).
 
         Prefer samples from the capability map (api_samples). Optionally attaches
         cookies from the session auth handoff after deep_crawl login.
+
+        cross_site=true sends the request the way a browser would from a foreign
+        page for the named identity: only cookies eligible cross-site (SameSite=None
+        and Secure; Lax too for GET), a foreign Origin/Referer, no injected auth
+        headers, and only CORS-safelisted request headers. Use it for CSRF proof.
         """
         if not url or not str(url).strip():
             return "Error: url is required (e.g. from capability_map.api_samples)."
@@ -9387,6 +9419,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 identity=identity,
                 hypothesis_id=hypothesis_id,
                 coverage_cell_id=coverage_cell_id,
+                cross_site=bool(cross_site),
             )
             note = (
                 "Use this to tamper method/headers/body on captured APIs. "

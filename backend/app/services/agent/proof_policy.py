@@ -38,7 +38,7 @@ PROOFS_BY_CLASS = {
     # Only an OOB callback that carries a shell-evaluated label; see validate_proof.
     "command_injection": frozenset({"oob_callback"}),
     "path_traversal": frozenset({"file_read"}),
-    "csrf": frozenset(),
+    "csrf": frozenset({"csrf_state_change"}),
     "known_cve": frozenset(),
     "account_enumeration": frozenset(),
 }
@@ -159,6 +159,80 @@ def _request_text(request: dict) -> str:
             break
         text = decoded
     return text
+
+
+_CSRF_TOKEN = re.compile(
+    r"(?i)csrf|xsrf|authenticity_token|requestverificationtoken|anti.?forgery|(?:^|[&\"'\s{,])_token\b"
+)
+
+
+def _csrf_state_change_proof(candidate, rows: dict, value) -> tuple[bool, str]:
+    """A browser-faithful cross-site write lands in the victim's account.
+
+    write: cross_site replay for a named identity (only cross-site-eligible
+    cookies, foreign Origin, no custom headers) that succeeds and carries the
+    canary; control: the same request with no cookies is rejected, so the
+    endpoint is not simply public; read: the victim's own session shows the
+    canary; cleanup removes it.
+    """
+    from app.services.agent.cross_site import FOREIGN_ORIGIN, simple_request
+    from app.services.agent.evidence_store import origin
+
+    write, control, read, cleanup = (rows.get(k) for k in ("write", "control", "read", "cleanup"))
+    if not all(item and item.get("kind") == "http_exchange"
+               for item in (write, control, read, cleanup)):
+        return False, "CSRF proof needs fresh write, no-cookie control, readback, and cleanup exchanges"
+    wreq, creq = write["payload"]["request"], control["payload"]["request"]
+    rreq, xreq = read["payload"]["request"], cleanup["payload"]["request"]
+
+    def ok(item):
+        return 200 <= int(item["payload"]["response"].get("status") or 0) < 300
+
+    victim = write.get("identity")
+    if victim in (None, "", "anonymous", "legacy") or not wreq.get("identity_verified"):
+        return False, "The cross-site write must use a verified named victim identity"
+    sent = wreq.get("cross_site_sent_names")
+    if wreq.get("cross_site") is not True or not isinstance(sent, list) or not sent:
+        return False, ("Send the write with cross_site=true; it must still carry a victim cookie "
+                       "a browser would attach cross-site")
+    if (wreq.get("headers") or {}).get("origin") != FOREIGN_ORIGIN:
+        return False, "The cross-site write must present the foreign Origin"
+    if not simple_request(wreq.get("method"), wreq.get("headers")):
+        return False, ("The write needs a CORS preflight (method, content type, or header), "
+                       "so a foreign page cannot send it")
+    header_names = " ".join(str(name) for name in (wreq.get("headers") or {}))
+    if _CSRF_TOKEN.search(str(wreq.get("body") or "")) or _CSRF_TOKEN.search(header_names):
+        return False, "The write carries an anti-CSRF token, which a foreign page cannot read"
+    if not isinstance(value, str) or value != "aegis-verify-" + candidate.nonce:
+        return False, "Use this candidate's fresh aegis-verify canary value"
+    if value not in str(wreq.get("body") or "") + str(wreq.get("url") or ""):
+        return False, "The cross-site write must carry the canary"
+    if not ok(write):
+        return False, "The cross-site write was not accepted"
+    try:
+        target = (origin(candidate.target), urlsplit(candidate.target).path or "/")
+        if (origin(wreq["url"]), urlsplit(wreq["url"]).path or "/") != target:
+            return False, "The cross-site write must hit the candidate endpoint"
+        if len({origin(r["url"]) for r in (wreq, creq, rreq, xreq)}) != 1:
+            return False, "All CSRF proof requests must stay on one origin"
+    except (KeyError, ValueError, TypeError):
+        return False, "CSRF proof contains an invalid request URL"
+    if (control.get("identity") != "anonymous" or creq.get("method") != wreq.get("method")
+            or creq.get("url") != wreq.get("url")):
+        return False, "The control must replay the same write with no cookies"
+    redirected = (urlsplit(str(control["payload"]["response"].get("url") or "")).path
+                  != urlsplit(creq["url"]).path)
+    if ok(control) and not redirected:
+        return False, "The write also succeeds with no session, so this is a public endpoint, not CSRF"
+    if read.get("identity") != victim or rreq.get("method") != "GET" or rreq.get("cross_site"):
+        return False, "Read the canary back with the victim's own session"
+    if not ok(read) or value not in str(read["payload"]["response"].get("body") or ""):
+        return False, "The victim's readback does not show the canary"
+    if cleanup.get("identity") != victim or not ok(cleanup):
+        return False, "A successful cleanup with the victim's session is required"
+    if not write["created_at"] < read["created_at"] < cleanup["created_at"]:
+        return False, "Readback and cleanup must follow the write in order"
+    return True, ""
 
 
 def _file_read_proof(candidate, baseline: dict | None, probe: dict | None,
@@ -698,6 +772,11 @@ def validate_proof(
                     or not xml_request):
                 return False, "XXE requires an observed XML capture and a fresh external-entity callback"
         return True, ""
+    if kind == "csrf_state_change":
+        return _csrf_state_change_proof(candidate, {
+            "write": row("write_id"), "control": row("control_id"),
+            "read": row("read_id"), "cleanup": row("cleanup_id"),
+        }, proof.get("value"))
     if kind == "file_read":
         return _file_read_proof(candidate, row("baseline_id"), row("artifact_id"), proof.get("file"))
     if kind == "response_match":
