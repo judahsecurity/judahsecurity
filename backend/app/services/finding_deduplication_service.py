@@ -167,8 +167,14 @@ class FindingDeduplicationService:
         
         # Match by CVE (very reliable)
         if cve_id:
+            cve_id = cve_id.strip().upper()
+            # Also match findings that cover the CVE among several (e.g. a
+            # Tenable plugin listing many CVEs keeps all of them in ``cves``).
             cve_match = query.filter(
-                Vulnerability.cve_id == cve_id
+                or_(
+                    Vulnerability.cve_id == cve_id,
+                    cast(Vulnerability.cves, String).like(f'%"{cve_id}"%'),
+                )
             ).first()
             if cve_match:
                 return cve_match

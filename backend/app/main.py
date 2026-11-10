@@ -314,6 +314,7 @@ async def startup_event():
     apply_oracle_migrations()
     apply_scan_profile_migrations()
     apply_agent_ledger_migrations()
+    apply_finding_identity_migrations()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -753,6 +754,30 @@ def apply_agent_ledger_migrations():
             "ALTER TABLE agent_action_receipts "
             "ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(64)"
         ))
+
+
+def apply_finding_identity_migrations():
+    """Add cross-source finding identity columns to existing vulnerability tables.
+
+    ``finding_observations`` itself is created by ``Base.metadata.create_all``.
+    """
+    from sqlalchemy import text
+
+    statements = [
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS cves JSON",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS dedup_key VARCHAR(255)",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS port_service_id INTEGER "
+        "REFERENCES port_services(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_dedup_key ON vulnerabilities (dedup_key)",
+        "CREATE INDEX IF NOT EXISTS ix_vulnerabilities_port_service_id ON vulnerabilities (port_service_id)",
+    ]
+    try:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+        logger.info("Finding identity schema migrations applied.")
+    except Exception as exc:
+        logger.error("Finding identity schema migrations failed (non-fatal): %s", exc)
 
 
 def apply_scan_profile_migrations():

@@ -7,6 +7,7 @@ from app.models.asset import Asset, AssetType, AssetStatus
 from app.models.sitemap_entry import SitemapEntry
 from app.models.finding_exception import FindingException, ExceptionType, ExceptionStatus
 from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
+from app.models.finding_observation import FindingObservation
 from app.models.finding_validation import (
     FindingValidation,
     ValidationStatus,
@@ -68,6 +69,7 @@ from app.models.tenable_integration import TenableVmIntegration
 from app.models.netbrain_integration import NetBrainIntegration
 
 __all__ = [
+    "FindingObservation",
     "User",
     "UserRole",
     "Organization",

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
 from app.models.wiz_integration import WizIntegration
+from app.services import finding_identity
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +306,7 @@ class _Stats:
         self.assets_updated = 0
         self.vulns_created = 0
         self.vulns_updated = 0
+        self.vulns_merged = 0
         self.findings_seen = 0
         self.findings_filtered = 0
 
@@ -391,13 +393,20 @@ def _upsert_vulnerability(
     db: Session, asset: Asset, finding: Dict[str, Any], stats: _Stats
 ) -> None:
     finding_id = str(finding.get("id") or "").strip()
+    template_id = f"wiz:{finding_id}"[:255] if finding_id else None
     title = str(finding.get("detailedName") or finding.get("name") or "Wiz vulnerability")[:500]
-    existing = None
-    if finding_id:
+    org_id = asset.organization_id
+    cves = finding_identity.normalize_cves(
+        [finding.get("name"), finding.get("detailedName"), _cve_id(finding)]
+    )
+    dedup_key = finding_identity.make_dedup_key(cves, DISCOVERY_SOURCE, finding_id or None)
+
+    existing = finding_identity.find_observed(db, org_id, DISCOVERY_SOURCE, finding_id)
+    if existing is None and template_id:
         existing = db.query(Vulnerability).filter(
             Vulnerability.asset_id == asset.id,
             Vulnerability.detected_by == DISCOVERY_SOURCE,
-            Vulnerability.template_id == f"wiz:{finding_id}"[:255],
+            Vulnerability.template_id == template_id,
         ).first()
     if existing is None:
         existing = db.query(Vulnerability).filter(
@@ -405,12 +414,17 @@ def _upsert_vulnerability(
             Vulnerability.detected_by == DISCOVERY_SOURCE,
             Vulnerability.title == title,
         ).first()
+    own_row = existing is not None
+    if existing is None:
+        existing = finding_identity.find_canonical(db, asset, cves, dedup_key)
 
     severity = _map_severity(
         finding.get("severity") or finding.get("vendorSeverity") or finding.get("nvdSeverity")
     )
     raw_status = str(finding.get("status") or "OPEN").upper()
     resolved = raw_status in {"RESOLVED", "CLOSED"} or bool(finding.get("resolvedAt"))
+    last_detected = _parse_datetime(finding.get("lastDetectedAt")) or datetime.utcnow()
+    resolved_at = _parse_datetime(finding.get("resolvedAt")) or datetime.utcnow()
     score = finding.get("score")
     try:
         cvss_score = float(score) if score is not None else None
@@ -429,22 +443,55 @@ def _upsert_vulnerability(
         "fixed_version": finding.get("fixedVersion"),
         "projects": finding.get("projects") or [],
     }
+    observation = dict(
+        state="fixed" if resolved else "open",
+        vendor_severity=str(finding.get("severity") or "") or None,
+        seen_at=last_detected,
+        first_seen=_parse_datetime(finding.get("firstDetectedAt")),
+        details={"wiz_status": raw_status, "version": finding.get("version"),
+                 "fixed_version": finding.get("fixedVersion")},
+    )
+
+    if existing is not None and not (own_row and finding_identity.owning_source(existing) == DISCOVERY_SOURCE):
+        # Another source (or another Wiz finding) already owns this weakness:
+        # record Wiz's view without overwriting it.
+        finding_identity.record_observation(db, org_id, existing, DISCOVERY_SOURCE, finding_id, **observation)
+        if resolved:
+            if (existing.status in _ACTIVE_STATUSES
+                    and finding_identity.all_sources_fixed(existing)):
+                existing.status = VulnerabilityStatus.RESOLVED
+                existing.resolved_at = resolved_at
+        else:
+            finding_identity.merge_into(
+                existing, cves=cves, severity=severity, last_detected=last_detected,
+                source=DISCOVERY_SOURCE,
+            )
+        stats.vulns_merged += 1
+        return
+
     if existing:
         existing.title = title
         existing.description = finding.get("description") or finding.get("CVEDescription")
         existing.severity = severity
         existing.cvss_score = cvss_score
-        existing.cve_id = _cve_id(finding)
+        existing.cve_id = cves[0] if cves else None
+        existing.cves = cves
+        existing.dedup_key = dedup_key
         existing.references = references
         existing.remediation = finding.get("remediation")
         existing.affected_component = (
             str(finding.get("version"))[:500] if finding.get("version") is not None else None
         )
-        existing.last_detected = _parse_datetime(finding.get("lastDetectedAt")) or datetime.utcnow()
-        existing.metadata_ = metadata
+        existing.last_detected = last_detected
+        existing.metadata_ = {**(existing.metadata_ or {}), **metadata}
+        finding_identity.record_observation(db, org_id, existing, DISCOVERY_SOURCE, finding_id, **observation)
         if resolved:
-            existing.status = VulnerabilityStatus.RESOLVED
-            existing.resolved_at = _parse_datetime(finding.get("resolvedAt")) or datetime.utcnow()
+            # Analyst decisions stay; a row other sources still report stays open.
+            if existing.status in _ACTIVE_STATUSES and (
+                not existing.observations or finding_identity.all_sources_fixed(existing)
+            ):
+                existing.status = VulnerabilityStatus.RESOLVED
+                existing.resolved_at = resolved_at
         elif existing.status == VulnerabilityStatus.RESOLVED:
             existing.status = VulnerabilityStatus.OPEN
             existing.resolved_at = None
@@ -455,7 +502,9 @@ def _upsert_vulnerability(
         description=finding.get("description") or finding.get("CVEDescription"),
         severity=severity,
         cvss_score=cvss_score,
-        cve_id=_cve_id(finding),
+        cve_id=cves[0] if cves else None,
+        cves=cves,
+        dedup_key=dedup_key,
         references=references,
         remediation=finding.get("remediation"),
         affected_component=(
@@ -463,16 +512,22 @@ def _upsert_vulnerability(
         ),
         asset_id=asset.id,
         detected_by=DISCOVERY_SOURCE,
-        template_id=f"wiz:{finding_id}"[:255] if finding_id else None,
+        template_id=template_id,
         status=VulnerabilityStatus.RESOLVED if resolved else VulnerabilityStatus.OPEN,
         first_detected=_parse_datetime(finding.get("firstDetectedAt")) or datetime.utcnow(),
-        last_detected=_parse_datetime(finding.get("lastDetectedAt")) or datetime.utcnow(),
+        last_detected=last_detected,
         resolved_at=_parse_datetime(finding.get("resolvedAt")) if resolved else None,
         tags=["source:wiz"],
         metadata_=metadata,
     )
     db.add(vulnerability)
+    finding_identity.record_observation(db, org_id, vulnerability, DISCOVERY_SOURCE, finding_id, **observation)
+    # Flush so later findings in this sync can match the new row.
+    db.flush()
     stats.vulns_created += 1
+
+
+_ACTIVE_STATUSES = (VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS)
 
 
 async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str, Any]:

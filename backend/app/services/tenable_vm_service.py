@@ -30,6 +30,7 @@ from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.port_service import PortService, PortState, Protocol
 from app.models.tenable_integration import DEFAULT_TENABLE_URL, SYNC_LOCK_TTL, TenableVmIntegration
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
+from app.services import finding_identity
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +438,7 @@ class _Stats:
         self.vulns_seen = 0
         self.vulns_created = 0
         self.vulns_updated = 0
+        self.vulns_merged = 0
         self.vulns_skipped = 0
         self.vulns_resolved = 0
         self.ports_created = 0
@@ -684,19 +686,60 @@ class TenableImporter:
             last_detected=_parse_datetime(finding.get("last_found")) or datetime.utcnow(),
             metadata_=metadata,
         )
-        existing = self.db.query(Vulnerability).filter(
-            Vulnerability.asset_id == asset.id,
-            Vulnerability.template_id == template_id,
-        ).first()
-        if existing:
+        cves = finding_identity.normalize_cves(cves)
+        fields["cves"] = cves
+        fields["dedup_key"] = finding_identity.make_dedup_key(
+            cves, "tenable", template_id[len(TEMPLATE_PREFIX):]
+        )
+        fields["port_service_id"] = port.id if port else None
+        vendor_id = _observation_id(finding, asset, template_id)
+        observation = dict(
+            state="open",
+            vendor_severity=str(finding.get("severity") or "") or None,
+            seen_at=fields["last_detected"],
+            first_seen=_parse_datetime(finding.get("first_found")),
+            details={"template_id": template_id, "plugin_id": plugin.get("id"), "port": metadata["port"]},
+        )
+
+        existing = finding_identity.find_observed(self.db, self.org_id, DISCOVERY_SOURCE, vendor_id)
+        if existing is None:
+            existing = self.db.query(Vulnerability).filter(
+                Vulnerability.asset_id == asset.id,
+                Vulnerability.template_id == template_id,
+            ).first()
+        if existing is None:
+            existing = finding_identity.find_canonical(self.db, asset, cves, fields["dedup_key"])
+
+        if existing is not None and existing.template_id != template_id:
+            # Another source (or another Tenable plugin) already owns this
+            # weakness: fold Tenable's view in without overwriting it.
+            finding_identity.merge_into(
+                existing,
+                cves=cves,
+                severity=severity,
+                last_detected=fields["last_detected"],
+                source="tenable",
+            )
+            finding_identity.record_observation(
+                self.db, self.org_id, existing, DISCOVERY_SOURCE, vendor_id, **observation
+            )
+            self.stats.vulns_merged += 1
+            return
+        if existing is not None:
+            # Keep CVEs and metadata other sources merged into this row.
+            fields["cves"] = finding_identity.normalize_cves(finding_identity.finding_cves(existing) + cves)
+            fields["metadata_"] = {**(existing.metadata_ or {}), **metadata}
             for key, value in fields.items():
                 setattr(existing, key, value)
             if existing.status == VulnerabilityStatus.RESOLVED:
                 existing.status = VulnerabilityStatus.OPEN
                 existing.resolved_at = None
+            finding_identity.record_observation(
+                self.db, self.org_id, existing, DISCOVERY_SOURCE, vendor_id, **observation
+            )
             self.stats.vulns_updated += 1
             return
-        self.db.add(Vulnerability(
+        vuln = Vulnerability(
             **fields,
             asset_id=asset.id,
             template_id=template_id,
@@ -704,8 +747,20 @@ class TenableImporter:
             first_detected=_parse_datetime(finding.get("first_found")) or datetime.utcnow(),
             detection_confidence="version_only",
             tags=["source:tenable"],
-        ))
+        )
+        self.db.add(vuln)
+        finding_identity.record_observation(
+            self.db, self.org_id, vuln, DISCOVERY_SOURCE, vendor_id, **observation
+        )
+        # Flush so later findings in this sync can match the new row.
+        self.db.flush()
         self.stats.vulns_created += 1
+
+
+def _observation_id(finding: Dict[str, Any], asset: Asset, template_id: str) -> str:
+    """Stable per-org Tenable observation key: Tenable asset + plugin + port."""
+    asset_ref = (finding.get("asset") or {}).get("uuid") or asset.value
+    return f"{asset_ref}:{template_id}"
 
 
 # Analyst decisions that a Tenable "fixed" state must not overwrite.
@@ -730,12 +785,25 @@ def _resolve_fixed(importer: "TenableImporter", findings: List[Dict[str, Any]]) 
         if asset is None:
             continue
         template_id = importer._template_id(plugin, importer._port_key(finding.get("port") or {}))
-        vuln = importer.db.query(Vulnerability).filter(
-            Vulnerability.asset_id == asset.id,
-            Vulnerability.template_id == template_id,
-            Vulnerability.status.in_(_RESOLVABLE_STATUSES),
-        ).first()
+        vendor_id = _observation_id(finding, asset, template_id)
+        vuln = finding_identity.find_observed(importer.db, importer.org_id, DISCOVERY_SOURCE, vendor_id)
         if vuln is None:
+            vuln = importer.db.query(Vulnerability).filter(
+                Vulnerability.asset_id == asset.id,
+                Vulnerability.template_id == template_id,
+            ).first()
+        if vuln is None:
+            continue
+        if vuln.observations:
+            finding_identity.record_observation(
+                importer.db, importer.org_id, vuln, DISCOVERY_SOURCE, vendor_id,
+                state="fixed", seen_at=_parse_datetime(finding.get("last_fixed")),
+                details={"template_id": template_id, "plugin_id": plugin.get("id")},
+            )
+        if vuln.status not in _RESOLVABLE_STATUSES:
+            continue
+        # A merged finding stays open while any other source still reports it.
+        if vuln.observations and not finding_identity.all_sources_fixed(vuln):
             continue
         vuln.status = VulnerabilityStatus.RESOLVED
         vuln.resolved_at = _parse_datetime(finding.get("last_fixed")) or datetime.utcnow()

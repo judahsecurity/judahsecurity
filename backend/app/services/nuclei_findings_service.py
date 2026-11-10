@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetType
 from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
+from app.services import finding_identity
 from app.models.scan import Scan
 from app.services.nuclei_service import NucleiResult, NucleiScanResult
 from app.services.nuclei_detection import build_nuclei_detection, build_nuclei_oast_proof
@@ -312,6 +313,20 @@ class NucleiFindingsService:
                 )
                 # Also refresh last_detected / scan_id / redetection metadata
                 self._update_vulnerability(duplicate, nuclei_result, scan_id=scan_id)
+                if finding_identity.owning_source(duplicate) != "nuclei":
+                    # Record that Nuclei independently sees this finding, so
+                    # another source reporting a fix does not close it.
+                    finding_identity.merge_into(
+                        duplicate,
+                        cves=finding_identity.normalize_cves([nuclei_result.cve_id]),
+                        source="nuclei",
+                    )
+                    finding_identity.record_observation(
+                        self.db, organization_id, duplicate, "nuclei",
+                        f"{asset.value}:{nuclei_result.template_id}",
+                        details={"template_id": nuclei_result.template_id,
+                                 "matched_at": nuclei_result.matched_at},
+                    )
                 result["updated"] = True
                 result["vulnerability_id"] = duplicate.id
                 result["deduplicated"] = True
@@ -636,6 +651,7 @@ class NucleiFindingsService:
             tags.append("proof:oob_callback")
             dc = DETECTION_CONFIDENCE_EXPLOIT_CONFIRMED
 
+        cves = finding_identity.normalize_cves([nuclei_result.cve_id])
         vulnerability = Vulnerability(
             title=title,
             description=description,
@@ -643,6 +659,8 @@ class NucleiFindingsService:
             cvss_score=nuclei_result.cvss_score,
             cvss_vector=nuclei_result.cvss_vector,
             cve_id=nuclei_result.cve_id,
+            cves=cves or None,
+            dedup_key=finding_identity.make_dedup_key(cves, "nuclei", nuclei_result.template_id),
             cwe_id=nuclei_result.cwe_id,
             references=references,
             asset_id=asset.id,

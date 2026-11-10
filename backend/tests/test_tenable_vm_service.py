@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from app.db.database import Base  # noqa: E402
 import app.models  # noqa: E402,F401
 from app.models.asset import Asset, AssetType  # noqa: E402
+from app.models.finding_observation import FindingObservation  # noqa: E402
 from app.models.organization import Organization  # noqa: E402
 from app.models.port_service import PortService  # noqa: E402
 from app.models.tenable_integration import TenableVmIntegration  # noqa: E402
@@ -175,7 +176,7 @@ def db():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=[
         Organization.__table__, TenableVmIntegration.__table__, Asset.__table__,
-        PortService.__table__, Vulnerability.__table__,
+        PortService.__table__, Vulnerability.__table__, FindingObservation.__table__,
     ])
     session = sessionmaker(bind=engine)()
     session.add(Organization(id=1, name="Acme"))
