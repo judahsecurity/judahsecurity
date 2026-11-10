@@ -65,6 +65,29 @@ hard HTTP request count, enforce that count at the request boundary; tool-start
 limits alone do not meet it. Compare AWS pilot traffic and finding quality
 before widening the scope or changing existing schedules.
 
+## Unverified leads and proof gaps
+
+A candidate the independent verifier could not prove stays out of findings,
+but it is not discarded. The run list reports `unverified_leads`, and the
+timeline shows each lead's title, class, severity, proof gap, and suggested
+next step. A refuted candidate is not a lead.
+
+A verifier run that ends without recording any verdict (model error, timeout,
+or a narrative-only answer) gets one fresh run with a new verification run id.
+Only then does the candidate settle as inconclusive, with the gap "Verifier
+recorded no verdict after 2 attempts".
+
+To see where candidates and coverage cells get stuck across saved runs:
+
+```bash
+sudo docker compose exec -T backend python scripts/prowl_proof_gap_report.py
+```
+
+Add `--org <id>`, `--since YYYY-MM-DD`, or `--json` as needed. The report is
+read-only and prints classes, statuses, counts, and redacted proof-gap reasons;
+it does not print targets, titles, or evidence. A class listed as "can never
+confirm" has no supported proof kind yet.
+
 ## Offline benchmark
 
 Run `PYTHONPATH=backend python backend/scripts/benchmark_autonomy_handoffs.py`.

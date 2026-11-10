@@ -89,6 +89,7 @@ interface AutonomyWork {
   spent_usd: number;
   recon_leads: number;
   verified_candidates: number;
+  unverified_leads?: number;
   stop_reason: string;
 }
 
@@ -110,6 +111,10 @@ interface TimelineEvent {
   evidence_ids?: string[];
   stop_reason?: string;
   cost_usd?: number;
+  vulnerability_class?: string;
+  severity?: string;
+  proof_gap?: string;
+  next_step?: string;
 }
 
 const FREQUENCY_OPTIONS = [
@@ -852,7 +857,7 @@ export default function SchedulesPage() {
             )}
             {autonomyRuns.filter((run) => run.id === selectedWorkId).map((run) => (
               <div key={run.id} className="text-sm space-y-1">
-                <p>{run.turns} turns · {run.recon_leads} leads · {run.verified_candidates} verified · ${run.spent_usd.toFixed(2)} reported spend</p>
+                <p>{run.turns} turns · {run.recon_leads} leads · {run.verified_candidates} verified · {run.unverified_leads ?? 0} unverified leads · ${run.spent_usd.toFixed(2)} reported spend</p>
                 {run.stop_reason && <p className="text-muted-foreground">Stopped: {run.stop_reason}</p>}
               </div>
             ))}
@@ -860,7 +865,11 @@ export default function SchedulesPage() {
               {timelineEvents.map((event, index) => (
                 <div key={`${event.kind}-${event.id || index}`} className="rounded border p-3 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant={event.verdict === 'verified' ? 'default' : 'secondary'}>{event.kind}</Badge>
+                    <Badge variant={event.verdict === 'verified' ? 'default' : 'secondary'}>
+                      {event.kind === 'candidate' && event.verdict !== 'verified' ? 'unverified lead' : event.kind}
+                    </Badge>
+                    {event.vulnerability_class && <span>{event.vulnerability_class}</span>}
+                    {event.kind === 'candidate' && event.severity && <span>{event.severity}</span>}
                     <span className="text-muted-foreground">{event.at ? formatDate(event.at) : 'Time unavailable'}</span>
                     {event.status && <span>{event.status}</span>}
                     {event.verdict && <strong>{event.verdict}</strong>}
@@ -872,6 +881,8 @@ export default function SchedulesPage() {
                   {event.observation_id && <p>Observation: {event.observation_id}</p>}
                   {(event.evidence_ref || event.evidence_ids?.length) && <p>Evidence: {[event.evidence_ref, ...(event.evidence_ids || [])].filter(Boolean).join(', ')}</p>}
                   {event.stop_reason && <p>Reason: {event.stop_reason}</p>}
+                  {event.proof_gap && <p>Not verified: {event.proof_gap}</p>}
+                  {event.next_step && <p>Next step: {event.next_step}</p>}
                   {typeof event.cost_usd === 'number' && <p>Reported cost: ${event.cost_usd.toFixed(2)}</p>}
                 </div>
               ))}

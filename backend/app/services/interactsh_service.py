@@ -601,6 +601,7 @@ def poll(session_id: str, only_new: bool = True) -> Dict[str, Any]:
         interactions.append({
             "protocol": evt.get("protocol"),
             "unique_id": evt.get("unique-id") or evt.get("full-id"),
+            "full_id": evt.get("full-id"),
             "remote_address": evt.get("remote-address"),
             "timestamp": evt.get("timestamp"),
             "q_type": evt.get("q-type"),

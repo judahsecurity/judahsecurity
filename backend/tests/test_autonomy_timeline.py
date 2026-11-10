@@ -66,3 +66,33 @@ def test_confirmation_without_matching_receipt_remains_lead():
     assert result["verified_count"] == 0
     assert next(event for event in result["events"] if event["kind"] == "candidate")["verdict"] == "lead"
     assert result["events"][-1]["stop_reason"] == "budget exhausted"
+
+
+def test_unverified_candidates_surface_with_their_proof_gap():
+    now = datetime.now(timezone.utc)
+    work = SimpleNamespace(
+        id="work-2", status="completed", turns=1, spent_usd=0.1,
+        stop_reason="", finished_at=now, updated_at=now,
+    )
+    snapshot = {"saved_at": now.timestamp(), "engagement_brain": {
+        "candidates": [
+            {"id": "c-inc", "status": "inconclusive", "title": "Command injection in ping",
+             "target": "https://app.example.test/ping?host=1&token=secret",
+             "vulnerability_class": "command_injection", "severity": "high",
+             "proof_gap": {"reason": "No proof kind for command_injection",
+                           "next_step": "Plant an OOB callback"}},
+            {"id": "c-pend", "status": "pending", "title": "Pending lead"},
+            {"id": "c-ref", "status": "refuted", "title": "Refuted claim"},
+        ],
+        "verification_receipts": {},
+    }}
+    result = build_timeline(work, snapshot, [], [], [])
+    assert result["unverified_lead_count"] == 2 and result["verified_count"] == 0
+    events = {e["id"]: e for e in result["events"] if e["kind"] == "candidate"}
+    lead = events["c-inc"]
+    assert lead["verdict"] == "lead" and lead["title"] == "Command injection in ping"
+    assert lead["vulnerability_class"] == "command_injection" and lead["severity"] == "high"
+    assert lead["proof_gap"] == "No proof kind for command_injection"
+    assert lead["next_step"] == "Plant an OOB callback"
+    assert "secret" not in lead["target"]
+    assert events["c-pend"]["proof_gap"] == "Awaiting independent verification"

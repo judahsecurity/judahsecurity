@@ -707,6 +707,7 @@ def get_schedule_autonomy_work(
 ):
     """Show bounded progress and outcome counts without prompts or raw evidence."""
     from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot
+    from app.services.agent.autonomy_timeline import unverified_lead
 
     schedule = db.get(ScanSchedule, schedule_id)
     if not schedule:
@@ -753,6 +754,11 @@ def get_schedule_autonomy_work(
                 and hyp.get("status") in {"open", "in_progress"}
             ),
             "verified_candidates": verified,
+            "unverified_leads": sum(
+                1 for candidate in (brain.get("candidates") or [])
+                if isinstance(candidate, dict)
+                and unverified_lead(candidate, brain.get("verification_receipts") or {})
+            ),
             "stop_reason": row.stop_reason,
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,

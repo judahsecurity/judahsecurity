@@ -29,6 +29,18 @@ def verified_candidate(candidate: dict, receipts: dict) -> bool:
     )
 
 
+def unverified_lead(candidate: dict, receipts: dict) -> bool:
+    """A candidate that was not refuted and lacks a receipt-backed confirmation.
+
+    These are real signals the verifier could not prove (or has not judged
+    yet). They are never findings, but operators must be able to see them.
+    """
+    return (
+        candidate.get("status") in {"pending", "inconclusive", "confirmed"}
+        and not verified_candidate(candidate, receipts)
+    )
+
+
 def _at(value: Any) -> str:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
@@ -103,13 +115,25 @@ def build_timeline(
     for row in candidates:
         verified = verified_candidate(row, receipts)
         receipt = _candidate_receipt(row, receipts) if verified else {}
-        events.append({
+        event = {
             "kind": "candidate", "at": _at(row.get("verified_at") or snapshot.get("saved_at")),
             "id": row.get("id"), "hypothesis_id": row.get("hypothesis_id"),
+            "title": redact_string(str(row.get("title") or ""))[:240],
+            "target": safe_target(row.get("target")),
+            "vulnerability_class": str(row.get("vulnerability_class") or "")[:64],
+            "severity": str(row.get("severity") or "")[:16],
             "verdict": "verified" if verified else "lead",
             "status": row.get("status"),
             "evidence_ids": list(receipt.get("evidence_ids") or row.get("evidence_ids") or [])[:16],
-        })
+        }
+        if not verified:
+            gap = row.get("proof_gap") if isinstance(row.get("proof_gap"), dict) else {}
+            reason = gap.get("reason") or row.get("verifier_summary") or (
+                "Awaiting independent verification" if row.get("status") == "pending"
+                else "No supported proof recorded")
+            event["proof_gap"] = redact_string(str(reason))[:300]
+            event["next_step"] = redact_string(str(gap.get("next_step") or ""))[:300]
+        events.append(event)
     for run in runs:
         events.append({
             "kind": "run", "at": _at(run.started_at), "run_id": run.id,
@@ -126,5 +150,6 @@ def build_timeline(
         "work_id": work.id, "status": work.status,
         "lead_count": len(observations),
         "verified_count": sum(verified_candidate(row, receipts) for row in candidates),
+        "unverified_lead_count": sum(unverified_lead(row, receipts) for row in candidates),
         "cost_usd": work.spent_usd, "events": events,
     }
