@@ -18,6 +18,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.wiz_integration import WizIntegration
+from app.models.wiz_custom_query import WizCustomQuery, WizCustomQueryRecord
 from app.models.tenable_integration import TenableVmIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
@@ -63,6 +64,16 @@ from app.schemas.censys_schemas import (
     CensysTestConnectionResponse,
 )
 from app.schemas.wiz_schemas import (
+    WizCustomQueryCreate,
+    WizCustomQueryRecordPage,
+    WizCustomQueryResponse,
+    WizCustomQueryRunResult,
+    WizCustomQueryUpdate,
+    WizQueryPreviewRequest,
+    WizQueryPreviewResponse,
+    WizQueryTemplate,
+    WizScriptParseRequest,
+    WizScriptParseResponse,
     WizIntegrationCreate,
     WizIntegrationResponse,
     WizIntegrationUpdate,
@@ -125,6 +136,7 @@ from app.services import (
     jira_service,
     censys_asm_service,
     wiz_service,
+    wiz_custom_query_service,
     tenable_vm_service,
     hackerone_service,
     akamai_waf_service,
@@ -924,7 +936,229 @@ async def sync_wiz_integration(
     integration = _get_wiz_integration(db, org_id, integration_id)
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
-    return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
+    result = await wiz_service.sync_integration(db, integration)
+    custom = await wiz_custom_query_service.sync_integration_queries(db, integration)
+    if custom:
+        failed = [item for item in custom if not item.get("ok")]
+        result["message"] = (
+            f"{result['message']} Ran {len(custom)} custom quer{'y' if len(custom) == 1 else 'ies'}"
+            f"{f' ({len(failed)} failed)' if failed else ''}."
+        )
+    result["custom_query_results"] = custom
+    return WizSyncResult(**result)
+
+
+# ── Wiz custom queries ──────────────────────────────────────────────────────
+
+
+def _get_wiz_custom_query(
+    db: Session, org_id: int, integration_id: int, query_id: int
+) -> WizCustomQuery:
+    query = (
+        db.query(WizCustomQuery)
+        .filter(
+            WizCustomQuery.id == query_id,
+            WizCustomQuery.integration_id == integration_id,
+            WizCustomQuery.organization_id == org_id,
+        )
+        .first()
+    )
+    if not query:
+        raise HTTPException(status_code=404, detail="Wiz custom query not found.")
+    return query
+
+
+def _wiz_query_response(db: Session, query: WizCustomQuery) -> WizCustomQueryResponse:
+    response = WizCustomQueryResponse.model_validate(query)
+    response.record_count = (
+        db.query(WizCustomQueryRecord)
+        .filter(WizCustomQueryRecord.query_id == query.id, WizCustomQueryRecord.is_present == True)  # noqa: E712
+        .count()
+    )
+    return response
+
+
+def _validated_wiz_query(text: str) -> str:
+    try:
+        return wiz_custom_query_service.validate_query(text)
+    except wiz_custom_query_service.WizQueryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/wiz/query-templates", response_model=List[WizQueryTemplate])
+def list_wiz_query_templates(current_user: User = Depends(get_current_active_user)):
+    return wiz_custom_query_service.TEMPLATES
+
+
+@router.post("/wiz/queries/parse-script", response_model=WizScriptParseResponse)
+def parse_wiz_query_script(
+    payload: WizScriptParseRequest,
+    current_user: User = Depends(require_analyst),
+):
+    """Extract QUERY/VARIABLES from a Wiz "Copy as Python" script without running it."""
+    try:
+        parsed = wiz_custom_query_service.parse_python_script(payload.script)
+    except wiz_custom_query_service.WizQueryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _validated_wiz_query(parsed["query"])
+    return parsed
+
+
+@router.get("/wiz/{integration_id}/queries", response_model=List[WizCustomQueryResponse])
+def list_wiz_custom_queries(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    _get_wiz_integration(db, org_id, integration_id)
+    queries = (
+        db.query(WizCustomQuery)
+        .filter(WizCustomQuery.integration_id == integration_id, WizCustomQuery.organization_id == org_id)
+        .order_by(WizCustomQuery.created_at.asc())
+        .all()
+    )
+    return [_wiz_query_response(db, query) for query in queries]
+
+
+@router.post("/wiz/{integration_id}/queries/preview", response_model=WizQueryPreviewResponse)
+async def preview_wiz_custom_query(
+    integration_id: int,
+    payload: WizQueryPreviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_wiz_integration(db, org_id, integration_id)
+    _validated_wiz_query(payload.query)
+    try:
+        result = await wiz_custom_query_service.preview(
+            integration, payload.query, payload.variables, payload.connection_path or None
+        )
+    except (wiz_service.WizApiError, wiz_custom_query_service.WizQueryError) as exc:
+        return WizQueryPreviewResponse(ok=False, message=str(exc))
+    return WizQueryPreviewResponse(**result)
+
+
+@router.post(
+    "/wiz/{integration_id}/queries",
+    response_model=WizCustomQueryResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_wiz_custom_query(
+    integration_id: int,
+    payload: WizCustomQueryCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    _get_wiz_integration(db, org_id, integration_id)
+    query_text = _validated_wiz_query(payload.query)
+    name = payload.name.strip()
+    if db.query(WizCustomQuery).filter(
+        WizCustomQuery.integration_id == integration_id, WizCustomQuery.name == name
+    ).first():
+        raise HTTPException(status_code=409, detail=f"A custom query named '{name}' already exists.")
+    query = WizCustomQuery(
+        organization_id=org_id,
+        integration_id=integration_id,
+        name=name,
+        query=query_text,
+        **payload.model_dump(exclude={"name", "query"}),
+    )
+    db.add(query)
+    db.commit()
+    db.refresh(query)
+    return _wiz_query_response(db, query)
+
+
+@router.put("/wiz/{integration_id}/queries/{query_id}", response_model=WizCustomQueryResponse)
+def update_wiz_custom_query(
+    integration_id: int,
+    query_id: int,
+    payload: WizCustomQueryUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    query = _get_wiz_custom_query(db, org_id, integration_id, query_id)
+    data = payload.model_dump(exclude_unset=True)
+    if "query" in data:
+        data["query"] = _validated_wiz_query(data["query"])
+    if "name" in data:
+        data["name"] = data["name"].strip()
+        clash = db.query(WizCustomQuery).filter(
+            WizCustomQuery.integration_id == integration_id,
+            WizCustomQuery.name == data["name"],
+            WizCustomQuery.id != query.id,
+        ).first()
+        if clash:
+            raise HTTPException(status_code=409, detail=f"A custom query named '{data['name']}' already exists.")
+    for key in ("connection_path", "asset_host_field"):
+        if key in data:
+            data[key] = (data[key] or "").strip() or None
+    for key, value in data.items():
+        setattr(query, key, value)
+    db.commit()
+    db.refresh(query)
+    return _wiz_query_response(db, query)
+
+
+@router.delete("/wiz/{integration_id}/queries/{query_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_wiz_custom_query(
+    integration_id: int,
+    query_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    query = _get_wiz_custom_query(db, org_id, integration_id, query_id)
+    db.query(WizCustomQueryRecord).filter(WizCustomQueryRecord.query_id == query.id).delete()
+    db.delete(query)
+    db.commit()
+
+
+@router.post("/wiz/{integration_id}/queries/{query_id}/run", response_model=WizCustomQueryRunResult)
+async def run_wiz_custom_query(
+    integration_id: int,
+    query_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_wiz_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
+    query = _get_wiz_custom_query(db, org_id, integration_id, query_id)
+    result = await wiz_custom_query_service.sync_custom_query(db, query, integration=integration)
+    return WizCustomQueryRunResult(**result)
+
+
+@router.get(
+    "/wiz/{integration_id}/queries/{query_id}/records",
+    response_model=WizCustomQueryRecordPage,
+)
+def list_wiz_custom_query_records(
+    integration_id: int,
+    query_id: int,
+    present_only: bool = Query(True),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Rows returned by a custom query, for review and for agents to validate."""
+    org_id = _get_org_id(current_user)
+    query = _get_wiz_custom_query(db, org_id, integration_id, query_id)
+    records = db.query(WizCustomQueryRecord).filter(
+        WizCustomQueryRecord.query_id == query.id,
+        WizCustomQueryRecord.organization_id == org_id,
+    )
+    if present_only:
+        records = records.filter(WizCustomQueryRecord.is_present == True)  # noqa: E712
+    total = records.count()
+    items = records.order_by(WizCustomQueryRecord.id).offset(offset).limit(limit).all()
+    return WizCustomQueryRecordPage(total=total, items=items)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

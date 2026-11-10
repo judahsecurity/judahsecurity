@@ -31,6 +31,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { api, getApiErrorMessage, type WizIntegration } from '@/lib/api';
+import { WizCustomQueries } from '@/components/integrations/WizCustomQueries';
 
 type WizForm = {
   connection_name: string;
@@ -215,7 +216,7 @@ export function WizSection() {
         <div className="flex-1 min-w-0">
           <CardTitle className="text-base">Wiz</CardTitle>
           <CardDescription>
-            Import internet-exposed virtual machines and their vulnerability findings from Wiz. Read-only.
+            Import internet-exposed virtual machines and their vulnerability findings from Wiz, plus any custom read-only queries. Read-only.
           </CardDescription>
         </div>
         {loading ? (
@@ -272,6 +273,7 @@ export function WizSection() {
                     <Trash2 className="h-4 w-4 mr-2" />Remove
                   </Button>
                 </div>
+                <WizCustomQueries integrationId={item.id} disabled={!item.is_active} />
               </div>
             ))}
             <Button size="sm" variant="outline" onClick={openCreate}><Plus className="h-4 w-4 mr-2" />Add tenant</Button>

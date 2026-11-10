@@ -427,6 +427,82 @@ export interface WizSyncResult {
   vulns_updated: number;
   findings_seen: number;
   findings_filtered: number;
+  custom_query_results?: WizCustomQueryRunResult[];
+}
+
+export interface WizCustomQuery {
+  id: number;
+  organization_id: number;
+  integration_id: number;
+  name: string;
+  description?: string | null;
+  query: string;
+  variables: Record<string, unknown>;
+  connection_path?: string | null;
+  page_size: number;
+  max_pages: number;
+  asset_host_field?: string | null;
+  is_active: boolean;
+  last_run_at?: string | null;
+  last_run_ok?: boolean | null;
+  last_run_stats?: Record<string, number> | null;
+  last_error?: string | null;
+  record_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WizCustomQueryInput {
+  name: string;
+  description?: string | null;
+  query: string;
+  variables: Record<string, unknown>;
+  connection_path?: string | null;
+  page_size: number;
+  max_pages: number;
+  asset_host_field?: string | null;
+  is_active: boolean;
+}
+
+export interface WizCustomQueryRunResult {
+  ok: boolean;
+  message: string;
+  rows_seen: number;
+  records_created: number;
+  records_updated: number;
+  records_gone: number;
+  assets_created: number;
+  assets_updated: number;
+  pages: number;
+}
+
+export interface WizQueryPreview {
+  ok: boolean;
+  message: string;
+  connection_path?: string | null;
+  rows: Record<string, unknown>[];
+  fields: string[];
+}
+
+export interface WizQueryTemplate {
+  key: string;
+  name: string;
+  description: string;
+  query: string;
+  variables: Record<string, unknown>;
+  connection_path?: string | null;
+  asset_host_field?: string | null;
+}
+
+export interface WizCustomQueryRecord {
+  id: number;
+  query_id: number;
+  external_id: string;
+  data: Record<string, unknown>;
+  asset_id?: number | null;
+  is_present: boolean;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
 }
 
 export interface TenableIntegration {
@@ -3210,6 +3286,61 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  async getWizQueryTemplates(): Promise<WizQueryTemplate[]> {
+    const response = await this.client.get('/integrations/wiz/query-templates');
+    return response.data;
+  }
+
+  async parseWizQueryScript(script: string): Promise<{ query: string; variables: Record<string, unknown> }> {
+    const response = await this.client.post('/integrations/wiz/queries/parse-script', { script });
+    return response.data;
+  }
+
+  async getWizCustomQueries(integrationId: number): Promise<WizCustomQuery[]> {
+    const response = await this.client.get(`/integrations/wiz/${integrationId}/queries`);
+    return response.data;
+  }
+
+  async previewWizCustomQuery(
+    integrationId: number,
+    payload: { query: string; variables: Record<string, unknown>; connection_path?: string | null },
+  ): Promise<WizQueryPreview> {
+    const response = await this.client.post(`/integrations/wiz/${integrationId}/queries/preview`, payload);
+    return response.data;
+  }
+
+  async createWizCustomQuery(integrationId: number, payload: WizCustomQueryInput): Promise<WizCustomQuery> {
+    const response = await this.client.post(`/integrations/wiz/${integrationId}/queries`, payload);
+    return response.data;
+  }
+
+  async updateWizCustomQuery(
+    integrationId: number,
+    queryId: number,
+    payload: Partial<WizCustomQueryInput>,
+  ): Promise<WizCustomQuery> {
+    const response = await this.client.put(`/integrations/wiz/${integrationId}/queries/${queryId}`, payload);
+    return response.data;
+  }
+
+  async deleteWizCustomQuery(integrationId: number, queryId: number): Promise<void> {
+    await this.client.delete(`/integrations/wiz/${integrationId}/queries/${queryId}`);
+  }
+
+  async runWizCustomQuery(integrationId: number, queryId: number): Promise<WizCustomQueryRunResult> {
+    const response = await this.client.post(`/integrations/wiz/${integrationId}/queries/${queryId}/run`);
+    return response.data;
+  }
+
+  async getWizCustomQueryRecords(
+    integrationId: number,
+    queryId: number,
+    params: { present_only?: boolean; limit?: number; offset?: number } = {},
+  ): Promise<{ total: number; items: WizCustomQueryRecord[] }> {
+    const response = await this.client.get(`/integrations/wiz/${integrationId}/queries/${queryId}/records`, { params });
     return response.data;
   }
 

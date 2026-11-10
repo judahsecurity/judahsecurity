@@ -759,7 +759,7 @@ class ScheduleWorker:
     async def run_wiz_syncs(self):
         """Run scheduled Wiz vulnerability and VM imports when due."""
         from app.models.wiz_integration import WizIntegration
-        from app.services import wiz_service
+        from app.services import wiz_custom_query_service, wiz_service
 
         db = self.get_db_session()
         if not db:
@@ -781,6 +781,8 @@ class ScheduleWorker:
                         f"Wiz sync (org {integration.organization_id}, "
                         f"'{integration.connection_name}'): {result.get('message')}"
                     )
+                    for custom in await wiz_custom_query_service.sync_integration_queries(db, integration):
+                        logger.info(f"Wiz custom query: {custom.get('message')}")
                 except Exception as exc:
                     logger.error(
                         f"Wiz sync failed for connection {integration.id}: {exc}",

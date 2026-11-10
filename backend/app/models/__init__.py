@@ -64,6 +64,7 @@ from app.models.workflow import (
     ScriptLanguage,
 )
 from app.models.wiz_integration import WizIntegration
+from app.models.wiz_custom_query import WizCustomQuery, WizCustomQueryRecord
 from app.models.tenable_integration import TenableVmIntegration
 from app.models.netbrain_integration import NetBrainIntegration
 
@@ -146,6 +147,8 @@ __all__ = [
     "WorkflowRunStatus",
     "WorkflowNodeRunStatus",
     "WizIntegration",
+    "WizCustomQuery",
+    "WizCustomQueryRecord",
     "TenableVmIntegration",
     "NetBrainIntegration",
     "ScriptLanguage",

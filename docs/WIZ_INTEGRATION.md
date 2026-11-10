@@ -11,6 +11,23 @@ Judah can import Wiz virtual machines and vulnerability findings into the exposu
 
 Existing records are updated by stable Wiz asset and finding identifiers. Findings reported as resolved by Wiz are resolved in Judah; findings seen open again are reopened. Judah never changes data in Wiz.
 
+## Custom queries
+
+Each Wiz connection can also run **custom queries** to pull any table Wiz exposes over GraphQL, such as application endpoints, attack-surface findings or issues, without code changes.
+
+1. In Wiz, open the table you want with the filters you want, and copy its API request as Python (the script that defines `QUERY` and `VARIABLES`).
+2. In Judah, open **Integrations → Wiz → Custom queries → Add query** and paste the whole script. Judah reads only the `QUERY` and `VARIABLES` literals; it never runs the script and ignores any credentials in it. A raw GraphQL query plus JSON variables also works, and **Application endpoints** is available as a template.
+3. Select **Preview** to fetch a few rows. Judah finds the result list (`nodes` + `pageInfo`) automatically and lists the fields it returned.
+4. Optionally set **Import hostname/URL field as assets** (for example `host`) so each row becomes an inventory asset tagged `source:wiz`, which agents can then validate.
+5. Save. The query runs after every Wiz sync, or on demand with **Run now**.
+
+Behaviour:
+
+- Only read operations are accepted. A GraphQL `mutation` or `subscription` is rejected, because it would change data in Wiz rather than return findings. For example, the `UpdateUserPreferences` request Wiz sends when a page first loads only hides UI help banners; capture the request that loads the table rows instead.
+- Paging is automatic. `$first` is set to the configured page size and `$after` starts empty, so a cursor or page size copied from the browser does not matter. Each run stops after the configured maximum number of pages.
+- Every returned node is stored by its Wiz `id`. Rows a later complete run no longer returns are marked as gone, not deleted; a run cut short by the page limit marks nothing as gone.
+- Rows are available at `GET /api/integrations/wiz/{id}/queries/{query_id}/records`.
+
 ## Wiz prerequisites
 
 1. In Wiz, open **Settings → Access Management → Service Accounts**.
@@ -45,4 +62,11 @@ The default OAuth token URL is `https://auth.app.wiz.io/oauth/token` with audien
 - `PUT /api/integrations/wiz/{id}`
 - `DELETE /api/integrations/wiz/{id}`
 - `POST /api/integrations/wiz/{id}/test`
-- `POST /api/integrations/wiz/{id}/sync`
+- `POST /api/integrations/wiz/{id}/sync` (also runs the connection's active custom queries)
+- `GET /api/integrations/wiz/query-templates`
+- `POST /api/integrations/wiz/queries/parse-script`
+- `GET|POST /api/integrations/wiz/{id}/queries`
+- `POST /api/integrations/wiz/{id}/queries/preview`
+- `PUT|DELETE /api/integrations/wiz/{id}/queries/{query_id}`
+- `POST /api/integrations/wiz/{id}/queries/{query_id}/run`
+- `GET /api/integrations/wiz/{id}/queries/{query_id}/records`
