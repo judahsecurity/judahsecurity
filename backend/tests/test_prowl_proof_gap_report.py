@@ -26,6 +26,8 @@ def test_summary_flags_unconfirmable_classes_and_open_cells():
             {"test_type": "reflected_xss", "status": "tested_clean"},
             {"test_type": "reflected_xss", "status": "inconclusive"},
             {"test_type": "sqli", "status": "untested"},
+            {"test_type": "sqli", "status": "blocked",
+             "first_pass_blocked_reason": "post_path_not_approved"},
         ],
     }}]
     works = [{"status": "completed", "stop_reason": "no new hypothesis or coverage progress"}]
@@ -35,6 +37,7 @@ def test_summary_flags_unconfirmable_classes_and_open_cells():
     assert rows["sql_injection"]["confirmed"] == 1 and rows["sql_injection"]["inconclusive"] == 1
     xss = next(r for r in report["coverage_cells_by_test_type"] if r["test_type"] == "reflected_xss")
     assert xss["open"] == 1 and report["runs_with_open_cells"] == 1
+    assert report["coverage_gaps"] == {"needs_operator:post_path_not_approved": 1}
     assert report["stop_reasons"][0]["reason"] == "no new hypothesis or coverage progress"
     assert any("no verdict after N attempts" in r["reason"] for r in report["top_inconclusive_reasons"])
     assert "secret.example.test" not in json.dumps(report)

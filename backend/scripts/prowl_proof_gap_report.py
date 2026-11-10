@@ -48,12 +48,13 @@ def _reason_bucket(text: str) -> str:
 
 
 def summarize(snapshots: Iterable[dict], works: Iterable[dict]) -> dict[str, Any]:
-    from app.services.agent.coverage_cells import CELL_OPEN
+    from app.services.agent.coverage_cells import CELL_TERMINAL, coverage_gap_code
     from app.services.agent.proof_policy import PROOFS_BY_CLASS
 
     by_class: dict[str, Counter] = {}
     reasons: Counter = Counter()
     cells: dict[str, Counter] = {}
+    gaps: Counter = Counter()
     runs_with_open_cells = 0
     snapshot_count = 0
     for payload in snapshots:
@@ -73,7 +74,10 @@ def summarize(snapshots: Iterable[dict], works: Iterable[dict]) -> dict[str, Any
                 continue
             status = str(cell.get("status") or "untested")
             cells.setdefault(str(cell.get("test_type") or "unknown"), Counter())[status] += 1
-            open_here += status in CELL_OPEN
+            gap = coverage_gap_code(cell)
+            if gap:
+                gaps[gap] += 1
+            open_here += status not in CELL_TERMINAL and not gap
         runs_with_open_cells += open_here > 0
 
     stops: Counter = Counter()
@@ -96,7 +100,7 @@ def summarize(snapshots: Iterable[dict], works: Iterable[dict]) -> dict[str, Any
     cell_rows = []
     for test, counts in sorted(cells.items(), key=lambda kv: -sum(kv[1].values())):
         total = sum(counts.values())
-        open_n = sum(n for status, n in counts.items() if status in CELL_OPEN)
+        open_n = sum(n for status, n in counts.items() if status not in CELL_TERMINAL)
         cell_rows.append({"test_type": test, "total": total, "open": open_n,
                           "open_pct": round(100 * open_n / total, 1) if total else 0.0,
                           "by_status": dict(counts)})
@@ -109,6 +113,7 @@ def summarize(snapshots: Iterable[dict], works: Iterable[dict]) -> dict[str, Any
         ],
         "coverage_cells_by_test_type": cell_rows,
         "runs_with_open_cells": runs_with_open_cells,
+        "coverage_gaps": dict(gaps.most_common()),
         "work_status": dict(statuses),
         "stop_reasons": [{"reason": r, "count": n} for r, n in stops.most_common(15)],
     }
@@ -116,7 +121,7 @@ def summarize(snapshots: Iterable[dict], works: Iterable[dict]) -> dict[str, Any
 
 def _print_text(report: dict) -> None:
     print(f"Snapshots read: {report['snapshots']}  "
-          f"(with open coverage cells: {report['runs_with_open_cells']})\n")
+          f"(with actionable open cells: {report['runs_with_open_cells']})\n")
     print("Candidates by class")
     print(f"  {'class':28} {'total':>5} {'conf':>5} {'refut':>5} {'inconc':>6} {'pend':>5} {'%inc':>6}  proof kinds")
     for row in report["candidates_by_class"]:
@@ -126,9 +131,10 @@ def _print_text(report: dict) -> None:
     print("\nTop inconclusive reasons")
     for row in report["top_inconclusive_reasons"]:
         print(f"  {row['count']:>4}  [{row['class']}] {row['reason']}")
-    print("\nCoverage cells by test type (open = blocks completion)")
+    print("\nCoverage cells by test type (open = not terminal; includes gaps)")
     for row in report["coverage_cells_by_test_type"]:
         print(f"  {row['test_type'][:28]:28} {row['total']:>6} total {row['open']:>6} open ({row['open_pct']}%)  {row['by_status']}")
+    print(f"Coverage gaps (accounted, untested, not clean): {report['coverage_gaps']}")
     print(f"\nWork status: {report['work_status']}")
     print("Stop reasons")
     for row in report["stop_reasons"]:

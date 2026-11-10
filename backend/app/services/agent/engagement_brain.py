@@ -3665,6 +3665,11 @@ def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
         lines.append(cov.get("summary") or "")
         for u in (cov.get("untested") or [])[:6]:
             lines.append(f"  untested: {u.get('method')} {u.get('path')}")
+        if cov.get("coverage_gap_count"):
+            lines.append(
+                f"Coverage gaps (do not lease; report to the operator, never as clean): "
+                f"{cov.get('coverage_gap_counts')}"
+            )
     if progress.get("pending_candidates"):
         lines.append(
             f"Pending independent_verify: {progress.get('pending_candidates')} candidate(s). "
@@ -4052,7 +4057,11 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         brain = engagement_brain_from_dict(brain)
     seed_coverage_from_surfaces(brain)
     denom = denominator_surfaces(brain)
-    from app.services.agent.coverage_cells import CELL_TERMINAL, migrate_coverage_cells
+    from app.services.agent.coverage_cells import (
+        CELL_TERMINAL,
+        coverage_gap_code,
+        migrate_coverage_cells,
+    )
 
     cells = migrate_coverage_cells(brain, denominator=denom)
     by_key = {
@@ -4082,7 +4091,28 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
     for cell in cells:
         cell_status = str(cell.get("status") or "untested")
         cell_counts[cell_status] = cell_counts.get(cell_status, 0) + 1
-    open_cells = [cell for cell in cells if cell.get("status") not in CELL_TERMINAL]
+    # Non-terminal cells are either still actionable (they block completion)
+    # or explicit gaps that cannot progress without operator input or new
+    # evidence. Gaps are accounted for, listed, and never counted as clean.
+    open_cells = []
+    gap_cells = []
+    gap_counts: Dict[str, int] = {}
+    for cell in cells:
+        if cell.get("status") in CELL_TERMINAL:
+            continue
+        code = coverage_gap_code(cell)
+        if not code:
+            open_cells.append(cell)
+            continue
+        gap_counts[code] = gap_counts.get(code, 0) + 1
+        gap_cells.append({
+            "id": cell.get("id"), "gap": code,
+            "test_type": cell.get("test_type"), "method": cell.get("method"),
+            "host": cell.get("host"), "path": cell.get("path"),
+            "parameter": cell.get("parameter"), "identity": cell.get("identity"),
+            "attempts": int(cell.get("attempts") or 0),
+            "reason": str(cell.get("reason") or "")[:240],
+        })
     pending_proofs = [
         row
         for row in (brain.proof_escalations or [])
@@ -4102,6 +4132,9 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         "cell_counts": cell_counts,
         "open_cell_count": len(open_cells),
         "open_cells": open_cells[:50],
+        "coverage_gap_count": len(gap_cells),
+        "coverage_gap_counts": gap_counts,
+        "coverage_gaps": gap_cells[:50],
         "coverage_cells": cells[:100],
         "pending_proof_escalation_count": len(pending_proofs),
         "pending_proof_escalations": pending_proofs[:20],
@@ -4113,7 +4146,8 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
             f"coverage {accounted}/{denom_n or 0} accounted "
             f"(finding={len(buckets['finding'])} clean={len(buckets['tested_clean'])} "
             f"skipped={len(buckets['skipped'])} untested={len(untested)}); "
-            f"cells {len(cells) - len(open_cells)}/{len(cells)} complete"
+            f"cells {len(cells) - len(open_cells) - len(gap_cells)}/{len(cells)} complete"
+            + (f", {len(gap_cells)} coverage gaps (untested, not clean)" if gap_cells else "")
         ),
     }
 

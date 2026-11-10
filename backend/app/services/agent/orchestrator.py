@@ -3678,6 +3678,14 @@ class AgentOrchestrator:
                 import json as _json
 
                 assessment = _json.loads(await self.tool_manager.scoped_assessment_summary())
+                gaps = assessment["coverage"].get("coverage_gap_counts") or {}
+                if assessment["complete"] and gaps:
+                    response.answer = (response.answer or "") + (
+                        f"\n\nAssessment complete with {sum(gaps.values())} coverage gaps "
+                        f"(untested, not clean): "
+                        + ", ".join(f"{code}={n}" for code, n in sorted(gaps.items()))
+                        + ". See coverage_gaps in scoped_assessment_summary."
+                    )
                 if not assessment["complete"]:
                     coverage = assessment["coverage"]
                     partial_reason = self.tool_manager._scoped_assessment_partial_reason

@@ -23,6 +23,28 @@ CELL_TERMINAL = frozenset({"finding", "tested_clean", "skipped"})
 CELL_OPEN = frozenset({"untested", "in_focus", "inconclusive"})
 CELL_STATUSES = frozenset({*CELL_TERMINAL, *CELL_OPEN, "leased", "blocked"})
 MAX_COVERAGE_CELLS = 10_000
+# Automatic leases an inconclusive cell gets before it becomes a reported
+# coverage gap. New evidence (for example a replayable browser capture) moves
+# the cell back to untested and earns it another lease.
+MAX_CELL_ATTEMPTS = 3
+
+
+def coverage_gap_code(cell: dict[str, Any]) -> str:
+    """Why an open cell cannot progress without new input, or "" if it can.
+
+    A gap is never a clean result. It accounts for the cell so the run can
+    finish and tells the operator exactly what is still untested and why:
+    ``needs_operator:<reason>`` for blocked cells (approve a POST path,
+    supply a working identity) and ``attempts_exhausted`` for cells that
+    repeated specialist leases could not settle.
+    """
+    status = str(cell.get("status") or "untested")
+    if status == "blocked":
+        return "needs_operator:" + (str(cell.get("first_pass_blocked_reason") or "")[:60] or "blocked")
+    if (status == "inconclusive" and not cell.get("lease_id")
+            and int(cell.get("attempts") or 0) >= MAX_CELL_ATTEMPTS):
+        return "attempts_exhausted"
+    return ""
 
 
 def lead_packet_for_cell(cell: dict[str, Any]) -> dict[str, Any]:
@@ -570,6 +592,9 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
                 # Mapping often sees a form or link before its private browser
                 # exchange. Upgrade the same work item when a replayable
                 # capture arrives; never reset a completed or leased verdict.
+                if coverage_gap_code(prior) == "attempts_exhausted":
+                    # A new replayable capture is new evidence: one more lease.
+                    prior["attempts"] = MAX_CELL_ATTEMPTS - 1
                 prior["capture_id"] = cell["capture_id"]
                 prior["observation_source"] = "browser_traffic"
                 prior["value_type"] = cell["value_type"] or prior.get("value_type", "")
@@ -1348,6 +1373,7 @@ def claim_coverage_cell_leases(
             for cell in brain.coverage_cells
             if cell.get("status") in CELL_OPEN
             and not cell.get("lease_id")
+            and not coverage_gap_code(cell)
             and (not allowed_sources or cell.get("source") in allowed_sources)
             and (not excluded_test_types or cell.get("test_type") not in excluded_test_types)
             and (allowed_cell_ids is None or cell.get("id") in allowed_cell_ids)

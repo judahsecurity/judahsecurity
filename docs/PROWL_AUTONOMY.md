@@ -77,6 +77,21 @@ or a narrative-only answer) gets one fresh run with a new verification run id.
 Only then does the candidate settle as inconclusive, with the gap "Verifier
 recorded no verdict after 2 attempts".
 
+Coverage cells that nothing automatic can advance are reported as coverage
+gaps instead of keeping the run open forever:
+
+- `needs_operator:<reason>`: a blocked cell, for example a POST path that
+  needs approval (`post_path_not_approved`) or a capture whose identity has
+  no usable session (`identity_unavailable`). Approving the path or
+  registering the identity reopens it.
+- `attempts_exhausted`: an inconclusive cell that has had three specialist
+  leases. A new replayable browser capture for the same input grants one more.
+
+Gap cells are not leased again. A run whose remaining non-terminal cells are
+all gaps may complete. The completion message, `scoped_assessment_summary`
+(`coverage_gap_count`, `coverage_gap_counts`, `coverage_gaps`), and the
+coverage summary list them as untested, never as clean.
+
 To see where candidates and coverage cells get stuck across saved runs:
 
 ```bash
