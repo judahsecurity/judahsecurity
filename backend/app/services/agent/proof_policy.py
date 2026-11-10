@@ -40,7 +40,7 @@ PROOFS_BY_CLASS = {
     "path_traversal": frozenset({"file_read"}),
     "csrf": frozenset({"csrf_state_change"}),
     "known_cve": frozenset(),
-    "account_enumeration": frozenset(),
+    "account_enumeration": frozenset({"account_oracle"}),
 }
 
 
@@ -159,6 +159,75 @@ def _request_text(request: dict) -> str:
             break
         text = decoded
     return text
+
+
+def _response_fingerprint(item: dict, identifiers: list[str]) -> tuple[int, str]:
+    """Status plus body with the probed identifier and volatile values removed."""
+    from urllib.parse import quote
+
+    response = item["payload"].get("response", {})
+    body = str(response.get("body") or "")
+    for ident in identifiers:
+        for form in {ident, quote(ident), quote(ident, safe="")}:
+            body = re.sub(re.escape(form), "<account>", body, flags=re.IGNORECASE)
+    body = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "<uuid>", body, flags=re.I)
+    body = re.sub(r"[0-9a-f]{16,}", "<hex>", body, flags=re.I)
+    body = re.sub(r"\d+", "<n>", body)
+    return int(response.get("status") or 0), re.sub(r"\s+", " ", body).strip()[:4000]
+
+
+def _account_oracle_proof(candidate, existing: str, existing_rows: list, missing_rows: list,
+                          controlled: frozenset[str]) -> tuple[bool, str]:
+    """A controlled account and fresh nonexistent accounts get consistently different answers."""
+    from app.services.agent.evidence_store import origin
+
+    if not existing or existing not in controlled:
+        return False, ("existing_account must be the login of a verified test identity; "
+                       "never probe real users")
+    if len(existing_rows) < 2 or len(missing_rows) < 2 or not all(existing_rows + missing_rows):
+        return False, "Cite at least two fresh exchanges for the existing account and two for missing ones"
+    rows = existing_rows + missing_rows
+    if any(item.get("kind") != "http_exchange" for item in rows):
+        return False, "Account oracle evidence must be HTTP exchanges"
+    marker = "aegis-verify-" + candidate.nonce
+    texts = [_request_text(item["payload"].get("request", {})) for item in rows]
+    if not all(existing in text.lower() for text in texts[:len(existing_rows)]):
+        return False, "Each existing-account request must carry the controlled login"
+    missing_ids = []
+    for text in texts[len(existing_rows):]:
+        found = re.search(re.escape(marker) + r"[\w.+@-]*", text)
+        if not found or existing in text.lower():
+            return False, "Each missing-account request must carry a fresh aegis-verify-<nonce> account"
+        missing_ids.append(found.group(0))
+    if len(set(missing_ids)) != len(missing_ids):
+        return False, "Use a distinct nonexistent account in each missing-account request"
+    first = rows[0]["payload"]["request"]
+    try:
+        endpoint = (origin(candidate.target), urlsplit(candidate.target).path or "/")
+        shapes = set()
+        for item, text in zip(rows, texts):
+            req = item["payload"]["request"]
+            if (origin(req["url"]), urlsplit(req["url"]).path or "/") != endpoint:
+                return False, "Every account probe must hit the candidate endpoint"
+            shape = re.sub(re.escape(marker) + r"[\w.+@-]*", "<account>", text)
+            shapes.add((req.get("method"), item.get("identity"),
+                        re.sub(re.escape(existing), "<account>", shape, flags=re.IGNORECASE)))
+    except (KeyError, ValueError, TypeError):
+        return False, "Account oracle proof contains an invalid request URL"
+    if len(shapes) != 1 or not first:
+        return False, "The requests must be identical apart from the account identifier"
+    idents = [existing, *missing_ids]
+    existing_fp = {_response_fingerprint(item, idents) for item in existing_rows}
+    missing_fp = {_response_fingerprint(item, idents) for item in missing_rows}
+    if len(existing_fp) != 1 or len(missing_fp) != 1:
+        return False, "Responses are not stable within each group (rate limiting or volatile content)"
+    if existing_fp == missing_fp:
+        return False, "Existing and missing accounts get the same response"
+    e_times = [item["created_at"] for item in existing_rows]
+    m_times = [item["created_at"] for item in missing_rows]
+    if not (min(e_times) < max(m_times) and min(m_times) < max(e_times)):
+        return False, "Interleave existing and missing probes so drift over time cannot explain the split"
+    return True, ""
 
 
 _CSRF_TOKEN = re.compile(
@@ -310,7 +379,8 @@ def _command_execution_callback(
 
 
 def validate_proof(
-    store, candidate, proof: dict, evidence_ids: list[str]
+    store, candidate, proof: dict, evidence_ids: list[str],
+    *, controlled_accounts: frozenset[str] = frozenset(),
 ) -> tuple[bool, str]:
     def row(key):
         artifact_id = proof.get(key)
@@ -772,6 +842,14 @@ def validate_proof(
                     or not xml_request):
                 return False, "XXE requires an observed XML capture and a fresh external-entity callback"
         return True, ""
+    if kind == "account_oracle":
+        def rows_for(key):
+            ids = proof.get(key) if isinstance(proof.get(key), list) else []
+            return [store.records.get(i) if i in evidence_ids else None for i in ids]
+        return _account_oracle_proof(
+            candidate, str(proof.get("existing_account") or "").strip().lower(),
+            rows_for("existing_ids"), rows_for("missing_ids"), controlled_accounts,
+        )
     if kind == "csrf_state_change":
         return _csrf_state_change_proof(candidate, {
             "write": row("write_id"), "control": row("control_id"),

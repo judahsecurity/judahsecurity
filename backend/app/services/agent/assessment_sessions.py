@@ -75,6 +75,7 @@ class IdentityRegistry:
         storage_state=None,
         role: str = "",
         tenant: str = "",
+        login: str = "",
     ) -> dict:
         if not name or name in ("anonymous", "legacy"):
             raise ValueError(
@@ -95,6 +96,9 @@ class IdentityRegistry:
             'target': target, 'cookies': cookies or (storage_state or {}).get('cookies') or [],
             'headers': headers or {}, 'storage_state': storage_state or {},
             'role': role, 'tenant': tenant, 'authenticated': False,
+            # The account identifier (email/username) this session logs in as.
+            # Only a verified session makes it a controlled account.
+            'login': str(login or '').strip().lower()[:254],
         }
         session = deepcopy(session)
         # A registry entry owns only one exact origin, including browser storage.
@@ -118,7 +122,16 @@ class IdentityRegistry:
     def describe(self, name: str, target: str = '') -> dict:
         item = self.resolve(name, target) if target else self.identities[name]
         return {'name': name, 'target': item['target'], 'role': item['role'],
-                'tenant': item['tenant'], 'authenticated': item['authenticated']}
+                'tenant': item['tenant'], 'authenticated': item['authenticated'],
+                'login': item.get('login', '')}
+
+    def controlled_logins(self, url: str) -> frozenset[str]:
+        """Account identifiers of verified test identities on this origin."""
+        expected = origin(url)
+        return frozenset(
+            session.get('login') for (_, session_origin), session in self._sessions.items()
+            if session_origin == expected and session.get('authenticated') and session.get('login')
+        )
 
     def describe_all(self) -> list[dict]:
         return [self.describe(name, session['target']) for (name, _), session in self._sessions.items()]

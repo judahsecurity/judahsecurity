@@ -9032,11 +9032,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         return json.dumps(evidence_store(self).read(evidence_id, offset, limit))
 
     async def register_test_identity(self, name: str, target: str, cookies=None, headers=None,
-                                     storage_state=None, role: str = "", tenant: str = "") -> str:
-        """Register an operator-provided test account session. Secrets are not returned."""
+                                     storage_state=None, role: str = "", tenant: str = "",
+                                     login: str = "") -> str:
+        """Register an operator-provided test account session. Secrets are not returned.
+
+        login is the account's email or username; once the session is verified it
+        is the controlled account an account-enumeration proof may use.
+        """
         from app.services.agent.assessment_sessions import identity_registry
         return json.dumps(identity_registry(self).register(name, target, cookies=cookies, headers=headers,
-                         storage_state=storage_state, role=role, tenant=tenant))
+                         storage_state=storage_state, role=role, tenant=tenant, login=login))
 
     async def list_test_identities(self) -> str:
         """List test identities and their verified login state without credentials."""

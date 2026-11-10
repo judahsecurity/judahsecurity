@@ -551,6 +551,20 @@ CSRF_VERIFIER_ADDENDUM = (
 )
 
 
+ACCOUNT_ORACLE_VERIFIER_ADDENDUM = (
+    "This is an account enumeration candidate. Use only a controlled account: the "
+    "login of a verified test identity (list_test_identities shows it). Never try "
+    "real users' emails. Send interleaved replay_http_request exchanges to the "
+    "candidate endpoint with the same identity, identical except for the account: "
+    "missing, existing, missing, existing (at least two of each). Each missing "
+    "account must be distinct and contain aegis-verify-<nonce>, e.g. "
+    "aegis-verify-<nonce>-1@example.invalid. Record proof {kind: account_oracle, "
+    "existing_account: <login>, existing_ids: [...], missing_ids: [...]}. The two "
+    "groups must differ consistently in status or body; a timing difference alone, "
+    "or responses that drift as a rate limit kicks in, is inconclusive."
+)
+
+
 def parse_verdict_from_text(text: str) -> str:
     blob = (text or "").lower()
     if re.search(r"\b(verdict\s*[:=]\s*)?(refuted|false positive|not exploitable|killed)\b", blob):
@@ -624,6 +638,8 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         addenda.append(PATH_TRAVERSAL_VERIFIER_ADDENDUM)
     elif claim_class == "csrf":
         addenda.append(CSRF_VERIFIER_ADDENDUM)
+    elif claim_class == "account_enumeration":
+        addenda.append(ACCOUNT_ORACLE_VERIFIER_ADDENDUM)
     class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
     proof_options = ", ".join(sorted(PROOFS_BY_CLASS.get(claim_class, ()))) or "none yet"
 
@@ -1907,7 +1923,13 @@ def apply_verdict(
                     )
                 if ok and not is_workflow:
                     from app.services.agent.proof_policy import validate_proof
-                    ok, why = validate_proof(evidence_store(tools_manager), c, proof or {}, evidence_ids or [])
+                    from app.services.agent.assessment_sessions import identity_registry
+                    try:
+                        controlled = identity_registry(tools_manager).controlled_logins(c.target)
+                    except ValueError:
+                        controlled = frozenset()
+                    ok, why = validate_proof(evidence_store(tools_manager), c, proof or {}, evidence_ids or [],
+                                             controlled_accounts=controlled)
                 if not ok or not evidence.strip():
                     verdict = "inconclusive"
                     summary = why or "A supported impact explanation is required"
