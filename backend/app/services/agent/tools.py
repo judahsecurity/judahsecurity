@@ -784,12 +784,140 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # Available with or without PDCP_API_KEY (unauthenticated has rate limits)
         tools["search_vulnx"] = self.search_vulnx       # single CVE deep-dive by ID
         tools["vulnx_query"] = self.vulnx_query         # search CVEs by technology/query
+        tools["search_traffic"] = self.search_traffic   # recorded agent + extension traffic
+        tools["search_run_digest"] = self.search_run_digest  # sibling-specialist leads (read-only)
         tools.update({name: getattr(self, name) for name in CAPABILITY_TOOLS})
         return tools
 
     def get_tool(self, name: str) -> Optional[callable]:
         """Get a tool by name."""
         return self.tools.get(name)
+
+    def _bind_finding_traffic(self, db, vuln, traffic_refs, receipt_evidence_ids) -> int:
+        """Bind execution-owned HTTP exchanges to a new finding, in replay order.
+
+        Only artifact IDs this session's evidence store actually recorded as
+        ``http_exchange`` are accepted: the model can cite traffic, not invent it.
+        Verifier receipt evidence is bound automatically after explicit refs.
+        """
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.traffic_recorder import bind_artifacts
+
+        if isinstance(traffic_refs, str):
+            try:
+                parsed = json.loads(traffic_refs)
+                traffic_refs = parsed if isinstance(parsed, list) else [traffic_refs]
+            except ValueError:
+                traffic_refs = [part.strip() for part in traffic_refs.split(",")]
+        wanted = [*(traffic_refs or []), *(receipt_evidence_ids or [])]
+        store = evidence_store(self)
+        valid: list[str] = []
+        for artifact_id in wanted:
+            record = store.records.get(str(artifact_id or ""))
+            if record and record.get("kind") == "http_exchange" and artifact_id not in valid:
+                valid.append(str(artifact_id))
+        if not valid:
+            return 0
+        try:
+            org_id = vuln.asset.organization_id if vuln.asset else None
+        except Exception:
+            org_id = None
+        org_id = org_id or current_organization_id.get()
+        if not org_id:
+            return 0
+        try:
+            added = bind_artifacts(db, vulnerability_id=vuln.id, organization_id=org_id, artifact_ids=valid)
+            db.commit()
+            return added
+        except Exception:
+            db.rollback()
+            logger.debug("finding traffic binding failed", exc_info=True)
+            return 0
+
+    async def search_run_digest(
+        self,
+        query: Optional[str] = None,
+        kind: Optional[str] = None,
+        limit: int = 20,
+    ) -> str:
+        """Search what other specialists in this run already tried and concluded (read-only).
+
+        Returns short program-written lines: kind=tried (tool, method path -> status,
+        identity) and kind=outcome (verdict + key findings), plus recon observations.
+        Use it before re-fetching pages or re-testing a hypothesis a sibling already
+        killed. Entries are leads: re-verify before relying on one, and never cite
+        a digest line as proof. Your own lines are not returned.
+        Args: query (substring of target/summary), kind (tried|outcome|observation), limit.
+        """
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.run_digest import current_specialist, run_digest
+
+        limit = max(1, min(int(limit or 20), 50))
+        kind = (kind or "").strip().lower()
+        needle = (query or "").strip().lower()
+        entries = [] if kind == "observation" else run_digest(self).search(
+            query=needle, kind=kind, exclude_specialist=current_specialist.get(), limit=limit,
+        )
+        observations = []
+        if kind in ("", "observation"):
+            from app.services.agent.observability import redact_string
+
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            for row in reversed(brain.recon_observations or []):
+                if not isinstance(row, dict):
+                    continue
+                line = f"{row.get('kind', '')} {row.get('target', '')} {row.get('value', '')}"
+                if needle and needle not in line.lower():
+                    continue
+                observations.append({
+                    "kind": "observation", "observation_kind": row.get("kind"),
+                    "target": redact_string(str(row.get("target") or ""))[:300],
+                    "value": redact_string(str(row.get("value") or ""))[:200],
+                    "source": row.get("source"),
+                })
+                if len(observations) >= limit:
+                    break
+        return json.dumps({
+            "note": "Leads from sibling specialists and recon. Not evidence; re-verify before use.",
+            "entries": entries,
+            "observations": observations,
+        }, default=str)
+
+    async def search_traffic(
+        self,
+        query: Optional[str] = None,
+        host: Optional[str] = None,
+        method: Optional[str] = None,
+        status_code: Optional[int] = None,
+        source: Optional[str] = None,
+        limit: int = 20,
+    ) -> str:
+        """Search recorded HTTP traffic for this organization (read-only).
+
+        Includes this and earlier agent runs plus operator browser-extension
+        captures. Results are discovery hints: cite an exchange in
+        create_finding(traffic_refs=[artifact_id]) only if it came from this
+        session's own execution (source=agent with an artifact_id you produced).
+        Extension traffic never grants replay authority.
+        """
+        from app.services.traffic_recorder import search, summary
+
+        _, org_id = get_tenant_context()
+        if not org_id:
+            return json.dumps({"error": "missing organization context"})
+        try:
+            status = int(status_code) if status_code not in (None, "") else None
+        except (TypeError, ValueError):
+            status = None
+        db = SessionLocal()
+        try:
+            total, rows = search(
+                db, org_id, q=query or "", host=host or "", method=method or "",
+                status_code=status, source=source or "", limit=max(1, min(int(limit or 20), 50)),
+            )
+            return json.dumps({"total": total, "exchanges": [summary(r) for r in rows]}, default=str)
+        finally:
+            db.close()
 
     async def _scoped_assessment_operation(self, operation: str, body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         from app.services.agent.prowl_service_bridge import hunter_operation, capability_map_from_observation
@@ -5002,6 +5130,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             db.add(vuln)
             db.commit()
             db.refresh(vuln)
+            traffic_bound = self._bind_finding_traffic(
+                db, vuln, kwargs.get("traffic_refs"),
+                (trace_metadata or {}).get("evidence_ids") or [],
+            )
             ra_msg = ""
             try:
                 from app.services.agent.risk_assessment import (
@@ -5096,6 +5228,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 f"Finding created: id={vuln.id}, title={vuln.title[:60]}..., "
                 f"severity={vuln.severity.value}, asset={asset.value}"
                 f"{f', demonstrated_chain={chain_n} steps' if chain_n else ''}"
+                f"{f', traffic_refs={traffic_bound}' if traffic_bound else ''}"
                 f"{ra_msg}"
             )
             # CVE→CWE loop-back into engagement brain methodologies

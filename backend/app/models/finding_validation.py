@@ -66,6 +66,12 @@ class FindingValidation(Base):
     # Full raw agent JSON output (verdict + _meta) for auditing
     raw_output = Column(JSON, default=dict)
 
+    # "validate" (was the detection right?) or "retest" (is it fixed?)
+    purpose = Column(String(20), nullable=False, default="validate", server_default="validate", index=True)
+    # Retest conclusion: still_reproducible | fixed | cannot_confirm
+    retest_outcome = Column(String(30), nullable=True)
+    retest_notes = Column(Text, nullable=True)
+
     # Who requested it
     requested_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 

@@ -1170,6 +1170,9 @@ class ScannerWorker:
                 "proof_of_concept": vuln.proof_of_concept,
                 # Full (trimmed) source metadata so the agent can read source-specific fields.
                 "metadata": trimmed_meta,
+                # "retest": the finding was reported fixed; decide whether it still reproduces.
+                "purpose": getattr(validation, "purpose", None) or "validate",
+                "retest_notes": getattr(validation, "retest_notes", None),
             }
             finding_json = json.dumps(finding_payload, default=str)
 
@@ -1410,10 +1413,26 @@ class ScannerWorker:
                             "verified_at": now.isoformat(),
                         },
                     }
+
+            # Remediation retest: conclude fixed / still reproducible / cannot
+            # confirm, and move the finding's status only on a clear result.
+            is_retest = (getattr(validation, "purpose", None) or "validate") == "retest"
+            if is_retest:
+                from app.services.finding_retest import apply_retest_outcome, retest_outcome
+
+                outcome = retest_outcome(verdict_data)
+                validation.retest_outcome = outcome
+                new_status = apply_retest_outcome(vuln, validation, outcome, now=now)
+                logger.info(
+                    f"VALIDATE_FINDING: retest of vuln {vuln.id} concluded {outcome}"
+                    f"{f' (status -> {new_status})' if new_status else ''}"
+                )
             db.commit()
 
             # Log a template-logic issue when the FP is attributed to the template.
-            if verdict_enum == ValidationVerdict.FALSE_POSITIVE and vuln.template_id and template_logic_issue:
+            # A retest that no longer reproduces means "fixed", not "bad template".
+            if (not is_retest and verdict_enum == ValidationVerdict.FALSE_POSITIVE
+                    and vuln.template_id and template_logic_issue):
                 try:
                     from app.services.detection_feedback_service import record_detection_feedback
                     record_detection_feedback(
@@ -1443,6 +1462,7 @@ class ScannerWorker:
             auto_refine = os.getenv("NUCLEI_AUTO_REFINE_ON_FP", "false").lower() in ("1", "true", "yes")
             if (
                 auto_refine
+                and not is_retest
                 and verdict_enum == ValidationVerdict.FALSE_POSITIVE
                 and vuln.template_id
                 and template_logic_issue
@@ -1485,7 +1505,7 @@ class ScannerWorker:
             # Re-evaluate the false-positive pattern for this template. A pattern
             # spanning enough hosts raises a suppression recommendation (it never
             # auto-suppresses without analyst approval).
-            if verdict_enum == ValidationVerdict.FALSE_POSITIVE and vuln.template_id:
+            if not is_retest and verdict_enum == ValidationVerdict.FALSE_POSITIVE and vuln.template_id:
                 try:
                     from app.services.detection_pattern_service import evaluate_template
                     evaluate_template(

@@ -40,6 +40,8 @@ jobs:
         run: ruff check --select F821,F822,F823 backend/app/services/agent backend/app/services/interactsh_service.py backend/app/workers/interactsh_worker.py harness/local_harness
       - name: Run backend and harness regression suites
         run: python -m pytest backend/tests harness/tests -o addopts= -q
+      - name: Run browser-extension unit tests
+        run: node --test browser-extension/capture.test.mjs
       - name: Validate production Compose configuration
         run: docker compose config --quiet
 

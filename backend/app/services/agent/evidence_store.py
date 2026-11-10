@@ -373,6 +373,11 @@ class EvidenceStore:
                 ),
                 evidence_ids=[artifact_id],
             )
+            # Durable, org-scoped traffic history for analysts (best effort).
+            from app.services.agent.tools import current_organization_id, current_session_id
+            from app.services.traffic_recorder import record_agent_exchange
+
+            record_agent_exchange(record, current_organization_id.get(), current_session_id.get())
         return artifact_id
 
     def read(self, artifact_id: str, offset: int = 0, limit: int = 6000) -> dict:
