@@ -429,6 +429,40 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+export interface SecurityScorecardIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  username: string;
+  import_risks: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SecurityScorecardSyncResult {
+  ok: boolean;
+  message: string;
+  portfolios_seen: number;
+  companies_seen: number;
+  assets_created: number;
+  assets_updated: number;
+  risks_created: number;
+  risks_updated: number;
+  risks_resolved: number;
+  companies_without_factors: number;
+  definitions_missing: number;
+}
+
 export interface TenableIntegration {
   id: number;
   organization_id: number;
@@ -3154,6 +3188,50 @@ class ApiClient {
 
   async syncCensysIntegration(id: number): Promise<CensysSyncResult> {
     const response = await this.client.post(`/integrations/censys/${id}/sync`);
+    return response.data;
+  }
+
+  // ── SecurityScorecard Integration ──────────────────────────────────────────
+
+  async getSecurityScorecardIntegrations(): Promise<SecurityScorecardIntegration[]> {
+    const response = await this.client.get('/integrations/securityscorecard');
+    return response.data;
+  }
+
+  async createSecurityScorecardIntegration(payload: {
+    connection_name?: string;
+    api_key: string;
+    import_risks?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<SecurityScorecardIntegration> {
+    const response = await this.client.post('/integrations/securityscorecard', payload);
+    return response.data;
+  }
+
+  async updateSecurityScorecardIntegration(id: number, payload: Partial<{
+    connection_name: string;
+    api_key: string;
+    import_risks: boolean;
+    is_active: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+  }>): Promise<SecurityScorecardIntegration> {
+    const response = await this.client.put(`/integrations/securityscorecard/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteSecurityScorecardIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/securityscorecard/${id}`);
+  }
+
+  async testSecurityScorecardConnection(id: number): Promise<{ ok: boolean; message: string; portfolio_count: number }> {
+    const response = await this.client.post(`/integrations/securityscorecard/${id}/test`);
+    return response.data;
+  }
+
+  async syncSecurityScorecardIntegration(id: number): Promise<SecurityScorecardSyncResult> {
+    const response = await this.client.post(`/integrations/securityscorecard/${id}/sync`);
     return response.data;
   }
 

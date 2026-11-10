@@ -22,6 +22,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F40
 from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created
 from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
 from app.models.wiz_integration import WizIntegration  # noqa: F401 — ensure table is created
+from app.models.securityscorecard_integration import SecurityScorecardIntegration  # noqa: F401 — ensure table is created
 from app.models.tenable_integration import TenableVmIntegration  # noqa: F401 — ensure table is created
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink  # noqa: F401 — ensure tables are created
 from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 — ensure table is created
