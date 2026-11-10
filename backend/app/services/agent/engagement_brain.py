@@ -582,8 +582,14 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
             "PASS if no-header is 200/400 (controller ran) AND invalid-bearer is 401. "
             "Do not dump. 400 missing-params is still a bypass."
         ),
-        "pass_criteria": "Missing header is not 401 while invalid Bearer is 401",
-        "kill_criteria": "Missing header is 401/403 like invalid Bearer",
+        "pass_criteria": (
+            "Missing header is not 401 while invalid Bearer is 401, OR missing header "
+            "is 401 while no Authorization + X-User-Id canary is 2xx"
+        ),
+        "kill_criteria": (
+            "Missing header is 401/403 like invalid Bearer AND identity headers "
+            "(X-User-Id / X-Forwarded-User / X-MS-CLIENT-PRINCIPAL-NAME) are also 401/403"
+        ),
         "specialist": "api_authz",
         "priority": "high",
     },
@@ -2072,6 +2078,26 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "priority": "high",
             "id_suffix": "always-open-write",
         },
+        {
+            "title": "Client-supplied identity header trusted (X-User-Id impersonation)",
+            "assumption": (
+                "When Authorization is absent the server falls back to X-User-Id / "
+                "X-Forwarded-User / X-MS-CLIENT-PRINCIPAL-NAME as the authenticated user"
+            ),
+            "test": (
+                "compare_requests use_auth_session=false on 2–4 mapped routes "
+                "(/api/*/me, list-my-* endpoints): no headers (expect 401) vs no "
+                "Authorization + X-User-Id: aegis-spoof-canary@invalid.example. One "
+                "identity header per request; also try the names the OpenAPI spec or "
+                "client JS sends. PASS if 2xx, strongest when the canary is echoed "
+                "(/me returns user_id=canary). Never spoof a real user or admin."
+            ),
+            "pass_criteria": "No-header 401/403 while identity-header-only request is 2xx",
+            "kill_criteria": "Identity-header-only request is 401/403 like no headers",
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "identity-header-spoof",
+        },
     ],
     "socketio_idor": [
         {
@@ -2286,6 +2312,10 @@ _FINDING_CLASS_ALIASES = {
     "bypassauthorization": "auth_header_bypass",
     "missing_authorization_header": "auth_header_bypass",
     "missing-authorization-header": "auth_header_bypass",
+    "identity_header_spoof": "auth_header_bypass",
+    "identity-header-spoof": "auth_header_bypass",
+    "x_user_id": "auth_header_bypass",
+    "x-user-id": "auth_header_bypass",
     "socketio_idor": "socketio_idor",
     "socketio-idor": "socketio_idor",
     "get_stream": "socketio_idor",
@@ -2568,6 +2598,11 @@ def queue_followups_for_finding(
                 "middleware bypass",
                 "no authorization header",
                 "without an authorization header",
+                "x-user-id header",
+                "identity header",
+                "x-forwarded-user",
+                "x-remote-user",
+                "x-ms-client-principal",
             )
         ):
             key = "auth_header_bypass"
@@ -3298,6 +3333,11 @@ def classify_finding_type(title: str = "", description: str = "", tags: Optional
             "middleware bypass",
             "no authorization header",
             "without an authorization header",
+            "x-user-id header",
+            "identity header",
+            "x-forwarded-user",
+            "x-remote-user",
+            "x-ms-client-principal",
         )
     ):
         return "auth_header_bypass"

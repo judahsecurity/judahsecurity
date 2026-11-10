@@ -477,6 +477,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "queue_finding_followups(vuln_type='unauth_settings_write'). "
             "Auth header bypass: no Authorization vs Bearer aegis-invalid — SUBMIT if "
             "no-header is 200/400 AND invalid-bearer is 401. 400 missing-params is a bypass. "
+            "If no-header is 401, try no Authorization + X-User-Id: "
+            "aegis-spoof-canary@invalid.example — SUBMIT on 2xx; never spoof a real user. "
             "queue_finding_followups(vuln_type='auth_header_bypass'). "
             "Socket.IO get_stream: Engine.IO polling + fabricated siteId → url_key. "
             "Do not fetch video; do not send null crash loops. "

@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 
 from app.services.agent.auth_header_bypass import (
+    CANARY_IDENTITY,
     INVALID_BEARER,
+    is_identity_spoof_pair,
     annotate_compare_proof as auth_header_proof,
     caps_critical_as_high as auth_header_caps,
     has_auth_header_proof,
@@ -266,6 +268,77 @@ def test_auth_header_deborah_mission():
     mission = verifier_mission(cand)
     assert "aegis-invalid" in mission
     assert "use_auth_session=false" in mission
+
+
+def test_identity_header_spoof_proof():
+    url = "https://app.example.azurewebsites.net/api/admins/me"
+    plain, spoof = {}, {"X-User-Id": CANARY_IDENTITY}
+    assert is_identity_spoof_pair(plain, spoof)
+    assert auth_header_force_unauth(url, url, plain, spoof)
+    force, why = should_force_unauth_session(url, url, plain, spoof)
+    assert force and why and "identity-header" in why
+    body = '{"is_admin":false,"user_id":"%s"}' % CANARY_IDENTITY
+    signals, proof, verdict = annotate_compare_proof(
+        baseline_url=url,
+        mutant_url=url,
+        baseline_headers=plain,
+        mutant_headers=spoof,
+        baseline_status=401,
+        mutant_status=200,
+        baseline_body='{"detail":"Authentication required"}',
+        mutant_body=body,
+    )
+    assert "identity_header_trusted" in signals
+    assert "identity_echoed" in signals
+    assert proof["variant"] == "identity_header_spoof"
+    assert proof["identity_header"] == "x-user-id"
+    assert proof["identity_echoed"] and proof["canary_identity"]
+    assert verdict == "MUTANT_BYPASS_CANDIDATE"
+
+    # Reversed order and a 201 create still count; no echo is still a candidate.
+    signals, proof, _ = auth_header_proof(
+        baseline_headers={"X-Forwarded-User": CANARY_IDENTITY},
+        mutant_headers={},
+        baseline_status=201,
+        mutant_status=401,
+    )
+    assert signals == ["identity_header_trusted"] and proof["no_header_status"] == 401
+
+
+def test_identity_header_spoof_negatives():
+    # Header ignored: both 401.
+    assert auth_header_proof(
+        baseline_headers={},
+        mutant_headers={"X-User-Id": CANARY_IDENTITY},
+        baseline_status=401,
+        mutant_status=401,
+    ) == ([], None, None)
+    # Endpoint is open anyway: not identity trust.
+    assert auth_header_proof(
+        baseline_headers={},
+        mutant_headers={"X-User-Id": CANARY_IDENTITY},
+        baseline_status=200,
+        mutant_status=200,
+    ) == ([], None, None)
+    # Authorization on either side is not this pair.
+    assert not is_identity_spoof_pair(
+        {"Authorization": "Bearer x"}, {"Authorization": "Bearer x", "X-User-Id": "a"}
+    )
+    assert not is_identity_spoof_pair({"X-Trace-Id": "1"}, {})
+    assert not is_identity_spoof_pair({}, {"X-User-Id": "  "})
+
+
+def test_identity_header_finding_gate_and_severity():
+    text = (
+        "Authentication bypass via X-User-Id header: no headers 401; "
+        f"X-User-Id: {CANARY_IDENTITY} 200 with user_id echoed"
+    )
+    assert is_auth_header_finding(text)
+    assert has_auth_header_proof(text)
+    assert not has_auth_header_proof("API accepts an X-User-Id header")
+    # Impersonation is not capped at High by the middleware-skip rule.
+    assert not auth_header_caps(text)
+    assert auth_header_caps("no authorization header 400 vs aegis-invalid 401")
 
 
 def test_socketio_rewrites_null_crash_and_blocks_leftover():

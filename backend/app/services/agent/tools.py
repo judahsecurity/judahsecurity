@@ -7207,6 +7207,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         "auth_header_bypass": [
             {"vuln": "OIDC/JWT middleware skipped when Authorization is absent", "severity": "high", "why": "ByPassAuthorization / fail-open: no-header reaches the controller (200/400) while invalid Bearer is 401. 400 missing-params is still a bypass."},
             {"vuln": "Always-open mutating sibling (Notes / UpdateNote)", "severity": "high", "why": "Some controllers skip auth even with an invalid Bearer. Empty/canary body only; do not mutate production rows."},
+            {"vuln": "Client-supplied identity header trusted (X-User-Id impersonation)", "severity": "high", "why": "No-header is 401 but no Authorization + X-User-Id / X-Forwarded-User / X-MS-CLIENT-PRINCIPAL-NAME: aegis-spoof-canary@invalid.example is 2xx (canary echoed on /me). Anyone can act as any user. Never spoof a real user; do not read their sessions."},
         ],
         "socketio_idor": [
             {"vuln": "Anonymous get_stream returns url_key for fabricated siteId", "severity": "high", "why": "No server-side authz on siteId/analyzerId. Do not fetch the video stream. Do not send null crash loops against ICS."},
@@ -7434,6 +7435,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "auth_header_bypass": "auth_header_bypass",
             "bypassauthorization": "auth_header_bypass",
             "missing_authorization_header": "auth_header_bypass",
+            "identity_header_spoof": "auth_header_bypass",
+            "x_user_id": "auth_header_bypass",
             "socketio_idor": "socketio_idor",
             "get_stream": "socketio_idor",
             "url_key": "socketio_idor",
@@ -7873,15 +7876,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         questions.append({
             "question": (
                 "For auth-header bypass: is middleware skip proven by no-header 200/400 "
-                "(controller ran) vs invalid Bearer 401 — not merely 'API exists'? "
-                "400 missing-params is a bypass, not a fail."
+                "(controller ran) vs invalid Bearer 401 — or identity-header trust "
+                "proven by no-header 401 vs X-User-Id canary 2xx — not merely 'API "
+                "exists'? 400 missing-params is a bypass, not a fail."
             ),
             "pass": q20,
             "feedback": (
                 "PASS — no-header vs invalid-bearer differential proven, or not this finding."
                 if q20 else
                 "FAIL — omit Authorization and send Bearer aegis-invalid on the same path. "
-                "SUBMIT if no-header is 200/400 AND invalid-bearer is 401. Do not dump."
+                "SUBMIT if no-header is 200/400 AND invalid-bearer is 401. If no-header "
+                "is 401, add only X-User-Id: aegis-spoof-canary@invalid.example; SUBMIT "
+                "on 2xx. Do not dump."
             ),
         })
 

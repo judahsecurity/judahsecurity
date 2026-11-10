@@ -1424,18 +1424,24 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
                 "header vs (2) Authorization: Bearer aegis-invalid. PASS if no-header "
                 "reaches app code (200/400 business error) AND invalid-bearer is 401. "
                 "A 400 on missing body is still a bypass — the controller ran. Probe "
-                "2–4 mapped routes (GetMenu, GetEntitiesById, Notes). Do not dump. "
-                "queue_finding_followups(vuln_type='auth_header_bypass')."
+                "2–4 mapped routes (GetMenu, GetEntitiesById, Notes). If no-header is "
+                "401, do not kill: resend with no Authorization + X-User-Id (and "
+                "X-Forwarded-User / X-MS-CLIENT-PRINCIPAL-NAME / names in the OpenAPI "
+                "spec): aegis-spoof-canary@invalid.example. 2xx (canary echoed on /me) "
+                "is identity-header impersonation. Never spoof a real user. Do not "
+                "dump. queue_finding_followups(vuln_type='auth_header_bypass')."
             ),
             pass_criteria=(
                 "Request without Authorization is not 401/403 while the same path with "
-                "an invalid Bearer is 401 (middleware only runs when a header is sent)"
+                "an invalid Bearer is 401 (middleware only runs when a header is sent), "
+                "OR no-header is 401 while an identity header alone is 2xx"
             ),
             kill_criteria=(
-                "Missing header is 401/403 like invalid Bearer. Do not kill because "
-                "the no-header response is 400 (missing required params)"
+                "Missing header is 401/403 like invalid Bearer AND identity-header-only "
+                "requests are also 401/403. Do not kill because the no-header response "
+                "is 400 (missing required params)"
             ),
-            cwe_ids=["CWE-287", "CWE-306", "CWE-862"],
+            cwe_ids=["CWE-287", "CWE-306", "CWE-862", "CWE-290"],
             capec_ids=["CAPEC-115", "CAPEC-1"],
             owasp="A07:2021 Identification and Authentication Failures",
             evidence=str(ev),

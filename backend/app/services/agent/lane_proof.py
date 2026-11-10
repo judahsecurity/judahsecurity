@@ -101,7 +101,7 @@ def should_force_unauth_session(
     ):
         return True, (
             "use_auth_session forced false (auth-header bypass pair; session "
-            "cookies would mask the missing-header skip)"
+            "cookies would mask the missing-header skip or identity-header trust)"
         )
     if socketio.is_socketio_path(baseline_url) or socketio.is_socketio_path(mutant_url):
         return True, "use_auth_session forced false (anonymous Socket.IO get_stream)"
@@ -180,6 +180,8 @@ def annotate_compare_proof(
                 mutant_headers=mutant_headers,
                 baseline_status=baseline_status,
                 mutant_status=mutant_status,
+                baseline_body=baseline_body,
+                mutant_body=mutant_body,
             ),
         ),
         (
