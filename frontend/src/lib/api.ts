@@ -1186,6 +1186,11 @@ class ApiClient {
     return response.data;
   }
 
+  async importAssetApiSpec(assetId: number, body: { document: string; name?: string; origin?: string }) {
+    const response = await this.client.post(`/assets/${assetId}/api-specs/import`, body, { timeout: 60000 });
+    return response.data;
+  }
+
   async createFixPr(vulnId: number, body: { repository: string; base_branch?: string; file_paths?: string[] }) {
     const response = await this.client.post(`/vulnerabilities/${vulnId}/fix-pr`, body);
     return response.data;
@@ -2624,6 +2629,9 @@ class ApiClient {
         stored_xss_cleanup_paths: string[];
         auth_login_path?: string;
         owner_only_resources: { target: string; owner_identity: string; other_identity: string }[];
+        oob_callbacks_allowed?: boolean;
+        credential_testing_allowed?: boolean;
+        exploit_dev_allowed?: boolean;
       };
     }
   ) {

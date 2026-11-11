@@ -100,6 +100,86 @@ function relativeCaptured(iso?: string | null) {
   return `${n} day${n === 1 ? '' : 's'} ago`;
 }
 
+const MAX_SPEC_BYTES = 2_000_000;
+
+function ApiSpecUpload({ assetId }: { assetId: number }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<Record<string, any> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const onFile = async (file: File | undefined) => {
+    if (!file) return;
+    setError(null);
+    setResult(null);
+    if (file.size > MAX_SPEC_BYTES) {
+      setError('File is larger than 2 MB.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const document = await file.text();
+      setResult(await api.importAssetApiSpec(assetId, { document, name: file.name.slice(0, 120) }));
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || err?.message || 'Upload failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="py-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">Import API spec</CardTitle>
+            <CardDescription>
+              Upload an OpenAPI/Swagger (JSON or YAML) or Postman v2 collection so Prowl tests every
+              documented input. Operations outside this asset&apos;s origin are dropped. No traffic is sent.
+            </CardDescription>
+          </div>
+          <label className="shrink-0">
+            <input
+              type="file"
+              accept=".json,.yaml,.yml,application/json,application/yaml,text/yaml"
+              className="sr-only"
+              disabled={busy}
+              onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ''; }}
+            />
+            <span className="inline-flex h-8 cursor-pointer items-center rounded-md border border-border px-3 text-sm">
+              <FileJson className="h-3.5 w-3.5 mr-1.5" />
+              {busy ? 'Importing…' : 'Upload spec'}
+            </span>
+          </label>
+        </div>
+      </CardHeader>
+      {(result || error) && (
+        <CardContent className="pt-0 text-xs space-y-1">
+          {error && <p className="text-destructive">{error}</p>}
+          {result && (
+            <>
+              <p>
+                Imported {result.format} “{result.title || 'untitled'}”: {result.operations} operations
+                ({result.rest_endpoints_added} new endpoints)
+                {result.out_of_scope_dropped ? `, ${result.out_of_scope_dropped} out-of-scope dropped` : ''}
+                {result.truncated ? ', truncated at 500' : ''}.
+              </p>
+              {result.suggested_identities?.length > 0 && (
+                <p>Suggested test identities: {result.suggested_identities.map((i: any) => i.scheme).join(', ')}</p>
+              )}
+              {result.owner_only_candidates?.length > 0 && (
+                <p>{result.owner_only_candidates.length} object-ID paths are owner-only (IDOR) candidates.</p>
+              )}
+              <p className="text-muted-foreground">
+                Refresh to see endpoints. In a Prowl session on this asset, the agent loads it with import_api_spec.
+              </p>
+            </>
+          )}
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
 function RestApiTable({
   rows,
   summary,
@@ -439,7 +519,8 @@ export function SitemapInventory({
   const externalRows = useMemo(() => apply(external), [external, query, active]);
 
   const total = sitemap.length + restApi.length + external.length;
-  if (total === 0) return null;
+  // A fresh asset with no crawl data can still take an uploaded spec.
+  if (total === 0) return assetId ? <ApiSpecUpload assetId={assetId} /> : null;
 
   return (
     <div className="space-y-4">
@@ -475,6 +556,7 @@ export function SitemapInventory({
       </div>
 
       <SitemapTable title="Sitemap" count={sitemapRows.length} rows={sitemapRows} />
+      {assetId ? <ApiSpecUpload assetId={assetId} /> : null}
       <RestApiTable rows={restApi} summary={restSummary} specs={apiSpecs} assetId={assetId} />
       <SitemapTable title="External URLs" count={externalRows.length} rows={externalRows} />
     </div>

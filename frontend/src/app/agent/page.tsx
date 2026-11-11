@@ -695,6 +695,10 @@ function AgentPageContent() {
   const [storedXssCleanupPathsText, setStoredXssCleanupPathsText] = useState('');
   const [ownerOnlyText, setOwnerOnlyText] = useState('');
   const [authLoginPath, setAuthLoginPath] = useState('');
+  // Explicit operator grants for lanes that are off by default.
+  const [grantOob, setGrantOob] = useState(false);
+  const [grantCredentials, setGrantCredentials] = useState(false);
+  const [grantExploitDev, setGrantExploitDev] = useState(false);
   const [mode, setMode] = useState<'assist' | 'agent' | 'pilot'>('agent');
   const [pilotStatus, setPilotStatus] = useState<{ ready: boolean; egress_ready: boolean; redis_ready: boolean } | null>(null);
   const [urlPrefilled, setUrlPrefilled] = useState(false);
@@ -1283,10 +1287,14 @@ function AgentPageContent() {
         description: 'Use at most eight POST paths, eight stored XSS cleanup paths, and eight owner-only lines in URL | owner | other format.' });
       return;
     }
-    const assessmentPolicy = bodyReplayPaths.length || storedXssCleanupPaths.length || ownerOnlyResources.length || authLoginPath.trim()
+    const anyGrant = mode !== 'pilot' && (grantOob || grantCredentials || grantExploitDev);
+    const assessmentPolicy = bodyReplayPaths.length || storedXssCleanupPaths.length || ownerOnlyResources.length || authLoginPath.trim() || anyGrant
       ? { body_replay_paths: bodyReplayPaths,
           stored_xss_cleanup_paths: storedXssCleanupPaths,
           auth_login_path: authLoginPath.trim() || undefined,
+          oob_callbacks_allowed: mode !== 'pilot' && grantOob,
+          credential_testing_allowed: mode !== 'pilot' && grantCredentials,
+          exploit_dev_allowed: mode !== 'pilot' && grantExploitDev,
           owner_only_resources: ownerOnlyResources.map((row) => ({
             target: row.target, owner_identity: row.owner_identity, other_identity: row.other_identity,
           })) }
@@ -2145,6 +2153,26 @@ function AgentPageContent() {
                         <div className="mt-2 space-y-2 w-80">
                           <p>Exact-host GET and browser reads need no POST replay path. Analyst tool approvals may still apply. POST replay can change data, so list only paths with a rollback or reset plan; omitted POST checks remain open as blocked coverage.</p>
                           <p>For an authenticated crawl, enter its login path. The backend must have TARGET_USER and TARGET_PASS configured. Login is approval-gated; those values stay out of the agent prompt.</p>
+                          <fieldset className="space-y-1 rounded border border-border p-2">
+                            <legend className="px-1 font-medium">Run grants (off by default)</legend>
+                            {([
+                              ['oob', 'Out-of-band callbacks (Interactsh/OAST)', grantOob, setGrantOob],
+                              ['cred', 'Credential testing (password spraying, default logins)', grantCredentials, setGrantCredentials],
+                              ['exploit', 'Custom Python PoC sandbox (exploit_dev): ledgered, results are leads only', grantExploitDev, setGrantExploitDev],
+                            ] as const).map(([key, label, value, setter]) => (
+                              <label key={key} className="flex items-start gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={value}
+                                  onChange={(event) => setter(event.target.checked)}
+                                  disabled={loading}
+                                  className="mt-0.5"
+                                />
+                                <span>{label}</span>
+                              </label>
+                            ))}
+                            <p>Grant only what the engagement&apos;s rules of engagement authorize. Each applies to this run only.</p>
+                          </fieldset>
                           <Input
                             aria-label="Authenticated login path"
                             placeholder="/login (leave blank for anonymous crawl)"
