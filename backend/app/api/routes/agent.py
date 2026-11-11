@@ -115,6 +115,7 @@ class AgentAssessmentPolicy(BaseModel):
     # objective to match the authorization regex.
     oob_callbacks_allowed: bool = False
     credential_testing_allowed: bool = False
+    exploit_dev_allowed: bool = False
 
     @field_validator("auth_login_path")
     @classmethod

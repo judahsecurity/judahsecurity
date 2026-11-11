@@ -3617,12 +3617,15 @@ class AgentOrchestrator:
                 # A prior turn's login opt-in must not authorize this turn.
                 self.tool_manager._scoped_auth_login_path = ""
             from app.services.agent.run_permissions import (
-                credential_testing_allowed, oob_callbacks_allowed,
+                credential_testing_allowed, exploit_dev_allowed, oob_callbacks_allowed,
             )
             self.tool_manager._credential_testing_allowed = credential_testing_allowed(
                 question, assessment_policy,
             )
             self.tool_manager._oob_callbacks_allowed = oob_callbacks_allowed(
+                question, assessment_policy,
+            )
+            self.tool_manager._exploit_dev_allowed = exploit_dev_allowed(
                 question, assessment_policy,
             )
 

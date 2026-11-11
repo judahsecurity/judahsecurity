@@ -531,6 +531,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _fallback_target = SessionValue(lambda: "")
     _credential_testing_allowed = SessionValue(lambda: False)
     _oob_callbacks_allowed = SessionValue(lambda: False)
+    _exploit_dev_allowed = SessionValue(lambda: False)
 
     def __init__(self):
         self.tools = self._register_tools()
@@ -2805,6 +2806,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "success": False,
                 "output": "Interceptor workers cannot enforce operator method and path approvals; use execute_deep_crawl.",
                 "error": "operator_method_policy_denied",
+            }
+        if tool_name in {"run_custom_probe", "run_poc_python"} and not self._exploit_dev_allowed:
+            return {
+                "success": False,
+                "output": "Custom Python exploit/PoC development requires explicit operator "
+                          "authorization (exploit_dev) for this run. Use the structured scoped "
+                          "probe tools, or ask the operator to enable exploit_dev.",
+                "error": "exploit_dev_not_authorized",
             }
         if tool_name in {"test_credential_spray", "execute_hydra", "execute_brutus"} and not self._credential_testing_allowed:
             return {
@@ -6382,10 +6391,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
         result["oob_allowed"] = True
+        result["lead_only"] = True
         result["hint"] = (
             "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
-            "localhost — Lictor blocks those. Print JSON proof to stdout."
+            "localhost — Lictor blocks those. Print JSON proof to stdout. This is "
+            "an exploit_dev lead: a candidate here still needs an independent "
+            "verifier capture before it can become a finding."
         )
+        # Record the authorized exploit-dev run for operator reconciliation.
+        try:
+            from app.services.agent.action_ledger import active_run_id, append_action
+
+            append_action(
+                active_run_id.get(), os.urandom(16).hex(),
+                "completed" if result.get("ok") else "failed", "run_custom_probe",
+                target=(hosts[0] if hosts else ""), phase="exploit_dev",
+                detail=f"exploit_dev sandbox run; hosts={len(set(hosts))} "
+                       f"exit={result.get('exit_code')}",
+            )
+        except Exception:
+            logger.debug("exploit_dev ledger append skipped", exc_info=True)
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
 
     async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:

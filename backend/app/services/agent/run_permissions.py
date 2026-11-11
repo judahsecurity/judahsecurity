@@ -60,6 +60,39 @@ def oob_callbacks_allowed(objective: str, operator_policy: dict | None = None) -
     return bool(_OOB_ACTION.search(text) and _OOB_POSITIVE.search(text))
 
 
+_EXPLOIT_DEV_ACTION = re.compile(
+    r"\b(?:exploit\s+develop(?:ment)?|develop(?:ing)?\s+(?:an?\s+)?exploit"
+    r"|proof[- ]of[- ]concept\s+exploit|custom\s+(?:python\s+)?(?:probe|poc|exploit)"
+    r"|write\s+(?:an?\s+)?exploit|poc\s+develop(?:ment)?)\b",
+    re.IGNORECASE,
+)
+_EXPLOIT_DEV_NEGATIVE = re.compile(
+    r"\b(?:no|avoid|without|exclude|never|do\s+not|don['’]t)\b.{0,80}"
+    r"\b(?:exploits?|custom\s+prob\w*|pocs?|proof[- ]of[- ]concept)",
+    re.IGNORECASE,
+)
+_EXPLOIT_DEV_POSITIVE = re.compile(
+    r"\b(?:authorize|allow|permit|enable|use|run|perform)\b.{0,80}"
+    r"\b(?:exploit\s+develop|custom\s+(?:python\s+)?(?:probe|poc|exploit)|poc\s+develop)\b",
+    re.IGNORECASE,
+)
+
+
+def exploit_dev_allowed(objective: str, operator_policy: dict | None = None) -> bool:
+    """Gate the free-form Python PoC sandbox behind an explicit operator grant.
+
+    The sandbox executes model-authored Python against in-scope hosts. An
+    ordinary assessment does not authorize it; the operator opts in with a
+    structured ``exploit_dev_allowed`` flag (or an unambiguous objective).
+    """
+    text = str(objective or "")
+    if _EXPLOIT_DEV_NEGATIVE.search(text):
+        return False
+    if isinstance(operator_policy, dict) and operator_policy.get("exploit_dev_allowed") is True:
+        return True
+    return bool(_EXPLOIT_DEV_ACTION.search(text) and _EXPLOIT_DEV_POSITIVE.search(text))
+
+
 def permitted_specialists(names: Iterable[str], *, allow_credential_testing: bool) -> list[str]:
     """Keep a credential assault hypothesis from silently entering an auto wave."""
     return [
