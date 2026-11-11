@@ -387,6 +387,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **wait_recon_workers**: Soft-join parallel streams and return briefs. Args: timeout_sec (default 45), optional worker_ids.
 - **list_recon_workers**: Status of session recon streams.
 - **map_application_traffic**, **collect_js_intelligence**: Build runtime/JS operation inventories (discovery only).
+- **import_api_spec**: Seed the operation ledger and XSS/SQLi coverage cells from an OpenAPI/Swagger or Postman document (sends no traffic). With no args it loads specs stored on the target asset (operator uploads and crawled swagger); or pass asset_id, or document (raw JSON/YAML). Out-of-origin operations are dropped. Returns suggested identities and owner-only (IDOR) candidates from path IDs — register identities before authorization checks.
 - **generate_authorization_matrix**, **run_authorization_proof**, **get_assessment_coverage**: Plan and execute identity-specific controlled setup/attack/verify workflows and track all matrix cells.
 - **browse_as_identity**: Browser capture in a fresh origin-bound registered identity context.
 - **validate_js_secret_candidate**: Operator-enabled provider hook; candidates never auto-publish.
@@ -879,6 +880,7 @@ TOOL_PHASE_MAP = {
     "test_credential_spray": ["exploitation", "post_exploitation"],
 
     "map_application_traffic": ["informational", "exploitation", "post_exploitation"],
+    "import_api_spec": ["informational", "exploitation", "post_exploitation"],
     "generate_authorization_matrix": ["informational", "exploitation", "post_exploitation"],
     "run_authorization_proof": ["exploitation", "post_exploitation"],
     "list_proof_captures": ["informational", "exploitation", "post_exploitation"],

@@ -971,6 +971,61 @@ def get_asset_api_specs(
     return {"specs": specs, "rest_endpoints": asset.rest_endpoints or []}
 
 
+from pydantic import BaseModel as _SpecBaseModel, Field as _SpecField
+
+
+class ApiSpecImportRequest(_SpecBaseModel):
+    """Operator-supplied OpenAPI/Swagger (JSON or YAML) or Postman v2 collection export."""
+    document: str = _SpecField(min_length=2, max_length=2_000_000)
+    name: str = _SpecField(default="", max_length=120)
+    origin: str = _SpecField(default="", max_length=300,
+                             description="Exact origin the spec applies to; defaults to the asset")
+    variables: Dict[str, str] = _SpecField(default_factory=dict,
+                                           description="Postman variable overrides (non-secret)")
+
+
+@router.post("/{asset_id}/api-specs/import")
+def import_asset_api_spec(
+    asset_id: int,
+    request: ApiSpecImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Store an uploaded API spec on the asset so Prowl can test every documented input.
+
+    Operations outside the asset's exact origin are dropped and reported, never
+    rewritten. No target traffic is sent.
+    """
+    from urllib.parse import urlparse
+
+    from app.services.api_spec_import import (
+        default_origin_for_asset, import_api_document, normalize_origin,
+        parse_api_document, persist_import_to_asset,
+    )
+
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not check_org_access(current_user, asset.organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    asset_origin = default_origin_for_asset(asset)
+    origin = normalize_origin(request.origin) if request.origin else asset_origin
+    if not origin:
+        raise HTTPException(status_code=400, detail="Provide an exact http(s) origin for this asset")
+    if asset_origin and urlparse(origin).hostname != urlparse(asset_origin).hostname:
+        raise HTTPException(status_code=400, detail="Origin host must match the asset")
+    variables = {k[:80]: str(v)[:500] for k, v in list(request.variables.items())[:50]}
+    try:
+        parsed = parse_api_document(request.document)
+        imported = import_api_document(parsed, origin, variables)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    added = persist_import_to_asset(asset, parsed, imported, name=request.name)
+    db.commit()
+    return {**imported.summary(), "rest_endpoints_added": added,
+            "next_step": "Prowl: call import_api_spec in a session for this target"}
+
+
 @router.get("/{asset_id}/api-specs/{spec_index}")
 def get_asset_api_spec_body(
     asset_id: int,

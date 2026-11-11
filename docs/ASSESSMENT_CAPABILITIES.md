@@ -245,3 +245,23 @@ Design references: [Hadrian](https://github.com/praetorian-inc/hadrian),
 [Titus](https://github.com/praetorian-inc/titus), and
 [Playwright WebSocket routing](https://playwright.dev/python/docs/api/class-websocketroute).
 No source code from these Praetorian tools was copied.
+
+## Operator-supplied API specs (OpenAPI, Swagger, Postman)
+
+`POST /api/v1/assets/{asset_id}/api-specs/import` accepts an OpenAPI 3 or
+Swagger 2 document (JSON or YAML) or a Postman v2.x collection export as
+`{"document": "...", "name": "...", "origin": "...", "variables": {}}`. The
+origin defaults to the asset and its host must match the asset. The document
+and its REST rows are stored on the asset; no target traffic is sent.
+
+In a Prowl session, `import_api_spec` (no args) loads stored specs for the
+target host, or takes `asset_id` or a raw `document`. Each operation becomes a
+synthetic, value-free request in the operation ledger (`sources=["api_spec"]`,
+`discovery_only`), so its query, JSON and form inputs get XSS/SQLi coverage
+cells like observed traffic. Placeholder values are synthetic (`1`, `test`);
+examples, defaults and Postman values from the document are never copied.
+Operations whose resolved origin differs from the session target are dropped
+and reported. The result also lists security schemes as suggested identities
+and GET operations with ID-like path parameters as owner-only candidates.
+Postman `{{baseUrl}}` with no value resolves to the allowed origin; Postman
+API references (`postman://...`) are not fetched.

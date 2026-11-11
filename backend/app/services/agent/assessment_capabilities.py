@@ -32,6 +32,7 @@ CAPABILITY_TOOLS = (
     "complete_scoped_assessment",
     "get_finding_candidate",
     "map_application_traffic",
+    "import_api_spec",
     "generate_authorization_matrix",
     "run_authorization_proof",
     "get_assessment_coverage",
@@ -216,6 +217,80 @@ class AssessmentCapabilities:
         ingest_operations(brain, [])
         self._queue_operation_inputs(brain)
         self._engagement_brain = brain.to_dict()
+
+    def _spec_documents_for_session(self, asset_id: int, origin: str):
+        """Stored spec documents for one org asset (explicit id or matching host)."""
+        from app.db.database import SessionLocal
+        from app.models.asset import Asset
+        from app.services.agent.tools import get_tenant_context
+        from app.services.api_spec_import import stored_documents
+
+        _user_id, org_id = get_tenant_context()
+        if not org_id:
+            raise ValueError("An organization agent session is required to load stored specs")
+        host = urlsplit(origin).hostname or ""
+        db = SessionLocal()
+        try:
+            query = db.query(Asset).filter(Asset.organization_id == org_id)
+            if asset_id:
+                assets = query.filter(Asset.id == int(asset_id)).all()
+            else:
+                assets = [a for a in query.filter(Asset.value.ilike(f"%{host}%")).limit(20).all()
+                          if (urlsplit(a.value).hostname if "://" in str(a.value)
+                              else str(a.value).strip().lower()) == host]
+            return [doc for asset in assets for doc in stored_documents(asset)]
+        finally:
+            db.close()
+
+    async def import_api_spec(
+        self, document: str = "", asset_id: int = 0, origin: str = "",
+    ) -> str:
+        """Seed the operation ledger and coverage cells from an OpenAPI/Swagger or Postman document; sends no requests."""
+        from app.services.api_spec_import import (
+            import_api_document, normalize_origin, parse_api_document,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cmap = getattr(self, "_capability_map", None) or {}
+        session_origin = normalize_origin(str(
+            (cmap.get("scope") if isinstance(cmap, dict) else "")
+            or (cmap.get("target") if isinstance(cmap, dict) else "")
+            or getattr(brain, "target", "") or getattr(self, "_fallback_target", "") or ""
+        ))
+        requested = normalize_origin(origin) if origin else ""
+        if session_origin and requested and requested != session_origin:
+            raise ValueError("Spec origin must match this session's target origin")
+        allowed = session_origin or requested
+        if not allowed:
+            raise ValueError("Set a target origin before importing a spec")
+        if document:
+            parsed_docs = [parse_api_document(document)]
+        else:
+            parsed_docs = self._spec_documents_for_session(asset_id, allowed)
+        if not parsed_docs:
+            return json.dumps(dict(
+                imported=[], operations_added=0,
+                note="No stored spec for this target; upload one to the asset or pass document",
+            ))
+        before = {op["id"] for op in brain.application_operations}
+        summaries = []
+        for parsed in parsed_docs[:4]:
+            imported = import_api_document(parsed, allowed)
+            ingest_operations(brain, imported.requests, identity="anonymous", source="api_spec")
+            summaries.append(imported.summary())
+        if not getattr(brain, "target", ""):
+            brain.target = allowed
+        self._queue_operation_inputs(brain)
+        self._engagement_brain = brain.to_dict()
+        added = [op for op in brain.application_operations if op["id"] not in before]
+        return json.dumps(dict(
+            imported=summaries,
+            operations_added=len(added),
+            operations=[{k: op.get(k) for k in ("id", "method", "path", "parameters")}
+                        for op in added[:40]],
+            note=("Spec operations are documentation leads: discovery_only until observed "
+                  "or probed. Coverage cells now include their inputs."),
+        ))
 
     async def map_application_traffic(
         self, requests: list, identity: str = "anonymous", source: str = "runtime"
