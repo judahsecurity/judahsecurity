@@ -123,12 +123,23 @@ class Settings(BaseSettings):
     # small app hosts use cloud APIs only.
     OLLAMA_FALLBACK_ENABLED: bool = False
 
+    # Generic OpenAI-protocol endpoint (vLLM, LM Studio, LiteLLM proxy, ...).
+    # Provider string: "openai_compatible". Per-org override: agent config
+    # ``llm_base_url``. Key is optional (per-org service "openai_compatible").
+    OPENAI_COMPATIBLE_BASE_URL: Optional[str] = None
+    OPENAI_COMPATIBLE_MODEL: str = ""
+    OPENAI_COMPATIBLE_API_KEY: Optional[str] = None
+    # LiteLLM SDK (provider string "litellm"), e.g. "bedrock/anthropic.claude-...".
+    # Requires the optional langchain-litellm package.
+    LITELLM_MODEL: str = ""
+
     @field_validator(
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "DEEPSEEK_API_KEY",
         "MOONSHOT_API_KEY",
         "GROQ_API_KEY",
+        "OPENAI_COMPATIBLE_API_KEY",
         mode="before",
     )
     @classmethod

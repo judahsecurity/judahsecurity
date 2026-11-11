@@ -252,9 +252,13 @@ def default_agent_config():
         # ── Single default model ─────────────────────────────────────────
         # This is the ONE model everything uses unless a per-task override is
         # set below. Change these two fields to switch the whole agent to a
-        # different model/provider. Providers: anthropic | openai | deepseek | kimi | groq | ollama.
+        # different model/provider. Providers: anthropic | openai | deepseek | kimi | groq | ollama
+        # | gemini | openrouter | openai_compatible | litellm.
         "llm_provider": "anthropic",
         "llm_model": "claude-sonnet-4-6",
+        # Endpoint for openai_compatible (vLLM, LM Studio, LiteLLM proxy, ...)
+        # or an api_base override for litellm. Empty uses the server setting.
+        "llm_base_url": "",
         # ── Optional per-task overrides ──────────────────────────────────
         # Leave empty to use the single default above for every task. To route
         # a specific task to a different model, add a "provider:model" entry,

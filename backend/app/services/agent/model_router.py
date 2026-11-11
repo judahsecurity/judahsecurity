@@ -141,6 +141,8 @@ def _settings_key_for_provider(provider: str) -> Optional[str]:
         return getattr(settings, "GROQ_API_KEY", None)
     if provider == ExternalService.OPENROUTER:
         return getattr(settings, "OPENROUTER_API_KEY", None)
+    if provider == ExternalService.OPENAI_COMPATIBLE:
+        return getattr(settings, "OPENAI_COMPATIBLE_API_KEY", None)
     return None
 
 
@@ -162,6 +164,10 @@ def _global_default_spec() -> str:
     if provider == ExternalService.OLLAMA:
         model = getattr(settings, "OLLAMA_MODEL", "") or DEFAULT_MODEL_BY_PROVIDER[ExternalService.OLLAMA]
         return f"{ExternalService.OLLAMA}:{model}"
+    if provider == ExternalService.OPENAI_COMPATIBLE:
+        return f"{ExternalService.OPENAI_COMPATIBLE}:{getattr(settings, 'OPENAI_COMPATIBLE_MODEL', '') or ''}"
+    if provider == ExternalService.LITELLM:
+        return f"{ExternalService.LITELLM}:{getattr(settings, 'LITELLM_MODEL', '') or ''}"
     # Default/anthropic.
     model = getattr(settings, "ANTHROPIC_MODEL", "") or DEFAULT_MODEL_BY_PROVIDER[ExternalService.ANTHROPIC]
     return f"{ExternalService.ANTHROPIC}:{model}"
@@ -176,6 +182,12 @@ def global_runtime_model_spec() -> Optional[tuple[str, str]]:
     provider, model = parse_model_spec(_global_default_spec())
     if provider == ExternalService.OLLAMA:
         if ollama_fallback_available():
+            return provider, model
+    elif provider == ExternalService.OPENAI_COMPATIBLE:
+        if model and getattr(settings, "OPENAI_COMPATIBLE_BASE_URL", None):
+            return provider, model
+    elif provider == ExternalService.LITELLM:
+        if model:
             return provider, model
     elif _settings_key_for_provider(provider):
         return provider, model
@@ -528,8 +540,11 @@ def _maybe_fallback_to_ollama(
     api_key: Optional[str],
 ) -> tuple[str, str, Optional[str]]:
     """If cloud key is missing, optionally fall back to local Ollama."""
-    if provider in KEYLESS_LLM_PROVIDERS:
+    if provider == ExternalService.OLLAMA:
         return provider, model, api_key or "ollama"
+    if provider in KEYLESS_LLM_PROVIDERS:
+        # Self-hosted / SDK-credentialed providers: pass the key only if set.
+        return provider, model, api_key
 
     if api_key:
         return provider, model, api_key
@@ -699,10 +714,14 @@ def get_llm_for_task(
         task, organization_id, provider, model,
     )
 
+    base_url = None
+    if provider in (ExternalService.OPENAI_COMPATIBLE, ExternalService.LITELLM):
+        base_url = (agent_config or {}).get("llm_base_url") or None
+
     primary = build_chat_model(
         provider, model, api_key,
         temperature=temperature, max_tokens=max_tokens,
-        timeout=timeout, max_retries=max_retries,
+        timeout=timeout, max_retries=max_retries, base_url=base_url,
     )
     return _attach_credit_fallback(
         primary,

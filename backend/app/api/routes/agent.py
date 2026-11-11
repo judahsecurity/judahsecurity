@@ -865,6 +865,8 @@ async def get_agent_status():
         "kimi": bool(settings.MOONSHOT_API_KEY),
         "groq": bool(settings.GROQ_API_KEY),
         "ollama": ollama_fallback_available(),
+        "openai_compatible": bool(settings.OPENAI_COMPATIBLE_BASE_URL and settings.OPENAI_COMPATIBLE_MODEL),
+        "litellm": bool(settings.LITELLM_MODEL),
     }
     selection = global_runtime_model_spec()
     available = selection is not None

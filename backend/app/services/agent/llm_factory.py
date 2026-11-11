@@ -48,7 +48,43 @@ DEFAULT_MODEL_BY_PROVIDER = {
     ExternalService.OLLAMA: "qwen2.5:14b",
     ExternalService.GEMINI: "gemini-2.5-pro",
     ExternalService.OPENROUTER: "openai/gpt-4o",
+    # No sensible default: these require an explicit model.
+    ExternalService.OPENAI_COMPATIBLE: "",
+    ExternalService.LITELLM: "",
 }
+
+# Hosts an operator-configured model endpoint may never point at.
+_BLOCKED_ENDPOINT_HOSTS = {"metadata.google.internal", "metadata", "169.254.169.254",
+                           "fd00:ec2::254"}
+
+
+def validate_model_base_url(url: Optional[str]) -> Optional[str]:
+    """Normalize a configured model endpoint, rejecting unsafe values.
+
+    Private and loopback hosts are allowed on purpose (self-hosted models are
+    the point); cloud metadata and link-local addresses are not.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    if not url:
+        return None
+    value = str(url).strip().rstrip("/")
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise UnsupportedProviderError("Model base URL must be an http(s) URL")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise UnsupportedProviderError("Model base URL must not carry credentials, query or fragment")
+    host = parts.hostname.lower()
+    if host in _BLOCKED_ENDPOINT_HOSTS:
+        raise UnsupportedProviderError("Model base URL points at a metadata service")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:  # a DNS name, not an IP literal
+        address = None
+    if address is not None and address.is_link_local:
+        raise UnsupportedProviderError("Model base URL points at a link-local address")
+    return value
 
 
 class UnsupportedProviderError(ValueError):
@@ -88,9 +124,15 @@ def _ollama_base_url() -> str:
     return (getattr(settings, "OLLAMA_BASE_URL", None) or "http://127.0.0.1:11434/v1").rstrip("/")
 
 
-def _base_url_for_provider(provider: str) -> Optional[str]:
+def _base_url_for_provider(provider: str, override: Optional[str] = None) -> Optional[str]:
     if provider == ExternalService.OLLAMA:
         return _ollama_base_url()
+    if provider == ExternalService.OPENAI_COMPATIBLE:
+        from app.core.config import settings
+        return validate_model_base_url(
+            override or getattr(settings, "OPENAI_COMPATIBLE_BASE_URL", None))
+    if provider == ExternalService.LITELLM:
+        return validate_model_base_url(override)
     return _OPENAI_COMPATIBLE_BASE_URLS.get(provider)
 
 
@@ -109,6 +151,7 @@ def build_chat_model(
     timeout: Optional[float] = 120,
     max_retries: int = 2,
     use_cache: bool = True,
+    base_url: Optional[str] = None,
 ) -> BaseChatModel:
     """Construct (or return a cached) LangChain chat model for ``provider``.
 
@@ -121,7 +164,9 @@ def build_chat_model(
     cache_key = (
         provider, model, _key_fingerprint(api_key),
         temperature, max_tokens, timeout, max_retries,
-        _base_url_for_provider(provider) if provider == ExternalService.OLLAMA else None,
+        _base_url_for_provider(provider, base_url) if provider in (
+            ExternalService.OLLAMA, ExternalService.OPENAI_COMPATIBLE, ExternalService.LITELLM,
+        ) else None,
     )
     if use_cache and cache_key in _MODEL_CACHE:
         return _MODEL_CACHE[cache_key]
@@ -132,7 +177,7 @@ def build_chat_model(
     llm = _construct(
         provider, model, api_key,
         temperature=temperature, max_tokens=max_tokens,
-        timeout=timeout, max_retries=max_retries,
+        timeout=timeout, max_retries=max_retries, base_url=base_url,
     )
 
     if use_cache:
@@ -149,6 +194,7 @@ def _construct(
     max_tokens: Optional[int],
     timeout: Optional[float],
     max_retries: int,
+    base_url: Optional[str] = None,
 ) -> BaseChatModel:
     # Common kwargs; drop None so provider defaults apply (e.g. reasoning models
     # that reject an explicit temperature).
@@ -172,7 +218,38 @@ def _construct(
             kwargs["api_key"] = api_key
         return ChatOpenAI(model=model, **kwargs)
 
-    base_url = _base_url_for_provider(provider)
+    if provider == ExternalService.LITELLM:
+        if not model:
+            raise UnsupportedProviderError("litellm requires an explicit model, e.g. litellm:bedrock/<model-id>")
+        try:
+            from langchain_litellm import ChatLiteLLM
+        except ImportError:
+            try:
+                from langchain_community.chat_models import ChatLiteLLM
+            except ImportError as exc:
+                raise UnsupportedProviderError(
+                    "LiteLLM support requires the 'langchain-litellm' package"
+                ) from exc
+        kwargs = {"model": model, "request_timeout": timeout, "max_retries": max_retries}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if api_key:
+            kwargs["api_key"] = api_key
+        endpoint = _base_url_for_provider(provider, base_url)
+        if endpoint:
+            kwargs["api_base"] = endpoint
+        return ChatLiteLLM(**kwargs)
+
+    if provider == ExternalService.OPENAI_COMPATIBLE and not model:
+        raise UnsupportedProviderError("openai_compatible requires an explicit model name")
+    endpoint = _base_url_for_provider(provider, base_url)
+    if provider == ExternalService.OPENAI_COMPATIBLE and not endpoint:
+        raise UnsupportedProviderError(
+            "openai_compatible needs a base URL (agent config llm_base_url or OPENAI_COMPATIBLE_BASE_URL)"
+        )
+    base_url = endpoint
     if base_url:
         # DeepSeek / Groq / Kimi / Ollama / OpenRouter speak the OpenAI wire protocol.
         from langchain_openai import ChatOpenAI
@@ -182,6 +259,9 @@ def _construct(
             kwargs["api_key"] = api_key
         elif provider == ExternalService.OLLAMA:
             kwargs["api_key"] = "ollama"
+        elif provider == ExternalService.OPENAI_COMPATIBLE:
+            # Self-hosted servers often need no key, but the SDK requires one.
+            kwargs["api_key"] = "not-needed"
         kwargs["base_url"] = base_url
         return ChatOpenAI(model=model, **kwargs)
 

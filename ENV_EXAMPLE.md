@@ -218,6 +218,20 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # the agent falls back to Ollama if it is reachable
 # (disable with OLLAMA_FALLBACK_ENABLED=false).
 # COMPOSE_PROFILES=ollama
+
+# Any OpenAI-protocol server (vLLM, LM Studio, LiteLLM proxy, gateways).
+# Provider string: "openai_compatible". Per-org override: agent setting
+# llm_base_url. Key is optional. Cloud metadata / link-local URLs are refused.
+# AI_PROVIDER=openai_compatible
+# OPENAI_COMPATIBLE_BASE_URL=http://vllm:8000/v1
+# OPENAI_COMPATIBLE_MODEL=qwen3-coder
+# OPENAI_COMPATIBLE_API_KEY=
+
+# LiteLLM SDK model strings (bedrock/..., vertex_ai/..., azure/...).
+# Provider string: "litellm". Needs `pip install langchain-litellm`; cloud
+# credentials use LiteLLM's own env vars (AWS_*, VERTEXAI_*, AZURE_*).
+# AI_PROVIDER=litellm
+# LITELLM_MODEL=bedrock/anthropic.claude-sonnet-4-6
 # OLLAMA_BASE_URL=http://ollama:11434/v1
 # OLLAMA_MODEL=qwen2.5:14b
 # OLLAMA_FALLBACK_ENABLED=true

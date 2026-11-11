@@ -164,6 +164,12 @@ class ExternalService:
     OLLAMA = "ollama"              # Local Ollama (OpenAI-compatible, no cloud key)
     GEMINI = "gemini"              # Google Gemini (future)
     OPENROUTER = "openrouter"      # OpenRouter aggregator (future)
+    # Any OpenAI-protocol server (vLLM, LM Studio, LiteLLM proxy, gateways).
+    # Base URL comes from agent config ``llm_base_url`` or settings.
+    OPENAI_COMPATIBLE = "openai_compatible"
+    # LiteLLM SDK model strings (bedrock/..., vertex_ai/..., azure/...). Cloud
+    # credentials are read by LiteLLM from its own environment variables.
+    LITELLM = "litellm"
 
     # Free services (no API key required)
     WAYBACK = "wayback"
@@ -218,6 +224,8 @@ SERVICE_ENV_FALLBACK: dict[str, str] = {
     ExternalService.GROQ:       "GROQ_API_KEY",
     ExternalService.GEMINI:     "GEMINI_API_KEY",
     ExternalService.OPENROUTER: "OPENROUTER_API_KEY",
+    ExternalService.OPENAI_COMPATIBLE: "OPENAI_COMPATIBLE_API_KEY",
+    ExternalService.LITELLM: "LITELLM_API_KEY",
     # Ollama is local — no cloud key. Optional OLLAMA_API_KEY is unused by
     # default; the router supplies a dummy client key when needed.
 }
@@ -234,11 +242,15 @@ LLM_PROVIDERS: frozenset[str] = frozenset({
     ExternalService.OLLAMA,
     ExternalService.GEMINI,
     ExternalService.OPENROUTER,
+    ExternalService.OPENAI_COMPATIBLE,
+    ExternalService.LITELLM,
 })
 
 # Providers that can run without a real cloud API key.
 KEYLESS_LLM_PROVIDERS: frozenset[str] = frozenset({
     ExternalService.OLLAMA,
+    ExternalService.OPENAI_COMPATIBLE,
+    ExternalService.LITELLM,
 })
 
 

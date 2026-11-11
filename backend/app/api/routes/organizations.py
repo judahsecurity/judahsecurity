@@ -359,6 +359,12 @@ def update_project_settings_module(
     _check_org_access(db, org_id, current_user)
     if module not in ALL_MODULES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown module: {module}")
+    if isinstance(body.config, dict) and body.config.get("llm_base_url"):
+        from app.services.agent.llm_factory import UnsupportedProviderError, validate_model_base_url
+        try:
+            body.config["llm_base_url"] = validate_model_base_url(body.config["llm_base_url"])
+        except UnsupportedProviderError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     ProjectSettings.set_config(db, org_id, module, body.config)
     db.commit()
     return ProjectSettings.get_config(db, org_id, module)
