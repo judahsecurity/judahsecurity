@@ -18,6 +18,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.wiz_integration import WizIntegration
+from app.models.crowdstrike_integration import CrowdStrikeIntegration
 from app.models.tenable_integration import TenableVmIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
@@ -61,6 +62,13 @@ from app.schemas.censys_schemas import (
     CensysIntegrationUpdate,
     CensysSyncResult,
     CensysTestConnectionResponse,
+)
+from app.schemas.crowdstrike_schemas import (
+    CrowdStrikeIntegrationCreate,
+    CrowdStrikeIntegrationResponse,
+    CrowdStrikeIntegrationUpdate,
+    CrowdStrikeSyncResult,
+    CrowdStrikeTestConnectionResponse,
 )
 from app.schemas.wiz_schemas import (
     WizIntegrationCreate,
@@ -125,6 +133,7 @@ from app.services import (
     jira_service,
     censys_asm_service,
     wiz_service,
+    crowdstrike_service,
     tenable_vm_service,
     hackerone_service,
     akamai_waf_service,
@@ -925,6 +934,181 @@ async def sync_wiz_integration(
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
     return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CrowdStrike Falcon — Exposure Management external assets, internet-facing
+# vulnerability paths, and prevention-policy (block vs detect) posture
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_crowdstrike_integration(
+    db: Session, org_id: int, integration_id: int
+) -> CrowdStrikeIntegration:
+    integration = (
+        db.query(CrowdStrikeIntegration)
+        .filter(
+            CrowdStrikeIntegration.id == integration_id,
+            CrowdStrikeIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="CrowdStrike connection not found.")
+    return integration
+
+
+async def _test_crowdstrike(integration: CrowdStrikeIntegration) -> dict:
+    return await crowdstrike_service.test_connection(
+        integration.cloud,
+        integration.get_client_id(),
+        integration.get_client_secret(),
+        member_cid=integration.member_cid,
+    )
+
+
+@router.get("/crowdstrike", response_model=List[CrowdStrikeIntegrationResponse])
+def list_crowdstrike_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(CrowdStrikeIntegration)
+        .filter(CrowdStrikeIntegration.organization_id == org_id)
+        .order_by(CrowdStrikeIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post(
+    "/crowdstrike",
+    response_model=CrowdStrikeIntegrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_crowdstrike_integration(
+    payload: CrowdStrikeIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    existing = db.query(CrowdStrikeIntegration).filter(
+        CrowdStrikeIntegration.organization_id == org_id,
+        CrowdStrikeIntegration.connection_name == payload.connection_name,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A CrowdStrike connection named '{payload.connection_name}' already exists.",
+        )
+
+    result = await crowdstrike_service.test_connection(
+        payload.cloud,
+        payload.client_id,
+        payload.client_secret,
+        member_cid=payload.member_cid,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = CrowdStrikeIntegration(
+        organization_id=org_id,
+        connection_name=payload.connection_name,
+        cloud=payload.cloud,
+        member_cid=(payload.member_cid or "").strip() or None,
+        asset_filter=(payload.asset_filter or "").strip() or None,
+        import_assets=payload.import_assets,
+        import_vulnerabilities=payload.import_vulnerabilities,
+        import_policies=payload.import_policies,
+        internet_exposed_only=payload.internet_exposed_only,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_client_id(payload.client_id)
+    integration.set_client_secret(payload.client_secret)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/crowdstrike/{integration_id}", response_model=CrowdStrikeIntegrationResponse)
+async def update_crowdstrike_integration(
+    integration_id: int,
+    payload: CrowdStrikeIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_crowdstrike_integration(db, org_id, integration_id)
+    data = payload.model_dump(exclude_unset=True)
+    client_id = data.pop("client_id", None)
+    client_secret = data.pop("client_secret", None)
+    for field in ("member_cid", "asset_filter"):
+        if field in data:
+            data[field] = (data[field] or "").strip() or None
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if client_id:
+        integration.set_client_id(client_id)
+    if client_secret:
+        integration.set_client_secret(client_secret)
+
+    result = await _test_crowdstrike(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    if not result["ok"]:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=result["message"])
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/crowdstrike/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_crowdstrike_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_crowdstrike_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post(
+    "/crowdstrike/{integration_id}/test",
+    response_model=CrowdStrikeTestConnectionResponse,
+)
+async def test_crowdstrike_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_crowdstrike_integration(db, org_id, integration_id)
+    result = await _test_crowdstrike(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return CrowdStrikeTestConnectionResponse(**result)
+
+
+@router.post("/crowdstrike/{integration_id}/sync", response_model=CrowdStrikeSyncResult)
+async def sync_crowdstrike_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_crowdstrike_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This CrowdStrike connection is disabled.")
+    return CrowdStrikeSyncResult(**(await crowdstrike_service.sync_integration(db, integration)))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -60,6 +60,7 @@ import { cn } from '@/lib/utils';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
+import { CrowdStrikeSection } from '@/components/integrations/CrowdStrikeSection';
 import { TenableSection } from '@/components/integrations/TenableSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
 
@@ -3212,6 +3213,9 @@ export default function IntegrationsPage() {
 
         {/* Wiz cloud exposure integration */}
         <WizSection />
+
+        {/* CrowdStrike Falcon Exposure Management + prevention posture */}
+        <CrowdStrikeSection />
 
         {/* Tenable Vulnerability Management integration */}
         <TenableSection />

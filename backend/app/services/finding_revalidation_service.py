@@ -461,6 +461,10 @@ async def _revalidate_nuclei(finding: dict) -> Optional[dict[str, Any]]:
     }
 
 
+# Detectors whose template_id is a vendor finding ID, never a nuclei template.
+_IMPORTED_SOURCES = {"crowdstrike"}
+
+
 async def revalidate_finding(finding: dict) -> dict[str, Any]:
     """
     Revalidate one finding using scanner-native tools and stored reproduction data.
@@ -471,7 +475,9 @@ async def revalidate_finding(finding: dict) -> dict[str, Any]:
     source_kind = (finding.get("source_kind") or "").lower()
 
     # 1) Nuclei / template-based detectors — replay the exact template when possible.
-    if finding.get("template_id") or finding.get("template_yaml"):
+    # Imported vendor findings carry vendor IDs, not nuclei templates.
+    imported = detected_by in _IMPORTED_SOURCES
+    if not imported and (finding.get("template_id") or finding.get("template_yaml")):
         nuclei_verdict = await _revalidate_nuclei(finding)
         if nuclei_verdict:
             return nuclei_verdict

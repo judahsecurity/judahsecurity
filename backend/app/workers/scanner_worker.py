@@ -1099,6 +1099,9 @@ class ScannerWorker:
                 source_kind = "manual"
             elif detected_by in ("port_scanner",):
                 source_kind = "network_service"
+            elif detected_by == "crowdstrike" and isinstance(meta, dict) and meta.get("port"):
+                # Imported CrowdStrike exposure path: re-probe the exposed port.
+                source_kind = "network_service"
             elif detected_by in ("trufflehog", "github_secret_scanner"):
                 source_kind = "secret"
             elif detected_by in (
