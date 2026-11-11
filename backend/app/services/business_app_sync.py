@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 TABLE = "cmdb_ci_business_app"
 FIELDS = (
     "sys_id,number,name,short_description,business_criticality,operational_status,"
-    "life_cycle_stage,owned_by,it_application_owner,url,data_classification,application_type,user_base"
+    "life_cycle_stage,owned_by,it_application_owner,url,data_classification,application_type,user_base,"
+    # Ownership / attribution. ServiceNow leaves out fields a table does not have.
+    "support_group,managed_by_group,business_unit,department,company"
 )
 PAGE_SIZE = 500
 MAX_RECORDS = 50_000
@@ -79,11 +81,28 @@ def upsert_record(db: Session, organization_id: int, record: Dict[str, Any], ins
     app.lifecycle_stage = _text(record.get("life_cycle_stage")) or None
     app.owner = _text(record.get("owned_by")) or None
     app.it_owner = _text(record.get("it_application_owner")) or None
+    app.support_group = _text(record.get("support_group")) or _text(record.get("managed_by_group")) or None
+    app.business_unit = _text(record.get("business_unit")) or None
+    app.department = _text(record.get("department")) or None
+    app.company = _text(record.get("company")) or None
     app.url = _text(record.get("url")) or None
     app.external_url = f"{instance}/nav_to.do?uri={TABLE}.do?sys_id={sys_id}" if instance else None
     app.raw = record
     app.synced_at = datetime.utcnow()
     return app
+
+
+def resolve_integration(db: Session, organization_id: int):
+    """The org's ServiceNow integration and instance base URL."""
+    integration = (
+        db.query(ServiceNowIntegration).filter(ServiceNowIntegration.organization_id == organization_id).first()
+    )
+    if integration is None:
+        raise ValueError("ServiceNow is not configured for this organization")
+    instance = _instance_base(integration.webhook_url)
+    if not instance:
+        raise ValueError("Could not derive the ServiceNow instance URL from the integration")
+    return integration, instance
 
 
 async def sync_business_apps(
@@ -93,15 +112,7 @@ async def sync_business_apps(
     client: Optional[httpx.AsyncClient] = None,
 ) -> Dict[str, Any]:
     """Pull every business application for the org. The caller commits."""
-    integration = (
-        db.query(ServiceNowIntegration).filter(ServiceNowIntegration.organization_id == organization_id).first()
-    )
-    if integration is None:
-        raise ValueError("ServiceNow is not configured for this organization")
-    instance = _instance_base(integration.webhook_url)
-    if not instance:
-        raise ValueError("Could not derive the ServiceNow instance URL from the integration")
-
+    integration, instance = resolve_integration(db, organization_id)
     url = f"{instance}/api/now/table/{TABLE}"
     own_client = client is None
     client = client or httpx.AsyncClient(timeout=60)

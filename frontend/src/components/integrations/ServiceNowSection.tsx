@@ -33,8 +33,9 @@ import {
   Shield,
   ArrowLeftRight,
   Download,
+  Network,
 } from 'lucide-react';
-import { api, getApiErrorMessage, type ServiceNowIntegration } from '@/lib/api';
+import { api, getApiErrorMessage, type CmdbSyncResult, type ServiceNowIntegration } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 
@@ -103,6 +104,8 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [pulling, setPulling] = useState(false);
+  const [cmdbSyncing, setCmdbSyncing] = useState(false);
+  const [cmdbResult, setCmdbResult] = useState<CmdbSyncResult | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string; http_status?: number; table_api_ok?: boolean } | null>(null);
   const [activeTab, setActiveTab] = useState<'endpoint' | 'auto' | 'sync'>('endpoint');
@@ -165,6 +168,22 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
       setTestResult({ ok: false, message: getApiErrorMessage(err, 'Test failed') });
     } finally {
       setTesting(false);
+    }
+  }
+
+  async function handleCmdbSync() {
+    setCmdbSyncing(true);
+    try {
+      const result = await api.syncServiceNowCmdb();
+      setCmdbResult(result);
+      toast({
+        title: 'CMDB sync complete',
+        description: `${result.business_apps} business apps, ${result.application_services ?? 0} application services; ${result.attribution.linked} asset(s) newly attributed.`,
+      });
+    } catch (err) {
+      toast({ title: 'CMDB sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setCmdbSyncing(false);
     }
   }
 
@@ -343,6 +362,25 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
               </div>
             )}
 
+            {cmdbResult && (
+              <div className="rounded-lg border p-3 text-xs space-y-1">
+                <p>
+                  CMDB: {cmdbResult.business_apps} business apps · {cmdbResult.application_services ?? 0} application
+                  services · {cmdbResult.entry_point_links ?? 0} entry points · {cmdbResult.service_map_links ?? 0} service-map
+                  CIs · {cmdbResult.relationship_links ?? 0} related CIs
+                </p>
+                <p className="text-muted-foreground">
+                  Assets: {cmdbResult.attribution.linked} newly linked, {cmdbResult.attribution.unchanged} unchanged,{' '}
+                  {cmdbResult.attribution.unlinked} unlinked, {cmdbResult.attribution.manual} manual (kept)
+                </p>
+                {cmdbResult.warnings.map((w) => (
+                  <p key={w} className="text-amber-400 flex items-start gap-1">
+                    <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />{w}
+                  </p>
+                ))}
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-2 pt-1">
               <Button size="sm" variant="outline" onClick={handleTest} disabled={testing}>
                 {testing ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
@@ -354,6 +392,16 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
                   Pull statuses
                 </Button>
               )}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleCmdbSync}
+                disabled={cmdbSyncing}
+                title="Pull business applications, application services and the CIs that run them, then attribute assets"
+              >
+                {cmdbSyncing ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Network className="h-4 w-4 mr-2" />}
+                Sync CMDB
+              </Button>
               <Button size="sm" variant="outline" onClick={openSetup}>
                 <Settings2 className="h-4 w-4 mr-2" />Edit
               </Button>

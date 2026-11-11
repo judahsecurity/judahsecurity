@@ -171,6 +171,11 @@ class Asset(Base):
     netblock_id = Column(Integer, ForeignKey("netblocks.id"), nullable=True)  # Associated netblock if any
     # Business application this asset serves; findings on it inherit the link.
     business_app_id = Column(Integer, ForeignKey("business_applications.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Application service (ServiceNow) running this asset, and how the link was made:
+    # manual | entry_point | service_map | relationship. Sync never overwrites a manual link.
+    app_service_id = Column(Integer, ForeignKey("application_services.id", ondelete="SET NULL"), nullable=True, index=True)
+    app_link_source = Column(String(30), nullable=True)
+    app_link_detail = Column(String(500), nullable=True)
     
     # Hosting classification (for IPs discovered via DNS resolution)
     # This helps distinguish between owned infrastructure vs cloud-hosted ephemeral IPs

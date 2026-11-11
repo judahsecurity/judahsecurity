@@ -673,6 +673,16 @@ def apply_oracle_migrations():
         "CREATE INDEX IF NOT EXISTS ix_vuln_sev_status ON vulnerabilities (sev_status)",
         "CREATE INDEX IF NOT EXISTS ix_vuln_business_app ON vulnerabilities (business_app_id)",
         "CREATE INDEX IF NOT EXISTS ix_assets_business_app ON assets (business_app_id)",
+        "ALTER TABLE business_applications ADD COLUMN IF NOT EXISTS support_group VARCHAR(255)",
+        "ALTER TABLE business_applications ADD COLUMN IF NOT EXISTS business_unit VARCHAR(255)",
+        "ALTER TABLE business_applications ADD COLUMN IF NOT EXISTS department VARCHAR(255)",
+        "ALTER TABLE business_applications ADD COLUMN IF NOT EXISTS company VARCHAR(255)",
+        "ALTER TABLE assets ADD COLUMN IF NOT EXISTS app_service_id INTEGER REFERENCES application_services(id) ON DELETE SET NULL",
+        "ALTER TABLE assets ADD COLUMN IF NOT EXISTS app_link_source VARCHAR(30)",
+        "ALTER TABLE assets ADD COLUMN IF NOT EXISTS app_link_detail VARCHAR(500)",
+        "CREATE INDEX IF NOT EXISTS ix_assets_app_service ON assets (app_service_id)",
+        # Existing hand-made business app links stay manual, so sync never replaces them.
+        "UPDATE assets SET app_link_source = 'manual' WHERE business_app_id IS NOT NULL AND app_link_source IS NULL",
 
         # ── Jira integration schema migrations ────────────────────────────────
         "ALTER TABLE jira_integrations ADD COLUMN IF NOT EXISTS auto_create_enabled       BOOLEAN NOT NULL DEFAULT FALSE",

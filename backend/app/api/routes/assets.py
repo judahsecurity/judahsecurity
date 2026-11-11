@@ -222,6 +222,7 @@ def build_asset_response(
     asset: Asset,
     vuln_counts: Optional[Dict[str, int]] = None,
     ip_relationships: Optional[List[dict]] = None,
+    ownership: Optional[dict] = None,
 ) -> dict:
     """Build asset response with port service information.
     
@@ -395,6 +396,10 @@ def build_asset_response(
         "has_login_portal": safe_get("has_login_portal", False),
         "login_portals": safe_get("login_portals", []),
         "netblock_id": safe_get("netblock_id"),
+        "business_app_id": safe_get("business_app_id"),
+        "app_service_id": safe_get("app_service_id"),
+        "app_link_source": safe_get("app_link_source"),
+        "ownership": ownership,
         # Scan tracking
         "last_scan_id": safe_get("last_scan_id"),
         "last_scan_name": safe_get("last_scan_name"),
@@ -438,6 +443,9 @@ def list_assets(
     has_geo: Optional[bool] = Query(None, description="Filter for assets with geo data (latitude/longitude)"),
     include_cidr: bool = Query(False, description="Include IP_RANGE/CIDR assets (excluded by default)"),
     collapse_related_ips: bool = Query(False, description="Omit non-owned DNS-linked or CDN edge IP records as standalone assets"),
+    business_app_id: Optional[int] = Query(None, description="Filter by business application"),
+    app_service_id: Optional[int] = Query(None, description="Filter by application service"),
+    attributed: Optional[bool] = Query(None, description="true = linked to a business app or application service; false = unattributed"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100000),
     db: Session = Depends(get_db),
@@ -480,6 +488,14 @@ def list_assets(
     
     if status:
         query = query.filter(Asset.status == status)
+    if business_app_id:
+        query = query.filter(Asset.business_app_id == business_app_id)
+    if app_service_id:
+        query = query.filter(Asset.app_service_id == app_service_id)
+    if attributed is True:
+        query = query.filter((Asset.business_app_id.isnot(None)) | (Asset.app_service_id.isnot(None)))
+    elif attributed is False:
+        query = query.filter(Asset.business_app_id.is_(None), Asset.app_service_id.is_(None))
     if search:
         query = query.filter(
             (Asset.name.ilike(f"%{search}%")) |
@@ -591,6 +607,8 @@ def list_assets(
 
     vuln_by_asset = _batch_vuln_counts(db, [a.id for a in assets])
     ip_links_by_asset = batch_ip_relationships(db, assets)
+    from app.services.app_attribution import ownership_for_assets
+    ownership_by_asset = ownership_for_assets(db, assets)
     
     return PaginatedAssetsResponse(
         items=[
@@ -598,6 +616,7 @@ def list_assets(
                 asset,
                 vuln_counts=vuln_by_asset.get(asset.id, _empty_vuln_counts()),
                 ip_relationships=ip_links_by_asset.get(asset.id, []),
+                ownership=ownership_by_asset.get(asset.id),
             )
             for asset in assets
         ],
@@ -918,9 +937,12 @@ def get_asset(
         )
 
     # Build full response with port services and technologies
+    from app.services.app_attribution import ownership_for_assets
+
     return build_asset_response(
         asset,
         ip_relationships=batch_ip_relationships(db, [asset]).get(asset.id, []),
+        ownership=ownership_for_assets(db, [asset]).get(asset.id),
     )
 
 

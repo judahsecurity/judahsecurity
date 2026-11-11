@@ -64,7 +64,7 @@ import {
   Gauge,
 } from 'lucide-react';
 import Link from 'next/link';
-import { api, getApiErrorMessage } from '@/lib/api';
+import { api, getApiErrorMessage, type OwnershipSummary } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate, downloadCSV, cn } from '@/lib/utils';
 import { RemediationPanel } from '@/components/remediation/RemediationPanel';
@@ -208,6 +208,7 @@ interface Finding {
   sev_status?: 'triaged' | 'needs_analyst' | 'incomplete' | null;
   sev_pending?: number | null;
   business_app?: BusinessAppSummary | null;
+  ownership?: OwnershipSummary | null;
 }
 
 interface OracleEnrichment {
@@ -1933,7 +1934,12 @@ export default function FindingsPage() {
   const needsTriageCount = findings.filter((f) => f.sev_status !== 'triaged').length;
 
   // Keep the table row in step with the triage panel after a save.
-  const applyRiskView = (findingId: number, view: RiskFactorsView, businessApp?: BusinessAppSummary | null) => {
+  const applyRiskView = (
+    findingId: number,
+    view: RiskFactorsView,
+    businessApp?: BusinessAppSummary | null,
+    ownership?: OwnershipSummary | null,
+  ) => {
     const patch: Partial<Finding> = {
       sev_score: view.score ?? null,
       sev_level: view.level ?? null,
@@ -1945,6 +1951,7 @@ export default function FindingsPage() {
       (patch as Record<string, unknown>)[`sev_${key}`] = f.score;
     }
     if (businessApp !== undefined) patch.business_app = businessApp;
+    if (ownership !== undefined) patch.ownership = ownership;
     setFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, ...patch } : f)));
     setSelectedFinding((prev) => (prev && prev.id === findingId ? { ...prev, ...patch } : prev));
   };
@@ -2300,7 +2307,7 @@ export default function FindingsPage() {
               }
             }}
           >
-            <div className="h-px w-[3408px]" />
+            <div className="h-px w-[4088px]" />
           </div>
           <div
             ref={tableScroll}
@@ -2311,9 +2318,9 @@ export default function FindingsPage() {
               }
             }}
           >
-            <table className="w-[3408px] table-fixed caption-bottom text-sm">
+            <table className="w-[4088px] table-fixed caption-bottom text-sm">
             <colgroup>
-              {[44, 380, 210, 135, 190, 100, 120, 100, 100, 95, 105, 100, 155, 80, 100, 95, 120, 190, 100, 80, 125, 95, 120, 120, 125, 180, 44].map((width, index) => (
+              {[44, 380, 210, 135, 190, 100, 120, 100, 100, 95, 105, 100, 155, 80, 100, 95, 120, 190, 100, 190, 170, 170, 150, 80, 125, 95, 120, 120, 125, 180, 44].map((width, index) => (
                 <col key={index} style={{ width }} />
               ))}
             </colgroup>
@@ -2344,6 +2351,10 @@ export default function FindingsPage() {
                 <TableHead>Scanner severity</TableHead>
                 <TableHead>App</TableHead>
                 <TableHead>App ID</TableHead>
+                <TableHead>App service</TableHead>
+                <TableHead>Owner</TableHead>
+                <TableHead>Support group</TableHead>
+                <TableHead>Business unit</TableHead>
                 <TableHead>KEV</TableHead>
                 <TableHead>Ransomware</TableHead>
                 <TableHead>EPSS score</TableHead>
@@ -2357,7 +2368,7 @@ export default function FindingsPage() {
             <TableBody className="[&_td]:px-3 [&_td]:py-3">
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={27} className="text-center !py-12">
+                  <TableCell colSpan={31} className="text-center !py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Loader2 className="h-8 w-8 animate-spin text-primary" />
                       <p className="text-muted-foreground">Loading findings...</p>
@@ -2366,7 +2377,7 @@ export default function FindingsPage() {
                 </TableRow>
               ) : filteredFindings.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={27} className="text-center !py-12">
+                  <TableCell colSpan={31} className="text-center !py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Shield className="h-12 w-12 text-muted-foreground/50" />
                       <p className="text-muted-foreground">
@@ -2497,6 +2508,20 @@ export default function FindingsPage() {
                     </TableCell>
                     <TableCell className="font-mono text-xs" title={finding.business_app?.app_id || undefined}>
                       <span className="block truncate">{finding.business_app?.app_id || '—'}</span>
+                    </TableCell>
+                    <TableCell title={finding.ownership?.app_service_name || undefined}>
+                      <span className="block truncate">{finding.ownership?.app_service_name || '—'}</span>
+                    </TableCell>
+                    <TableCell title={finding.ownership?.owner || undefined}>
+                      <span className="block truncate">{finding.ownership?.owner || '—'}</span>
+                    </TableCell>
+                    <TableCell title={finding.ownership?.support_group || undefined}>
+                      <span className="block truncate">{finding.ownership?.support_group || '—'}</span>
+                    </TableCell>
+                    <TableCell title={finding.ownership?.business_unit || finding.ownership?.department || undefined}>
+                      <span className="block truncate">
+                        {finding.ownership?.business_unit || finding.ownership?.department || '—'}
+                      </span>
                     </TableCell>
                     <TableCell>
                       {finding.delphi?.kev ? <span className="text-red-400">Yes</span> : finding.delphi ? 'No' : '—'}
@@ -2872,9 +2897,10 @@ export default function FindingsPage() {
                 findingId={selectedFinding.id}
                 assetId={selectedFinding.asset_id}
                 businessApp={selectedFinding.business_app ?? null}
+                ownership={selectedFinding.ownership ?? null}
                 onDirtyChange={onDirtyChange}
-                onUpdated={(view, businessApp) => {
-                  applyRiskView(selectedFinding.id, view, businessApp);
+                onUpdated={(view, businessApp, ownership) => {
+                  applyRiskView(selectedFinding.id, view, businessApp, ownership);
                   void reloadReview();
                 }}
               />}

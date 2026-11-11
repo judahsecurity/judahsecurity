@@ -3,6 +3,7 @@ from app.models.user import User, UserRole
 from app.models.organization import Organization
 from app.models.netblock import Netblock  # Must be imported BEFORE Asset due to FK reference
 from app.models.business_application import BusinessApplication  # before Asset/Vulnerability (FK)
+from app.models.application_service import ApplicationService, CmdbCiLink  # before Asset (FK)
 from app.models.asset import Asset, AssetType, AssetStatus
 from app.models.sitemap_entry import SitemapEntry
 from app.models.finding_exception import FindingException, ExceptionType, ExceptionStatus

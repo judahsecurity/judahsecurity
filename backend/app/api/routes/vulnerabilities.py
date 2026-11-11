@@ -125,6 +125,9 @@ def business_app_summary(app: Any, *, inherited: bool = False) -> dict:
         "business_criticality": app.business_criticality,
         "criticality_level": app.criticality_level,
         "owner": app.owner,
+        "it_owner": app.it_owner,
+        "support_group": app.support_group,
+        "business_unit": app.business_unit,
         "external_url": app.external_url,
         "inherited_from_asset": inherited,
     }
@@ -148,6 +151,8 @@ def build_vuln_response(
             app_id = vuln.business_app_id or (getattr(vuln.asset, "business_app_id", None) if vuln.asset else None)
             app = db.query(BusinessApplication).filter(BusinessApplication.id == app_id).first() if app_id else None
             d["business_app"] = business_app_summary(app, inherited=vuln.business_app_id is None) if app else None
+            from app.services.app_attribution import ownership_for_vulns
+            d["ownership"] = ownership_for_vulns(db, [vuln]).get(vuln.id)
 
     # Latest asset screenshot for analyst visual context on the findings page
     screenshot_id = getattr(vuln.asset, "latest_screenshot_id", None) if vuln.asset else None
@@ -309,6 +314,7 @@ def list_vulnerabilities(
         description="Filter by severity triage status: needs_analyst, triaged, incomplete, or not_evaluated",
     ),
     business_app_id: Optional[int] = Query(None, description="Filter by business application"),
+    app_service_id: Optional[int] = Query(None, description="Filter by application service running the asset"),
     sort: Optional[str] = Query(
         None,
         description="'risk' orders by severity-evaluation score; default orders by OPES priority",
@@ -364,6 +370,8 @@ def list_vulnerabilities(
                 and_(Vulnerability.business_app_id.is_(None), Asset.business_app_id == business_app_id),
             )
         )
+    if app_service_id:
+        query = query.filter(Asset.app_service_id == app_service_id)
 
     if sort == "risk":
         ordering = (
@@ -418,9 +426,13 @@ def list_vulnerabilities(
     if app_ids:
         apps_by_id = {a.id: a for a in db.query(BusinessApplication).filter(BusinessApplication.id.in_(app_ids)).all()}
 
+    from app.services.app_attribution import ownership_for_vulns
+    ownership = ownership_for_vulns(db, vulns)
+
     responses = []
     for v in vulns:
         d = build_vuln_response(v, include_detection_dumps=False)
+        d["ownership"] = ownership.get(v.id)
         app = apps_by_id.get(v.business_app_id or (getattr(v.asset, "business_app_id", None) if v.asset else None))
         d["business_app"] = business_app_summary(app, inherited=v.business_app_id is None) if app else None
         sid = d.get("screenshot_id")

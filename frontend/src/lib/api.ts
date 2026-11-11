@@ -293,6 +293,70 @@ export interface JiraTicket {
 
 // ── ServiceNow shared types ────────────────────────────────────────────────
 
+/** Who owns an asset or finding: the application service running it, the
+ *  business application consuming that service, and their owner / support
+ *  group / business unit (ServiceNow CMDB). */
+export interface OwnershipSummary {
+  business_app_id?: number | null;
+  business_app_number?: string | null;
+  business_app_name?: string | null;
+  business_app_url?: string | null;
+  app_service_id?: number | null;
+  app_service_number?: string | null;
+  app_service_name?: string | null;
+  app_service_url?: string | null;
+  environment?: string | null;
+  owner?: string | null;
+  it_owner?: string | null;
+  support_group?: string | null;
+  business_unit?: string | null;
+  department?: string | null;
+  company?: string | null;
+  criticality_level?: number | null;
+  business_criticality?: string | null;
+  /** manual | entry_point | service_map | relationship */
+  link_source?: string | null;
+  link_detail?: string | null;
+  inherited_from_asset?: boolean;
+}
+
+export interface AppServiceSummary {
+  id: number;
+  number?: string | null;
+  name: string;
+  service_class?: string | null;
+  business_app_id?: number | null;
+  business_criticality?: string | null;
+  criticality_level?: number | null;
+  environment?: string | null;
+  owner?: string | null;
+  support_group?: string | null;
+  business_unit?: string | null;
+  external_url?: string | null;
+}
+
+export interface CmdbSyncResult {
+  business_apps: number;
+  application_services?: number;
+  entry_point_links?: number;
+  service_map_links?: number;
+  relationship_links?: number;
+  attribution: { linked: number; unlinked: number; unchanged: number; manual: number; by_source: Record<string, number> };
+  warnings: string[];
+}
+
+export type AttributionGroupBy = 'business_unit' | 'owner' | 'support_group' | 'business_app' | 'app_service';
+
+export type AttributionRow = {
+  assets: number;
+  open_findings: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  info: number;
+} & Partial<Record<AttributionGroupBy, string | null>>;
+
 export interface ServiceNowIntegration {
   id: number;
   organization_id: number;
@@ -1249,9 +1313,26 @@ class ApiClient {
     return response.data;
   }
 
-  async syncBusinessApps() {
+  /** Pull business apps, application services and the CIs that run them from
+   *  the ServiceNow CMDB, then attribute assets to them. */
+  async syncServiceNowCmdb() {
     const response = await this.client.post('/business-apps/sync');
-    return response.data as { synced: number };
+    return response.data as CmdbSyncResult;
+  }
+
+  async reattributeAssets() {
+    const response = await this.client.post('/business-apps/attribute');
+    return response.data as CmdbSyncResult['attribution'];
+  }
+
+  async listAppServices(q?: string, limit = 25) {
+    const response = await this.client.get('/business-apps/services', { params: { q: q || undefined, limit } });
+    return response.data as AppServiceSummary[];
+  }
+
+  async getOwnershipAttribution(groupBy: AttributionGroupBy = 'business_unit') {
+    const response = await this.client.get('/business-apps/attribution', { params: { group_by: groupBy } });
+    return response.data as AttributionRow[];
   }
 
   async linkFindingBusinessApp(vulnId: number, businessAppId: number | null) {
@@ -1259,8 +1340,11 @@ class ApiClient {
     return response.data;
   }
 
-  async linkAssetBusinessApp(assetId: number, businessAppId: number | null) {
-    const response = await this.client.put(`/business-apps/assets/${assetId}`, { business_app_id: businessAppId });
+  async linkAssetBusinessApp(assetId: number, businessAppId: number | null, appServiceId: number | null = null) {
+    const response = await this.client.put(`/business-apps/assets/${assetId}`, {
+      business_app_id: businessAppId,
+      app_service_id: appServiceId,
+    });
     return response.data;
   }
 

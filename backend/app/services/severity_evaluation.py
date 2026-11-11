@@ -550,6 +550,11 @@ def build_context(db: Session, vuln: Any) -> FindingContext:
     if app is not None:
         ctx.business_app_name = app.name or app.app_id or ""
         ctx.business_app_criticality = app.criticality_level
+    if ctx.business_app_criticality is None:
+        svc = _app_service(db, vuln, asset)
+        if svc is not None and svc.criticality_level:
+            ctx.business_app_name = svc.name or svc.number or ""
+            ctx.business_app_criticality = svc.criticality_level
     return ctx
 
 
@@ -562,6 +567,22 @@ def _business_app(db: Session, vuln: Any, asset: Any) -> Any:
     if not app_id:
         return None
     return db.query(BusinessApplication).filter(BusinessApplication.id == app_id).first()
+
+
+def _app_service(db: Session, vuln: Any, asset: Any) -> Any:
+    svc_id = getattr(asset, "app_service_id", None)
+    if not svc_id:
+        return None
+    try:
+        from app.models.application_service import ApplicationService
+    except ImportError:
+        return None
+    svc = db.query(ApplicationService).filter(ApplicationService.id == svc_id).first()
+    # A finding linked by hand to another business app does not take this service.
+    override = getattr(vuln, "business_app_id", None)
+    if svc is not None and override and svc.business_app_id not in (None, override):
+        return None
+    return svc
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────

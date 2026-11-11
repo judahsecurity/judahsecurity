@@ -5,7 +5,8 @@ import { Loader2, AlertTriangle, Bot, Building2, ExternalLink } from 'lucide-rea
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { api, getApiErrorMessage } from '@/lib/api';
+import { api, getApiErrorMessage, type OwnershipSummary } from '@/lib/api';
+import { OwnershipDetails } from '@/components/ownership/OwnershipDetails';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 
@@ -105,12 +106,18 @@ interface RiskFactorTriagePanelProps {
   findingId: number;
   assetId?: number;
   businessApp?: BusinessAppSummary | null;
+  /** Application service / business app attribution with owner and business unit. */
+  ownership?: OwnershipSummary | null;
   onDirtyChange?: (dirty: boolean) => void;
   /** Called after any change so the findings table row can update. */
-  onUpdated?: (view: RiskFactorsView, businessApp?: BusinessAppSummary | null) => void;
+  onUpdated?: (
+    view: RiskFactorsView,
+    businessApp?: BusinessAppSummary | null,
+    ownership?: OwnershipSummary | null,
+  ) => void;
 }
 
-export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdated, onDirtyChange }: RiskFactorTriagePanelProps) {
+export function RiskFactorTriagePanel({ findingId, assetId, businessApp, ownership, onUpdated, onDirtyChange }: RiskFactorTriagePanelProps) {
   const [view, setView] = useState<RiskFactorsView | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -123,7 +130,9 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
   const [linking, setLinking] = useState(false);
   const { toast } = useToast();
 
+  const [owner, setOwner] = useState<OwnershipSummary | null>(ownership ?? null);
   useEffect(() => setApp(businessApp ?? null), [findingId, businessApp]);
+  useEffect(() => setOwner(ownership ?? null), [findingId, ownership]);
 
   useEffect(() => {
     if (appQuery.trim().length < 2) {
@@ -218,12 +227,14 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
           ? await api.linkAssetBusinessApp(assetId, appId)
           : await api.linkFindingBusinessApp(findingId, appId);
       const linked: BusinessAppSummary | null = res.business_app ?? null;
+      const linkedOwnership: OwnershipSummary | null = res.ownership ?? null;
       setApp(linked);
+      setOwner(linkedOwnership);
       setAppQuery('');
       setAppResults([]);
       const next = await api.getRiskFactors(findingId);
       setView(next);
-      onUpdated?.(next, linked);
+      onUpdated?.(next, linked, linkedOwnership);
       toast({
         title: appId ? 'Business application linked' : 'Business application cleared',
         description:
@@ -291,6 +302,11 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
             <span className="text-amber-400">not linked</span>
           )}
         </div>
+        {owner && (
+          <div className="rounded-md bg-muted/30 p-2">
+            <OwnershipDetails ownership={owner} compact />
+          </div>
+        )}
         <Input
           className="h-8 text-xs"
           placeholder="Search by application id (e.g. APM0001234) or name"

@@ -127,6 +127,12 @@ class AssetResponse(AssetBase):
     is_live: bool = False
     netblock_id: Optional[int] = None
     asn: Optional[str] = None
+
+    # Business application / application service attribution (ServiceNow)
+    business_app_id: Optional[int] = None
+    app_service_id: Optional[int] = None
+    app_link_source: Optional[str] = None  # manual | entry_point | service_map | relationship
+    ownership: Optional[dict[str, Any]] = None
     
     # Hosting classification (for IP assets - distinguishes owned vs cloud infrastructure)
     hosting_type: Optional[str] = None  # owned, cloud, cdn, third_party, unknown

@@ -42,9 +42,11 @@ VULN_INPUTS = {
 }
 ASSET_INPUTS = {
     "criticality", "is_public", "ip_address", "ip_addresses", "hosting_type", "hosting_provider",
-    "netblock_id", "business_app_id", "organization_id", "value", "has_login_portal", "resolved_from",
+    "netblock_id", "business_app_id", "app_service_id", "organization_id", "value", "has_login_portal",
+    "resolved_from",
 }
 APP_INPUTS = {"criticality_level", "business_criticality", "name", "app_id"}
+SERVICE_INPUTS = {"criticality_level", "business_criticality", "name", "business_app_id"}
 NETBLOCK_INPUTS = {"cidr_notation", "inetnum", "start_ip", "end_ip", "is_owned", "in_scope", "organization_id"}
 
 _registered = False
@@ -85,6 +87,7 @@ def mark_dirty(conn, where) -> None:
 
 
 def _collect(session: Session):
+    from app.models.application_service import ApplicationService
     from app.models.asset import Asset
     from app.models.business_application import BusinessApplication
     from app.models.netblock import Netblock
@@ -94,6 +97,7 @@ def _collect(session: Session):
     asset_ids: Set[int] = set()
     resolved: Set[tuple] = set()  # (org_id, domain) whose resolved IPs changed
     app_ids: Set[int] = set()
+    svc_ids: Set[int] = set()
     org_ids: Set[int] = set()
 
     for obj in list(session.dirty) + list(session.deleted):
@@ -113,6 +117,10 @@ def _collect(session: Session):
             if obj in session.deleted or _changed(obj, APP_INPUTS):
                 if obj.id is not None:
                     app_ids.add(obj.id)
+        elif isinstance(obj, ApplicationService):
+            if obj in session.deleted or _changed(obj, SERVICE_INPUTS):
+                if obj.id is not None:
+                    svc_ids.add(obj.id)
         elif isinstance(obj, Netblock):
             if obj in session.deleted or _changed(obj, NETBLOCK_INPUTS):
                 org_ids.add(obj.organization_id)
@@ -125,7 +133,7 @@ def _collect(session: Session):
             org_ids.add(obj.organization_id)
         elif isinstance(obj, Asset) and obj.resolved_from:
             resolved.add((obj.organization_id, obj.resolved_from))
-    return asset_ids, resolved, app_ids, org_ids
+    return asset_ids, resolved, app_ids, svc_ids, org_ids
 
 
 def register() -> None:
@@ -148,8 +156,8 @@ def register() -> None:
         pending = session.info.pop("sev_pending", None)
         if not pending:
             return
-        asset_ids, resolved, app_ids, org_ids = pending
-        if not (asset_ids or resolved or app_ids or org_ids):
+        asset_ids, resolved, app_ids, svc_ids, org_ids = pending
+        if not (asset_ids or resolved or app_ids or svc_ids or org_ids):
             return
         from app.models.asset import Asset
         from app.models.vulnerability import Vulnerability
@@ -165,6 +173,9 @@ def register() -> None:
             if app_ids:
                 app_assets = select(at.c.id).where(at.c.business_app_id.in_(app_ids))
                 mark_dirty(conn, or_(vt.c.business_app_id.in_(app_ids), vt.c.asset_id.in_(app_assets)))
+            if svc_ids:
+                svc_assets = select(at.c.id).where(at.c.app_service_id.in_(svc_ids))
+                mark_dirty(conn, vt.c.asset_id.in_(svc_assets))
             if org_ids:
                 org_assets = select(at.c.id).where(at.c.organization_id.in_(org_ids))
                 mark_dirty(conn, vt.c.asset_id.in_(org_assets))

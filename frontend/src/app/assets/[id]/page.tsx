@@ -70,10 +70,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { api, getApiErrorMessage } from '@/lib/api';
+import { api, getApiErrorMessage, type OwnershipSummary } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate } from '@/lib/utils';
 import { ApplicationMap } from '@/components/assets/ApplicationMap';
+import { OwnershipDetails } from '@/components/ownership/OwnershipDetails';
 import { SitemapInventory } from '@/components/assets/SitemapInventory';
 import { DiscoveryPath } from '@/components/assets/DiscoveryPath';
 import { AddFindingDialog } from '@/components/findings/AddFindingDialog';
@@ -161,6 +162,7 @@ interface Vulnerability {
 interface Asset {
   id: number;
   name: string;
+  ownership?: OwnershipSummary | null;
   asset_type: string;
   value: string;
   root_domain?: string;
@@ -999,6 +1001,17 @@ export default function AssetDetailPage() {
         {/* Details Tab */}
         {activeTab === 'details' && (
           <>
+            {/* Ownership: business application / application service (ServiceNow CMDB) */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Ownership</CardTitle>
+                <CardDescription>Business application and application service running this asset</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <OwnershipDetails ownership={asset.ownership} />
+              </CardContent>
+            </Card>
+
             {/* Asset Information */}
         <Card>
           <CardHeader>

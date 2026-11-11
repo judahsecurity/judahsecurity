@@ -38,6 +38,10 @@ class BusinessApplication(Base):
     lifecycle_stage = Column(String(100), nullable=True)
     owner = Column(String(255), nullable=True)
     it_owner = Column(String(255), nullable=True)
+    support_group = Column(String(255), nullable=True)
+    business_unit = Column(String(255), nullable=True)
+    department = Column(String(255), nullable=True)
+    company = Column(String(255), nullable=True)
     url = Column(String(500), nullable=True)
     external_url = Column(String(500), nullable=True)  # link to the record in ServiceNow
 
