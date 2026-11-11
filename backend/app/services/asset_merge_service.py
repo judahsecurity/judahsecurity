@@ -10,6 +10,10 @@ Use cases:
 1. Merge IP asset into its parent domain when IP was resolved from domain
 2. Merge duplicate assets discovered from multiple sources
 3. Clean up orphaned IP assets that belong to known domains
+
+Assets whose cloud or hardware IDs disagree (see app.services.asset_identity)
+are different machines and are never merged. Merging moves the duplicate's
+identifiers to the survivor, so the next connector sync finds the survivor.
 """
 
 import logging
@@ -101,6 +105,130 @@ class AssetMergeService:
         
         return results
     
+    # ── Core merge ─────────────────────────────────────────────────────────
+
+    def absorb(self, primary: Asset, dup: Asset) -> Dict[str, int]:
+        """Move everything ``dup`` owns onto ``primary`` and delete ``dup``.
+
+        Children are re-parented through their relationship, not just their
+        foreign key: ``dup`` deletes its collections on delete, so anything
+        left in them would be deleted with it. Does not commit.
+        """
+        moved = {"vulnerabilities_moved": 0, "ports_moved": 0, "screenshots_moved": 0}
+        if dup.id == primary.id:
+            return moved
+
+        for vuln in list(dup.vulnerabilities):
+            existing = None
+            if vuln.template_id or vuln.title:
+                existing = self.db.query(Vulnerability).filter(
+                    Vulnerability.asset_id == primary.id,
+                    Vulnerability.template_id == vuln.template_id,
+                    Vulnerability.title == vuln.title,
+                ).first()
+            if existing is not None:
+                if vuln.last_detected and (not existing.last_detected or vuln.last_detected > existing.last_detected):
+                    existing.last_detected = vuln.last_detected
+                dup.vulnerabilities.remove(vuln)
+                self.db.delete(vuln)
+            else:
+                metadata = dict(vuln.metadata_ or {})
+                metadata.setdefault("merged_from_asset_id", dup.id)
+                vuln.metadata_ = metadata
+                vuln.asset = primary
+                moved["vulnerabilities_moved"] += 1
+
+        for port in list(dup.port_services):
+            existing = self.db.query(PortService).filter(
+                PortService.asset_id == primary.id,
+                PortService.port == port.port,
+                PortService.protocol == port.protocol,
+            ).first()
+            if existing is not None:
+                if port.last_seen and (not existing.last_seen or port.last_seen > existing.last_seen):
+                    existing.last_seen = port.last_seen
+                for attr in ("service_name", "banner"):
+                    if getattr(port, attr, None) and not getattr(existing, attr, None):
+                        setattr(existing, attr, getattr(port, attr))
+                dup.port_services.remove(port)
+                self.db.delete(port)
+            else:
+                port.asset = primary
+                moved["ports_moved"] += 1
+
+        for screenshot in list(dup.screenshots):
+            screenshot.asset = primary
+            moved["screenshots_moved"] += 1
+
+        primary_paths = {entry.path_key for entry in primary.sitemap_entries}
+        for entry in list(dup.sitemap_entries):
+            if entry.path_key in primary_paths:
+                dup.sitemap_entries.remove(entry)
+                self.db.delete(entry)
+            else:
+                entry.asset = primary
+
+        for row in list(dup.identifiers):
+            row.asset = primary
+
+        for tech in list(dup.technologies):
+            if tech not in primary.technologies:
+                primary.technologies.append(tech)
+        for label in list(dup.labels):
+            if label not in primary.labels:
+                primary.labels.append(label)
+        for child in list(dup.children):
+            child.parent = primary
+
+        for ip in dup.ip_addresses or []:
+            primary.add_ip_address(ip)
+        if not primary.ip_address and dup.ip_address:
+            primary.ip_address = dup.ip_address
+
+        primary.tags = sorted(set(primary.tags or []) | set(dup.tags or []))
+        sources = [s for s in (primary.discovery_source or "").split(",") if s]
+        for source in (dup.discovery_source or "").split(","):
+            if source and source not in sources:
+                sources.append(source)
+        primary.discovery_source = ",".join(sources)[:100] or None
+
+        # Per-source metadata blocks ("wiz", "tenable", ...) are kept side by
+        # side; the primary's own values win where both have the same key.
+        metadata = dict(dup.metadata_ or {})
+        metadata.update(primary.metadata_ or {})
+        history = list(metadata.get("merged_assets") or [])
+        history.append({
+            "asset_id": dup.id,
+            "value": dup.value,
+            "asset_type": dup.asset_type.value if dup.asset_type else None,
+            "merged_at": datetime.utcnow().isoformat(),
+        })
+        metadata["merged_assets"] = history[-50:]
+        primary.metadata_ = metadata
+
+        for attr in (
+            "system_type", "operating_system", "device_class", "device_subclass",
+            "hosting_type", "hosting_provider", "country", "country_code", "city",
+            "region", "isp", "asn", "business_app_id",
+        ):
+            if getattr(dup, attr, None) and not getattr(primary, attr, None):
+                setattr(primary, attr, getattr(dup, attr))
+        if dup.first_seen and (not primary.first_seen or dup.first_seen < primary.first_seen):
+            primary.first_seen = dup.first_seen
+        if dup.last_seen and (not primary.last_seen or dup.last_seen > primary.last_seen):
+            primary.last_seen = dup.last_seen
+        if dup.latest_screenshot_id and not primary.latest_screenshot_id:
+            primary.latest_screenshot_id = dup.latest_screenshot_id
+
+        self.db.delete(dup)
+        self.db.flush()
+        return moved
+
+    def _identity_conflict(self, a: Asset, b: Asset) -> bool:
+        from app.services.asset_identity import AssetIdentityResolver
+
+        return AssetIdentityResolver(self.db, a.organization_id, "merge").assets_conflict(a, b)
+
     def merge_ip_into_domain(
         self,
         ip_asset_id: int,
@@ -109,215 +237,101 @@ class AssetMergeService:
     ) -> Dict[str, Any]:
         """
         Merge an IP asset into its parent domain asset.
-        
-        - Moves vulnerabilities from IP to domain
-        - Moves port services from IP to domain
-        - Moves screenshots from IP to domain
-        - Updates the domain's ip_addresses field
-        - Optionally deletes the IP asset
+
+        Findings record the IP they were discovered on, ports record the
+        scanned IP, and the IP is added to the domain's ``ip_addresses``.
+        With ``delete_ip_asset=False`` only the IP attribute is copied.
         """
         ip_asset = self.db.query(Asset).filter(Asset.id == ip_asset_id).first()
         domain_asset = self.db.query(Asset).filter(Asset.id == domain_asset_id).first()
-        
+
         if not ip_asset or not domain_asset:
             raise ValueError("Asset not found")
-        
         if ip_asset.asset_type != AssetType.IP_ADDRESS:
             raise ValueError(f"Asset {ip_asset_id} is not an IP address")
-        
         if domain_asset.asset_type not in [AssetType.DOMAIN, AssetType.SUBDOMAIN]:
             raise ValueError(f"Asset {domain_asset_id} is not a domain/subdomain")
-        
+        if self._identity_conflict(domain_asset, ip_asset):
+            raise ValueError("Assets carry different cloud or hardware IDs and are different machines")
+
+        ip_value = ip_asset.value
         result = {
             "ip_asset_id": ip_asset_id,
             "domain_asset_id": domain_asset_id,
             "vulnerabilities_moved": 0,
             "ports_moved": 0,
             "screenshots_moved": 0,
-            "ip_added": False,
+            "ip_added": ip_value not in (domain_asset.ip_addresses or []),
         }
-        
-        # 1. Add IP to domain's ip_addresses
-        ip_value = ip_asset.value
-        current_ips = list(domain_asset.ip_addresses or [])
-        if ip_value not in current_ips:
-            domain_asset.add_ip_address(ip_value)
-            result["ip_added"] = True
-        
-        # 2. Move vulnerabilities - update finding metadata to track the original IP
-        for vuln in ip_asset.vulnerabilities:
-            # Update metadata to track where finding was actually discovered
-            metadata = dict(vuln.metadata_ or {})
-            metadata["discovered_on_ip"] = ip_value
-            metadata["merged_from_asset_id"] = ip_asset_id
-            vuln.metadata_ = metadata
-            
-            # Move to domain asset
-            vuln.asset_id = domain_asset_id
-            result["vulnerabilities_moved"] += 1
-        
-        # 3. Move port services - track the scanned IP
-        for port in ip_asset.port_services:
-            # Check if domain already has this port
-            existing_port = self.db.query(PortService).filter(
-                PortService.asset_id == domain_asset_id,
-                PortService.port == port.port,
-                PortService.protocol == port.protocol,
-            ).first()
-            
-            if existing_port:
-                # Update existing with latest info
-                existing_port.scanned_ip = ip_value
-                existing_port.last_seen = datetime.utcnow()
-                if port.service_name and not existing_port.service_name:
-                    existing_port.service_name = port.service_name
-                if port.banner and not existing_port.banner:
-                    existing_port.banner = port.banner
-            else:
-                # Move port to domain
-                port.asset_id = domain_asset_id
-                port.scanned_ip = ip_value
-                result["ports_moved"] += 1
-        
-        # 4. Move screenshots
-        for screenshot in ip_asset.screenshots:
-            screenshot.asset_id = domain_asset_id
-            result["screenshots_moved"] += 1
-        
-        # 5. Merge metadata
-        ip_meta = dict(ip_asset.metadata_ or {})
-        domain_meta = dict(domain_asset.metadata_ or {})
-        domain_meta["merged_ips"] = domain_meta.get("merged_ips", [])
-        domain_meta["merged_ips"].append({
-            "ip": ip_value,
-            "merged_at": datetime.utcnow().isoformat(),
-            "original_asset_id": ip_asset_id,
-        })
-        domain_asset.metadata_ = domain_meta
-        
-        # 6. Update domain with any enrichment from IP asset
-        if ip_asset.system_type and not domain_asset.system_type:
-            domain_asset.system_type = ip_asset.system_type
-        if ip_asset.operating_system and not domain_asset.operating_system:
-            domain_asset.operating_system = ip_asset.operating_system
-        if ip_asset.device_class and not domain_asset.device_class:
-            domain_asset.device_class = ip_asset.device_class
-        if ip_asset.device_subclass and not domain_asset.device_subclass:
-            domain_asset.device_subclass = ip_asset.device_subclass
-        
-        # Copy geo data if domain doesn't have it
-        if ip_asset.country and not domain_asset.country:
-            domain_asset.country = ip_asset.country
-            domain_asset.country_code = ip_asset.country_code
-            domain_asset.city = ip_asset.city
-            domain_asset.region = ip_asset.region
-            domain_asset.isp = ip_asset.isp
-            domain_asset.asn = ip_asset.asn
-        
-        # 7. Delete IP asset if requested
+        domain_asset.add_ip_address(ip_value)
+
         if delete_ip_asset:
-            self.db.delete(ip_asset)
+            for vuln in ip_asset.vulnerabilities:
+                metadata = dict(vuln.metadata_ or {})
+                metadata["discovered_on_ip"] = ip_value
+                vuln.metadata_ = metadata
+            for port in ip_asset.port_services:
+                port.scanned_ip = ip_value
+            merged_ips = list((domain_asset.metadata_ or {}).get("merged_ips") or [])
+            merged_ips.append({
+                "ip": ip_value,
+                "merged_at": datetime.utcnow().isoformat(),
+                "original_asset_id": ip_asset_id,
+            })
+            result.update(self.absorb(domain_asset, ip_asset))
+            metadata = dict(domain_asset.metadata_ or {})
+            metadata["merged_ips"] = merged_ips
+            domain_asset.metadata_ = metadata
             result["ip_asset_deleted"] = True
-        
+
         self.db.commit()
-        
         logger.info(f"Merged IP {ip_value} into domain {domain_asset.value}: "
-                   f"{result['vulnerabilities_moved']} vulns, {result['ports_moved']} ports")
-        
+                    f"{result['vulnerabilities_moved']} vulns, {result['ports_moved']} ports")
         return result
-    
+
     def merge_duplicate_domains(
         self,
         asset_ids: List[int],
     ) -> Dict[str, Any]:
         """
-        Merge duplicate domain assets into one.
-        
-        The oldest asset (lowest ID) becomes the primary.
-        All findings, ports, etc. are moved to the primary.
+        Merge duplicate assets into one.
+
+        The first ID given is the primary when it exists; otherwise the
+        oldest asset is. Assets whose cloud or hardware IDs disagree with the
+        primary's are left alone.
         """
         if len(asset_ids) < 2:
             raise ValueError("Need at least 2 assets to merge")
-        
+
         assets = self.db.query(Asset).filter(
             Asset.id.in_(asset_ids)
-        ).order_by(Asset.created_at.asc()).all()
-        
+        ).order_by(Asset.created_at.asc(), Asset.id.asc()).all()
         if len(assets) < 2:
             raise ValueError("Could not find all assets")
-        
-        primary = assets[0]
-        duplicates = assets[1:]
-        
+
+        primary = next((a for a in assets if a.id == asset_ids[0]), assets[0])
+        rest = [a for a in assets if a is not primary]
+        duplicates = [a for a in rest if not self._identity_conflict(primary, a)]
+        skipped = [a.id for a in rest if a not in duplicates]
+
         result = {
             "primary_id": primary.id,
             "primary_value": primary.value,
             "merged_count": len(duplicates),
             "merged_ids": [a.id for a in duplicates],
+            "skipped_conflicting_ids": skipped,
             "vulnerabilities_moved": 0,
             "ports_moved": 0,
         }
-        
         for dup in duplicates:
-            # Move vulnerabilities
-            for vuln in dup.vulnerabilities:
-                # Check for duplicate finding
-                existing = self.db.query(Vulnerability).filter(
-                    Vulnerability.asset_id == primary.id,
-                    Vulnerability.template_id == vuln.template_id,
-                    Vulnerability.title == vuln.title,
-                ).first()
-                
-                if existing:
-                    # Update existing with any new info
-                    if vuln.last_seen and (not existing.last_seen or vuln.last_seen > existing.last_seen):
-                        existing.last_seen = vuln.last_seen
-                    self.db.delete(vuln)
-                else:
-                    vuln.asset_id = primary.id
-                    result["vulnerabilities_moved"] += 1
-            
-            # Move ports
-            for port in dup.port_services:
-                existing = self.db.query(PortService).filter(
-                    PortService.asset_id == primary.id,
-                    PortService.port == port.port,
-                    PortService.protocol == port.protocol,
-                ).first()
-                
-                if existing:
-                    # Update existing
-                    if port.last_seen and (not existing.last_seen or port.last_seen > existing.last_seen):
-                        existing.last_seen = port.last_seen
-                    self.db.delete(port)
-                else:
-                    port.asset_id = primary.id
-                    result["ports_moved"] += 1
-            
-            # Move screenshots
-            for ss in dup.screenshots:
-                ss.asset_id = primary.id
-            
-            # Merge IPs
-            if dup.ip_addresses:
-                for ip in dup.ip_addresses:
-                    primary.add_ip_address(ip)
-            
-            # Merge discovery sources
-            if dup.discovery_source and dup.discovery_source != primary.discovery_source:
-                primary_sources = (primary.discovery_source or "").split(",")
-                if dup.discovery_source not in primary_sources:
-                    primary.discovery_source = f"{primary.discovery_source},{dup.discovery_source}"
-            
-            # Delete duplicate
-            self.db.delete(dup)
-        
+            moved = self.absorb(primary, dup)
+            result["vulnerabilities_moved"] += moved["vulnerabilities_moved"]
+            result["ports_moved"] += moved["ports_moved"]
+
         self.db.commit()
-        
         logger.info(f"Merged {len(duplicates)} duplicates into asset {primary.id} ({primary.value})")
-        
         return result
-    
+
     def run_full_merge(
         self,
         organization_id: int,

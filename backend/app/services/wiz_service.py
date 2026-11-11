@@ -13,6 +13,16 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetStatus, AssetType
+from app.services.asset_identity import (
+    WIZ_ID,
+    AssetIdentityResolver,
+    Identifier,
+    Resolution,
+    backfill_identifiers,
+    provider_ids,
+    record_id,
+    unique,
+)
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
 from app.models.wiz_integration import WizIntegration
 
@@ -284,6 +294,7 @@ def _is_internet_exposed(asset: Dict[str, Any]) -> bool:
 
 
 def _asset_value(asset: Dict[str, Any]) -> Optional[str]:
+    """Display key for a new asset. Identity comes from ``_identifiers``."""
     return next(
         (
             str(value).strip()
@@ -299,10 +310,19 @@ def _asset_value(asset: Dict[str, Any]) -> Optional[str]:
     )
 
 
+def _identifiers(asset: Dict[str, Any]) -> List[Identifier]:
+    """The cloud provider's own ID first, then Wiz's record ID as an alias."""
+    return unique([
+        *provider_ids(asset.get("providerUniqueId"), asset.get("cloudPlatform")),
+        record_id(WIZ_ID, asset.get("id")),
+    ])
+
+
 class _Stats:
     def __init__(self) -> None:
         self.assets_created = 0
         self.assets_updated = 0
+        self.assets_merged = 0
         self.vulns_created = 0
         self.vulns_updated = 0
         self.findings_seen = 0
@@ -312,11 +332,40 @@ class _Stats:
         return vars(self).copy()
 
 
-def _upsert_asset(db: Session, org_id: int, source: Dict[str, Any], stats: _Stats) -> Asset:
+def _resolve(resolver: AssetIdentityResolver, source: Dict[str, Any]) -> Resolution:
+    value = _asset_value(source)
+
+    def legacy() -> Optional[Asset]:
+        # Assets Wiz created before identifiers were recorded used this value.
+        if not value:
+            return None
+        return resolver.db.query(Asset).filter(
+            Asset.organization_id == resolver.org_id, Asset.value == value[:500]
+        ).first()
+
+    return resolver.resolve(_identifiers(source), fallback=legacy)
+
+
+def _owned_by_wiz(asset: Asset) -> bool:
+    return (asset.discovery_source or "").split(",")[0] == DISCOVERY_SOURCE
+
+
+def _upsert_asset(
+    db: Session,
+    org_id: int,
+    source: Dict[str, Any],
+    stats: _Stats,
+    resolver: Optional[AssetIdentityResolver] = None,
+    resolution: Optional[Resolution] = None,
+) -> Asset:
     value = _asset_value(source)
     if not value:
         raise ValueError("Wiz virtual machine has no stable identifier")
-    asset = db.query(Asset).filter(Asset.organization_id == org_id, Asset.value == value).first()
+    resolver = resolver or AssetIdentityResolver(db, org_id, DISCOVERY_SOURCE)
+    resolution = resolution or _resolve(resolver, source)
+    asset = resolution.asset
+    if asset is not None and resolution.duplicates:
+        stats.assets_merged += resolver.merge(asset, resolution.duplicates)
     ips = [str(ip) for ip in (source.get("ipAddresses") or []) if ip]
     metadata = dict(asset.metadata_ or {}) if asset else {}
     metadata["wiz"] = {
@@ -332,50 +381,60 @@ def _upsert_asset(db: Session, org_id: int, source: Dict[str, Any], stats: _Stat
         "image_name": source.get("imageName"),
         "status": source.get("status"),
         "tags": source.get("tags") or [],
+        "ip_addresses": ips,
         "has_wide_internet_exposure": bool(source.get("hasWideInternetExposure")),
         "has_limited_internet_exposure": bool(source.get("hasLimitedInternetExposure")),
     }
+    platform = str(source.get("cloudPlatform") or "").lower()[:100] or None
+    operating_system = str(source.get("operatingSystem"))[:200] if source.get("operatingSystem") else None
     if asset:
-        asset.name = str(source.get("name") or asset.name)[:255]
         asset.last_seen = datetime.utcnow()
-        operating_system = source.get("operatingSystem")
-        if operating_system:
-            asset.operating_system = str(operating_system)[:200]
-        asset.ip_addresses = ips or asset.ip_addresses
-        asset.ip_address = (ips[0] if ips else asset.ip_address)
-        asset.hosting_provider = (
-            str(source.get("cloudPlatform") or asset.hosting_provider or "").lower()[:100] or None
-        )
-        asset.hosting_type = "cloud"
-        asset.is_public = _is_internet_exposed(source)
+        if _owned_by_wiz(asset):
+            # Wiz created this asset: its cloud inventory is authoritative.
+            asset.name = str(source.get("name") or asset.name)[:255]
+            asset.operating_system = operating_system or asset.operating_system
+            asset.ip_addresses = ips or asset.ip_addresses
+            asset.ip_address = ips[0] if ips else asset.ip_address
+            asset.hosting_provider = platform or asset.hosting_provider
+            asset.hosting_type = "cloud"
+            asset.is_public = _is_internet_exposed(source)
+        else:
+            # Another source owns this asset: enrich, never overwrite.
+            asset.operating_system = asset.operating_system or operating_system
+            for ip in ips:
+                asset.add_ip_address(ip)
+            asset.ip_address = asset.ip_address or (ips[0] if ips else None)
+            asset.hosting_provider = asset.hosting_provider or platform
+            asset.hosting_type = asset.hosting_type or "cloud"
         asset.metadata_ = metadata
         tags = list(asset.tags or [])
         if "source:wiz" not in tags:
             tags.append("source:wiz")
             asset.tags = tags
         stats.assets_updated += 1
-        return asset
-    asset = Asset(
-        name=str(source.get("name") or value)[:255],
-        asset_type=AssetType.CLOUD_RESOURCE,
-        value=value[:500],
-        organization_id=org_id,
-        status=AssetStatus.DISCOVERED,
-        discovery_source=DISCOVERY_SOURCE,
-        association_reason="Virtual machine attributed to the organization by Wiz",
-        association_confidence=95,
-        tags=["source:wiz"],
-        metadata_=metadata,
-        operating_system=(str(source.get("operatingSystem"))[:200] if source.get("operatingSystem") else None),
-        ip_addresses=ips,
-        ip_address=ips[0] if ips else None,
-        hosting_type="cloud",
-        hosting_provider=str(source.get("cloudPlatform") or "").lower()[:100] or None,
-        is_public=_is_internet_exposed(source),
-    )
-    db.add(asset)
-    db.flush()
-    stats.assets_created += 1
+    else:
+        asset = Asset(
+            name=str(source.get("name") or value)[:255],
+            asset_type=AssetType.CLOUD_RESOURCE,
+            value=value[:500],
+            organization_id=org_id,
+            status=AssetStatus.DISCOVERED,
+            discovery_source=DISCOVERY_SOURCE,
+            association_reason="Virtual machine attributed to the organization by Wiz",
+            association_confidence=95,
+            tags=["source:wiz"],
+            metadata_=metadata,
+            operating_system=operating_system,
+            ip_addresses=ips,
+            ip_address=ips[0] if ips else None,
+            hosting_type="cloud",
+            hosting_provider=platform,
+            is_public=_is_internet_exposed(source),
+        )
+        db.add(asset)
+        db.flush()
+        stats.assets_created += 1
+    resolver.attach(asset, _identifiers(source))
     return asset
 
 
@@ -480,6 +539,8 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
     try:
         findings = await _client_for(integration).get_vulnerability_findings()
         stats.findings_seen = len(findings)
+        resolver = AssetIdentityResolver(db, integration.organization_id, DISCOVERY_SOURCE)
+        backfill_identifiers(db, integration.organization_id, DISCOVERY_SOURCE, "source:wiz")
         asset_cache: Dict[str, Asset] = {}
         for finding in findings:
             source = finding.get("vulnerableAsset") or {}
@@ -493,17 +554,17 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
             if not value:
                 stats.findings_filtered += 1
                 continue
-            asset = asset_cache.get(value)
+            key = str(source.get("id") or value)
+            asset = asset_cache.get(key)
             if asset is None:
-                existing = db.query(Asset).filter(
-                    Asset.organization_id == integration.organization_id,
-                    Asset.value == value,
-                ).first()
-                if not integration.import_assets and existing is None:
+                resolution = _resolve(resolver, source)
+                if not integration.import_assets and resolution.asset is None:
                     stats.findings_filtered += 1
                     continue
-                asset = _upsert_asset(db, integration.organization_id, source, stats)
-                asset_cache[value] = asset
+                asset = _upsert_asset(
+                    db, integration.organization_id, source, stats, resolver, resolution
+                )
+                asset_cache[key] = asset
             if integration.import_vulnerabilities:
                 _upsert_vulnerability(db, asset, finding, stats)
 

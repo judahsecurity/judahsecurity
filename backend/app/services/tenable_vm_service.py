@@ -6,9 +6,13 @@ Each sync uses the Tenable export APIs:
 * ``POST /vulns/export`` — Low/Medium/High/Critical findings in the OPEN or
   REOPENED state found in the last 30 days.
 
-Assets are named by their first public FQDN, or their first public IPv4
-address when they have no usable FQDN. Private, internal, and cloud-provider
-addresses are skipped. Findings are rated from CVSSv3 (temporal score, else
+Assets are matched to existing ones by the IDs in Tenable's own record, in
+this order: cloud provider IDs (AWS instance ID, Azure resource / VM ID, GCP
+instance ID), BIOS UUID and MAC, then the Tenable asset / agent UUID. Only
+when none match is the asset matched, or created, by its first public FQDN or
+first public IPv4. Private, internal, and cloud-provider addresses are never
+used as that fallback key; a cloud VM with a public address but no usable
+FQDN is imported under its cloud provider ID instead. Findings are rated from CVSSv3 (temporal score, else
 base score) and attached to the asset, plus the matching port when Tenable
 reports one.
 """
@@ -24,12 +28,29 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.port_service import PortService, PortState, Protocol
 from app.models.tenable_integration import DEFAULT_TENABLE_URL, SYNC_LOCK_TTL, TenableVmIntegration
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
+from app.services.asset_identity import (
+    TENABLE_AGENT,
+    TENABLE_ASSET,
+    AssetIdentityResolver,
+    Identifier,
+    aws_ids,
+    azure_ids,
+    backfill_identifiers,
+    bios_id,
+    gcp_ids,
+    mac_id,
+    primary_cloud_id,
+    record_id,
+    unique,
+    CLOUD_NAMESPACES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -383,6 +404,41 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     return parsed
 
 
+def record_identifiers(record: Dict[str, Any]) -> List[Identifier]:
+    """IDs carried by a Tenable asset record (asset export or a finding's
+    ``asset`` block), strongest first. Works without a Tenable UUID."""
+    ids: List[Optional[Identifier]] = []
+    for arn in _as_list(record.get("aws_ec2_instance_arn")):
+        ids.extend(aws_ids(arn))
+    for instance in _as_list(record.get("aws_ec2_instance_id")):
+        ids.extend(aws_ids(instance))
+    for resource_id in _as_list(record.get("azure_resource_id")):
+        ids.extend(azure_ids(resource_id=resource_id))
+    for vm_id in _as_list(record.get("azure_vm_id")):
+        ids.extend(azure_ids(vm_id=vm_id))
+    for instance in _as_list(record.get("gcp_instance_id")):
+        ids.extend(gcp_ids(instance_id=instance))
+    for bios in _as_list(record.get("bios_uuid")):
+        ids.append(bios_id(bios))
+    for mac in _as_list(record.get("mac_addresses")) + _as_list(record.get("mac_address")):
+        ids.append(mac_id(mac))
+    ids.append(record_id(TENABLE_ASSET, record.get("id") or record.get("uuid")))
+    for agent in _as_list(record.get("agent_uuid")):
+        ids.append(record_id(TENABLE_AGENT, agent))
+    return unique(ids)
+
+
+def _has_public_ipv4(ipv4s: List[Any]) -> bool:
+    for ip in ipv4s:
+        try:
+            parsed = ipaddress.ip_address(str(ip).strip())
+        except ValueError:
+            continue
+        if parsed.version == 4 and parsed.is_global:
+            return True
+    return False
+
+
 def _detector_for(finding: Dict[str, Any]) -> str:
     """Agent / credentialed findings are invisible to an external attacker."""
     asset = finding.get("asset") or {}
@@ -434,6 +490,7 @@ class _Stats:
         self.assets_updated = 0
         self.assets_skipped = 0
         self.assets_retired = 0
+        self.assets_merged = 0
         self.vulns_seen = 0
         self.vulns_created = 0
         self.vulns_updated = 0
@@ -452,18 +509,64 @@ class TenableImporter:
         self.org_id = organization_id
         self.addresses = address_filter or _AddressFilter(db, organization_id)
         self.stats = _Stats()
-        self._assets: Dict[str, Asset] = {}
-        self._uuid_to_value: Dict[str, Tuple[str, AssetType]] = {}
-        self._touched_assets: set[str] = set()
+        self.resolver = AssetIdentityResolver(db, organization_id, DISCOVERY_SOURCE)
+        self._by_uuid: Dict[str, Asset] = {}
+        self._touched_assets: set[int] = set()
 
     # Assets ------------------------------------------------------------------
 
-    def _upsert_asset(self, value: str, asset_type: AssetType, source: Dict[str, Any]) -> Asset:
-        asset = self._assets.get(value)
+    def _by_value(self, value: str) -> Optional[Asset]:
+        return self.db.query(Asset).filter(
+            Asset.organization_id == self.org_id, Asset.value == value
+        ).first()
+
+    def _resolve_record(self, record: Dict[str, Any], identity: Optional[Tuple[str, AssetType]],
+                        create: bool = True) -> Optional[Asset]:
+        """Match ``record`` to an asset by its own IDs, then its public name.
+
+        With ``create`` the asset is created when nothing matches, and every
+        ID in the record is registered on the result.
+        """
+        uuid = str(record.get("id") or record.get("uuid") or "").lower()
+        if uuid and uuid in self._by_uuid:
+            return self._by_uuid[uuid]
+        ids = record_identifiers(record)
+        cloud = primary_cloud_id(ids)
+        # A cloud ID makes the asset importable even when its only public
+        # address is a (skipped, ephemeral) cloud IP.
+        cloud_importable = cloud is not None and _has_public_ipv4(_as_list(record.get("ipv4s")))
+        resolution = self.resolver.resolve(
+            ids, fallback=(lambda: self._by_value(identity[0])) if identity else None
+        )
+        asset = resolution.asset
         if asset is None:
-            asset = self.db.query(Asset).filter(
-                Asset.organization_id == self.org_id, Asset.value == value
-            ).first()
+            if not create:
+                return None
+            if identity is not None and not resolution.conflict:
+                value, asset_type = identity
+            elif cloud is not None and (cloud_importable or identity is not None):
+                # Either no public name, or the name already belongs to a
+                # different machine: name this one by its provider ID.
+                value, asset_type = cloud.value, AssetType.CLOUD_RESOURCE
+            else:
+                return None
+        else:
+            value, asset_type = asset.value, asset.asset_type
+            if resolution.duplicates and create:
+                self.stats.assets_merged += self.resolver.merge(asset, resolution.duplicates)
+                for key, cached in list(self._by_uuid.items()):
+                    if sa_inspect(cached).was_deleted:
+                        self._by_uuid[key] = asset
+        if not create:
+            return asset
+        asset = self._upsert_asset(value, asset_type, record, asset, ids)
+        self.resolver.attach(asset, ids)
+        if uuid:
+            self._by_uuid[uuid] = asset
+        return asset
+
+    def _upsert_asset(self, value: str, asset_type: AssetType, source: Dict[str, Any],
+                      asset: Optional[Asset] = None, ids: Optional[List[Identifier]] = None) -> Asset:
         ipv4s = [str(ip) for ip in _as_list(source.get("ipv4s")) if self.addresses.public_ipv4(str(ip))]
         operating_systems = [str(o) for o in _as_list(source.get("operating_systems")) if o]
         tenable_meta = {
@@ -476,6 +579,15 @@ class TenableImporter:
             "has_agent": bool(source.get("has_agent") or source.get("agent_uuid")),
             "last_assessed": source.get("last_assessed") or source.get("last_scan_time"),
             "last_seen": source.get("last_seen"),
+            "cloud_ids": [
+                {"namespace": i.namespace, "value": i.value}
+                for i in (ids or []) if i.namespace in CLOUD_NAMESPACES
+            ],
+            "aws_owner_id": source.get("aws_owner_id"),
+            "aws_region": source.get("aws_region"),
+            "azure_subscription_id": source.get("azure_subscription_id"),
+            "gcp_project_id": source.get("gcp_project_id"),
+            "gcp_zone": source.get("gcp_zone"),
         }
         tenable_meta = {k: v for k, v in tenable_meta.items() if v not in (None, [], "")}
         is_new = asset is None
@@ -493,7 +605,14 @@ class TenableImporter:
                 metadata_={"tenable": tenable_meta},
                 is_public=True,
             )
-            if asset_type == AssetType.IP_ADDRESS:
+            if asset_type == AssetType.CLOUD_RESOURCE:
+                asset.hosting_type = "cloud"
+                asset.is_ephemeral_ip = True
+                public = [str(ip) for ip in _as_list(source.get("ipv4s")) if _has_public_ipv4([ip])]
+                asset.ip_addresses = public
+                asset.ip_address = public[0] if public else None
+                asset.name = str((_as_list(source.get("hostnames")) or [value])[0])[:255]
+            elif asset_type == AssetType.IP_ADDRESS:
                 asset.ip_address = value
                 asset.ip_addresses = [value]
             elif ipv4s:
@@ -515,16 +634,15 @@ class TenableImporter:
                 asset.status = AssetStatus.DISCOVERED
             if operating_systems and not asset.operating_system:
                 asset.operating_system = operating_systems[0][:200]
-            if ipv4s and asset_type != AssetType.IP_ADDRESS:
+            if ipv4s and asset.asset_type != AssetType.IP_ADDRESS:
                 asset.ip_addresses = sorted(set(asset.ip_addresses or []) | set(ipv4s))
                 asset.ip_address = asset.ip_address or ipv4s[0]
             tags = list(asset.tags or [])
             if "source:tenable" not in tags:
                 asset.tags = tags + ["source:tenable"]
-            if value not in self._touched_assets:
+            if asset.id not in self._touched_assets:
                 self.stats.assets_updated += 1
-        self._touched_assets.add(value)
-        self._assets[value] = asset
+        self._touched_assets.add(asset.id)
         return asset
 
     def import_assets(self, records: List[Dict[str, Any]]) -> None:
@@ -534,12 +652,8 @@ class TenableImporter:
                 self.stats.assets_skipped += 1
                 continue
             identity = self.addresses.identity(_as_list(record.get("fqdns")), _as_list(record.get("ipv4s")))
-            if identity is None:
+            if self._resolve_record(record, identity) is None:
                 self.stats.assets_skipped += 1
-                continue
-            if record.get("id"):
-                self._uuid_to_value[str(record["id"])] = identity
-            self._upsert_asset(identity[0], identity[1], record)
 
     # Ports -------------------------------------------------------------------
 
@@ -596,31 +710,26 @@ class TenableImporter:
 
     # Vulnerabilities ---------------------------------------------------------
 
-    def _asset_for_finding(self, finding: Dict[str, Any]) -> Optional[Asset]:
+    @staticmethod
+    def _finding_record(finding: Dict[str, Any]) -> Dict[str, Any]:
+        """A finding's ``asset`` block in asset-export shape."""
         source = finding.get("asset") or {}
-        asset_uuid = str(source.get("uuid") or "")
-        identity = self._uuid_to_value.get(asset_uuid) if asset_uuid else None
-        if identity is None:
-            identity = self.addresses.identity(
-                _as_list(source.get("fqdn")) + _as_list(source.get("hostname")),
-                _as_list(source.get("ipv4")),
-            )
-            if identity is None:
-                return None
-            if asset_uuid:
-                self._uuid_to_value[asset_uuid] = identity
-        if identity[0] in self._assets:
-            return self._assets[identity[0]]
-        asset_record = {
-            "id": asset_uuid or None,
+        return {
+            **source,
+            "id": source.get("uuid") or None,
             "fqdns": _as_list(source.get("fqdn")),
             "ipv4s": _as_list(source.get("ipv4")),
             "hostnames": _as_list(source.get("hostname")),
             "operating_systems": _as_list(source.get("operating_system")),
             "network_name": source.get("network_id"),
-            "agent_uuid": source.get("agent_uuid"),
         }
-        return self._upsert_asset(identity[0], identity[1], asset_record)
+
+    def _finding_identity(self, record: Dict[str, Any]) -> Optional[Tuple[str, AssetType]]:
+        return self.addresses.identity(record["fqdns"] + record["hostnames"], record["ipv4s"])
+
+    def _asset_for_finding(self, finding: Dict[str, Any], create: bool = True) -> Optional[Asset]:
+        record = self._finding_record(finding)
+        return self._resolve_record(record, self._finding_identity(record), create=create)
 
     def import_vulnerabilities(self, findings: List[Dict[str, Any]]) -> None:
         for finding in findings:
@@ -716,17 +825,9 @@ def _resolve_fixed(importer: "TenableImporter", findings: List[Dict[str, Any]]) 
     """Close findings Tenable now reports as FIXED. Never creates anything."""
     for finding in findings:
         plugin = finding.get("plugin") or {}
-        source = finding.get("asset") or {}
         if not plugin.get("id"):
             continue
-        identity = importer._uuid_to_value.get(str(source.get("uuid") or "")) or importer.addresses.identity(
-            _as_list(source.get("fqdn")) + _as_list(source.get("hostname")), _as_list(source.get("ipv4"))
-        )
-        if identity is None:
-            continue
-        asset = importer._assets.get(identity[0]) or importer.db.query(Asset).filter(
-            Asset.organization_id == importer.org_id, Asset.value == identity[0]
-        ).first()
+        asset = importer._asset_for_finding(finding, create=False)
         if asset is None:
             continue
         template_id = importer._template_id(plugin, importer._port_key(finding.get("port") or {}))
@@ -758,7 +859,7 @@ def _retire_stale_assets(importer: "TenableImporter") -> None:
     ).all()
     now = datetime.utcnow().isoformat()
     for asset in stale:
-        if asset.value in importer._touched_assets:
+        if asset.id in importer._touched_assets:
             continue
         asset.status = AssetStatus.INACTIVE
         metadata = dict(asset.metadata_ or {})
@@ -805,6 +906,7 @@ async def sync_integration(
     db.refresh(integration)
     importer = TenableImporter(db, integration.organization_id, address_filter)
     try:
+        backfill_identifiers(db, integration.organization_id, DISCOVERY_SOURCE, "source:tenable")
         client = client or _client_for(integration)
         since = _since_epoch()
         asset_records: Optional[List[Dict[str, Any]]] = None

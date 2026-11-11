@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from app.db.database import Base  # noqa: E402
 import app.models  # noqa: E402,F401
 from app.models.asset import Asset, AssetType  # noqa: E402
+from app.models.asset_identifier import AssetIdentifier  # noqa: E402
 from app.models.organization import Organization  # noqa: E402
 from app.models.port_service import PortService  # noqa: E402
 from app.models.tenable_integration import TenableVmIntegration  # noqa: E402
@@ -174,7 +175,7 @@ def test_connection_403_points_at_view_all_assets_permission():
 def db():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=[
-        Organization.__table__, TenableVmIntegration.__table__, Asset.__table__,
+        Organization.__table__, TenableVmIntegration.__table__, Asset.__table__, AssetIdentifier.__table__,
         PortService.__table__, Vulnerability.__table__,
     ])
     session = sessionmaker(bind=engine)()

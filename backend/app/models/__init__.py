@@ -4,6 +4,7 @@ from app.models.organization import Organization
 from app.models.netblock import Netblock  # Must be imported BEFORE Asset due to FK reference
 from app.models.business_application import BusinessApplication  # before Asset/Vulnerability (FK)
 from app.models.asset import Asset, AssetType, AssetStatus
+from app.models.asset_identifier import AssetIdentifier
 from app.models.sitemap_entry import SitemapEntry
 from app.models.finding_exception import FindingException, ExceptionType, ExceptionStatus
 from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
@@ -75,6 +76,7 @@ __all__ = [
     "Asset",
     "AssetType",
     "AssetStatus",
+    "AssetIdentifier",
     "SitemapEntry",
     "FindingException",
     "ExceptionType",

@@ -125,6 +125,13 @@ class Asset(Base):
         back_populates="asset",
         cascade="all, delete-orphan",
     )
+    # Source and cloud-provider IDs used to deduplicate across connectors.
+    identifiers = relationship(
+        "AssetIdentifier",
+        back_populates="asset",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     
     # Labels (many-to-many relationship)
     labels = relationship("Label", secondary="asset_labels", back_populates="assets")
