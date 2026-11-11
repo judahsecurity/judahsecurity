@@ -549,6 +549,34 @@ services:
     networks:
       - asm_network
 
+  # ServiceNow CMDB worker: daily sync of business applications, application
+  # services and the CIs that run them; attributes newly discovered assets to
+  # them every 15 minutes. Idle for orgs without a ServiceNow integration.
+  cmdb-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: asm_cmdb_worker
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
+      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
+      - CMDB_SYNC_HOURS=${CMDB_SYNC_HOURS:-24}
+      - CMDB_ATTRIBUTE_INTERVAL_MINUTES=${CMDB_ATTRIBUTE_INTERVAL_MINUTES:-15}
+      - CMDB_SYNC_START_DELAY_MINUTES=${CMDB_SYNC_START_DELAY_MINUTES:-5}
+    depends_on:
+      backend:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.cmdb_worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'app.workers.cmdb_worker' /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - asm_network
+
   # Database Admin Interface (optional, for development)
   adminer:
     image: adminer:latest

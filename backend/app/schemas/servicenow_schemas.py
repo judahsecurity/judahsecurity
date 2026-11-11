@@ -1,7 +1,7 @@
 """Pydantic schemas for ServiceNow integration."""
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -100,6 +100,8 @@ class ServiceNowIntegrationResponse(BaseModel):
     last_test_ok: Optional[bool]
     last_delivery_at: Optional[datetime]
     last_pull_at: Optional[datetime] = None
+    last_cmdb_sync_at: Optional[datetime] = None
+    last_cmdb_sync_result: Optional[Dict[str, Any]] = None
     last_error: Optional[str]
     created_at: datetime
     updated_at: datetime

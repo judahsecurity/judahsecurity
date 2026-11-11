@@ -64,6 +64,9 @@ class ServiceNowIntegration(Base):
     last_test_ok = Column(Boolean, nullable=True)
     last_delivery_at = Column(DateTime, nullable=True)
     last_pull_at = Column(DateTime, nullable=True)
+    # Last CMDB sync (business apps, application services, CIs) and its outcome.
+    last_cmdb_sync_at = Column(DateTime, nullable=True)
+    last_cmdb_sync_result = Column(JSON, nullable=True)
     last_error = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)

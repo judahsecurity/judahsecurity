@@ -257,3 +257,40 @@ def test_attribution_api(api):
     items = listed["items"] if isinstance(listed, dict) else listed
     assert [v["id"] for v in items] == [100]
     assert items[0]["ownership"]["business_unit"] == "Retail"
+
+
+def test_last_sync_recorded_and_new_assets_attributed(Session, monkeypatch):
+    from app.services import cmdb_sync
+    from app.workers import cmdb_worker
+
+    db = Session()
+    asyncio.run(sync_cmdb(db, 1, client=_client(CMDB, [])))
+    db.commit()
+    integration = db.query(ServiceNowIntegration).one()
+    assert integration.last_cmdb_sync_at is not None
+    assert integration.last_cmdb_sync_result["application_services"] == 2
+
+    # Discovery adds an asset after the sync; the worker's attribution pass links it
+    # without calling ServiceNow and leaves everything else alone.
+    db.add(Asset(id=20, name="SHOP.acme.com", value="SHOP.acme.com", asset_type=AssetType.SUBDOMAIN,
+                 organization_id=1))
+    db.get(Asset, 2).app_link_detail = "edited"
+    db.commit()
+    db.close()
+
+    results = cmdb_worker.attribute_new(Session)
+    assert results[1]["linked"] == 1
+    db = Session()
+    assert db.get(Asset, 20).app_link_source == "entry_point"
+    assert db.get(Asset, 2).app_link_detail == "edited"
+    db.close()
+
+    # Full sync across orgs; a failing org is recorded, not raised.
+    async def boom(db, org_id, **kw):
+        raise RuntimeError("instance unreachable")
+
+    monkeypatch.setattr(cmdb_sync, "sync_cmdb", boom)
+    assert cmdb_worker.sync_all(Session) == {1: {"error": "instance unreachable"}}
+    db = Session()
+    assert db.query(ServiceNowIntegration).one().last_cmdb_sync_result == {"error": "instance unreachable"}
+    db.close()

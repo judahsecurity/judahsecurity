@@ -705,6 +705,8 @@ def apply_oracle_migrations():
         "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS validate_on_remote_close  BOOLEAN NOT NULL DEFAULT TRUE",
         "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS accept_close_as           VARCHAR(30) NOT NULL DEFAULT 'resolved'",
         "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS last_pull_at              TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS last_cmdb_sync_at         TIMESTAMP",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS last_cmdb_sync_result     JSON",
         "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS snow_state                     VARCHAR(50)",
         "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS snow_state_label               VARCHAR(100)",
         "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS last_synced_at                 TIMESTAMP WITH TIME ZONE",

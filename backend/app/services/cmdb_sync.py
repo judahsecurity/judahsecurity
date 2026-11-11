@@ -402,6 +402,8 @@ async def sync_cmdb(
 
     result["attribution"] = attribute_assets(db, organization_id)
     result["warnings"] = warnings
+    integration.last_cmdb_sync_at = datetime.utcnow()
+    integration.last_cmdb_sync_result = result
     logger.info("ServiceNow CMDB sync for org %s: %s", organization_id, result)
     return result
 
@@ -429,10 +431,17 @@ def is_manual(asset: Asset) -> bool:
     return asset.app_link_source == MANUAL or (asset.app_link_source is None and asset.business_app_id is not None)
 
 
-def attribute_assets(db: Session, organization_id: int, assets: Optional[Iterable[Asset]] = None) -> Dict[str, Any]:
+def attribute_assets(
+    db: Session,
+    organization_id: int,
+    assets: Optional[Iterable[Asset]] = None,
+    *,
+    unattributed_only: bool = False,
+) -> Dict[str, Any]:
     """Match assets to the CIs that run an application service or business
     application. Updates assets whose link was made automatically or never
-    made; leaves manual links alone. The caller commits."""
+    made; leaves manual links alone. ``unattributed_only`` limits the run to
+    assets with no link yet (newly discovered ones). The caller commits."""
     services = {
         s.id: s for s in db.query(ApplicationService).filter(ApplicationService.organization_id == organization_id)
     }
@@ -445,7 +454,14 @@ def attribute_assets(db: Session, organization_id: int, assets: Optional[Iterabl
             by_ip.setdefault(link.ip_address, []).append(link)
 
     if assets is None:
-        assets = db.query(Asset).filter(Asset.organization_id == organization_id).all()
+        if unattributed_only and not (by_host or by_ip):
+            return {"linked": 0, "unlinked": 0, "unchanged": 0, "manual": 0, "by_source": {}}
+        query = db.query(Asset).filter(Asset.organization_id == organization_id)
+        if unattributed_only:
+            query = query.filter(
+                Asset.app_link_source.is_(None), Asset.business_app_id.is_(None), Asset.app_service_id.is_(None)
+            )
+        assets = query.all()
 
     stats = {"linked": 0, "unlinked": 0, "unchanged": 0, "manual": 0, "by_source": {}}
     for asset in assets:

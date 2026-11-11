@@ -989,6 +989,8 @@ def to_response_dict(integration: ServiceNowIntegration) -> Dict[str, Any]:
         "last_test_ok": integration.last_test_ok,
         "last_delivery_at": integration.last_delivery_at,
         "last_pull_at": getattr(integration, "last_pull_at", None),
+        "last_cmdb_sync_at": getattr(integration, "last_cmdb_sync_at", None),
+        "last_cmdb_sync_result": getattr(integration, "last_cmdb_sync_result", None),
         "last_error": integration.last_error,
         "created_at": integration.created_at,
         "updated_at": integration.updated_at,

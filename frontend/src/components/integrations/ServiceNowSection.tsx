@@ -176,6 +176,7 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
     try {
       const result = await api.syncServiceNowCmdb();
       setCmdbResult(result);
+      await load();
       toast({
         title: 'CMDB sync complete',
         description: `${result.business_apps} business apps, ${result.application_services ?? 0} application services; ${result.attribution.linked} asset(s) newly attributed.`,
@@ -346,6 +347,18 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
             {integration.last_pull_at && (
               <p className="text-xs text-muted-foreground">
                 Last pull: {new Date(integration.last_pull_at).toLocaleString()}
+              </p>
+            )}
+            {integration.last_cmdb_sync_at && (
+              <p className="text-xs text-muted-foreground">
+                Last CMDB sync: {new Date(integration.last_cmdb_sync_at).toLocaleString()}
+                {integration.last_cmdb_sync_result?.error ? (
+                  <span className="text-red-400"> — {String(integration.last_cmdb_sync_result.error)}</span>
+                ) : integration.last_cmdb_sync_result ? (
+                  <span>
+                    {' '}— {integration.last_cmdb_sync_result.application_services ?? 0} application services, runs daily
+                  </span>
+                ) : null}
               </p>
             )}
             {integration.last_error && (

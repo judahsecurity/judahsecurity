@@ -377,6 +377,8 @@ export interface ServiceNowIntegration {
   last_test_ok?: boolean;
   last_delivery_at?: string;
   last_pull_at?: string;
+  last_cmdb_sync_at?: string | null;
+  last_cmdb_sync_result?: (Partial<CmdbSyncResult> & { error?: string }) | null;
   last_error?: string;
   created_at: string;
   updated_at: string;
