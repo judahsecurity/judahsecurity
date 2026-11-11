@@ -126,6 +126,7 @@ def test_prioritization_filters():
     assert cs.prioritization_reasons({"exprt_rating": "CRITICAL", "vector": "AV:L/AC:L"}) == []
     assert cs.prioritization_reasons({"exprt_rating": "LOW", "vector": "AV:L",
                                       "cisa_info": {"is_cisa_kev": True}}) == ["cisa_kev"]
+    assert cs.prioritization_reasons({"exprt_rating": "LOW", "is_cisa_kev": True}) == ["cisa_kev"]
     assert cs.prioritization_reasons({"id": "cve-2024-1", "exprt_rating": "LOW"},
                                      ["CVE-2024-1"]) == ["attack_chain_cve"]
     assert cs.map_severity("CRITICAL") == Severity.CRITICAL

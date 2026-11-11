@@ -399,6 +399,10 @@ def _has_network_vector(cve: Dict[str, Any]) -> bool:
 
 
 def _is_kev(cve: Dict[str, Any]) -> bool:
+    # FalconPy's Spotlight spec names the field ``cve.is_cisa_kev``; some
+    # payloads nest it under ``cve.cisa_info``. Accept either.
+    if cve.get("is_cisa_kev"):
+        return True
     cisa = cve.get("cisa_info") or {}
     return bool(cisa.get("is_cisa_kev")) if isinstance(cisa, dict) else False
 
