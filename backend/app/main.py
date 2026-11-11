@@ -53,6 +53,7 @@ from app.api.routes import app_structure as app_structure_router
 from app.api.routes import mcp as mcp_router
 from app.api.routes import prowl as prowl_router
 from app.api.routes import pr_checks as pr_checks_router
+from app.api.routes import fix_requests as fix_requests_router
 from app.api.routes import mitre as mitre_router
 from app.api.routes import llm_red_team as llm_red_team_router
 from app.api.routes import detection_feedback as detection_feedback_router
@@ -68,6 +69,7 @@ from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot  
 from app.models.scoped_assessment_run import ScopedAssessmentRun  # noqa: F401 — private service capabilities
 from app.models.prowl_publication import ProwlPublication  # noqa: F401 — finding idempotency
 from app.models.pr_check import PrCheck  # noqa: F401 — pull-request checks
+from app.models.fix_request import FixRequest  # noqa: F401 — fix pull requests
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
     Workflow,
     WorkflowVersion,
@@ -223,6 +225,7 @@ app.include_router(app_structure_router.router, prefix=settings.API_PREFIX)
 app.include_router(mcp_router.router, prefix=settings.API_PREFIX)
 app.include_router(prowl_router.router, prefix=settings.API_PREFIX)
 app.include_router(pr_checks_router.router, prefix=settings.API_PREFIX)
+app.include_router(fix_requests_router.router, prefix=settings.API_PREFIX)
 app.include_router(mitre_router.router, prefix=settings.API_PREFIX)
 app.include_router(llm_red_team_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)

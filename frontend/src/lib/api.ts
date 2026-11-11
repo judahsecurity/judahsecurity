@@ -1186,6 +1186,21 @@ class ApiClient {
     return response.data;
   }
 
+  async createFixPr(vulnId: number, body: { repository: string; base_branch?: string; file_paths?: string[] }) {
+    const response = await this.client.post(`/vulnerabilities/${vulnId}/fix-pr`, body);
+    return response.data;
+  }
+
+  async listFixRequests(vulnId: number) {
+    const response = await this.client.get('/fix-requests', { params: { vulnerability_id: vulnId } });
+    return response.data;
+  }
+
+  async setFixPreview(fixId: string, previewOrigin: string) {
+    const response = await this.client.put(`/fix-requests/${fixId}/preview`, { preview_origin: previewOrigin });
+    return response.data;
+  }
+
   async askLeo(vulnId: number) {
     const response = await this.client.post(`/vulnerabilities/${vulnId}/risk-assessment/ask`);
     return response.data;

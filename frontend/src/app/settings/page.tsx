@@ -126,6 +126,15 @@ const API_SERVICES = [
     group: 'AI / LLM',
   },
   {
+    name: 'github',
+    label: 'GitHub (fix PRs)',
+    description: 'Fine-grained token for opening draft fix PRs on verified findings: contents read/write and pull requests read/write on the target repositories only.',
+    free: true,
+    hasUser: false,
+    link: 'https://github.com/settings/personal-access-tokens/new',
+    group: 'Source control',
+  },
+  {
     name: 'vulncheck',
     label: 'VulnCheck',
     description: 'KEV and exploit/XDB intelligence — known-exploited CVEs, public exploit maturity, validation, ransomware associations, and weaponized evidence. Powers Vulnerability Intelligence and OPES scoring.',
@@ -698,7 +707,7 @@ export default function SettingsPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            {['AI / LLM', 'Vulnerability Intelligence', 'Asset Discovery'].map((group) => {
+            {['AI / LLM', 'Source control', 'Vulnerability Intelligence', 'Asset Discovery'].map((group) => {
               const groupServices = API_SERVICES.filter((s: any) => (s.group || 'Asset Discovery') === group);
               return (
                 <div key={group} className="space-y-4">

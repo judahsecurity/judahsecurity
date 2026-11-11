@@ -232,6 +232,11 @@ class Settings(BaseSettings):
     
     # GitHub Secret Scanning Configuration
     GITHUB_TOKEN: Optional[str] = None
+    # GitHub Enterprise: https://ghe.example.com/api/v3
+    GITHUB_API_URL: str = "https://api.github.com"
+    # Fix PRs use the org's own "github" API-config token. Allow the global
+    # GITHUB_TOKEN only on single-tenant deployments.
+    FIX_PR_ALLOW_GLOBAL_GITHUB_TOKEN: bool = False
     GITHUB_SECRET_SCAN_ENABLED: bool = True
     
     # MITRE ATT&CK Enrichment

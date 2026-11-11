@@ -67,7 +67,7 @@ READONLY_TOOLS = {
     "get_api_operation_inventory",
     "scoped_assessment_status",
     "scoped_assessment_memory",
-    "get_assessment_coverage", "map_application_traffic", "import_api_spec", "import_source_routes", "generate_authorization_matrix",
+    "get_assessment_coverage", "map_application_traffic", "import_api_spec", "import_source_routes", "verify_fix", "generate_authorization_matrix",
     "query_assets",
     "query_vulnerabilities",
     "query_ports",

@@ -142,6 +142,7 @@ interface DelphiEnrichment {
 
 interface Finding {
   id: number;
+  verification_level?: string | null;
   title: string;
   name?: string;
   template_id: string;
@@ -1379,6 +1380,11 @@ export default function FindingsPage() {
     // ── Finding validation (native detector / steps replay) ─────────────────────
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validating, setValidating] = useState(false);
+  const [fixRepo, setFixRepo] = useState('');
+  const [fixPaths, setFixPaths] = useState('');
+  const [fixPreview, setFixPreview] = useState('');
+  const [fixBusy, setFixBusy] = useState(false);
+  const [fixRequests, setFixRequests] = useState<any[]>([]);
   const [askingLeo, setAskingLeo] = useState(false);
   const [detectionIssueText, setDetectionIssueText] = useState('');
   const [loggingIssue, setLoggingIssue] = useState(false);
@@ -1450,6 +1456,53 @@ export default function FindingsPage() {
       if (res && (res.status === 'completed' || res.status === 'failed')) {
         return;
       }
+    }
+  };
+
+  const loadFixRequests = async (findingId: number) => {
+    try {
+      const data = await api.listFixRequests(findingId);
+      if (openFindingIdRef.current === findingId) setFixRequests(data.fix_requests || []);
+    } catch {
+      setFixRequests([]);
+    }
+  };
+
+  useEffect(() => {
+    setFixRequests([]);
+    if (selectedFinding?.verification_level === 'exploit_verified') {
+      loadFixRequests(selectedFinding.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFinding?.id]);
+
+  const handleCreateFixPr = async () => {
+    if (!selectedFinding || !fixRepo.trim()) return;
+    const findingId = selectedFinding.id;
+    setFixBusy(true);
+    try {
+      const paths = fixPaths.split(',').map((p) => p.trim()).filter(Boolean);
+      const fix = await api.createFixPr(findingId, {
+        repository: fixRepo.trim(),
+        ...(paths.length ? { file_paths: paths } : {}),
+      });
+      toast({ title: 'Draft fix PR opened', description: fix.pr_url || fix.branch });
+      await loadFixRequests(findingId);
+    } catch (err: any) {
+      toast({ title: 'Could not open fix PR', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setFixBusy(false);
+    }
+  };
+
+  const handleSetFixPreview = async (fixId: string) => {
+    if (!selectedFinding || !fixPreview.trim()) return;
+    try {
+      await api.setFixPreview(fixId, fixPreview.trim());
+      toast({ title: 'Preview saved', description: 'Run a Prowl session on it and call verify_fix.' });
+      await loadFixRequests(selectedFinding.id);
+    } catch (err: any) {
+      toast({ title: 'Could not save preview', description: getApiErrorMessage(err), variant: 'destructive' });
     }
   };
 
@@ -2946,6 +2999,55 @@ export default function FindingsPage() {
               />
               }
               validation={<>
+              {selectedFinding?.verification_level === 'exploit_verified' && (
+                <div className="space-y-3 pt-4 border-t border-border">
+                  <p className="text-sm font-medium">Fix pull request</p>
+                  <p className="text-xs text-muted-foreground">
+                    Prowl writes a minimal patch for this verified finding and opens it as a draft PR.
+                    The fix is marked verified only after the original proof fails on the PR&apos;s preview.
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    <input
+                      className="h-8 rounded-md border border-border bg-background px-2 text-sm"
+                      placeholder="owner/repository"
+                      value={fixRepo}
+                      onChange={(e) => setFixRepo(e.target.value)}
+                    />
+                    <input
+                      className="h-8 rounded-md border border-border bg-background px-2 text-sm"
+                      placeholder="Files to fix (optional, comma-separated)"
+                      value={fixPaths}
+                      onChange={(e) => setFixPaths(e.target.value)}
+                    />
+                    <Button size="sm" variant="outline" onClick={handleCreateFixPr} disabled={fixBusy || !fixRepo.trim()}>
+                      {fixBusy ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Writing fix…</> : 'Open draft fix PR'}
+                    </Button>
+                  </div>
+                  {fixRequests.map((fix) => (
+                    <div key={fix.id} className="rounded-md border border-border p-2 text-xs space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <a href={fix.pr_url} target="_blank" rel="noreferrer" className="underline">
+                          {fix.repository}#{fix.pr_number}
+                        </a>
+                        <span className="font-medium">{String(fix.status).replace(/_/g, ' ')}</span>
+                      </div>
+                      {fix.status === 'pr_open' && (
+                        <div className="flex gap-2">
+                          <input
+                            className="h-7 flex-1 rounded-md border border-border bg-background px-2"
+                            placeholder={fix.preview_origin || 'https://preview.example.com'}
+                            value={fixPreview}
+                            onChange={(e) => setFixPreview(e.target.value)}
+                          />
+                          <Button size="sm" variant="ghost" onClick={() => handleSetFixPreview(fix.id)}>
+                            Set preview
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
               {/* Validate with agent */}
               <div className="space-y-3 pt-4 border-t border-border">
                 <div className="flex items-center justify-between gap-2">

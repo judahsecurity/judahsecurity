@@ -34,6 +34,8 @@ CAPABILITY_TOOLS = (
     "map_application_traffic",
     "import_api_spec",
     "import_source_routes",
+    "verify_fix",
+    "record_fix_verification",
     "generate_authorization_matrix",
     "run_authorization_proof",
     "get_assessment_coverage",
@@ -361,6 +363,94 @@ class AssessmentCapabilities:
                   "independently. A source-only finding stays advisory (medium max) "
                   "until a live repro."),
         ))
+
+    def _session_origin(self) -> str:
+        from app.services.api_spec_import import normalize_origin
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cmap = getattr(self, "_capability_map", None) or {}
+        return normalize_origin(str(
+            (cmap.get("scope") if isinstance(cmap, dict) else "")
+            or (cmap.get("target") if isinstance(cmap, dict) else "")
+            or getattr(brain, "target", "") or getattr(self, "_fallback_target", "") or ""
+        ))
+
+    def _load_fix(self, db, fix_id: str):
+        from app.models.fix_request import FixRequest
+        from app.models.vulnerability import Vulnerability
+        from app.services.agent.tools import get_tenant_context
+
+        _user_id, org_id = get_tenant_context()
+        fix = db.query(FixRequest).filter(FixRequest.id == str(fix_id)).first()
+        if not fix or not org_id or fix.organization_id != org_id:
+            raise ValueError("Fix request not found for this organization")
+        if not fix.preview_origin:
+            raise ValueError("Set the fix's preview origin first (PUT /fix-requests/{id}/preview)")
+        if self._session_origin() != fix.preview_origin:
+            raise ValueError("Run fix verification in a session whose target is the fix's preview origin")
+        vulnerability = db.query(Vulnerability).filter(Vulnerability.id == fix.vulnerability_id).first()
+        return fix, vulnerability
+
+    async def verify_fix(self, fix_id: str) -> str:
+        """Return the original reproduction rebased onto the fix's preview origin; sends no requests."""
+        from app.db.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            fix, vulnerability = self._load_fix(db, fix_id)
+            meta = dict(getattr(vulnerability, "metadata_", None) or {})
+            plan = dict(
+                fix_id=fix.id, preview_origin=fix.preview_origin, pr_url=fix.pr_url,
+                finding=dict(
+                    id=vulnerability.id, title=vulnerability.title,
+                    cwe=vulnerability.cwe_id or "",
+                    proof_kind=meta.get("proof_kind") or (meta.get("verification") or {}).get("kind", ""),
+                    steps_to_reproduce=(vulnerability.steps_to_reproduce or "")[:4000],
+                    proof_of_concept=(vulnerability.proof_of_concept or "")[:2000],
+                    affected_component=vulnerability.affected_component or "",
+                ),
+                instructions=(
+                    "Re-run the same proof against the preview origin with the scoped probe "
+                    "tools (same input, same identities). Then call record_fix_verification "
+                    "with verdict 'fixed' (proof no longer reproduces) or 'still_vulnerable', "
+                    "citing the evidence IDs of those fresh exchanges."
+                ),
+            )
+        finally:
+            db.close()
+        return json.dumps(plan)
+
+    async def record_fix_verification(self, fix_id: str, verdict: str,
+                                      evidence_ids: list | None = None, note: str = "") -> str:
+        """Record whether the original proof still reproduces on the fix's preview, citing fresh evidence."""
+        from datetime import datetime as _dt
+
+        from app.db.database import SessionLocal
+        from app.services.fix_pr_service import FixError, apply_fix_verdict, check_fix_evidence
+
+        ids = [str(i) for i in (evidence_ids or [])][:20]
+        store = evidence_store(self)
+        db = SessionLocal()
+        try:
+            fix, vulnerability = self._load_fix(db, fix_id)
+            problem = check_fix_evidence(
+                store.records, ids, preview_origin=fix.preview_origin,
+                not_before=fix.created_at or _dt.utcnow(),
+                historical=getattr(store, "_historical_ids", ()),
+            )
+            if problem:
+                return json.dumps(dict(recorded=False, error=problem))
+            try:
+                result = apply_fix_verdict(fix, vulnerability, verdict=verdict,
+                                           evidence_ids=ids, note=note)
+            except FixError as exc:
+                return json.dumps(dict(recorded=False, error=str(exc)))
+            db.commit()
+            status = fix.status
+        finally:
+            db.close()
+        return json.dumps(dict(recorded=True, status=status, verification=result,
+                               note="Production status changes after merge and a production re-test."))
 
     async def map_application_traffic(
         self, requests: list, identity: str = "anonymous", source: str = "runtime"

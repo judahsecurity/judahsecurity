@@ -171,6 +171,9 @@ class ExternalService:
     # credentials are read by LiteLLM from its own environment variables.
     LITELLM = "litellm"
 
+    # Source control: per-org token for opening fix pull requests.
+    GITHUB = "github"
+
     # Free services (no API key required)
     WAYBACK = "wayback"
     RAPIDDNS = "rapiddns"
