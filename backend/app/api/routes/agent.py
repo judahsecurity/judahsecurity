@@ -115,6 +115,11 @@ class AgentAssessmentPolicy(BaseModel):
     # objective to match the authorization regex.
     oob_callbacks_allowed: bool = False
     credential_testing_allowed: bool = False
+    # Open, sandboxed exploit-development tier and the explicit post-exploitation
+    # tier. Both default off and are read by run_permissions.exploit_dev_allowed /
+    # post_exploit_allowed. post_exploit additionally requires exploit_dev.
+    exploit_dev_allowed: bool = False
+    post_exploit_allowed: bool = False
 
     @field_validator("auth_login_path")
     @classmethod

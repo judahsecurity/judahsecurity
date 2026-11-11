@@ -1584,6 +1584,12 @@ def _requested_identities(value: Any) -> set[str]:
 
 
 def _action_kind(tool_name: str, args: dict) -> str:
+    # The open exploit-development tier and post-exploitation are their own
+    # action classes, off unless the directive's allowed_actions lists them.
+    if tool_name in {"exploit_workspace_post_exploit", "run_post_exploit_action"}:
+        return "post_exploit"
+    if tool_name in {"exploit_workspace", "run_exploit_workspace", "exploit_workspace_command"}:
+        return "exploit_dev"
     if (tool_name.startswith(("get_", "list_", "query_", "read_", "search_"))
             or tool_name in {"execute_dnsx", "execute_httpx", "execute_whatweb", "execute_wafw00f"}):
         return "read"

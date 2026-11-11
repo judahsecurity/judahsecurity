@@ -40,6 +40,46 @@ _OOB_POSITIVE = re.compile(
 )
 
 
+_EXPLOIT_DEV_NEGATIVE = re.compile(
+    r"\b(?:no|avoid|without|exclude|never|do\s+not|don['’]t)\b.{0,80}"
+    r"\b(?:exploit\s+dev(?:elopment)?|sandbox|exploit\s+workspace|custom\s+exploit)\b",
+    re.IGNORECASE,
+)
+_POST_EXPLOIT_NEGATIVE = re.compile(
+    r"\b(?:no|avoid|without|exclude|never|do\s+not|don['’]t)\b.{0,80}"
+    r"\b(?:post[- ]exploit(?:ation)?|post[- ]ex)\b",
+    re.IGNORECASE,
+)
+
+
+def exploit_dev_allowed(objective: str, operator_policy: dict | None = None) -> bool:
+    """Open, sandboxed exploit-development tier. Off unless a structured grant.
+
+    Unlike the probe lanes this is never inferred from objective wording: the
+    only way in is an explicit operator flag, and a negative objective still
+    vetoes it. Whatever the open tier finds is a lead, not a finding.
+    """
+    if _EXPLOIT_DEV_NEGATIVE.search(str(objective or "")):
+        return False
+    return bool(isinstance(operator_policy, dict)
+                and operator_policy.get("exploit_dev_allowed") is True)
+
+
+def post_exploit_allowed(objective: str, operator_policy: dict | None = None) -> bool:
+    """Explicit post-exploitation tier (e.g. read a canary, list permissions).
+
+    Requires the structured operator grant *and* the exploit-development tier,
+    since post-exploitation presumes a sandbox foothold. A negative objective
+    vetoes it. Default off.
+    """
+    if _POST_EXPLOIT_NEGATIVE.search(str(objective or "")):
+        return False
+    if not (isinstance(operator_policy, dict)
+            and operator_policy.get("post_exploit_allowed") is True):
+        return False
+    return exploit_dev_allowed(objective, operator_policy)
+
+
 def credential_testing_allowed(objective: str, operator_policy: dict | None = None) -> bool:
     """Require a clear operator grant; an ordinary full assessment is not one."""
     text = str(objective or "")

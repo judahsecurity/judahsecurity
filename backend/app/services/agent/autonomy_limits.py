@@ -9,6 +9,18 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 
+# Ordered action contract. ``read``/``probe`` are the default, always-available
+# tiers. ``state_change`` gates mutating probes. ``exploit_dev`` unlocks the
+# open, sandboxed exploit-development tier, and ``post_exploit`` the explicit
+# post-exploitation tier; both are off unless the operator grant lists them, and
+# anything they find is still only a lead until the independent verifier
+# reproduces it. The order is the escalation order and is preserved when a
+# config is normalized so a directive renders a stable, auditable action list.
+ACTION_CLASSES: tuple[str, ...] = (
+    "read", "probe", "state_change", "exploit_dev", "post_exploit",
+)
+
+
 @dataclass(frozen=True)
 class AutonomyLimits:
     max_specialist_tool_calls: int = 12
@@ -23,6 +35,11 @@ class AutonomyLimits:
     max_specialist_spend_usd: float = 2.0
     max_recon_tool_starts: int = 8
     request_rate_per_second: int = 1
+    # Open exploit-development tier. Zero commands keeps the tier closed even
+    # when ``exploit_dev`` is granted; its wall-clock and request use are also
+    # charged against max_specialist_seconds / max_specialist_requests.
+    max_exploit_commands: int = 0
+    max_exploit_seconds: int = 120
 
 
 current_autonomy_limits: ContextVar[AutonomyLimits | None] = ContextVar(
@@ -77,9 +94,9 @@ def limits_from_config(config: dict | None, *, target: str = "") -> AutonomyLimi
     }))
     requested_actions = {
         str(action) for action in (cfg.get("allowed_actions") or ["read", "probe"])
-        if action in {"read", "probe", "state_change"}
+        if action in ACTION_CLASSES
     }
-    actions = tuple(action for action in ("read", "probe", "state_change") if action in requested_actions)
+    actions = tuple(action for action in ACTION_CLASSES if action in requested_actions)
     try:
         spend = max(0.01, min(float(cfg.get("max_specialist_spend_usd") or 2.0), 20.0))
     except (ValueError, TypeError):
@@ -97,4 +114,11 @@ def limits_from_config(config: dict | None, *, target: str = "") -> AutonomyLimi
         max_specialist_spend_usd=spend,
         max_recon_tool_starts=bounded("max_recon_tool_starts", 8, 30),
         request_rate_per_second=bounded("request_rate_per_second", 1, 20),
+        # Default 0 keeps the open tier closed; a grant raises it within a hard
+        # ceiling so a sandbox can never outrun the operator's autonomy budget.
+        max_exploit_commands=(
+            max(0, min(int(cfg.get("max_exploit_commands") or 0), 25))
+            if "exploit_dev" in requested_actions else 0
+        ),
+        max_exploit_seconds=bounded("max_exploit_seconds", 120, 300),
     )

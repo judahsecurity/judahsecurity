@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import secrets
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Awaitable, Callable
 from urllib.parse import quote
 
@@ -132,6 +132,97 @@ PROOF_STRATEGIES = {
         "authorization_mutation", ("POST", "PUT", "PATCH"), False, _mutation_verdict
     ),
 }
+
+
+@dataclass(frozen=True)
+class DerivedProofProposal:
+    """A reviewed path from a one-off open-tier exploit to a fixed probe type.
+
+    The open exploit-development tier can find something the fixed probe set does
+    not cover. To fold that back into the deterministic probe set, it *proposes*
+    a new named strategy that binds to an **existing trusted evaluator** — never
+    new, model-supplied verdict code — and that proposal only becomes usable
+    after explicit operator review. This keeps the invariant that every verdict
+    is code, while letting open-ended exploration grow the fixed set over time.
+    """
+
+    name: str
+    base_strategy: str
+    source_lead_id: str
+    target: str
+    notes: str = ""
+    reviewer: str = ""
+    approved: bool = False
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self):
+        return asdict(self)
+
+
+class DerivedProofRegistry:
+    """Hold derived-strategy proposals; expose only the reviewed, approved ones.
+
+    Scoped per run/engagement rather than mutating the process-wide
+    ``PROOF_STRATEGIES`` map, so one tenant's derived probe never leaks into
+    another's assessment.
+    """
+
+    # Built-ins a derived strategy is allowed to reuse. A derived probe is a new
+    # *name* over a known evaluator, so no untrusted evaluator is ever run.
+    ALLOWED_BASES = frozenset(PROOF_STRATEGIES)
+
+    def __init__(self):
+        self._proposals: dict[str, DerivedProofProposal] = {}
+
+    def propose(self, *, name: str, base_strategy: str, source_lead_id: str,
+                source_kind: str, target: str, notes: str = "") -> DerivedProofProposal:
+        name = str(name or "").strip()
+        if not (name.startswith("derived_") and name.replace("_", "").isalnum()):
+            raise ValueError("Derived strategy name must be derived_<alnum>")
+        if name in PROOF_STRATEGIES:
+            raise ValueError("Derived strategy cannot shadow a built-in")
+        if base_strategy not in self.ALLOWED_BASES:
+            raise ValueError("Derived strategy must bind to a known trusted evaluator")
+        # Only a genuine open-tier lead can seed a derived probe.
+        if source_kind not in ("exploit_workspace_lead", "post_exploit_lead"):
+            raise ValueError("A derived probe must originate from an open-tier lead")
+        if not source_lead_id:
+            raise ValueError("A derived probe must cite its source lead artifact")
+        proposal = DerivedProofProposal(
+            name=name, base_strategy=base_strategy, source_lead_id=source_lead_id,
+            target=target, notes=str(notes or "")[:2000],
+        )
+        self._proposals[name] = proposal
+        return proposal
+
+    def approve(self, name: str, reviewer: str) -> DerivedProofProposal:
+        """Operator review. Without a named reviewer nothing is ever approved."""
+        proposal = self._proposals.get(name)
+        if proposal is None:
+            raise KeyError(name)
+        if not str(reviewer or "").strip():
+            raise ValueError("Approval requires a named reviewer")
+        approved = DerivedProofProposal(
+            **{**proposal.to_dict(), "approved": True, "reviewer": reviewer.strip()}
+        )
+        self._proposals[name] = approved
+        return approved
+
+    def pending(self) -> list[DerivedProofProposal]:
+        return [p for p in self._proposals.values() if not p.approved]
+
+    def resolve(self, name: str) -> ProofStrategy | None:
+        """Return a usable strategy: built-ins, or an *approved* derived one."""
+        if name in PROOF_STRATEGIES:
+            return PROOF_STRATEGIES[name]
+        proposal = self._proposals.get(name)
+        if proposal is None or not proposal.approved:
+            return None
+        base = PROOF_STRATEGIES[proposal.base_strategy]
+        # Reuse the trusted evaluator under the new derived name.
+        return ProofStrategy(
+            proposal.name, base.attack_methods, base.requires_control, base.evaluate,
+        )
 
 
 class ProofEngine:

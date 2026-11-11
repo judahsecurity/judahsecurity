@@ -35,6 +35,11 @@ verification_run: ContextVar[VerificationRun | None] = ContextVar(
     "verification_run", default=None
 )
 
+# Evidence kinds produced by the open exploit-development tier. They are leads,
+# not findings: validate() rejects them outright so a fresh verifier must
+# reproduce the effect with a supported proof kind before anything publishes.
+_LEAD_ONLY_KINDS = frozenset({"exploit_workspace_lead", "post_exploit_lead"})
+
 
 def re_full_artifact_id(value: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]{32}", value))
@@ -423,6 +428,14 @@ class EvidenceStore:
                 return (
                     False,
                     "Oversized evidence cannot confirm a finding; run a bounded follow-up",
+                )
+            # Open-tier (exploit-development / post-exploitation) output is a
+            # lead, never verifier-grade evidence. A fresh verifier must
+            # reproduce the effect with a supported proof kind instead.
+            if row["kind"] in _LEAD_ONLY_KINDS:
+                return (
+                    False,
+                    "Open-tier leads cannot confirm a finding; reproduce with a verifier proof",
                 )
             if time.time() - row["created_at"] > max_age:
                 return False, "Evidence has expired; rerun verification"

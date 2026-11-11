@@ -2,8 +2,10 @@
 
 from app.services.agent.run_permissions import (
     credential_testing_allowed,
+    exploit_dev_allowed,
     oob_callbacks_allowed,
     permitted_specialists,
+    post_exploit_allowed,
 )
 
 
@@ -56,3 +58,49 @@ def test_agent_policy_model_exposes_structured_grants():
 
     # An explicit objective veto still wins over the structured grant.
     assert not oob_callbacks_allowed("Assess https://app.test. Do not use callbacks.", granted)
+
+
+def test_exploit_dev_tier_requires_a_structured_grant_only():
+    # Never inferred from objective wording, however emphatic.
+    assert not exploit_dev_allowed("Run exploit development in a sandbox workspace")
+    assert not exploit_dev_allowed("Run a full assessment")
+    # Structured grant opens it; a negative objective vetoes it.
+    assert exploit_dev_allowed("Assess https://app.test", {"exploit_dev_allowed": True})
+    assert not exploit_dev_allowed(
+        "Assess https://app.test but do not use the exploit sandbox",
+        {"exploit_dev_allowed": True},
+    )
+
+
+def test_post_exploit_requires_both_grants():
+    # post_exploit presumes a sandbox foothold, so exploit_dev must be on too.
+    assert not post_exploit_allowed("Assess", {"post_exploit_allowed": True})
+    assert not post_exploit_allowed("Assess", {"exploit_dev_allowed": True})
+    assert post_exploit_allowed(
+        "Assess", {"exploit_dev_allowed": True, "post_exploit_allowed": True},
+    )
+    # Vetoing either lane turns post-exploitation off.
+    assert not post_exploit_allowed(
+        "Assess. No post-exploitation.",
+        {"exploit_dev_allowed": True, "post_exploit_allowed": True},
+    )
+    assert not post_exploit_allowed(
+        "Assess but avoid the exploit sandbox",
+        {"exploit_dev_allowed": True, "post_exploit_allowed": True},
+    )
+
+
+def test_agent_policy_exposes_exploit_tier_grants():
+    from app.api.routes.agent import AgentAssessmentPolicy
+
+    default = AgentAssessmentPolicy().model_dump()
+    assert default["exploit_dev_allowed"] is False
+    assert default["post_exploit_allowed"] is False
+    assert not exploit_dev_allowed("Assess https://app.test", default)
+    assert not post_exploit_allowed("Assess https://app.test", default)
+
+    granted = AgentAssessmentPolicy(
+        exploit_dev_allowed=True, post_exploit_allowed=True,
+    ).model_dump()
+    assert exploit_dev_allowed("Assess https://app.test", granted)
+    assert post_exploit_allowed("Assess https://app.test", granted)

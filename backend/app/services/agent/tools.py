@@ -531,6 +531,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _fallback_target = SessionValue(lambda: "")
     _credential_testing_allowed = SessionValue(lambda: False)
     _oob_callbacks_allowed = SessionValue(lambda: False)
+    _exploit_dev_allowed = SessionValue(lambda: False)
+    _post_exploit_allowed = SessionValue(lambda: False)
 
     def __init__(self):
         self.tools = self._register_tools()
