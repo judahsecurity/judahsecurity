@@ -295,12 +295,25 @@ async def test_operator_policy_blocks_post_redirect(manager, transport):
 
 
 @pytest.mark.asyncio
-async def test_operator_policy_blocks_unbounded_python_probe(manager):
+async def test_operator_policy_blocks_unbounded_python_probe(manager, monkeypatch):
+    import app.services.agent.confirmation_service as confirmation
+
+    async def allow(*_args, **_kwargs):
+        return {"decision": "allow"}
+
+    monkeypatch.setattr(confirmation, "gate", allow)
     manager.set_scoped_assessment_policy({})
-    result = await manager._execute_impl("run_custom_probe", {
-        "source": "import httpx; httpx.post('https://app.test/write')",
-    })
-    assert result["error"] == "operator_method_policy_denied"
+    probe = {"source": "import httpx; httpx.post('https://app.test/write')",
+             "allowed_hosts": "https://app.test"}
+    # Without the operator's exploit_dev grant the sandbox never starts.
+    result = await manager._execute_impl("run_custom_probe", dict(probe))
+    assert result["error"] == "exploit_dev_not_authorized"
+    # With the grant it runs, but enforces the operator policy itself: this
+    # POST path was never approved, so the write is refused before any request.
+    manager._exploit_dev_allowed = True
+    result = await manager._execute_impl("run_custom_probe", dict(probe))
+    assert "not an operator-approved write path" in json.dumps(result, default=str)
+    manager._exploit_dev_allowed = False
     result = await manager._execute_impl("execute_interceptor", {
         "args": "https://app.test",
     })

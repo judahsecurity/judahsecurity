@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from typing import Any, Iterable, List, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 from urllib.parse import urlparse
 
 # Collaborator / OOB hosts specialists may hit to prove blind SSRF.
@@ -71,6 +71,15 @@ FORBIDDEN_NAMES = {
     "staticmethod",
     "type",
 }
+# Attributes that send traffic around the scoped request() wrapper.
+FORBIDDEN_ATTRS = {
+    "AsyncClient", "stream", "send", "build_request",
+    "HTTPTransport", "AsyncHTTPTransport", "MockTransport", "WSGITransport", "ASGITransport",
+    "urlopen", "build_opener", "install_opener", "OpenerDirector", "URLopener",
+    "FancyURLopener", "urlretrieve", "HTTPConnection", "HTTPSConnection",
+}
+# Only these submodules of an allowed package may be imported.
+ALLOWED_SUBMODULES = {"urllib": {"urllib", "urllib.parse"}}
 MAX_SOURCE_CHARS = 12_000
 DEFAULT_TIMEOUT_SEC = 20
 MAX_OUTPUT_CHARS = 20_000
@@ -84,6 +93,10 @@ _ALLOWED = json.loads(__ALLOWED_JSON__)
 _TIMEOUT = float(__TIMEOUT__)
 
 _OOB = json.loads(__OOB_JSON__)
+# None = no operator write policy. A list = only these exact paths may receive a
+# non-read method (the operator's approved POST replay / cleanup paths).
+_WRITE_PATHS = json.loads(__WRITE_PATHS_JSON__)
+_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 def _host_ok(host: str) -> bool:
     host = (host or "").lower().rstrip(".")
@@ -99,9 +112,17 @@ def _host_ok(host: str) -> bool:
 
 class _ScopedClient(httpx.Client):
     def request(self, method, url, **kwargs):
-        host = (urlparse(str(url)).hostname or "").lower()
+        parsed = urlparse(str(url))
+        host = (parsed.hostname or "").lower()
         if not _host_ok(host):
             raise PermissionError(f"host not in engagement scope: {host}")
+        is_write = str(method).upper() not in _READ_METHODS
+        if is_write and _WRITE_PATHS is not None:
+            if str(method).upper() != "POST" or (parsed.path or "/") not in _WRITE_PATHS:
+                raise PermissionError(
+                    f"{str(method).upper()} {parsed.path or '/'} is not an operator-approved write path")
+            # A redirect could carry the write to an unapproved path.
+            kwargs["follow_redirects"] = False
         kwargs.setdefault("timeout", _TIMEOUT)
         kwargs.setdefault("follow_redirects", True)
         return super().request(method, url, **kwargs)
@@ -175,23 +196,36 @@ def validate_probe_source(source: str) -> List[str]:
     except SyntaxError as exc:
         return [f"syntax error: {exc}"]
 
+    def module_ok(name: str) -> bool:
+        root = name.split(".")[0]
+        if root not in ALLOWED_MODULES:
+            return False
+        allowed_sub = ALLOWED_SUBMODULES.get(root)
+        return allowed_sub is None or name in allowed_sub
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                root = (alias.name or "").split(".")[0]
-                if root not in ALLOWED_MODULES:
+                if not module_ok(alias.name or ""):
                     errors.append(f"import not allowed: {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
-            root = mod.split(".")[0]
-            if root not in ALLOWED_MODULES:
+            if node.level or not module_ok(mod):
                 errors.append(f"from-import not allowed: {mod or '*'}")
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-            if node.id in FORBIDDEN_NAMES:
+            for alias in node.names:
+                if alias.name in FORBIDDEN_ATTRS or alias.name == "*" or alias.name.startswith("_"):
+                    errors.append(f"import name not allowed: {alias.name}")
+        elif isinstance(node, ast.Name):
+            if node.id in FORBIDDEN_NAMES and isinstance(node.ctx, ast.Load):
                 errors.append(f"builtin not allowed: {node.id}")
+            elif node.id.startswith("_"):
+                # Sandbox scope state (_ALLOWED, _OOB, _WRITE_PATHS) is off limits.
+                errors.append(f"private name not allowed: {node.id}")
         elif isinstance(node, ast.Attribute):
-            if node.attr.startswith("__"):
-                errors.append(f"dunder access not allowed: {node.attr}")
+            if node.attr.startswith("_"):
+                errors.append(f"private attribute access not allowed: {node.attr}")
+            elif node.attr in FORBIDDEN_ATTRS:
+                errors.append(f"API that bypasses scope checks not allowed: {node.attr}")
     # de-dupe, keep order
     seen = set()
     uniq = []
@@ -207,6 +241,7 @@ def _prepare_probe(
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    approved_write_paths: Optional[Iterable[str]] = None,
 ) -> tuple[list[str], float, str, dict[str, str]] | dict[str, Any]:
     """Validate scope and source before either probe runner starts a process."""
     hosts = _normalize_hosts(allowed_hosts)
@@ -224,6 +259,10 @@ def _prepare_probe(
         _RUNNER.replace("__ALLOWED_JSON__", repr(json.dumps(hosts)))
         .replace("__OOB_JSON__", repr(json.dumps(list(OOB_HOST_SUFFIXES))))
         .replace("__TIMEOUT__", repr(timeout_sec))
+        .replace("__WRITE_PATHS_JSON__", repr(json.dumps(
+            None if approved_write_paths is None
+            else sorted({str(p) for p in approved_write_paths if isinstance(p, str)})
+        )))
     )
     body = textwrap.dedent(source).strip() + "\n"
     script = prelude + "\n" + body
@@ -244,9 +283,11 @@ def run_custom_probe(
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    approved_write_paths: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Synchronous runner for direct callers; the agent uses the async runner."""
-    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
+    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec,
+                              approved_write_paths=approved_write_paths)
     if isinstance(prepared, dict):
         return prepared
     hosts, timeout_sec, script, env = prepared
@@ -309,9 +350,11 @@ async def run_custom_probe_async(
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    approved_write_paths: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Run the agent's probe without blocking cancellation of its turn."""
-    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
+    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec,
+                              approved_write_paths=approved_write_paths)
     if isinstance(prepared, dict):
         return prepared
     hosts, timeout_sec, script, env = prepared

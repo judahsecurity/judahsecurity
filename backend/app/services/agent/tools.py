@@ -2795,12 +2795,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
-        if self._scoped_policy_applied and tool_name in {"run_custom_probe", "run_poc_python"}:
-            return {
-                "success": False,
-                "output": "Custom Python HTTP probes cannot enforce operator method and path approvals; use structured replay tools.",
-                "error": "operator_method_policy_denied",
-            }
         if self._scoped_policy_applied and tool_name == "execute_interceptor":
             return {
                 "success": False,
@@ -6373,9 +6367,19 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         datetime, collections, urllib.parse. Hosts must be in engagement scope.
         Print results to stdout. Not a shell — no os/subprocess/sockets.
         """
-        if self._scoped_policy_applied:
-            return json.dumps({"error": "Custom Python HTTP probes cannot enforce operator method and path approvals; use structured replay tools."})
+        if not self._exploit_dev_allowed:
+            return json.dumps({"ok": False, "error": "exploit_dev_not_authorized",
+                               "hint": "Ask the operator to enable the exploit_dev grant for this run."})
         from app.services.agent.custom_probe import run_custom_probe_async
+
+        # Under an operator method/path policy the sandbox enforces it itself:
+        # reads anywhere in scope, POST only to the approved write paths.
+        approved_write_paths = None
+        if self._scoped_policy_applied:
+            approved_write_paths = sorted(
+                (getattr(self, "_scoped_body_replay_paths", None) or set())
+                | (getattr(self, "_scoped_race_action_paths", None) or set())
+            )
 
         hosts: List[str] = []
         if allowed_hosts:
@@ -6389,8 +6393,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if isinstance(cmap, dict) and cmap.get("target"):
             hosts.append(str(cmap.get("target")))
 
-        result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
+        result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec,
+                                              approved_write_paths=approved_write_paths)
         result["oob_allowed"] = True
+        if approved_write_paths is not None:
+            result["write_policy"] = {"methods": ["GET", "HEAD", "OPTIONS", "POST"],
+                                      "approved_post_paths": approved_write_paths}
         result["lead_only"] = True
         result["hint"] = (
             "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
