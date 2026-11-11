@@ -1,0 +1,30 @@
+name: Judah Prowl PR check
+description: >
+  Send a pull request's changed files to Judah for source analysis, annotate
+  findings, and hand extracted routes to Prowl for live testing.
+inputs:
+  api-url:
+    description: Judah API base URL, e.g. https://asm.example.com/api/v1
+    required: true
+  api-key:
+    description: Org agent API key (tfasm_...) with the pr:check scope
+    required: true
+  asset-id:
+    description: Optional asset whose live origin Prowl should test with the extracted routes
+    required: false
+    default: ""
+  fail-on:
+    description: Lowest severity that fails the job (info|low|medium|high|critical|never)
+    required: false
+    default: medium
+runs:
+  using: composite
+  steps:
+    - name: Run Judah PR check
+      shell: bash
+      env:
+        JUDAH_API_URL: ${{ inputs.api-url }}
+        JUDAH_API_KEY: ${{ inputs.api-key }}
+        PROWL_ASSET_ID: ${{ inputs.asset-id }}
+        PROWL_FAIL_ON: ${{ inputs.fail-on }}
+      run: python3 "${{ github.action_path }}/prowl_pr_check.py"

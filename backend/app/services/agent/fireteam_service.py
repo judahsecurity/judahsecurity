@@ -1346,6 +1346,7 @@ async def _run_specialist(
                 "get_assessment_coverage",
                 "map_application_traffic",
                 "import_api_spec",
+                "import_source_routes",
                 "list_proof_captures",
                 "list_authorization_leads",
                 "prepare_captured_authorization_proof",

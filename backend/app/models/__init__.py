@@ -34,6 +34,7 @@ from app.models.agent_palace import AgentPalaceDrawer
 from app.models.agent_conversation import AgentConversation
 from app.models.scoped_assessment_run import ScopedAssessmentRun
 from app.models.prowl_publication import ProwlPublication
+from app.models.pr_check import PrCheck
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat
 from app.models.project_settings import (
     ProjectSettings,
@@ -68,6 +69,7 @@ from app.models.tenable_integration import TenableVmIntegration
 from app.models.netbrain_integration import NetBrainIntegration
 
 __all__ = [
+    "PrCheck",
     "User",
     "UserRole",
     "Organization",

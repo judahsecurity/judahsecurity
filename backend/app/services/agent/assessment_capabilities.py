@@ -33,6 +33,7 @@ CAPABILITY_TOOLS = (
     "get_finding_candidate",
     "map_application_traffic",
     "import_api_spec",
+    "import_source_routes",
     "generate_authorization_matrix",
     "run_authorization_proof",
     "get_assessment_coverage",
@@ -290,6 +291,75 @@ class AssessmentCapabilities:
                         for op in added[:40]],
             note=("Spec operations are documentation leads: discovery_only until observed "
                   "or probed. Coverage cells now include their inputs."),
+        ))
+
+    async def import_source_routes(self, check_id: str = "") -> str:
+        """Seed the operation ledger from routes a PR check extracted from source; sends no requests."""
+        from app.db.database import SessionLocal
+        from app.models.asset import Asset
+        from app.models.pr_check import PrCheck
+        from app.services.agent.tools import get_tenant_context
+        from app.services.api_spec_import import normalize_origin
+        from app.services.pr_check_service import synthetic_requests_for_routes
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cmap = getattr(self, "_capability_map", None) or {}
+        origin = normalize_origin(str(
+            (cmap.get("scope") if isinstance(cmap, dict) else "")
+            or (cmap.get("target") if isinstance(cmap, dict) else "")
+            or getattr(brain, "target", "") or getattr(self, "_fallback_target", "") or ""
+        ))
+        if not origin:
+            raise ValueError("Set a target origin before importing source routes")
+        _user_id, org_id = get_tenant_context()
+        if not org_id:
+            raise ValueError("An organization agent session is required")
+        host = urlsplit(origin).hostname or ""
+        db = SessionLocal()
+        try:
+            query = db.query(PrCheck).filter(PrCheck.organization_id == org_id)
+            if check_id:
+                check = query.filter(PrCheck.id == str(check_id)).first()
+            else:
+                asset_ids = [a.id for a in db.query(Asset).filter(
+                    Asset.organization_id == org_id, Asset.value.ilike(f"%{host}%")).limit(20).all()
+                    if (urlsplit(a.value).hostname if "://" in str(a.value)
+                        else str(a.value).strip().lower()) == host]
+                check = (query.filter(PrCheck.asset_id.in_(asset_ids))
+                         .order_by(PrCheck.created_at.desc()).first()) if asset_ids else None
+            if check is None:
+                return json.dumps(dict(operations_added=0,
+                                       note="No PR check with routes for this target"))
+            if check.asset_id:
+                asset = db.query(Asset).filter(Asset.id == check.asset_id).first()
+                asset_host = (urlsplit(asset.value).hostname if asset and "://" in str(asset.value)
+                              else str(getattr(asset, "value", "")).strip().lower())
+                if asset_host != host:
+                    raise ValueError("That PR check belongs to a different asset than this session's target")
+            routes = list(check.routes or [])
+            findings = list(check.findings or [])
+            check_ref = check.id
+        finally:
+            db.close()
+        before = {op["id"] for op in brain.application_operations}
+        ingest_operations(brain, synthetic_requests_for_routes(routes, origin),
+                          identity="anonymous", source="source_code")
+        if not getattr(brain, "target", ""):
+            brain.target = origin
+        self._queue_operation_inputs(brain)
+        self._engagement_brain = brain.to_dict()
+        added = [op for op in brain.application_operations if op["id"] not in before]
+        leads = [{k: f.get(k) for k in ("rule_id", "title", "cwe", "file", "line",
+                                         "route", "live_test_class")}
+                 for f in findings if f.get("route") and f.get("live_test_class")][:30]
+        return json.dumps(dict(
+            check_id=check_ref, operations_added=len(added),
+            operations=[{k: op.get(k) for k in ("id", "method", "path", "parameters")}
+                        for op in added[:40]],
+            source_leads=leads,
+            note=("Source routes are leads, not observations: probe them live and verify "
+                  "independently. A source-only finding stays advisory (medium max) "
+                  "until a live repro."),
         ))
 
     async def map_application_traffic(
