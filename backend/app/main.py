@@ -59,6 +59,7 @@ from app.api.routes import detection_suppression as detection_suppression_router
 from app.api.routes import recon as recon_router
 from app.api.routes import workflows as workflows_router
 from app.api.routes import attacks as attacks_router
+from app.api.routes import finding_response as finding_response_router
 from app.models.agent_palace import AgentPalaceDrawer  # noqa: F401 — palace memory table
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat  # noqa: F401 — interceptor workers
 from app.models.sitemap_entry import SitemapEntry  # noqa: F401 — Praetorian-style app sitemap
@@ -82,6 +83,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 _evidence_cleanup_task = None
+_finding_response_task = None
 
 
 async def _evidence_cleanup_loop() -> None:
@@ -95,6 +97,22 @@ async def _evidence_cleanup_loop() -> None:
         except Exception:
             logger.exception("Agent evidence cleanup failed")
         await asyncio.sleep(6 * 3600)
+
+async def _finding_response_loop() -> None:
+    """SLA reminders/breaches/close-outs and webhook delivery for finding response."""
+    from app.services.finding_response import run_cycle
+
+    interval = int(os.getenv("FINDING_RESPONSE_INTERVAL_SECONDS", "300"))
+    await asyncio.sleep(30)
+    while True:
+        try:
+            totals = await asyncio.to_thread(run_cycle, SessionLocal)
+            if any(totals.values()):
+                logger.info("Finding response cycle: %s", totals)
+        except Exception:
+            logger.exception("Finding response cycle failed")
+        await asyncio.sleep(max(interval, 30))
+
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -226,6 +244,7 @@ app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_suppression_router.router, prefix=settings.API_PREFIX)
 app.include_router(workflows_router.router, prefix=settings.API_PREFIX)
 app.include_router(attacks_router.router, prefix=settings.API_PREFIX)
+app.include_router(finding_response_router.router, prefix=settings.API_PREFIX)
 
 
 # ── Scoring pipeline lifecycle ────────────────────────────────────────────────
@@ -348,6 +367,9 @@ async def startup_event():
     ensure_default_scan_profiles()
     global _evidence_cleanup_task
     _evidence_cleanup_task = asyncio.create_task(_evidence_cleanup_loop())
+    global _finding_response_task
+    if os.getenv("FINDING_RESPONSE_LOOP", "true").lower() != "false":
+        _finding_response_task = asyncio.create_task(_finding_response_loop())
 
 
 @app.on_event("shutdown")
@@ -355,6 +377,8 @@ async def shutdown_event():
     """Run on application shutdown."""
     if _evidence_cleanup_task is not None:
         _evidence_cleanup_task.cancel()
+    if _finding_response_task is not None:
+        _finding_response_task.cancel()
     logger.info("Shutting down application")
 
 

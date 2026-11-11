@@ -1,0 +1,170 @@
+# =============================================================================
+# VR - Respond  (Blink executor for Judah finding response)
+#
+# Judah owns intake, dedup, triage, SLA and the owner notice. When an action's
+# executor is "webhook", Judah POSTs a signed event here; this workflow carries
+# the action out and reports back, so Judah's event log, SLA metrics and the
+# finding page stay the source of truth.
+#
+#   Judah event ──▶ S1 parse ──▶ S2 fetch notice from Judah ──▶ branch on action
+#        notify_owner  → email owner the standard notice (+ optional channel post)
+#        sla_reminders → reminder (sla_warning) or past-due escalation (sla_breached)
+#        close_out     → "resolved" note to owner
+#        open_ticket   → Jira issue
+#   ──▶ S9 POST /finding-response/findings/{id}/actions  (done | failed)
+#
+# Setup (see integrations/blink/README.md):
+#   Blink secrets:  judah_api_key  (Judah agent API key, scope findings:respond)
+#   Judah settings: PUT /api/v1/finding-response/settings/webhook
+#                   {"url": "<this trigger's URL>", "api_key_header": "BLINK-API-KEY",
+#                    "api_key": "<this trigger's key>", "secret": "<optional HMAC secret>"}
+#
+# VERIFY markers: vendor action ids and input names (email, Slack/Teams, Jira)
+# and the secrets syntax must be checked against your workspace catalog.
+# =============================================================================
+name: VR - Respond
+type: Flow
+automation_type: event
+desc: Carries out Judah finding-response actions (owner notice, SLA reminders, close-out, ticket) and reports results back to Judah.
+runner: blink_cloud
+
+triggers:
+  webhooks:
+    - id: REPLACE_WITH_GENERATED_UUID      # Blink fills this when you create the trigger
+      active: true
+      name: judah-finding-response
+      trigger_type: custom_webhook
+      token: REPLACE_WITH_GENERATED_TOKEN
+
+workflow:
+  - section: 1. Read the event and the notice
+    steps:
+      - id: S1
+        name: Parse Judah event
+        action: core.python
+        inputs:
+          code: |
+            import json
+            body = context.event.payload if hasattr(context.event, "payload") else context.event
+            if isinstance(body, str):
+                body = json.loads(body)
+            f = body.get("finding") or {}
+            links = f.get("links") or {}
+            details = body.get("details") or {}
+            print(json.dumps({
+                "event_id": body.get("event_id"),
+                "event_type": body.get("event_type"),
+                "action": body.get("action") or "",
+                "finding_id": f.get("id"),
+                "title": f.get("title") or "",
+                "severity": f.get("sla_tier") or f.get("severity") or "",
+                "asset": f.get("asset") or "",
+                "owner_email": f.get("owner_email") or "",
+                "remediation_due": f.get("remediation_due") or "",
+                "ticket_key": f.get("ticket_key") or "",
+                "notice_json": links.get("notice_json") or "",
+                "notice_docx": links.get("notice_docx") or "",
+                "callback": links.get("actions_callback") or "",
+                "threshold": details.get("threshold"),
+                "days_left": details.get("days_left"),
+                "overdue_days": details.get("overdue_days"),
+            }))
+
+      - id: S2
+        name: Fetch the rendered notice from Judah
+        action: core.python
+        inputs:
+          code: |
+            import json, requests
+            e = context.steps.S1.output
+            KEY = "{{ secrets.judah_api_key }}"                  # VERIFY: Blink secrets syntax
+            r = requests.get(e["notice_json"], headers={"X-API-Key": KEY}, timeout=60)
+            r.raise_for_status()
+            n = r.json()
+            action, etype = e["action"], e["event_type"]
+            subject, html = n["subject"], n["html"]
+            if etype == "sla_warning":
+                subject = f"Reminder ({e['days_left']} days left): {subject}"
+            elif etype == "sla_breached":
+                subject = f"PAST DUE ({e['overdue_days']} days): {subject}"
+            elif etype == "resolved":
+                subject = f"Resolved: {n['fields']['title']}"
+                html = ("<p>This finding is now closed in vulnerability management. Thank you.</p>" + html)
+            print(json.dumps({
+                "to": n.get("to") or e["owner_email"],
+                "subject": subject,
+                "html": html,
+                "text": n["text"],
+                "missing_fields": n["fields"].get("missing_fields") or [],
+            }))
+
+  - section: 2. Carry out the action
+    steps:
+      - id: S3
+        name: Owner notice, reminder or close-out → email
+        action: internal.if
+        inputs:
+          condition:
+            sentence:
+              - lvalue: "{{ steps.S1.output.action }}"
+                op: Not Equals
+                rvalue: open_ticket
+        transitions:
+          - on: true
+            steps:
+              - id: S4
+                name: Email owner the standard finding notice
+                action: msgraph.SendMail                         # VERIFY: your email action (Outlook / Graph / SMTP)
+                connections:
+                  msgraph: email_connection                      # VERIFY
+                inputs:
+                  To: "{{ steps.S2.output.to }}"
+                  Subject: "{{ steps.S2.output.subject }}"
+                  Body Type: HTML                                # VERIFY
+                  Body: "{{ steps.S2.output.html }}"
+                  # Optional: attach the .docx — fetch steps.S1.output.notice_docx with the
+                  # Judah API key in a core.python step and pass the file per your action.
+
+              - id: S5
+                name: Post to the vulnerability channel (optional)
+                action: slack.SendMessage                        # VERIFY (or teams.SendMessage)
+                connections:
+                  slack: slack_connection                        # VERIFY
+                inputs:
+                  Channel: "#vuln-response"                      # VERIFY
+                  Message: |
+                    *{{ steps.S1.output.severity }}* {{ steps.S1.output.event_type }} — {{ steps.S1.output.title }}
+                    Asset: `{{ steps.S1.output.asset }}` • Owner: {{ steps.S2.output.to }} • Due: {{ steps.S1.output.remediation_due }}
+          - on: false
+            steps:
+              - id: S6
+                name: Create Jira issue
+                action: jira.CreateIssue                         # VERIFY
+                connections:
+                  jira: jira_connection                          # VERIFY
+                inputs:
+                  Project Key: SEC                               # VERIFY
+                  Issue Type: Bug                                # VERIFY
+                  Summary: "{{ steps.S2.output.subject }}"
+                  Description: "{{ steps.S2.output.text }}"
+
+  - section: 3. Report back to Judah
+    steps:
+      - id: S9
+        name: Report action result
+        action: core.python
+        inputs:
+          code: |
+            import json, requests
+            e = context.steps.S1.output
+            KEY = "{{ secrets.judah_api_key }}"                  # VERIFY: Blink secrets syntax
+            action = e["action"] or "notify_owner"
+            details = {"channel": "email", "owner_email": context.steps.S2.output["to"]}
+            if action == "open_ticket":
+                ticket = context.steps.S6.output if hasattr(context.steps, "S6") else {}
+                details = {"channel": "jira", "ticket_key": (ticket or {}).get("key", ""),
+                           "ticket_url": (ticket or {}).get("self", "")}
+            body = {"action": action, "outcome": "done", "event_id": e["event_id"], "details": details}
+            r = requests.post(e["callback"], json=body, headers={"X-API-Key": KEY}, timeout=60)
+            r.raise_for_status()
+            print(json.dumps(r.json()))

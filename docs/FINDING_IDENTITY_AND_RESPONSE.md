@@ -95,7 +95,49 @@ issue types to a shared Judah taxonomy key, e.g. `tls.protocol.tls10` or
 
 ---
 
-## 2. Response automation: Blink-style capability in Loom
+## 2. Finding response (shipped): triage, SLA, owner notice, executors
+
+Judah runs the response process. Each action is carried out by **Judah** or
+by an **external workflow** (Blink, via webhook), chosen per organization and
+per action. Code: `services/finding_response.py`, `services/sla_policy.py`,
+`services/finding_notice.py`, `api/routes/finding_response.py`. Blink
+workflow and setup: `integrations/blink/`.
+
+1. **Triage gate.** Open findings wait in `GET /finding-response/triage-queue`,
+   each with the SLA the policy proposes. An analyst approves
+   (`POST /findings/{id}/triage`), optionally overriding the tier, exposure and
+   owner, and filling in notice text (impact, steps to reproduce, ...). Or the
+   analyst rejects it, optionally marking it a false positive. Nothing reaches
+   an owner before approval.
+2. **SLA.** Settings module `sla_policy` holds days by tier
+   (urgent/critical/high/medium/low/info) × exposure (internet /
+   non-internet). Defaults are the proposed remediation-window table.
+   - Exposure comes from `asset.is_public` unless the analyst overrides it.
+   - A critical finding in CISA KEV is promoted to urgent.
+   - The tier can follow scanner severity or the Likelihood × Impact risk
+     level (`tier_source`).
+   - The deadline is frozen at approval into `finding_responses` and
+     `vulnerabilities.remediation_deadline`.
+3. **Owner notice.** One template rendered as JSON, HTML email, text, .docx and
+   PDF. It combines the finding template (title in the severity color,
+   severity, expected remediation date, affected asset, description, impact,
+   steps to reproduce, remediation) with the "External Exposure" letter
+   (header, type, To: owning team, intro with detection date and SLA,
+   reporter / ticket number, closing paragraphs linking the VM team). All
+   labels, colors, dates and paragraphs are org settings (`notice` block).
+4. **Events.** `finding_events` is both the audit log and the outbox. Actions
+   routed to `webhook` are POSTed, signed, with retries. Executors report back
+   through `POST /findings/{id}/actions`. A background loop
+   (`FINDING_RESPONSE_INTERVAL_SECONDS`, default 300) sends SLA reminders,
+   breach events and close-outs.
+5. **Executors.** `notify_owner`, `open_ticket`, `sla_reminders` and
+   `close_out` are each set to `judah`, `webhook` or `off`. Judah's own
+   sender (email, Slack/Teams) is the next step. Until it exists, `judah`
+   events wait as `queued_native`.
+
+---
+
+## 3. Response automation: Blink-style capability in Loom
 
 ### Recommendation
 

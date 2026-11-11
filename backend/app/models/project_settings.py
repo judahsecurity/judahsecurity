@@ -29,6 +29,8 @@ MODULE_AGENT = "agent"
 MODULE_SCAN_TOGGLES = "scan_toggles"
 MODULE_RULES_OF_ENGAGEMENT = "rules_of_engagement"
 MODULE_COMMONCRAWL = "commoncrawl"
+MODULE_SLA_POLICY = "sla_policy"
+MODULE_FINDING_RESPONSE = "finding_response"
 
 ALL_MODULES = [
     MODULE_TARGET,
@@ -47,6 +49,8 @@ ALL_MODULES = [
     MODULE_SCAN_TOGGLES,
     MODULE_RULES_OF_ENGAGEMENT,
     MODULE_COMMONCRAWL,
+    MODULE_SLA_POLICY,
+    MODULE_FINDING_RESPONSE,
 ]
 
 
@@ -401,6 +405,120 @@ def default_commoncrawl_config():
     }
 
 
+def default_sla_policy_config():
+    """Remediation windows (days) by SLA tier and exposure.
+
+    Defaults follow the "Proposed remediation windows by severity and
+    exposure type" table. ``None`` means no SLA (no deadline, no reminders).
+    """
+    return {
+        "tiers": ["urgent", "critical", "high", "medium", "low", "info"],
+        "internet_accessible": {
+            "urgent": 2, "critical": 14, "high": 30, "medium": 60, "low": 90, "info": None,
+        },
+        "non_internet_accessible": {
+            "urgent": 10, "critical": 30, "high": 60, "medium": 90, "low": 180, "info": None,
+        },
+        # Which finding field picks the tier: "severity" (scanner/analyst
+        # severity) or "risk_level" (the Likelihood x Impact model, sev_level).
+        "tier_source": "severity",
+        # Promote to "urgent" automatically when the finding's CVE is in CISA
+        # KEV and the tier would otherwise be critical. Analysts can always set
+        # urgent by hand at triage.
+        "urgent_if_kev_critical": True,
+        # Exposure used when nothing says whether the asset is internet-facing.
+        "default_exposure": "internet_accessible",
+        # When the SLA clock starts: "triage" (analyst approval) or "detected".
+        "clock_starts": "triage",
+        # Fractions of the window at which reminders fire, then breach.
+        "reminder_thresholds": [0.5, 0.9],
+    }
+
+
+def default_finding_response_config():
+    """Who carries out each response action, and how findings reach owners.
+
+    Executors: "judah" (Judah sends it itself), "webhook" (Judah emits a signed
+    event and an external workflow such as Blink carries it out and reports
+    back), or "off". One executor per action keeps every action firing once.
+    """
+    return {
+        # Findings reach owners only after an analyst approves them at triage.
+        "executors": {
+            "notify_owner": "webhook",
+            "open_ticket": "off",
+            "sla_reminders": "webhook",
+            "close_out": "webhook",
+        },
+        "webhook_url": "",
+        # Encrypted at rest; set through PUT /finding-response/webhook.
+        "webhook_secret_encrypted": "",
+        "webhook_api_key_header": "",
+        "webhook_api_key_encrypted": "",
+        "default_owner_email": "",
+        # Public base URL of this Judah deployment, used for links in events
+        # and notices (e.g. https://judah.example.com). Empty = relative links.
+        "judah_base_url": "",
+        "notice": {
+            "from_name": "Vulnerability Management",
+            "subject_template": "[{severity}] {title} - remediate by {deadline}",
+            # Banner above the title; {exposure_title} is External or Internal.
+            "header_template": "{exposure_title} Exposure",
+            # strftime format for dates in the notice (MM/DD/YYYY by default;
+            # "%B %d, %Y" gives "September 07, 2023").
+            "date_format": "%m/%d/%Y",
+            "labels": {
+                "severity": "Severity",
+                "type": "Type",
+                "asset": "Affected Asset",
+                "recipient": "To",
+                "remediation_date": "Expected Remediation Date",
+                "remediation": "Remediation/Recommendation",
+            },
+            # Paragraph placeholders: {detected_date} {sla_days} {exposure}
+            # {severity} {asset} {title} {remediation_date} {ticket_number};
+            # {contact} becomes a mailto link to contact_email.
+            "intro_template": (
+                "On {detected_date}, an {exposure} vulnerability was identified on an asset within "
+                "your area of responsibility. This finding should be reviewed, and remediated or "
+                "mitigated within {sla_days} days, before a risk is tracked in the organization's "
+                "Governance, Risk, and Compliance (GRC) system. Details of this finding can be found below."
+            ),
+            "intro_no_sla_template": (
+                "On {detected_date}, an {exposure} finding was identified on an asset within your "
+                "area of responsibility. Details can be found below."
+            ),
+            "closing_templates": [
+                "If you have any questions or believe that this communication is incorrectly "
+                "assigned to you, please contact the {contact} team.",
+                "If this issue has been remediated, please contact the {contact} team.",
+                "If this issue cannot be remediated or mitigated by the required remediation date "
+                "above, please document this risk within the risk management system and email the "
+                "ticket number or confirmation of risk acceptance to the {contact} team.",
+            ],
+            "contact_name": "Vulnerability Management",
+            "contact_email": "",
+            # Display names for finding sources in the "Reporter" line.
+            "source_names": {
+                "tenable_vm": "Tenable", "tenable_agent": "Tenable", "tenable_credentialed": "Tenable",
+                "wiz": "Wiz", "nuclei": "Judah", "port_scanner": "Judah", "censys": "Censys",
+                "hackerone": "HackerOne", "praetorian": "Praetorian", "falcon": "CrowdStrike Falcon",
+                "manual": "Manual", "bitsight": "BitSight", "securityscorecard": "SecurityScorecard",
+            },
+            # Title/severity colors; defaults match the finding template .docx.
+            "severity_colors": {
+                "urgent": "7030A0",
+                "critical": "C00000",
+                "high": "FF0000",
+                "medium": "FFC000",
+                "low": "92D050",
+                "info": "00B050",
+            },
+            "footer": "",
+        },
+    }
+
+
 def get_default_config(module: str) -> dict:
     """Return default config for a module."""
     defaults = {
@@ -420,6 +538,8 @@ def get_default_config(module: str) -> dict:
         MODULE_SCAN_TOGGLES: default_scan_toggles_config,
         MODULE_RULES_OF_ENGAGEMENT: default_rules_of_engagement_config,
         MODULE_COMMONCRAWL: default_commoncrawl_config,
+        MODULE_SLA_POLICY: default_sla_policy_config,
+        MODULE_FINDING_RESPONSE: default_finding_response_config,
     }
     fn = defaults.get(module)
     return fn() if fn else {}
