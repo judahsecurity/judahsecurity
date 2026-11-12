@@ -153,7 +153,7 @@ class ThreatModel:
     mitigations: List[Mitigation] = field(default_factory=list)
     surfaces: List[Surface] = field(default_factory=list)
     focus_areas: List[FocusArea] = field(default_factory=list)
-    provenance: Dict[str, str] = field(default_factory=dict)
+    provenance: Dict[str, Any] = field(default_factory=dict)
     languages: List[str] = field(default_factory=list)
     frameworks: List[str] = field(default_factory=list)
 
@@ -233,7 +233,12 @@ _INPUT_PATH_RE = re.compile(
 )
 
 
-def surfaces_from_capability_map(cmap: Optional[Dict[str, Any]]) -> List[Surface]:
+MAX_THREAT_MODEL_SURFACES = 250
+
+
+def surfaces_from_capability_map(
+    cmap: Optional[Dict[str, Any]], *, limit: Optional[int] = MAX_THREAT_MODEL_SURFACES,
+) -> List[Surface]:
     if not cmap:
         return []
     out: List[Surface] = []
@@ -279,7 +284,7 @@ def surfaces_from_capability_map(cmap: Optional[Dict[str, Any]]) -> List[Surface
     for s in out:
         if s.auth == "unknown":
             s.auth = auth
-    return out[:250]
+    return out if limit is None else out[:limit]
 
 
 def focus_areas_from_model(model: ThreatModel) -> List[FocusArea]:
@@ -736,7 +741,15 @@ def bootstrap_from_capability_map(
             "mode": "url",
         },
     )
-    model.surfaces = surfaces_from_capability_map(cmap)
+    discovered_surfaces = surfaces_from_capability_map(cmap, limit=None)
+    model.surfaces = discovered_surfaces[:MAX_THREAT_MODEL_SURFACES]
+    model.provenance["surface_inventory_total"] = len(discovered_surfaces)
+    model.provenance["surface_inventory_omitted_count"] = max(
+        0, len(discovered_surfaces) - len(model.surfaces)
+    )
+    model.provenance["surface_inventory_omitted_input_count"] = sum(
+        surface.takes_input for surface in discovered_surfaces[MAX_THREAT_MODEL_SURFACES:]
+    )
     model.focus_areas = focus_areas_from_model(model)
     model.mitigations = _default_mitigations(model)
     return model
@@ -1173,6 +1186,12 @@ def merge_threat_models(base: ThreatModel, overlay: ThreatModel) -> ThreatModel:
         if k not in surf_keys:
             base.surfaces.append(s)
             surf_keys.add(k)
+    for key in (
+        "surface_inventory_total", "surface_inventory_omitted_count",
+        "surface_inventory_omitted_input_count",
+    ):
+        if key in overlay.provenance:
+            base.provenance[key] = overlay.provenance[key]
     base.focus_areas = focus_areas_from_model(base)
     return base
 
