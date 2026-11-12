@@ -23,6 +23,7 @@ import {
   Info,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { ActiveCampaignsCard, type ActiveCampaignsData } from './ActiveCampaignsCard';
 
 interface RemediationStep {
   order: number;
@@ -84,6 +85,8 @@ interface RemediationPanelProps {
   cwe?: CweInfo | null;
   /** CWE ID when cwe object not loaded (e.g. for lazy load) */
   cweId?: string | null;
+  /** Active exploitation campaigns naming this finding's CVE or exposed product */
+  activeCampaigns?: ActiveCampaignsData | null;
   className?: string;
 }
 
@@ -131,7 +134,15 @@ const accessConfig: Record<string, string> = {
   security_team: 'Security Team',
 };
 
-export function RemediationPanel({ playbook, fallbackRemediation, cwe, cweId, className }: RemediationPanelProps) {
+export function RemediationPanel({
+  playbook,
+  fallbackRemediation,
+  cwe,
+  cweId,
+  activeCampaigns,
+  className,
+}: RemediationPanelProps) {
+  const hasCampaigns = (activeCampaigns?.campaigns?.length ?? 0) > 0;
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set([1]));
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const [showVerification, setShowVerification] = useState(false);
@@ -169,7 +180,7 @@ export function RemediationPanel({ playbook, fallbackRemediation, cwe, cweId, cl
 
   // If no playbook, show fallback remediation and optional CWE guidance
   if (!playbook) {
-    if (!fallbackRemediation && !cwe && !cweId) {
+    if (!fallbackRemediation && !cwe && !cweId && !hasCampaigns) {
       return (
         <Card className={cn("border-muted", className)}>
           <CardContent className="py-8 text-center text-muted-foreground">
@@ -183,6 +194,7 @@ export function RemediationPanel({ playbook, fallbackRemediation, cwe, cweId, cl
 
     return (
       <div className={cn("space-y-4", className)}>
+        <ActiveCampaignsCard data={activeCampaigns} />
         {fallbackRemediation && (
           <Card className="border-muted">
             <CardHeader>
@@ -218,6 +230,7 @@ export function RemediationPanel({ playbook, fallbackRemediation, cwe, cweId, cl
 
   return (
     <div className={cn("space-y-4", className)}>
+      <ActiveCampaignsCard data={activeCampaigns} />
       {/* Header with Priority and Effort */}
       <Card className="border-muted">
         <CardHeader className="pb-3">

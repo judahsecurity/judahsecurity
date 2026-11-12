@@ -9,6 +9,7 @@ import threading
 from typing import Any
 
 from app.scripts.refresh_vuln_intel import _resolve_token
+from app.services.campaign_mitigations import refresh_campaign_feed
 from app.services.external_vuln_indexes import (
     refresh_nuclei_cve_index,
     refresh_vulncheck_exploit_index,
@@ -56,12 +57,14 @@ def refresh_once(*, interval_seconds: int | None = None) -> dict[str, Any]:
             "error": "missing_token",
         }
     nuclei = refresh_nuclei_cve_index(refresh_hours=refresh_hours)
+    campaigns = refresh_campaign_feed(refresh_hours=refresh_hours)
     result = {
         "cisa_kev": len(cisa),
         "enisa_kev": len(enisa),
         "vulncheck_kev": len(vulncheck_kev),
         "vulncheck_exploits": vulncheck_exploits,
         "nuclei": nuclei,
+        "campaign_intel": campaigns,
         "token_configured": bool(token),
         "token_source": token_source,
     }

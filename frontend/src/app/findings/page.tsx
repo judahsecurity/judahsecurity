@@ -2883,6 +2883,7 @@ export default function FindingsPage() {
               {(loadingRemediation ||
                 remediationData?.has_playbook ||
                 remediationData?.cwe ||
+                remediationData?.active_campaigns?.campaigns?.length ||
                 selectedFinding?.remediation_deadline) && (
               <div className="space-y-2">
                 <p className="text-sm font-medium text-green-400 flex items-center gap-2">
@@ -2908,6 +2909,7 @@ export default function FindingsPage() {
                     }
                     cwe={remediationData?.cwe}
                     cweId={remediationData?.cwe_id || selectedFinding?.cwe_id}
+                    activeCampaigns={remediationData?.active_campaigns}
                   />
                 )}
               </div>

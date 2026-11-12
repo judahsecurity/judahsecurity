@@ -10,6 +10,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.vulnerability import Vulnerability
 from app.services.remediation_playbook_service import RemediationPlaybookService
 from app.services.cwe_service import get_cwe_service
+from app.services.campaign_mitigations import campaigns_for_finding
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +412,29 @@ def _build_playbook_blocks(playbook: Dict) -> List[Dict]:
     return blocks
 
 
+def _build_campaign_blocks(campaigns: List[Dict]) -> List[Dict]:
+    """Interim mitigations from active exploitation campaigns (feed text, plain only)."""
+    blocks: List[Dict] = [_adf_heading("Active Exploitation Campaign: Interim Mitigations", 2)]
+    for campaign in campaigns[:3]:
+        match = campaign.get("match") or {}
+        label = "CVE" if match.get("type") == "cve" else "Exposed product"
+        blocks.append(_adf_heading(str(campaign.get("name", ""))[:200], 3))
+        blocks.append(_adf_para(
+            f"Matched on {label}: {match.get('value', '')}. "
+            f"Reported {campaign.get('published', '')}. Source: {campaign.get('url', '')}"
+        ))
+        if campaign.get("mitigations"):
+            blocks.append(_adf_bullet_list([str(m) for m in campaign["mitigations"][:8]]))
+        checks = campaign.get("compromise_checks") or []
+        if checks:
+            blocks.append(_adf_heading("Check for prior compromise", 4))
+            blocks.append(_adf_bullet_list([
+                f"{c.get('title') or 'Check'}: {c.get('look_for', '')} (logs: {c.get('log_source', 'n/a')})"
+                for c in checks[:6]
+            ]))
+    return blocks
+
+
 def _build_description(
     vuln: Vulnerability,
     include_description: bool,
@@ -420,6 +444,7 @@ def _build_description(
     include_enrichment: bool,
     playbook: Optional[Dict] = None,
     cwe_info: Optional[Dict] = None,
+    campaigns: Optional[List[Dict]] = None,
 ) -> Dict:
     blocks: List[Dict] = []
 
@@ -460,6 +485,10 @@ def _build_description(
     if include_evidence and vuln.steps_to_reproduce:
         blocks.append(_adf_heading("Steps to Reproduce", 3))
         blocks.append(_adf_para(vuln.steps_to_reproduce))
+
+    if include_remediation and campaigns:
+        blocks.append(_adf_rule())
+        blocks.extend(_build_campaign_blocks(campaigns))
 
     if include_remediation:
         if playbook:
@@ -548,6 +577,7 @@ async def create_jira_ticket(
     """Create a Jira issue from a vulnerability. Returns key, url, id."""
     playbook_dict: Optional[Dict] = None
     cwe_info: Optional[Dict] = None
+    campaigns: List[Dict] = []
     if include_remediation:
         try:
             playbook_obj = RemediationPlaybookService.get_playbook_for_finding(
@@ -569,6 +599,13 @@ async def create_jira_ticket(
             except Exception:
                 logger.warning("Could not fetch CWE info for %s", vuln.cwe_id)
 
+        campaigns = campaigns_for_finding(
+            cve_id=vuln.cve_id,
+            title=vuln.title,
+            template_id=vuln.template_id,
+            tags=vuln.tags or [],
+        ).get("campaigns") or []
+
     severity_str = vuln.severity.value if vuln.severity else "unknown"
     title = f"[ASM] [{severity_str.upper()}] {vuln.title or vuln.template_id}"
     if len(title) > 255:
@@ -589,6 +626,7 @@ async def create_jira_ticket(
         include_enrichment=include_enrichment,
         playbook=playbook_dict,
         cwe_info=cwe_info,
+        campaigns=campaigns,
     )
 
     fields: Dict[str, Any] = {

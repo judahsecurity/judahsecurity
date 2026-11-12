@@ -144,6 +144,11 @@ def main(argv: list[str] | None = None) -> int:
     for source, status in exploit_indexes.items():
         print(f"  {source}: {status.get('status')} ({status.get('cves', 'cached')} CVEs)")
 
+    print("refreshing active campaign mitigations (Rapid Threat Intel)…")
+    from app.services.campaign_mitigations import refresh_campaign_feed
+    campaign_status = refresh_campaign_feed(force=True)
+    print(f"  campaign_intel: {campaign_status.get('status')} ({campaign_status.get('campaigns', 0)} campaigns)")
+
     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
     print(f"done in {elapsed:.1f}s")
     if not cisa and not vkev and not enisa:

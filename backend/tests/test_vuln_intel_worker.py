@@ -30,6 +30,11 @@ def test_refresh_once_updates_vulncheck_and_public_indexes(monkeypatch):
         "refresh_nuclei_cve_index",
         lambda **kw: calls.setdefault("nuclei", kw) or {"status": "fresh", "cves": 2},
     )
+    monkeypatch.setattr(
+        worker,
+        "refresh_campaign_feed",
+        lambda **kw: calls.setdefault("campaigns", kw) or {"status": "fresh", "campaigns": 3},
+    )
 
     result = worker.refresh_once(interval_seconds=1800)
 
@@ -37,3 +42,4 @@ def test_refresh_once_updates_vulncheck_and_public_indexes(monkeypatch):
     assert calls["kev"]["token"] == "token"
     assert calls["xdb"]["refresh_hours"] == 0.5
     assert calls["nuclei"]["refresh_hours"] == 0.5
+    assert calls["campaigns"]["refresh_hours"] == 0.5

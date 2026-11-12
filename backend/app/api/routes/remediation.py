@@ -14,6 +14,7 @@ from app.services.remediation_playbook_service import (
     REMEDIATION_PLAYBOOKS,
 )
 from app.services.cwe_service import get_cwe_service
+from app.services.campaign_mitigations import campaigns_for_finding
 
 router = APIRouter(prefix="/remediation", tags=["Remediation"])
 
@@ -165,6 +166,12 @@ def get_remediation_for_finding(
     if cwe_id:
         cwe_info = get_cwe_service().get_dict(cwe_id)
 
+    # Interim mitigations and compromise checks from active exploitation
+    # campaigns that name this finding's CVE or exposed product.
+    active_campaigns = campaigns_for_finding(
+        cve_id=cve_id, title=title, template_id=template_id, tags=tags
+    )
+
     if not playbook:
         # Return the finding's built-in remediation if no playbook matches
         return {
@@ -175,6 +182,7 @@ def get_remediation_for_finding(
             "references": finding.references or [],
             "cwe_id": cwe_id,
             "cwe": cwe_info,
+            "active_campaigns": active_campaigns,
             "message": "No specific playbook found. Showing finding's built-in remediation."
         }
 
@@ -185,6 +193,7 @@ def get_remediation_for_finding(
         "playbook": playbook.to_dict(),
         "cwe_id": cwe_id,
         "cwe": cwe_info,
+        "active_campaigns": active_campaigns,
     }
 
 
