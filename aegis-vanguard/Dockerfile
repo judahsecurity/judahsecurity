@@ -18,23 +18,23 @@ RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architect
     | tar -C /usr/local -xz
 
 # ── ProjectDiscovery tools ───────────────────────────────────────────
-RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
-    && go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest \
-    && go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
-    && go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
-    && go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest \
-    && go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
-    && go install -v github.com/projectdiscovery/katana/cmd/katana@latest \
-    && go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest
+RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0 \
+    && go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@v2.21.0 \
+    && go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1 \
+    && go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.7.0 \
+    && go install -v github.com/projectdiscovery/httpx/cmd/httpx@v1.12.0 \
+    && go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.11.1 \
+    && go install -v github.com/projectdiscovery/katana/cmd/katana@v1.8.0 \
+    && go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@v1.4.5
 
 # ── Additional Go-based security tools ───────────────────────────────
-RUN go install -v github.com/owasp-amass/amass/v4/...@master \
-    && go install -v github.com/tomnomnom/waybackurls@latest \
-    && go install -v github.com/lc/gau/v2/cmd/gau@latest \
-    && go install -v github.com/ffuf/ffuf/v2@latest \
-    && go install -v github.com/hahwul/dalfox/v2@latest \
-    && go install -v github.com/s0md3v/smap/cmd/smap@latest \
-    && go install -v github.com/BishopFox/jsluice/cmd/jsluice@latest
+RUN go install -v github.com/owasp-amass/amass/v4/...@v4.2.0 \
+    && go install -v github.com/tomnomnom/waybackurls@v0.1.0 \
+    && go install -v github.com/lc/gau/v2/cmd/gau@v2.2.4 \
+    && go install -v github.com/ffuf/ffuf/v2@v2.3.0 \
+    && go install -v github.com/hahwul/dalfox/v2@v2.13.0 \
+    && go install -v github.com/s0md3v/smap/cmd/smap@v1.0.0-beta \
+    && go install -v github.com/BishopFox/jsluice/cmd/jsluice@v0.0.0-20240110145140-0ddfab153e06
 
 # ── Feroxbuster (Rust release) ───────────────────────────────────────
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -50,8 +50,8 @@ RUN ARCH=$(dpkg --print-architecture) && \
 #                       plugins, all 5 RIRs, domains + CIDRs from an org name
 # Argus (titus binary): all-seeing secrets scanner — 487 detection rules,
 #                       optional live credential validation
-RUN go install -v github.com/praetorian-inc/pius/cmd/pius@latest \
-    && go install -v github.com/praetorian-inc/titus/cmd/titus@latest
+RUN go install -v github.com/praetorian-inc/pius/cmd/pius@v1.3.18 \
+    && go install -v github.com/praetorian-inc/titus/cmd/titus@v1.3.0
 
 # ── Aegis Vanguard: Hermes (TruffleHog v3) ──────────────────────────
 # Hermes: remote secrets-finder — GitHub/GitLab orgs, S3/GCS/Azure,

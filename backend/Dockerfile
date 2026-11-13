@@ -88,12 +88,12 @@ RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns
 # Download waybackurls, assetfinder, and GAU (smaller Go tools)
 RUN apt-get update && apt-get install -y --no-install-recommends golang \
     && rm -rf /var/lib/apt/lists/* \
-    && go install github.com/tomnomnom/waybackurls@latest \
-    && go install github.com/tomnomnom/assetfinder@latest \
-    && go install github.com/lc/gau/v2/cmd/gau@latest \
+    && go install github.com/tomnomnom/waybackurls@v0.1.0 \
+    && go install github.com/tomnomnom/assetfinder@v0.1.1 \
+    && go install github.com/lc/gau/v2/cmd/gau@v2.2.4 \
     && go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@v1.3.1 \
-    && (GOTOOLCHAIN=go1.25.1 go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest || echo "subfaster build skipped") \
-    && (go install github.com/hahwul/dalfox/v2@latest || echo "dalfox build skipped") \
+    && (GOTOOLCHAIN=go1.25.1 go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@v2.21.0 || echo "subfaster build skipped") \
+    && (go install github.com/hahwul/dalfox/v2@v2.13.0 || echo "dalfox build skipped") \
     && cp /root/go/bin/* /tools/
 
 # Feroxbuster (Rust — download release binary)

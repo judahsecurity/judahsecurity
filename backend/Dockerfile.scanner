@@ -78,14 +78,14 @@ RUN ARCH=$(dpkg --print-architecture) && \
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 # CGO is required by jsluice -> go-tree-sitter (C parsers).
 ENV CGO_ENABLED=1
-RUN go install github.com/lc/gau/v2/cmd/gau@latest && \
+RUN go install github.com/lc/gau/v2/cmd/gau@v2.2.4 && \
     go install github.com/tomnomnom/waybackurls@v0.1.0 && \
-    go install github.com/d3mondev/puredns/v2@latest && \
+    go install github.com/d3mondev/puredns/v2@v2.1.1 && \
     go install github.com/haccer/subjack@b53899ce6230767beb1c4a9f879c6ebba23a98fa && \
-    go install github.com/BishopFox/jsluice/cmd/jsluice@latest && \
-    go install github.com/projectdiscovery/uncover/cmd/uncover@latest && \
+    go install github.com/BishopFox/jsluice/cmd/jsluice@v0.0.0-20240110145140-0ddfab153e06 && \
+    go install github.com/projectdiscovery/uncover/cmd/uncover@v1.2.1 && \
     go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@v1.3.1 && \
-    go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest && \
+    go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@v2.21.0 && \
     cp /root/go/bin/gau /tools/ && \
     cp /root/go/bin/waybackurls /tools/ && \
     cp /root/go/bin/puredns /tools/ && \
@@ -114,7 +114,7 @@ FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d8
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 ENV GOBIN=/praetorian-bin
 RUN mkdir -p /praetorian-bin && \
-    go install github.com/praetorian-inc/pius/cmd/pius@latest && \
+    go install github.com/praetorian-inc/pius/cmd/pius@v1.3.18 && \
     go install github.com/praetorian-inc/titus/cmd/titus@v1.2.7
 
 # =============================================================================

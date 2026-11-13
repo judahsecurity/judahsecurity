@@ -3,7 +3,7 @@ FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064
 RUN apk add --no-cache git ca-certificates
 
 # Install vulnx CLI for enrichment tool exec fallback
-RUN go install github.com/projectdiscovery/vulnx/v2/cmd/vulnx@latest
+RUN go install github.com/projectdiscovery/vulnx/v2/cmd/vulnx@v2.0.2
 
 WORKDIR /build
 COPY go.mod go.sum ./
