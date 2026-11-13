@@ -503,7 +503,8 @@ def get_prioritized_remediation_list(
     """
     Get a prioritized list of findings to remediate.
     
-    Sorted by severity and then by effort (easier fixes first).
+    Findings named by an active exploitation campaign come first (CVE
+    matches, then targeted products), then by severity.
     Groups findings by playbook for batch remediation.
     
     Note: Informational findings are excluded by default since they 
@@ -533,8 +534,12 @@ def get_prioritized_remediation_list(
         if organization_id:
             query = query.join(Asset).filter(Asset.organization_id == organization_id)
         
-        # Order by severity first
+        # Findings named by an active exploitation campaign first (CVE
+        # matches before product matches), then by severity.
+        from app.api.routes.vulnerabilities import campaign_rank
+
         findings = query.order_by(
+            campaign_rank(),
             Vulnerability.severity.desc(),
             Vulnerability.created_at.asc()
         ).limit(limit).all()
@@ -568,6 +573,8 @@ def get_prioritized_remediation_list(
                 "asset_id": finding.asset_id,
                 "asset_value": asset_value,
                 "template_id": finding.template_id,
+                "campaign_match": finding.campaign_match,
+                "campaign_ids": finding.campaign_ids or [],
                 "has_playbook": playbook is not None,
                 "playbook": {
                     "id": playbook.id,

@@ -93,6 +93,21 @@ def rescore_changed_findings() -> dict[str, int]:
     return result
 
 
+def sync_campaign_findings() -> dict[str, Any]:
+    """Stamp open findings with active exploitation campaigns (triage priority)."""
+    import app.models  # noqa: F401 — register models
+    from app.db.database import SessionLocal
+    from app.services.campaign_mitigations import sync_campaign_matches
+
+    result = sync_campaign_matches(SessionLocal)
+    if result.get("status") == "ok":
+        logger.info(
+            "Active campaigns: %d open finding(s) matched (cve=%d product=%d), %d updated, %d cleared",
+            result["matched"], result["cve"], result["product"], result["updated"], result["cleared"],
+        )
+    return result
+
+
 def _handle_signal(_signum, _frame) -> None:
     _shutdown.set()
 
@@ -115,6 +130,10 @@ def main() -> None:
             rescore_changed_findings()
         except Exception:
             logger.exception("Marking findings with changed exploitation intel failed")
+        try:
+            sync_campaign_findings()
+        except Exception:
+            logger.exception("Matching findings to active campaigns failed")
         _shutdown.wait(interval)
     logger.info("Vulnerability intelligence refresher stopped")
 

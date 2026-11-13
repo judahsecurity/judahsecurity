@@ -265,14 +265,26 @@ def _start_background_refresh() -> None:
     ).start()
 
 
+def _cache_key() -> Optional[Tuple[str, int]]:
+    """(path, mtime_ns) of the cache file read_json_cache would use."""
+    configured = os.environ.get("DELPHI_CACHE_DIR") or "/tmp/delphi_cache"
+    for directory in dict.fromkeys((configured, "/tmp/delphi_cache")):
+        path = os.path.join(directory, CACHE_FILENAME)
+        try:
+            return path, os.stat(path).st_mtime_ns
+        except OSError:
+            continue
+    return None
+
+
 def _load_index() -> Optional[Dict[str, Any]]:
+    key = _cache_key()
+    if key is not None and _memo["key"] == key and _memo["index"] is not None:
+        return _memo["index"]
     cached = read_json_cache(CACHE_FILENAME)
     if not isinstance(cached, dict):
         _start_background_refresh()
         return None
-    key = cached.get("fetched_at")
-    if _memo["key"] == key and _memo["index"] is not None:
-        return _memo["index"]
     by_cve: Dict[str, List[Dict[str, Any]]] = {}
     by_product: Dict[str, List[Dict[str, Any]]] = {}
     for campaign in cached.get("campaigns") or []:
@@ -333,3 +345,112 @@ def campaigns_for_finding(
     except Exception:
         logger.exception("Campaign intel lookup failed")
         return empty
+
+
+# ── Finding sweep (triage priority) ──────────────────────────────────────────
+
+def _alias_probe(alias: str) -> str:
+    """Longest word of an alias: a cheap SQL pre-filter, verified in Python."""
+    return max(alias.split(), key=len)
+
+
+def sync_campaign_matches(session_factory) -> Dict[str, Any]:
+    """Stamp open findings with their active-campaign match.
+
+    Sets ``campaign_match`` ("cve" beats "product"), ``campaign_ids`` and
+    ``campaign_matched_at``; clears findings whose campaigns aged out of the
+    feed. Product matches skip informational findings, which are inventory
+    rather than weaknesses. These columns are not severity inputs, so this
+    never triggers a re-score. Run by the vuln-intel worker after a refresh.
+    """
+    from datetime import datetime
+
+    from sqlalchemy import or_
+
+    from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
+
+    if _enabled():
+        index = _load_index()
+        if index is None:
+            return {"status": "no_data"}  # keep current stamps until data arrives
+    else:
+        index = {"by_cve": {}, "by_product": {}}
+
+    V = Vulnerability
+    open_states = [VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]
+    wanted: Dict[int, Tuple[str, List[str]]] = {}
+
+    db = session_factory()
+    try:
+        by_cve = index["by_cve"]
+        if by_cve:
+            rows = (
+                db.query(V.id, V.cve_id)
+                .filter(V.status.in_(open_states), or_(*[V.cve_id.ilike(f"%{c}%") for c in by_cve]))
+                .all()
+            )
+            for vid, cve_field in rows:
+                ids = [c["id"] for cve in _cves(cve_field) for c in by_cve.get(cve, [])]
+                if ids:
+                    wanted[vid] = ("cve", list(dict.fromkeys(ids)))
+
+        by_product = index["by_product"]
+        probes = {
+            _alias_probe(alias)
+            for product in by_product
+            for alias in PRODUCT_ALIASES.get(product, ())
+        }
+        if probes:
+            rows = (
+                db.query(V.id, V.title, V.template_id, V.tags)
+                .filter(
+                    V.status.in_(open_states),
+                    V.severity != Severity.INFO,
+                    or_(*[col.ilike(f"%{p}%") for p in probes for col in (V.title, V.template_id)]),
+                )
+                .all()
+            )
+            for vid, title, template_id, tags in rows:
+                tag_text = " ".join(t for t in (tags or []) if isinstance(t, str))
+                ids = [
+                    c["id"]
+                    for product in _products(title or "", template_id or "", tag_text)
+                    for c in by_product.get(product, [])
+                ]
+                if not ids:
+                    continue
+                if vid in wanted:
+                    match, existing = wanted[vid]
+                    wanted[vid] = (match, list(dict.fromkeys(existing + ids)))
+                else:
+                    wanted[vid] = ("product", list(dict.fromkeys(ids)))
+
+        current = {
+            vid: (match, ids or [])
+            for vid, match, ids in db.query(V.id, V.campaign_match, V.campaign_ids)
+            .filter(V.campaign_match.isnot(None))
+            .all()
+        }
+        now = datetime.utcnow()
+        changes: List[Dict[str, Any]] = []
+        for vid, (match, ids) in wanted.items():
+            if current.get(vid) != (match, ids):
+                changes.append({"id": vid, "campaign_match": match, "campaign_ids": ids, "campaign_matched_at": now})
+        cleared = [vid for vid in current if vid not in wanted]
+        changes.extend(
+            {"id": vid, "campaign_match": None, "campaign_ids": None, "campaign_matched_at": None}
+            for vid in cleared
+        )
+        if changes:
+            db.bulk_update_mappings(V, changes)
+            db.commit()
+        return {
+            "status": "ok",
+            "matched": len(wanted),
+            "cve": sum(1 for m, _ in wanted.values() if m == "cve"),
+            "product": sum(1 for m, _ in wanted.values() if m == "product"),
+            "updated": len(changes) - len(cleared),
+            "cleared": len(cleared),
+        }
+    finally:
+        db.close()

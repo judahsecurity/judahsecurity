@@ -50,6 +50,7 @@ import {
   XCircle,
   Users,
   Flame,
+  Crosshair,
   TrendingUp,
   Sparkles,
   ArrowUpDown,
@@ -208,6 +209,9 @@ interface Finding {
   sev_status?: 'triaged' | 'needs_analyst' | 'incomplete' | null;
   sev_pending?: number | null;
   business_app?: BusinessAppSummary | null;
+  /** Named by an active exploitation campaign: by CVE, or by targeted product */
+  campaign_match?: 'cve' | 'product' | null;
+  campaign_ids?: string[] | null;
 }
 
 interface OracleEnrichment {
@@ -288,7 +292,12 @@ interface ContextualAssessment {
   missing_checks?: string[];
 }
 
-type SortMode = 'opes' | 'risk' | 'severity' | 'delphi' | 'recent' | 'cvss';
+type SortMode = 'opes' | 'campaign' | 'risk' | 'severity' | 'delphi' | 'recent' | 'cvss';
+type ExposureFilter = 'all' | 'internal' | 'internet';
+
+/** Active exploitation campaign first (CVE before product), as the API's sort=campaign. */
+const campaignRank = (f: { campaign_match?: string | null }) =>
+  f.campaign_match === 'cve' ? 0 : f.campaign_match === 'product' ? 1 : 2;
 
 const RISK_LEVEL_STYLE: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-400 border-red-500/30',
@@ -917,6 +926,9 @@ export default function FindingsPage() {
   const [sortMode, setSortMode] = useState<SortMode>('opes');
   const [onlyKev, setOnlyKev] = useState(false);
   const [onlyAgent, setOnlyAgent] = useState(false);
+  const [onlyCampaign, setOnlyCampaign] = useState(false);
+  const [exposureFilter, setExposureFilter] = useState<ExposureFilter>('all');
+  const campaignSort = sortMode === 'campaign';
   const [onlyNeedsTriage, setOnlyNeedsTriage] = useState(false);
   const [severityEvalBusy, setSeverityEvalBusy] = useState(false);
   const [oracleBatchBusy, setOracleBatchBusy] = useState(false);
@@ -1749,6 +1761,11 @@ export default function FindingsPage() {
           // Top chips filter by OPES priority score (scanner severity as unscored fallback)
           opes_category: selectedSeverity || undefined,
           detected_by: onlyAgent ? 'agent' : undefined,
+          // Campaign/exposure filters and campaign sort run server-side so
+          // they reach past the first page.
+          active_campaign: onlyCampaign ? 'any' : undefined,
+          exposure: exposureFilter === 'all' ? undefined : exposureFilter,
+          sort: campaignSort ? 'campaign' : undefined,
           limit: 100,
         }),
         api.getFindingsSummary(),
@@ -1779,7 +1796,7 @@ export default function FindingsPage() {
     api.getOrganizations().then((orgs: any[]) => {
       if (orgs?.length) setFirstOrgId(orgs[0].id);
     }).catch(() => {});
-  }, [selectedSeverity, onlyAgent]);
+  }, [selectedSeverity, onlyAgent, onlyCampaign, exposureFilter, campaignSort]);
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
@@ -1877,10 +1894,18 @@ export default function FindingsPage() {
       if (!matchesSearch) return false;
       if (onlyKev && !f.delphi?.kev) return false;
       if (onlyAgent && (f.detected_by || '').toLowerCase() !== 'agent') return false;
+      if (onlyCampaign && !f.campaign_match) return false;
       if (onlyNeedsTriage && f.sev_status === 'triaged') return false;
       return true;
     })
     .sort((a, b) => {
+      if (sortMode === 'campaign') {
+        const rank = campaignRank(a) - campaignRank(b);
+        if (rank !== 0) return rank;
+        const aS = a.sev_score ?? -1;
+        const bS = b.sev_score ?? -1;
+        if (aS !== bS) return bS - aS;
+      }
       if (sortMode === 'opes') {
         const aRank = opesSortRank[effectivePriority(a)] ?? 5;
         const bRank = opesSortRank[effectivePriority(b)] ?? 5;
@@ -1930,6 +1955,7 @@ export default function FindingsPage() {
   const kevCount = findings.filter((f) => f.delphi?.kev).length;
   const ransomwareCount = findings.filter((f) => isRansomwareKev(f.delphi?.kev)).length;
   const agentCount = findings.filter((f) => (f.detected_by || '').toLowerCase() === 'agent').length;
+  const campaignCount = findings.filter((f) => f.campaign_match).length;
   const needsTriageCount = findings.filter((f) => f.sev_status !== 'triaged').length;
 
   // Keep the table row in step with the triage panel after a save.
@@ -2062,6 +2088,12 @@ export default function FindingsPage() {
                     Sort: OPES priority
                   </span>
                 </SelectItem>
+                <SelectItem value="campaign">
+                  <span className="flex items-center gap-2">
+                    <Crosshair className="h-3.5 w-3.5 text-red-400" />
+                    Sort: Active campaigns first
+                  </span>
+                </SelectItem>
                 <SelectItem value="risk">Sort: Risk (L × I)</SelectItem>
                 <SelectItem value="severity">Sort: Scanner severity</SelectItem>
                 <SelectItem value="delphi">
@@ -2083,6 +2115,25 @@ export default function FindingsPage() {
               <Flame className="h-4 w-4 mr-2" />
               KEV only {kevCount > 0 && <span className="ml-1 text-xs opacity-70">({kevCount})</span>}
             </Button>
+            <Button
+              variant={onlyCampaign ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setOnlyCampaign((v) => !v)}
+              title="Show only findings whose CVE or product is targeted by an active exploitation campaign"
+            >
+              <Crosshair className="h-4 w-4 mr-2" />
+              Active campaigns {campaignCount > 0 && <span className="ml-1 text-xs opacity-70">({campaignCount})</span>}
+            </Button>
+            <Select value={exposureFilter} onValueChange={(v) => setExposureFilter(v as ExposureFilter)}>
+              <SelectTrigger className="h-9 w-[160px] text-sm" title="Filter by asset exposure">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All assets</SelectItem>
+                <SelectItem value="internal">Internal assets</SelectItem>
+                <SelectItem value="internet">Internet-facing</SelectItem>
+              </SelectContent>
+            </Select>
             <Button
               variant={onlyAgent ? 'default' : 'outline'}
               size="sm"
@@ -2414,6 +2465,20 @@ export default function FindingsPage() {
                       >
                         {finding.title || finding.name || finding.template_id}
                       </button>
+                      {finding.campaign_match && (
+                        <Badge
+                          variant="outline"
+                          className="mt-1 w-fit gap-1 text-[10px] text-red-400 border-red-400/40"
+                          title={
+                            finding.campaign_match === 'cve'
+                              ? 'This CVE is exploited by an active campaign; see Remediation for interim mitigations'
+                              : 'This product is targeted by an active campaign; see Remediation for interim mitigations'
+                          }
+                        >
+                          <Crosshair className="h-3 w-3" />
+                          {finding.campaign_match === 'cve' ? 'Exploited in active campaign' : 'Product under active attack'}
+                        </Badge>
+                      )}
                     </TableCell>
                     <TableCell>
                       {finding.host ? (

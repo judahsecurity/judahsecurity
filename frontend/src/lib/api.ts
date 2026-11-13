@@ -1050,6 +1050,12 @@ class ApiClient {
     /** OPES priority category — preferred over scanner severity for triage filters */
     opes_category?: string;
     detected_by?: string;
+    /** Active exploitation campaign match: any, cve or product */
+    active_campaign?: 'any' | 'cve' | 'product';
+    /** Asset exposure: internal (not publicly accessible) or internet */
+    exposure?: 'internal' | 'internet';
+    /** 'risk' or 'campaign'; default is OPES priority */
+    sort?: 'risk' | 'campaign';
     skip?: number; 
     limit?: number;
   }) {

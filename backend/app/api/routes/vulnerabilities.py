@@ -279,6 +279,15 @@ def _effective_opes_category_expr():
     )
 
 
+def campaign_rank():
+    """Sort key: CVE named by an active campaign, then targeted product, then the rest."""
+    return case(
+        (Vulnerability.campaign_match == "cve", 0),
+        (Vulnerability.campaign_match == "product", 1),
+        else_=2,
+    )
+
+
 @router.get("/", response_model=List[VulnerabilityResponse])
 def list_vulnerabilities(
     severity: Optional[Severity] = None,
@@ -309,9 +318,19 @@ def list_vulnerabilities(
         description="Filter by severity triage status: needs_analyst, triaged, incomplete, or not_evaluated",
     ),
     business_app_id: Optional[int] = Query(None, description="Filter by business application"),
+    active_campaign: Optional[str] = Query(
+        None,
+        description="Filter by active exploitation campaign match: any, cve or product",
+    ),
+    exposure: Optional[str] = Query(
+        None,
+        description="Filter by asset exposure: internal (not publicly accessible) or internet",
+    ),
     sort: Optional[str] = Query(
         None,
-        description="'risk' orders by severity-evaluation score; default orders by OPES priority",
+        description="'risk' orders by severity-evaluation score; 'campaign' puts findings named by an "
+        "active exploitation campaign first (CVE before product matches), then by risk; "
+        "default orders by OPES priority",
     ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -364,8 +383,32 @@ def list_vulnerabilities(
                 and_(Vulnerability.business_app_id.is_(None), Asset.business_app_id == business_app_id),
             )
         )
+    if active_campaign:
+        match = active_campaign.strip().lower()
+        if match == "any":
+            query = query.filter(Vulnerability.campaign_match.isnot(None))
+        elif match in ("cve", "product"):
+            query = query.filter(Vulnerability.campaign_match == match)
+        else:
+            raise HTTPException(status_code=400, detail="active_campaign must be any, cve or product")
+    if exposure:
+        exp = exposure.strip().lower()
+        if exp == "internal":
+            query = query.filter(Asset.is_public.is_(False))
+        elif exp == "internet":
+            query = query.filter(Asset.is_public.isnot(False))
+        else:
+            raise HTTPException(status_code=400, detail="exposure must be internal or internet")
 
-    if sort == "risk":
+    if sort == "campaign":
+        ordering = (
+            campaign_rank(),
+            Vulnerability.sev_score.desc().nullslast(),
+            Vulnerability.oracle_opes_score.desc().nullslast(),
+            Vulnerability.severity.desc(),
+            Vulnerability.created_at.desc(),
+        )
+    elif sort == "risk":
         ordering = (
             Vulnerability.sev_score.desc().nullslast(),
             Vulnerability.oracle_opes_score.desc().nullslast(),
