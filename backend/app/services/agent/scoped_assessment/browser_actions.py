@@ -35,6 +35,21 @@ def allowed_discovery_control(*, kind: str, label: str, in_form: bool,
     )
 
 
+# Plain buttons are clicked only in write-observation mode: reads pass, and any
+# write the click triggers is recorded and blocked rather than sent.
+MAX_OBSERVATION_BUTTONS = 4
+
+
+def allowed_observation_button(*, label: str, in_form: bool, button_type: str = "") -> bool:
+    """A non-destructive plain button outside forms, e.g. "Load catalog"."""
+    return (
+        not in_form
+        and button_type.lower() not in {"submit", "reset"}
+        and bool(label.strip())
+        and not _DESTRUCTIVE.search(label)
+    )
+
+
 def safe_get_form_field(form: dict) -> str:
     """Select one inert search field; never submit a write or credential form."""
     if str(form.get("method") or "").upper() != "GET":

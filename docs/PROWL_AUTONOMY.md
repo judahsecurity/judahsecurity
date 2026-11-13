@@ -94,10 +94,17 @@ toward it). Every decision is recorded in `engagement_brain.replay_approvals` an
 the action ledger. Approvals are re-applied each turn only while delegation
 stays on; withdrawing it withdraws them.
 
-Current limit: browser discovery clicks only tabs and disclosure controls and
-aborts unapproved POSTs without recording them, so in an unattended run a POST
-is captured only through Caido-ingested traffic or an earlier operator-approved
-action. Capturing a blocked write without sending it is the next step.
+Browser `inspect_js` discovery also clicks up to four plain, non-destructive
+buttons outside forms. Each click runs in write-observation mode: same-origin
+reads on safe paths pass, while any write the click triggers is aborted and kept
+as a private capture marked `blocked_unsent` (request body and safe headers,
+no response). That capture is what `propose_replay_path` treats as observed, and
+the observed-input sweep replays its recorded body once the path is approved.
+`backend/tests/test_delegated_post_lab.py` exercises this with real Chromium
+against the class lab: the blind POST SQLi and POST XSS inputs stay blocked
+without delegation, are confirmed by the independent verifier with it, and the
+patched apps yield no finding. Tab and disclosure clicks keep their earlier
+behaviour, in which a same-origin write they trigger is sent and captured.
 
 ## Continuous dispatch and signal-earned budget
 

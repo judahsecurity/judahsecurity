@@ -340,6 +340,9 @@ async def check_browser(
     marker_request = False
     client_initial_response_ok = False
     get_form_actions = 0
+    # Set while clicking a plain button: reads pass, writes are recorded unsent.
+    write_observation_mode = False
+    blocked_writes_recorded = 0
     approved_post_path = urlsplit(form_action).path or "/"
     post_action_active = False
     approved_post_requests = 0
@@ -375,11 +378,63 @@ async def check_browser(
 
             governor = current_request_governor.get()
 
+            async def record_unsent_write(request, page_url: str) -> None:
+                """Keep a blocked write as a private capture without sending it.
+
+                The agent may then propose the path under delegated approval,
+                and the sweep replays the recorded body once it is approved.
+                """
+                nonlocal blocked_writes_recorded
+                if traffic_exchanges is None or request.resource_type not in {"xhr", "fetch"}:
+                    return
+                from .browser_traffic import MAX_BODY_BYTES, package_exchange, retain_exchange
+
+                body = request.post_data_buffer or b""
+                if len(body) > MAX_BODY_BYTES:
+                    return
+                public, private = package_exchange(
+                    url=request.url, expected_origin=expected_origin,
+                    action_ref=current_action_ref, method=request.method,
+                    resource_type=request.resource_type, status=0,
+                    content_type="", request_body=body, response_body=b"",
+                    request_content_type=request.headers.get("content-type", ""),
+                    page_url=page_url, request_headers=request.headers,
+                )
+                public["blocked_unsent"] = True
+                if retain_exchange(traffic_exchanges, seen_exchange_shapes,
+                                   {"public": public, "private": private}) in {"added", "replaced"}:
+                    blocked_writes_recorded += 1
+
             async def route_request(route):
                 nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
                 nonlocal xhr_body_match_mode, xhr_volatile_fields
                 nonlocal blocked_marker_navigation, blocked_marker_fetch
                 post_mutation = None
+                if write_observation_mode:
+                    from .browser_actions import allowed_discovery_path
+
+                    try:
+                        same_origin = origin(route.request.url) == expected_origin
+                    except ValueError:
+                        same_origin = False
+                    method = route.request.method.upper()
+                    if same_origin and method not in {"GET", "HEAD", "OPTIONS"}:
+                        try:
+                            frame_url = route.request.frame.url
+                        except Exception:
+                            frame_url = ""
+                        try:
+                            await record_unsent_write(route.request, frame_url)
+                        except Exception:
+                            pass
+                        blocked_requests += 1
+                        await route.abort()
+                        return
+                    if not same_origin or not allowed_discovery_path(
+                            urlsplit(route.request.url).path or "/"):
+                        blocked_requests += 1
+                        await route.abort()
+                        return
                 try:
                     allowed = origin(route.request.url) == expected_origin
                     if allowed and post_action_active:
@@ -867,9 +922,10 @@ async def check_browser(
                         cleanup_success = False
             if operation == "inspect_js":
                 from .browser_actions import (
-                    MAX_GET_FORM_ACTIONS, allowed_discovery_control,
-                    safe_get_form_field,
+                    MAX_GET_FORM_ACTIONS, MAX_OBSERVATION_BUTTONS, allowed_discovery_control,
+                    allowed_observation_button, safe_get_form_field,
                 )
+                observation_buttons = 0
 
                 page_observations: list[dict] = []
 
@@ -973,7 +1029,7 @@ async def check_browser(
                 while len(actions) - 2 < max_actions:
                     selected = None
                     controls = await page.query_selector_all(
-                        "[role=tab], button[aria-expanded='false'][aria-controls], summary"
+                        "[role=tab], button[aria-expanded='false'][aria-controls], summary, button"
                     )
                     for index, control in enumerate(controls[:24]):
                         try:
@@ -981,14 +1037,24 @@ async def check_browser(
                                 continue
                             role = (await control.get_attribute("role") or "").lower()
                             tag = await control.evaluate("el => el.tagName.toLowerCase()")
-                            kind = "tab" if role == "tab" else "summary" if tag == "summary" else "disclosure"
+                            controls_id = (await control.get_attribute("aria-controls") or "")[:80]
+                            disclosure = bool(controls_id) and (
+                                await control.get_attribute("aria-expanded") == "false")
+                            kind = ("tab" if role == "tab" else "summary" if tag == "summary"
+                                    else "disclosure" if disclosure else "button")
                             label = " ".join((await control.inner_text()).split())[:80]
                             in_form = await control.evaluate("el => Boolean(el.closest('form'))")
                             button_type = await control.get_attribute("type") or ""
-                            controls_id = (await control.get_attribute("aria-controls") or "")[:80]
                             page_path = urlsplit(page.url).path or "/"
                             fingerprint = (page_path, kind, label, controls_id)
-                            if fingerprint in seen_controls or not allowed_discovery_control(
+                            if fingerprint in seen_controls:
+                                continue
+                            if kind == "button":
+                                if (observation_buttons >= MAX_OBSERVATION_BUTTONS
+                                        or not allowed_observation_button(
+                                            label=label, in_form=in_form, button_type=button_type)):
+                                    continue
+                            elif not allowed_discovery_control(
                                 kind=kind, label=label, in_form=in_form, button_type=button_type,
                             ):
                                 continue
@@ -1003,12 +1069,17 @@ async def check_browser(
                     ref = f"ui-{len(actions) - 1}"
                     current_action_ref = ref
                     start = (len(requests), len(javascript_sources), len(traffic_exchanges))
+                    if kind == "button":
+                        observation_buttons += 1
+                        write_observation_mode = True
                     try:
                         await control.click(timeout=1500, no_wait_after=True)
                         await page.wait_for_timeout(400)
                         status = "completed"
                     except Exception as exc:
                         status = type(exc).__name__
+                    finally:
+                        write_observation_mode = False
                     assert_in_scope(page.url, allowed_origins)
                     await collect_inline()
                     actions.append(await checkpoint(
@@ -1072,6 +1143,7 @@ async def check_browser(
                 "title": (await page.title())[:200],
                 "requests": requests,
                 "blocked_requests": blocked_requests,
+                "blocked_writes_recorded": blocked_writes_recorded,
             }
             if operation == "map":
                 hrefs = await page.locator("a[href]").evaluate_all(

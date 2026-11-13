@@ -59,4 +59,4 @@ jobs:
       - run: python -m pip install -r backend/requirements-assessment-tests.txt 'playwright>=1.48'
       - run: python -m playwright install --with-deps chromium
       - name: Exercise actual browser capture and identity isolation
-        run: python -m pytest backend/tests/test_assessment_browser_capture.py -q
+        run: python -m pytest backend/tests/test_assessment_browser_capture.py backend/tests/test_delegated_post_lab.py -q
