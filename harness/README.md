@@ -37,7 +37,10 @@ rejection, neither run has an extra finding, and both runs used equal budgets.
 
 The included local lab exposes nine classes in positive and negative modes:
 SQLi, base64 encoded SQLi, reflected XSS, DOM XSS, SSRF, IDOR, GraphQL authorization,
-unsafe upload, and CSRF. It binds
+unsafe upload, and CSRF, plus blind POST SQLi, POST XHR XSS and a
+two-step `chain_leaked_key` case: a first-party script leaks a support API key
+that unlocks other customers' orders, so the impact is reachable only when the
+JS-secret result leads to an authorization test. It binds
 only to `127.0.0.1`. The SSRF positive fixture makes a DNS lookup only for a
 host beneath an explicitly supplied controlled OAST suffix. Start one case at
 a time, using a dedicated assessment database and the **same model, budget,
@@ -55,6 +58,14 @@ AEGIS_FINDINGS_SINK="$PWD/runs/class_lab/runs/graphql_authz-positive/findings.js
 python -m local_harness.product_class_benchmark runs/class_lab/corpus.json \
   --out runs/class_lab/report.json
 ```
+
+Add `--autonomy` to the agent command to apply scheduled-run limits (per-host
+request governor, signal-earned budget, specialist contracts) and
+`--delegate-replay-approval` to let the agent unlock write paths it observed.
+`product_assessment.json` then carries an `autonomy` section (target requests per
+host, backoffs, bonus grants, replay decisions), and the ledger metrics count
+fireteam refills, bonus grants and replay decisions. Use the same flags for both
+sides of a `ledger_compare`.
 
 Repeat the lab server and agent command for each manifest case, changing
 `--class`, `--polarity`, and the sink directory. For the SSRF positive, add

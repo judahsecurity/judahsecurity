@@ -19,6 +19,7 @@ CASES = {
     "graphql_authz": ("idor", "/graphql", "graphql_api"),
     "unsafe_file_upload": ("file_upload", "/api/uploads/{id}", "file_upload"),
     "csrf": ("csrf", "/profile", "auth_logic"),
+    "chain_leaked_key": ("idor", "/api/orders/2", "js_secrets"),
 }
 
 
@@ -34,7 +35,7 @@ def build_manifest(target: str) -> dict:
                 "expected_findings": [{
                     "id": name, "category": category, "endpoint": endpoint,
                     "description": f"Lab {bug_class} impact at {endpoint}",
-                    "accepted_categories": ["authz"] if bug_class == "graphql_authz" else
+                    "accepted_categories": ["authz"] if bug_class in {"graphql_authz", "chain_leaked_key"} else
                                            ["xss"] if bug_class == "unsafe_file_upload" else [],
                 }] if polarity == "positive" else [],
             })

@@ -79,7 +79,7 @@ def test_upload_and_csrf_negatives_reject_active_or_forged_content():
 
 def test_manifest_has_positive_and_negative_cases_for_each_class():
     cases = build_manifest("http://127.0.0.1:8765")["cases"]
-    assert len(cases) == 22
+    assert len(cases) == 24
     for bug_class in {case["bug_class"] for case in cases}:
         assert {case["polarity"] for case in cases if case["bug_class"] == bug_class} == {
             "positive", "negative"
@@ -128,3 +128,29 @@ def test_post_xhr_xss_fixture_rotates_token_and_escapes_patched_response():
         assert request(handler, "/api/render", method="POST", body={
             "message": payload, "csrf_token": token,
         })[0] == 403
+
+
+def _get(handler, path, headers=()):
+    lines = [f"GET {path} HTTP/1.1", "Host: localhost", *headers]
+    socket = MemorySocket(("\r\n".join(lines) + "\r\n\r\n").encode())
+    handler(socket, ("127.0.0.1", 12345), SimpleNamespace())
+    header, body = socket.output.getvalue().split(b"\r\n\r\n", 1)
+    return int(header.split()[1]), body.decode()
+
+
+def test_chain_fixture_leaks_a_key_that_unlocks_other_orders_only_when_vulnerable():
+    from local_harness.benchmark.class_lab import CHAIN_KEY
+
+    vulnerable = handler_for("chain_leaked_key", True, "")
+    patched = handler_for("chain_leaked_key", False, "")
+    assert "/static/support.js" in _get(vulnerable, "/")[1]
+    assert CHAIN_KEY in _get(vulnerable, "/static/support.js")[1]
+    assert CHAIN_KEY not in _get(patched, "/static/support.js")[1]
+    # Step 2 needs step 1: without the key, B's order is refused to A.
+    assert _get(vulnerable, "/api/orders/2", ["X-Lab-Identity: A"])[0] == 403
+    assert _get(vulnerable, "/api/orders/2")[0] == 401
+    status, body = _get(vulnerable, "/api/orders/2", [f"X-Api-Key: {CHAIN_KEY}"])
+    assert status == 200 and "aegis-lab-private-record-2" in body
+    # The patched app never honours the key; owners still read their own order.
+    assert _get(patched, "/api/orders/2", [f"X-Api-Key: {CHAIN_KEY}"])[0] == 401
+    assert _get(patched, "/api/orders/1", ["X-Lab-Identity: A"])[0] == 200

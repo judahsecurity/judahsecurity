@@ -18,7 +18,13 @@ import sqlite3
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CLASSES = ("sqli", "sqli_encoded", "sqli_post_blind", "xss", "xss_dom", "xss_post_xhr", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf")
+CLASSES = ("sqli", "sqli_encoded", "sqli_post_blind", "xss", "xss_dom", "xss_post_xhr", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf", "chain_leaked_key")
+
+# chain_leaked_key: a first-party script leaks a support API key (step 1) that
+# unlocks other customers' orders (step 2). Finding the impact needs the JS
+# secret result to unlock an authorization test. The negative app ships no key
+# and never honours one.
+CHAIN_KEY = "lab-support-key-3f9a1c7e5b2d4086"
 
 
 def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
@@ -79,6 +85,9 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
                     "ssrf": '<a href="/api/fetch?url=https%3A%2F%2Fexample.com">URL preview</a>',
                     "idor": '<a href="/api/objects/1">Private object</a>',
                     "graphql_authz": '<a href="/graphql">GraphQL API</a><p>POST JSON query node(id: "1") { ownerId secret }</p>',
+                    "chain_leaked_key": '<h1>Order status</h1><a href="/api/orders/1">My order</a>'
+                                        '<p>Support tooling calls /api/orders/{id} with an X-Api-Key header.</p>'
+                                        '<script src="/static/support.js"></script>',
                     "unsafe_file_upload": '<form action="/api/uploads" method="post" enctype="multipart/form-data"><input type="file" name="file"><button>Upload</button></form><p>JSON API accepts filename, content_type, content. GET/DELETE /api/uploads/{id}</p>',
                     "csrf": '<form action="/login" method="post"><input name="username"><input type="password" name="password"></form><form action="/profile" method="post"><input name="display_name"><button>Save</button></form>',
                 }
@@ -147,6 +156,29 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
                 return
             if bug_class == "graphql_authz" and path == "/graphql":
                 self._json(200, {"endpoint": "/graphql", "example": "query { node(id: \"1\") { ownerId secret } }"})
+                return
+            if bug_class == "chain_leaked_key" and path == "/static/support.js":
+                key = CHAIN_KEY if vulnerable else ""
+                self._send(200, (
+                    "const SUPPORT_API = '/api/orders/';\n"
+                    f"const SUPPORT_API_KEY = '{key}';\n"
+                    "async function lookup(id){return fetch(SUPPORT_API+id,"
+                    "{headers:{'X-Api-Key':SUPPORT_API_KEY}}).then(r=>r.json())}\n"
+                ), "application/javascript")
+                return
+            if bug_class == "chain_leaked_key" and path.startswith("/api/orders/"):
+                order_id = path.rsplit("/", 1)[-1]
+                orders = {"1": "A", "2": "B"}
+                if order_id not in orders:
+                    self._json(404, {"error": "missing"})
+                    return
+                key_ok = vulnerable and self.headers.get("X-Api-Key") == CHAIN_KEY
+                identity = self._identity()
+                if not key_ok and identity != orders[order_id]:
+                    self._json(401 if identity == "anonymous" else 403, {"error": "not your order"})
+                    return
+                self._json(200, {"order_id": order_id, "owner_id": orders[order_id],
+                                 "shipping_address": f"aegis-lab-private-record-{order_id}"})
                 return
             if bug_class == "unsafe_file_upload" and path.startswith("/api/uploads/"):
                 item = state["uploads"].get(path.rsplit("/", 1)[-1])
