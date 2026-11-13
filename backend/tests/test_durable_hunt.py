@@ -556,3 +556,112 @@ async def test_schedule_delegation_reaches_the_agent_policy(sessions, monkeypatc
     monkeypatch.setattr(action_ledger, "latest_run", lambda db, **kwargs: None)
     await durable_hunt.process_claimed("work-1", "w1")
     assert seen["policy"] == expected
+
+
+# --- Operator requests park only themselves ---------------------------------
+
+def _operator_turn(sessions, monkeypatch, responses, snapshot_brain):
+    from app.services.agent import action_ledger, orchestrator, run_snapshot
+
+    prompts = []
+
+    class FakeOrchestrator:
+        async def invoke(self, **kwargs):
+            prompts.append(kwargs["question"])
+            with sessions() as db:
+                db.merge(AgentRunSnapshot(
+                    session_id=kwargs["session_id"], organization_id=7,
+                    payload={"saved_at": time.time(), "engagement_brain": {}},
+                ))
+                db.commit()
+            return responses[min(len(prompts), len(responses)) - 1]
+
+    async def get_orchestrator():
+        return FakeOrchestrator()
+
+    monkeypatch.setattr(orchestrator, "get_agent_orchestrator", get_orchestrator)
+    monkeypatch.setattr(durable_hunt, "_authorized", lambda db, row: (True, ""))
+    monkeypatch.setattr(action_ledger, "latest_run", lambda db, **kwargs: {"status": "paused"})
+    monkeypatch.setattr(run_snapshot, "load_run_snapshot", lambda org, sid: {
+        "capability_map": {"target": TARGET}, "engagement_brain": snapshot_brain(),
+    })
+    return prompts
+
+
+def _awaiting(**fields):
+    values = {"error": None, "task_complete": False, "cost_usd": 0.1, "answer": "paused",
+              "awaiting_question": False, "awaiting_approval": False}
+    values.update(fields)
+    return SimpleNamespace(**values)
+
+
+HYPOTHESES = {"hypotheses": [{
+    "id": "h1", "title": "Check API", "assumption": "A", "test": "T",
+    "pass_criteria": "P", "kill_criteria": "K", "specialist": "api_authz", "target": TARGET,
+}]}
+
+
+@pytest.mark.asyncio
+async def test_approval_request_parks_and_the_run_continues(sessions, monkeypatch):
+    with sessions() as db:
+        db.add(_work(max_turns=12, price_limit_usd=8.0))
+        db.commit()
+        durable_hunt.claim_next(db, owner="w1")
+    approval = _awaiting(awaiting_approval=True, approval_request={
+        "from_phase": "informational", "to_phase": "exploitation", "reason": "Confirm SQLi",
+    })
+    revisions = iter(range(100))
+    _operator_turn(sessions, monkeypatch, [approval], lambda: {
+        "hypotheses": [{**HYPOTHESES["hypotheses"][0], "id": f"h{next(revisions)}"}],
+    })
+    result = await durable_hunt.process_claimed("work-1", "w1")
+    assert result["status"] == "queued"
+    with sessions() as db:
+        row = db.get(AgentAutonomyWork, "work-1")
+        assert [item["kind"] for item in row.limits["parked"]] == ["approval"]
+        assert "exploitation" in row.limits["parked"][0]["summary"]
+        assert "Operator decisions are pending and parked" in row.prompt
+        assert "Do not request these again" in row.prompt
+        durable_hunt.claim_next(db, owner="w2")
+    # The same request again is not parked twice.
+    await durable_hunt.process_claimed("work-1", "w2")
+    with sessions() as db:
+        assert len(db.get(AgentAutonomyWork, "work-1").limits["parked"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_with_only_parked_work_left_reports_what_waits(sessions, monkeypatch):
+    with sessions() as db:
+        db.add(_work(max_turns=12, price_limit_usd=8.0))
+        db.commit()
+        durable_hunt.claim_next(db, owner="w1")
+    question = _awaiting(awaiting_question=True,
+                         question_request={"question": "Which tenant may I test?"})
+    _operator_turn(sessions, monkeypatch, [question], lambda: {
+        "hypotheses": [{**HYPOTHESES["hypotheses"][0], "status": "killed"}],
+    })
+    result = await durable_hunt.process_claimed("work-1", "w1")
+    assert result["status"] == "blocked"
+    assert "Waiting for operator: question: Which tenant may I test?" in result["stop_reason"]
+
+
+@pytest.mark.asyncio
+async def test_agent_error_still_stops_the_run(sessions, monkeypatch):
+    with sessions() as db:
+        db.add(_work())
+        db.commit()
+        durable_hunt.claim_next(db, owner="w1")
+    failed = SimpleNamespace(error="model unavailable", task_complete=False, cost_usd=0.0,
+                             answer="", awaiting_question=False, awaiting_approval=False)
+    _operator_turn(sessions, monkeypatch, [failed], lambda: HYPOTHESES)
+    result = await durable_hunt.process_claimed("work-1", "w1")
+    assert result["status"] == "blocked" and result["stop_reason"] == "Agent error: model unavailable"
+
+
+def test_parked_items_are_deduplicated_and_capped():
+    item = {"kind": "question", "key": "q:1", "summary": "question: a"}
+    assert durable_hunt.merge_parked([item], dict(item)) == [item]
+    many = [{"kind": "question", "key": f"q:{i}", "summary": str(i)} for i in range(15)]
+    assert len(durable_hunt.merge_parked(many, None)) == durable_hunt.MAX_PARKED
+    assert durable_hunt.parked_item(SimpleNamespace(awaiting_approval=False,
+                                                    awaiting_question=False)) is None

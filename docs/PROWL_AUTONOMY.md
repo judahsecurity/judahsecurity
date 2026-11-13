@@ -58,6 +58,17 @@ reports `completed` while a candidate is pending; if the budget runs out first,
 the stop reason lists the candidates still awaiting independent verification.
 Existing schedules keep their saved `max_turns`; raise it to opt them in.
 
+## Operator requests park instead of stopping
+
+When a scheduled turn ends on a phase-transition approval or a question for
+the operator, the request is parked on the work item (`limits.parked`, at most
+10, deduplicated) and the run continues: the next turn is told which decisions
+are pending, not to request them again, and to carry on with the work that does
+not depend on them. When no other work remains, the run stops with "Waiting
+for operator: ..." listing each parked decision, which the completion email
+includes. An agent error still stops the run. Answering a parked decision later
+means starting a new run with that decision made.
+
 ## Request-boundary pacing and request count
 
 During a scheduled turn, every in-process `httpx` request to a host in the

@@ -247,7 +247,8 @@ async def _heartbeat(work_id: str, owner: str, stop: asyncio.Event) -> None:
 
 def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str = "",
             cost_usd: float = 0.0, revision: str = "", prompt: str = "",
-            count_turn: bool = True, requests: int = 0) -> dict[str, Any]:
+            count_turn: bool = True, requests: int = 0,
+            parked: list[dict] | None = None) -> dict[str, Any]:
     with SessionLocal() as db:
         row = db.query(AgentAutonomyWork).filter(
             AgentAutonomyWork.id == work_id,
@@ -257,9 +258,12 @@ def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str =
         if count_turn:
             row.turns += 1
         row.spent_usd = round(float(row.spent_usd or 0) + cost_usd, 6)
-        if requests:
+        if requests or parked is not None:
             limits = dict(row.limits or {})
-            limits["requests_sent"] = int(limits.get("requests_sent") or 0) + int(requests)
+            if requests:
+                limits["requests_sent"] = int(limits.get("requests_sent") or 0) + int(requests)
+            if parked is not None:
+                limits["parked"] = parked
             row.limits = limits
         row.status = status
         row.stop_reason = reason[:500]
@@ -277,6 +281,46 @@ def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str =
             "spent_usd": row.spent_usd, "stop_reason": row.stop_reason,
             "requests_sent": int((row.limits or {}).get("requests_sent") or 0),
         }
+
+
+MAX_PARKED = 10
+
+
+def parked_item(response: Any) -> dict | None:
+    """The operator decision a turn stopped on, as a value-free summary."""
+    if getattr(response, "awaiting_approval", False):
+        request = getattr(response, "approval_request", None) or {}
+        if not isinstance(request, dict):
+            request = getattr(request, "model_dump", lambda: {})()
+        to_phase = str(request.get("to_phase") or "next phase")
+        reason = " ".join(str(request.get("reason") or "").split())[:200]
+        return {"kind": "approval", "key": f"approval:{to_phase}",
+                "summary": f"approval to enter {to_phase}" + (f" ({reason})" if reason else "")}
+    if getattr(response, "awaiting_question", False):
+        request = getattr(response, "question_request", None) or {}
+        if not isinstance(request, dict):
+            request = getattr(request, "model_dump", lambda: {})()
+        question = " ".join(str(request.get("question") or "").split())[:200]
+        return {"kind": "question", "key": "question:" + hashlib.sha256(
+                    question.lower().encode()).hexdigest()[:16],
+                "summary": f"question: {question or 'operator input requested'}"}
+    return None
+
+
+def merge_parked(existing: Any, item: dict | None) -> list[dict]:
+    rows = [row for row in (existing or []) if isinstance(row, dict) and row.get("key")]
+    if item and all(row["key"] != item["key"] for row in rows):
+        rows.append(item)
+    return rows[-MAX_PARKED:]
+
+
+def parked_note(items: list[dict]) -> str:
+    listed = "; ".join(item["summary"] for item in items)[:600]
+    return (
+        f"Operator decisions are pending and parked: {listed}. No operator is "
+        "available during this scheduled run. Do not request these again; continue "
+        "with the work that does not depend on them and record what is blocked on each."
+    )
 
 
 def next_step(
@@ -443,11 +487,13 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
             current_signal_bonus_pool.reset(bonus_token)
             current_autonomy_recon_gate.reset(gate_token)
             current_autonomy_limits.reset(token)
-        if response.error or getattr(response, "awaiting_question", False) or getattr(response, "awaiting_approval", False):
+        if response.error:
             return finish(
-                status="blocked", reason="Agent error or operator input required",
+                status="blocked", reason=f"Agent error: {str(response.error)[:300]}",
                 answer=str(getattr(response, "answer", "") or ""),
             )
+        # An operator request parks only itself; other work keeps going.
+        parked_now = parked_item(response)
         raw_cost = getattr(response, "cost_usd", None)
         if not isinstance(raw_cost, (int, float)) or not math.isfinite(raw_cost) or raw_cost < 0:
             return finish(status="blocked", reason="Agent spend could not be measured")
@@ -489,10 +535,22 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
                 not verifying and governor.max_requests - governor.total < 10
             ),
         )
+        parked = merge_parked(limits_config.get("parked"), parked_now)
+        prompt = decision.get("prompt", "")
+        reason = decision["reason"]
+        if parked:
+            if decision["status"] == "queued":
+                prompt = f"{prompt} {parked_note(parked)}"
+            else:
+                waiting = "; ".join(item["summary"] for item in parked)[:300]
+                reason = (f"{reason}; " if reason else "") + f"Waiting for operator: {waiting}"
+                if decision["status"] == "completed":
+                    decision["status"] = "blocked"
         return finish(
-            status=decision["status"], reason=decision["reason"],
+            status=decision["status"], reason=reason,
             answer=str(response.answer or ""), cost_usd=cost,
-            revision=decision.get("revision", ""), prompt=decision.get("prompt", ""),
+            revision=decision.get("revision", ""), prompt=prompt,
+            parked=parked if parked_now else None,
         )
     except asyncio.TimeoutError:
         return finish(status="blocked", reason="Assessment time budget reached")
