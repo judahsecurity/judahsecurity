@@ -116,7 +116,6 @@ services:
       # Legacy optional executor; normal Prowl mode uses the built-in backend tools.
       - PROWL_ASSESSMENT_URL=${PROWL_ASSESSMENT_URL:-}
       - PROWL_ADMIN_TOKEN=${PROWL_ADMIN_TOKEN:-}
-      - PROWL_INGEST_KEY=${PROWL_INGEST_KEY:-}
       # Optional: redacted OTLP traces to a self-hosted Phoenix/Langfuse sidecar
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}

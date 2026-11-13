@@ -169,11 +169,17 @@ bound asset and observed origin must match before any of these writes occur.
 The asset detail page shows the passive API fingerprint and JS review receipts
 in App Structure alongside the saved paths, parameters, scripts, and REST APIs.
 
-Confirmed service publications enter the ordinary Aegis Findings table through
-`POST /api/v1/prowl/findings`. This intake requires a service key, distinct
-hunter and verifier evidence, a supported proof recipe, asset matching, and
-idempotency by candidate ID. For runs provisioned by Aegis, it also checks the
-bound organization, asset, and exact origin.
+The service-to-Aegis intake endpoints (`POST /api/v1/prowl/findings` and
+`GET /api/v1/prowl/assets/{id}/memory`) have been removed. They authenticated
+the service with one shared key for every organization and trusted the
+hunter and verifier evidence sent in the request body, so a key holder could
+create `exploit_verified` findings without a real reproduction. Normal Prowl
+publishes through `create_finding` and the independent verifier gate instead.
+If the external executor is needed again, rebuild its intake with a credential
+scoped to one provisioned run (organization, asset and origin taken from that
+run, with an expiry) and evidence the server verifies itself, either signed with
+the run's verifier credential or fetched from the service by artifact ID. The
+`prowl_publications` table is kept for historical records.
 
 ## Configuration for the legacy optional executor
 
@@ -184,8 +190,8 @@ For the legacy executor integration only, build the separate assessment image
 from the PROWL service checkout and make
 it available as `PROWL_ASSESSMENT_IMAGE` (default `prowl-browser:latest`). In
 the Aegis deployment set `PROWL_ASSESSMENT_URL` to
-`http://prowl-assessment:8833`, set a strong `PROWL_ADMIN_TOKEN`, and share a
-separate strong `PROWL_INGEST_KEY` with the service. Start the Compose
+`http://prowl-assessment:8833` and set a strong `PROWL_ADMIN_TOKEN`. The
+service can no longer publish findings back into Aegis (see above). Start the Compose
 `scoped-assessment` profile. The service has a private persistent data volume
 and no published port.
 
