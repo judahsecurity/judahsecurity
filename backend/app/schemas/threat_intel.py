@@ -61,6 +61,7 @@ class CveDetailResponse(BaseModel):
     oracle: dict[str, Any]
     signals: dict[str, Any] = Field(default_factory=dict)
     exploit_intelligence: dict[str, Any] = Field(default_factory=dict)
+    ai_exploitability: dict[str, Any] = Field(default_factory=dict)
     prioritization: dict[str, Any] = Field(default_factory=dict)
     shadowserver: dict[str, Any] = Field(default_factory=dict)
     intel_updates: list[IntelTimelineEvent]

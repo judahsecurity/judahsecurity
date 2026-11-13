@@ -35,6 +35,11 @@ from app.core.config import settings
 from app.models.api_config import ExternalService, resolve_api_key
 from app.services.vuln_intel_enrichment import enrich_cve_catalog
 from app.services.exploit_intelligence import bounded_priority_contribution
+from app.services.ai_exploitability import (
+    TIER_RANK as AI_TIER_RANK,
+    assess_ai_exploitability,
+    confirmed_ai_pocs_for_cves,
+)
 from app.services.external_vuln_indexes import (
     external_index_status,
     nuclei_coverage_for_cves,
@@ -888,6 +893,7 @@ def _build_entry(
     otx_count: int,
     oracle: dict,
     epss: dict | None = None,
+    ai_confirmed: dict | None = None,
 ) -> dict:
     if not isinstance(pdcp, dict):
         pdcp = {}
@@ -940,6 +946,7 @@ def _build_entry(
         "opes_score": oracle.get("opes_score"),
         "opes_category": oracle.get("opes_category"),
         "delphi_priority": oracle.get("delphi_priority"),
+        "ai_exploitability": assess_ai_exploitability(pdcp, ai_confirmed),
     }
 
 
@@ -951,6 +958,7 @@ async def get_emerging_vulnerabilities(
     severity: Optional[str] = Query(None, description="Filter by severity (critical,high,medium,low)"),
     detection: Optional[str] = Query(None, description="Filter: nuclei_template | poc_available | remote_no_template | no_detection | unknown"),
     source: Optional[str] = Query(None, description="Filter by source(s): cisa_kev,vulncheck_kev,vulncheck_xdb,enisa_kev,euvd,shadowserver,kevintel (comma-separated)"),
+    ai: Optional[str] = Query(None, description="Filter by AI exploitability tier(s): confirmed,likely,possible,unlikely,unknown (comma-separated)"),
     limit: int = Query(500, ge=1, le=2000),
     include_otx: bool = Query(
         False,
@@ -1129,6 +1137,7 @@ async def get_emerging_vulnerabilities(
 
     # Oracle DB lookup (sync, local DB — no HTTP)
     oracle_map = _get_oracle_analysis_for_cves(db, cve_ids)
+    ai_confirmed_map = confirmed_ai_pocs_for_cves(cve_ids)
 
     entries = []
     cve_ids_set = set(cve_ids)
@@ -1143,6 +1152,7 @@ async def get_emerging_vulnerabilities(
                 otx_count=otx_map.get(cve_id, 0),
                 oracle=oracle_map.get(cve_id) or {},
                 epss=epss_map.get(cve_id),
+                ai_confirmed=ai_confirmed_map.get(cve_id),
             )
         except Exception:
             logger.warning("threat-intel skipped malformed row %s", cve_id, exc_info=True)
@@ -1161,6 +1171,12 @@ async def get_emerging_vulnerabilities(
         entries = [
             e for e in entries
             if required_sources.intersection(set(e.get("kev_sources", [])))
+        ]
+    if ai:
+        allowed_ai = {t.strip().lower() for t in ai.split(",")}
+        entries = [
+            e for e in entries
+            if (e.get("ai_exploitability") or {}).get("tier", "unknown") in allowed_ai
         ]
 
     # Sort: multi-source CVEs first, then by severity
@@ -1182,6 +1198,10 @@ async def get_emerging_vulnerabilities(
         ),
         "otx_active_campaigns": sum(1 for e in entries if e.get("otx_active_campaign")),
         "oracle_analyzed": sum(1 for e in entries if e.get("oracle_analyzed")),
+        "by_ai_exploitability": {
+            tier: sum(1 for e in entries if (e.get("ai_exploitability") or {}).get("tier") == tier)
+            for tier in sorted(AI_TIER_RANK, key=AI_TIER_RANK.get, reverse=True)
+        },
         "by_severity": {
             "critical": sum(1 for e in entries if e.get("severity") == "critical"),
             "high": sum(1 for e in entries if e.get("severity") == "high"),
@@ -1289,6 +1309,9 @@ async def get_cve_detail(
         kev=known_exploited,
         shadowserver_signal=shadowserver,
     )
+    ai_exploitability = assess_ai_exploitability(
+        pdcp, confirmed_ai_pocs_for_cves([cve_id]).get(cve_id.upper())
+    )
     signals = {
         "observed_exploitation": {
             "known_exploited": known_exploited,
@@ -1301,6 +1324,7 @@ async def get_cve_detail(
             "percentile": pdcp.get("epss_percentile") if pdcp.get("epss_percentile") is not None else epss.get("epss_percentile"),
         },
         "public_exploit_maturity": exploit_intelligence,
+        "ai_exploitability": ai_exploitability,
         "detection_coverage": {
             "nuclei_template": bool(pdcp.get("is_template") or pdcp.get("nuclei_templates")),
             "template_count": pdcp.get("template_count") or (1 if pdcp.get("is_template") else 0),
@@ -1322,6 +1346,7 @@ async def get_cve_detail(
         "oracle": oracle,
         "signals": signals,
         "exploit_intelligence": exploit_intelligence,
+        "ai_exploitability": ai_exploitability,
         "prioritization": prioritization,
         "shadowserver": shadowserver,
         **timeline,
