@@ -1,0 +1,43 @@
+name: image build
+
+# Builds every image (without pushing) when a Dockerfile, a download pin or
+# the verification helper changes, so a bad pin fails here, not in deploy.
+on:
+  pull_request:
+    paths:
+      - '**/Dockerfile*'
+      - '**/docker/**'
+      - 'scripts/pin_build_downloads.py'
+      - '.github/workflows/image-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**/Dockerfile*'
+      - '**/docker/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {context: backend, dockerfile: Dockerfile}
+          - {context: backend, dockerfile: Dockerfile.scanner}
+          - {context: frontend, dockerfile: Dockerfile}
+          - {context: aegis-oracle, dockerfile: Dockerfile}
+          - {context: aegis-vanguard, dockerfile: Dockerfile}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Build ${{ matrix.context }}/${{ matrix.dockerfile }}
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          DOCKER_BUILDKIT=1 docker build --pull=false \
+            -f "${{ matrix.context }}/${{ matrix.dockerfile }}" "${{ matrix.context }}"

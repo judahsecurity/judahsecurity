@@ -1,0 +1,30 @@
+#!/bin/sh
+# fetch-verified URL [OUTFILE]
+#
+# Download URL only if its SHA-256 matches the pin for that exact URL in the
+# build manifest (scripts/pin_build_downloads.py writes it). A URL with no pin,
+# or a file whose hash differs, is refused and nothing is left on disk.
+set -eu
+
+url="${1:?usage: fetch-verified URL [OUTFILE]}"
+out="${2:-$(basename "$url")}"
+manifest="${FETCH_VERIFIED_MANIFEST:-/usr/local/share/build-checksums.sha256}"
+
+expected=$(awk -v u="$url" '$1 !~ /^#/ && $2 == u { print $1; exit }' "$manifest")
+if [ -z "$expected" ]; then
+    echo "fetch-verified: refusing $url: no pinned SHA-256 in $manifest" >&2
+    exit 1
+fi
+
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --proto '=https' --tlsv1.2 "$url" -o "$out"
+else
+    wget -q --https-only "$url" -O "$out"
+fi
+
+if ! echo "$expected  $out" | sha256sum -c - >/dev/null 2>&1; then
+    actual=$(sha256sum "$out" | cut -d' ' -f1)
+    rm -f "$out"
+    echo "fetch-verified: SHA-256 mismatch for $url (expected $expected, got $actual)" >&2
+    exit 1
+fi

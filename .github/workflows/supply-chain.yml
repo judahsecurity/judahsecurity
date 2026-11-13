@@ -21,6 +21,10 @@ jobs:
           persist-credentials: false
       - name: Images, actions, Go tools, downloads and git clones are pinned
         run: python3 scripts/supply_chain_check.py
+      - name: Every image download has a SHA-256 pin
+        run: |
+          python3 scripts/pin_build_downloads.py --check
+          cmp backend/docker/fetch-verified aegis-vanguard/docker/fetch-verified
 
   vulnerabilities:
     name: Known-vulnerable dependencies

@@ -3,6 +3,10 @@
 # Uses pre-built binaries instead of compiling for faster builds
 
 FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS base
+# Every build-time download is checked against a reviewed SHA-256 pin
+# (scripts/pin_build_downloads.py); fetch-verified refuses anything else.
+COPY docker/fetch-verified /usr/local/bin/fetch-verified
+COPY docker/build-checksums.sha256 /usr/local/share/build-checksums.sha256
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -29,31 +33,31 @@ ARG TARGETARCH=amd64
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then PD_ARCH="arm64"; else PD_ARCH="amd64"; fi && \
     # Each tool is downloaded independently so a single failure doesn't abort the build
-    (wget -q "https://github.com/projectdiscovery/nuclei/releases/download/v3.3.7/nuclei_3.3.7_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/nuclei/releases/download/v3.3.7/nuclei_3.3.7_linux_${PD_ARCH}.zip" && \
      unzip -o -q "nuclei_3.3.7_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "nuclei_3.3.7_linux_${PD_ARCH}.zip") || echo "nuclei download skipped" && \
-    (wget -q "https://github.com/projectdiscovery/subfinder/releases/download/v2.6.7/subfinder_2.6.7_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/subfinder/releases/download/v2.6.7/subfinder_2.6.7_linux_${PD_ARCH}.zip" && \
      unzip -o -q "subfinder_2.6.7_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "subfinder_2.6.7_linux_${PD_ARCH}.zip") || echo "subfinder download skipped" && \
-    (wget -q "https://github.com/projectdiscovery/httpx/releases/download/v1.6.10/httpx_1.6.10_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/httpx/releases/download/v1.6.10/httpx_1.6.10_linux_${PD_ARCH}.zip" && \
      unzip -o -q "httpx_1.6.10_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "httpx_1.6.10_linux_${PD_ARCH}.zip") || echo "httpx download skipped" && \
-    (wget -q "https://github.com/projectdiscovery/dnsx/releases/download/v1.2.1/dnsx_1.2.1_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/dnsx/releases/download/v1.2.1/dnsx_1.2.1_linux_${PD_ARCH}.zip" && \
      unzip -o -q "dnsx_1.2.1_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "dnsx_1.2.1_linux_${PD_ARCH}.zip") || echo "dnsx download skipped" && \
-    (wget -q "https://github.com/projectdiscovery/naabu/releases/download/v2.3.3/naabu_2.3.3_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/naabu/releases/download/v2.3.3/naabu_2.3.3_linux_${PD_ARCH}.zip" && \
      unzip -o -q "naabu_2.3.3_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "naabu_2.3.3_linux_${PD_ARCH}.zip") || echo "naabu download skipped" && \
-    (wget -q "https://github.com/projectdiscovery/katana/releases/download/v1.1.0/katana_1.1.0_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/katana/releases/download/v1.1.0/katana_1.1.0_linux_${PD_ARCH}.zip" && \
      unzip -o -q "katana_1.1.0_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "katana_1.1.0_linux_${PD_ARCH}.zip") || echo "katana download skipped" && \
-    (wget -q "https://github.com/projectdiscovery/chaos-client/releases/download/v0.5.2/chaos-client_0.5.2_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/chaos-client/releases/download/v0.5.2/chaos-client_0.5.2_linux_${PD_ARCH}.zip" && \
      unzip -o -q "chaos-client_0.5.2_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "chaos-client_0.5.2_linux_${PD_ARCH}.zip") || echo "chaos download skipped" && \
-    (wget -q "https://github.com/projectdiscovery/tlsx/releases/download/v1.1.7/tlsx_1.1.7_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/tlsx/releases/download/v1.1.7/tlsx_1.1.7_linux_${PD_ARCH}.zip" && \
      unzip -o -q "tlsx_1.1.7_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "tlsx_1.1.7_linux_${PD_ARCH}.zip") || echo "tlsx download skipped" && \
-    (wget -q "https://github.com/projectdiscovery/vulnx/releases/download/v2.0.1/vulnx_2.0.1_linux_${PD_ARCH}.zip" && \
+    (fetch-verified "https://github.com/projectdiscovery/vulnx/releases/download/v2.0.1/vulnx_2.0.1_linux_${PD_ARCH}.zip" && \
      unzip -o -q "vulnx_2.0.1_linux_${PD_ARCH}.zip" -d /tools && \
      rm -f "vulnx_2.0.1_linux_${PD_ARCH}.zip") || echo "vulnx download skipped"
 
@@ -61,11 +65,11 @@ RUN ARCH=$(dpkg --print-architecture) && \
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then ARCH_SUFFIX="arm64"; else ARCH_SUFFIX="amd64"; fi && \
     # ffuf
-    wget -q "https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_${ARCH_SUFFIX}.tar.gz" && \
+    fetch-verified "https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_${ARCH_SUFFIX}.tar.gz" && \
     tar -xzf "ffuf_2.1.0_linux_${ARCH_SUFFIX}.tar.gz" -C /tools && \
     rm "ffuf_2.1.0_linux_${ARCH_SUFFIX}.tar.gz" && \
     # Amass
-    wget -q "https://github.com/owasp-amass/amass/releases/download/v4.2.0/amass_Linux_${ARCH_SUFFIX}.zip" && \
+    fetch-verified "https://github.com/owasp-amass/amass/releases/download/v4.2.0/amass_Linux_${ARCH_SUFFIX}.zip" && \
     unzip -o -q "amass_Linux_${ARCH_SUFFIX}.zip" -d /tmp/amass && \
     cp /tmp/amass/amass_Linux_${ARCH_SUFFIX}/amass /tools/ && \
     rm -rf /tmp/amass "amass_Linux_${ARCH_SUFFIX}.zip"
@@ -99,7 +103,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends golang \
 # Feroxbuster (Rust — download release binary)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then FX_ARCH="aarch64"; else FX_ARCH="x86_64"; fi && \
-    (wget -q "https://github.com/epi052/feroxbuster/releases/download/v2.11.0/${FX_ARCH}-linux-feroxbuster.zip" -O /tmp/ferox.zip && \
+    (fetch-verified "https://github.com/epi052/feroxbuster/releases/download/v2.11.0/${FX_ARCH}-linux-feroxbuster.zip" /tmp/ferox.zip && \
      unzip -o -q /tmp/ferox.zip -d /tmp/ferox && \
      find /tmp/ferox -type f -name feroxbuster -exec cp {} /tools/ \; && \
      rm -rf /tmp/ferox /tmp/ferox.zip) || echo "feroxbuster download skipped"
@@ -107,14 +111,14 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # Download Gitleaks (secret scanner - Go binary)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then GL_ARCH="arm64"; else GL_ARCH="x64"; fi && \
-    wget -q "https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_${GL_ARCH}.tar.gz" -O gitleaks.tar.gz && \
+    fetch-verified "https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_${GL_ARCH}.tar.gz" gitleaks.tar.gz && \
     tar -xzf gitleaks.tar.gz -C /tools && \
     rm gitleaks.tar.gz || echo "Gitleaks download skipped"
 
 # Download Kiterunner (API endpoint brute-forcer)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then KR_ARCH="arm64"; else KR_ARCH="amd64"; fi && \
-    wget -q "https://github.com/assetnote/kiterunner/releases/download/v1.0.2/kiterunner_1.0.2_linux_${KR_ARCH}.tar.gz" -O kiterunner.tar.gz && \
+    fetch-verified "https://github.com/assetnote/kiterunner/releases/download/v1.0.2/kiterunner_1.0.2_linux_${KR_ARCH}.tar.gz" kiterunner.tar.gz && \
     tar -xzf kiterunner.tar.gz -C /tools && \
     rm kiterunner.tar.gz || echo "Kiterunner download skipped (release may not exist for ${KR_ARCH})"
 
@@ -273,10 +277,9 @@ RUN git clone --quiet https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && g
 # Prefer v2.0.1; fall back to v1.0.0. Wrapper: `astf …` on PATH.
 RUN apt-get update && apt-get install -y --no-install-recommends openjdk-21-jre-headless \
     && mkdir -p /opt/astf \
-    && (curl -fsSL -o /opt/astf/astf.jar \
+    && fetch-verified \
           "https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.1/astf-v2.0.1.jar" \
-        || curl -fsSL -o /opt/astf/astf.jar \
-          "https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v1.0.0/astf-v1.0.0.jar") \
+          /opt/astf/astf.jar \
     && printf '#!/bin/sh\nexec java -jar /opt/astf/astf.jar "$@"\n' > /usr/local/bin/astf \
     && chmod +x /usr/local/bin/astf \
     && rm -rf /var/lib/apt/lists/* \
@@ -286,8 +289,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends openjdk-21-jre-
 RUN pip install --no-cache-dir semgrep || echo "Semgrep installation skipped"
 
 # Trivy (container / filesystem / IaC vulnerability scanner)
-RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-        | sh -s -- -b /usr/local/bin \
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ]; then TV_ARCH="ARM64"; else TV_ARCH="64bit"; fi && \
+    fetch-verified "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-${TV_ARCH}.tar.gz" \
+        /tmp/trivy.tgz && \
+    tar -C /usr/local/bin -xzf /tmp/trivy.tgz trivy && rm /tmp/trivy.tgz \
     || echo "Trivy installation skipped"
 
 # Install subcat (passive subdomain enumeration — 19 sources)

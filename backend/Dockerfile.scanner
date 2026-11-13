@@ -25,6 +25,10 @@
 # =============================================================================
 
 FROM python:3.11-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39 AS builder
+# Every build-time download is checked against a reviewed SHA-256 pin
+# (scripts/pin_build_downloads.py); fetch-verified refuses anything else.
+COPY docker/fetch-verified /usr/local/bin/fetch-verified
+COPY docker/build-checksums.sha256 /usr/local/share/build-checksums.sha256
 
 # Install build dependencies.
 # build-essential is required because jsluice pulls in go-tree-sitter which
@@ -48,22 +52,22 @@ ARG TARGETARCH
 RUN if [ "$TARGETARCH" = "arm64" ]; then PD_ARCH="arm64"; else PD_ARCH="amd64"; fi && \
     echo "Building for architecture: $PD_ARCH" && \
     # Nuclei v3.7.0
-    curl -sL "https://github.com/projectdiscovery/nuclei/releases/download/v3.7.0/nuclei_3.7.0_linux_${PD_ARCH}.zip" -o nuclei.zip && \
+    fetch-verified "https://github.com/projectdiscovery/nuclei/releases/download/v3.7.0/nuclei_3.7.0_linux_${PD_ARCH}.zip" nuclei.zip && \
     unzip -o -q nuclei.zip -d /tools && rm nuclei.zip && \
     # Subfinder v2.12.0
-    curl -sL "https://github.com/projectdiscovery/subfinder/releases/download/v2.12.0/subfinder_2.12.0_linux_${PD_ARCH}.zip" -o subfinder.zip && \
+    fetch-verified "https://github.com/projectdiscovery/subfinder/releases/download/v2.12.0/subfinder_2.12.0_linux_${PD_ARCH}.zip" subfinder.zip && \
     unzip -o -q subfinder.zip -d /tools && rm subfinder.zip && \
     # HTTPX v1.8.1
-    curl -sL "https://github.com/projectdiscovery/httpx/releases/download/v1.8.1/httpx_1.8.1_linux_${PD_ARCH}.zip" -o httpx.zip && \
+    fetch-verified "https://github.com/projectdiscovery/httpx/releases/download/v1.8.1/httpx_1.8.1_linux_${PD_ARCH}.zip" httpx.zip && \
     unzip -o -q httpx.zip -d /tools && rm httpx.zip && \
     # Naabu v2.4.0
-    curl -sL "https://github.com/projectdiscovery/naabu/releases/download/v2.4.0/naabu_2.4.0_linux_${PD_ARCH}.zip" -o naabu.zip && \
+    fetch-verified "https://github.com/projectdiscovery/naabu/releases/download/v2.4.0/naabu_2.4.0_linux_${PD_ARCH}.zip" naabu.zip && \
     unzip -o -q naabu.zip -d /tools && rm naabu.zip && \
     # DNSX v1.2.3
-    curl -sL "https://github.com/projectdiscovery/dnsx/releases/download/v1.2.3/dnsx_1.2.3_linux_${PD_ARCH}.zip" -o dnsx.zip && \
+    fetch-verified "https://github.com/projectdiscovery/dnsx/releases/download/v1.2.3/dnsx_1.2.3_linux_${PD_ARCH}.zip" dnsx.zip && \
     unzip -o -q dnsx.zip -d /tools && rm dnsx.zip && \
     # Katana v1.4.0
-    curl -sL "https://github.com/projectdiscovery/katana/releases/download/v1.4.0/katana_1.4.0_linux_${PD_ARCH}.zip" -o katana.zip && \
+    fetch-verified "https://github.com/projectdiscovery/katana/releases/download/v1.4.0/katana_1.4.0_linux_${PD_ARCH}.zip" katana.zip && \
     unzip -o -q katana.zip -d /tools && rm katana.zip
 
 # Install Go tools (GAU, puredns, subjack, jsluice, uncover) built with a recent toolchain
@@ -71,10 +75,9 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then PD_ARCH="arm64"; else PD_ARCH="amd64"; 
 # Keep Go at 1.25.1 and pin subjack to the v3.0.0 commit; @latest requires Go 1.26.
 ENV GOTOOLCHAIN=go1.25.1
 ENV GO_VERSION=1.25.1
-RUN ARCH=$(dpkg --print-architecture) && \
-    if [ "$ARCH" = "arm64" ]; then GO_ARCH="arm64"; else GO_ARCH="amd64"; fi && \
-    curl -sSfL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o /tmp/go.tgz && \
-    rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+# Go comes from the digest-pinned official image; GOTOOLCHAIN above then
+# selects go1.25.1 through the module proxy, verified by the checksum database.
+COPY --from=golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 # CGO is required by jsluice -> go-tree-sitter (C parsers).
 ENV CGO_ENABLED=1
@@ -98,7 +101,7 @@ RUN go install github.com/lc/gau/v2/cmd/gau@v2.2.4 && \
 # Download Kiterunner (API endpoint brute-forcer)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then KR_ARCH="arm64"; else KR_ARCH="amd64"; fi && \
-    curl -sL "https://github.com/assetnote/kiterunner/releases/download/v1.0.2/kiterunner_1.0.2_linux_${KR_ARCH}.tar.gz" -o kiterunner.tgz && \
+    fetch-verified "https://github.com/assetnote/kiterunner/releases/download/v1.0.2/kiterunner_1.0.2_linux_${KR_ARCH}.tar.gz" kiterunner.tgz && \
     tar -xzf kiterunner.tgz -C /tools && rm kiterunner.tgz || echo "Kiterunner download skipped"
 
 # Make all tools executable
@@ -123,20 +126,25 @@ RUN mkdir -p /praetorian-bin && \
 # Janus  (OWASP ZAP):      stable Linux release + packaged python scripts
 # =============================================================================
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS aegis-builder
+# Every build-time download is checked against a reviewed SHA-256 pin
+# (scripts/pin_build_downloads.py); fetch-verified refuses anything else.
+COPY docker/fetch-verified /usr/local/bin/fetch-verified
+COPY docker/build-checksums.sha256 /usr/local/share/build-checksums.sha256
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates tar \
     && rm -rf /var/lib/apt/lists/*
 
 # Hermes: TruffleHog v3 (~80MB). Install script handles arch detection.
-RUN mkdir -p /aegis-bin && \
-    curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-        | sh -s -- -b /aegis-bin
+RUN mkdir -p /aegis-bin && ARCH=$(dpkg --print-architecture) && \
+    fetch-verified "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.9/trufflehog_3.99.9_linux_${ARCH}.tar.gz" \
+        /tmp/trufflehog.tgz && \
+    tar -C /aegis-bin -xzf /tmp/trufflehog.tgz trufflehog && rm /tmp/trufflehog.tgz
 
 # Janus: OWASP ZAP 2.16.x stable release (ships zap-baseline.py / zap-full-scan.py)
 ARG ZAP_VERSION=2.16.1
 RUN mkdir -p /aegis-zap && \
-    curl -sSfL "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Linux.tar.gz" \
-        -o /tmp/zap.tgz && \
+    fetch-verified "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Linux.tar.gz" \
+        /tmp/zap.tgz && \
     tar -xzf /tmp/zap.tgz -C /aegis-zap --strip-components=1 && \
     rm /tmp/zap.tgz
 
@@ -144,6 +152,10 @@ RUN mkdir -p /aegis-zap && \
 # Final Image
 # =============================================================================
 FROM python:3.11-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39
+# Every build-time download is checked against a reviewed SHA-256 pin
+# (scripts/pin_build_downloads.py); fetch-verified refuses anything else.
+COPY docker/fetch-verified /usr/local/bin/fetch-verified
+COPY docker/build-checksums.sha256 /usr/local/share/build-checksums.sha256
 
 LABEL maintainer="ASM Platform"
 LABEL description="Scanner worker with security scanning tools"
@@ -188,8 +200,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG DOCKER_CLI_VERSION=27.5.1
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then DARCH="aarch64"; else DARCH="x86_64"; fi && \
-    curl -fsSL "https://download.docker.com/linux/static/stable/${DARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
-      | tar -xz -C /tmp && \
+    fetch-verified "https://download.docker.com/linux/static/stable/${DARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+      /tmp/docker.tgz && \
+    tar -xzf /tmp/docker.tgz -C /tmp && rm /tmp/docker.tgz && \
     mv /tmp/docker/docker /usr/local/bin/docker && \
     rm -rf /tmp/docker && \
     chmod +x /usr/local/bin/docker
@@ -218,8 +231,8 @@ RUN pip install --no-cache-dir schemathesis || echo "Schemathesis installation s
 RUN pip install --no-cache-dir graphql-cop || echo "graphql-cop installation skipped"
 
 # puredns needs a list of public resolvers for wildcard filtering; ship a copy
-RUN curl -sSfL https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
-        -o /opt/resolvers.txt || echo "" > /opt/resolvers.txt
+RUN fetch-verified https://raw.githubusercontent.com/trickest/resolvers/6047aa832a85852caa6ec7d0c2e071bd823a749e/resolvers.txt \
+        /opt/resolvers.txt || echo "" > /opt/resolvers.txt
 
 # Themis (Prowler) - cloud CSPM for AWS/Azure/GCP/Kubernetes.
 # Installed as a Python package so `prowler aws|azure|gcp|kubernetes` is on PATH.
@@ -242,8 +255,11 @@ RUN git clone --quiet https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && g
 RUN pip install --no-cache-dir semgrep || echo "Semgrep installation skipped"
 
 # Trivy (container / filesystem / IaC vulnerability scanner)
-RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-        | sh -s -- -b /usr/local/bin \
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ]; then TV_ARCH="ARM64"; else TV_ARCH="64bit"; fi && \
+    fetch-verified "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-${TV_ARCH}.tar.gz" \
+        /tmp/trivy.tgz && \
+    tar -C /usr/local/bin -xzf /tmp/trivy.tgz trivy && rm /tmp/trivy.tgz \
     || echo "Trivy installation skipped"
 
 # Browser for reliable headless crawl + screenshots in Docker (no display needed).

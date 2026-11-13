@@ -1,4 +1,8 @@
 FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5
+# Every build-time download is checked against a reviewed SHA-256 pin
+# (scripts/pin_build_downloads.py); fetch-verified refuses anything else.
+COPY docker/fetch-verified /usr/local/bin/fetch-verified
+COPY docker/build-checksums.sha256 /usr/local/share/build-checksums.sha256
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
@@ -13,9 +17,8 @@ RUN apt-get update && apt-get install -y \
 
 # ── Go toolchain (for ProjectDiscovery + Praetorian tools) ──────────
 # Go 1.25+ required by Praetorian pius; older tools build fine on 1.25.
-ARG GO_VERSION=1.25.0
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
-    | tar -C /usr/local -xz
+# Go comes from the digest-pinned official image rather than a download.
+COPY --from=golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 /usr/local/go /usr/local/go
 
 # ── ProjectDiscovery tools ───────────────────────────────────────────
 RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.17.0 \
@@ -39,7 +42,7 @@ RUN go install -v github.com/owasp-amass/amass/v4/...@v4.2.0 \
 # ── Feroxbuster (Rust release) ───────────────────────────────────────
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then FX_ARCH="aarch64"; else FX_ARCH="x86_64"; fi && \
-    (wget -q "https://github.com/epi052/feroxbuster/releases/download/v2.11.0/${FX_ARCH}-linux-feroxbuster.zip" -O /tmp/ferox.zip && \
+    (fetch-verified "https://github.com/epi052/feroxbuster/releases/download/v2.11.0/${FX_ARCH}-linux-feroxbuster.zip" /tmp/ferox.zip && \
      unzip -o -q /tmp/ferox.zip -d /tmp/ferox && \
      find /tmp/ferox -type f -name feroxbuster -exec cp {} /usr/local/bin/ \; && \
      chmod +x /usr/local/bin/feroxbuster && \
@@ -57,8 +60,11 @@ RUN go install -v github.com/praetorian-inc/pius/cmd/pius@v1.3.18 \
 # Hermes: remote secrets-finder — GitHub/GitLab orgs, S3/GCS/Azure,
 #         Docker images, Postman, Jenkins, Jira/Confluence, + live
 #         credential verification. Complement to Argus (local paths).
-RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-        | sh -s -- -b /usr/local/bin
+# Pinned release instead of piping the moving install script into sh.
+RUN ARCH=$(dpkg --print-architecture) && \
+    fetch-verified "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.9/trufflehog_3.99.9_linux_${ARCH}.tar.gz" \
+        /tmp/trufflehog.tgz && \
+    tar -C /usr/local/bin -xzf /tmp/trufflehog.tgz trufflehog && rm /tmp/trufflehog.tgz
 
 # ── Aegis Vanguard: Janus (OWASP ZAP) ───────────────────────────────
 # Janus: two-faced DAST gatekeeper — baseline (passive, CI-safe) and
@@ -66,8 +72,8 @@ RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main
 ARG ZAP_VERSION=2.16.1
 RUN apt-get update && apt-get install -y --no-install-recommends default-jre-headless \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Linux.tar.gz" \
-        -o /tmp/zap.tgz \
+    && fetch-verified "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Linux.tar.gz" \
+        /tmp/zap.tgz \
     && mkdir -p /opt/zap \
     && tar -xzf /tmp/zap.tgz -C /opt/zap --strip-components=1 \
     && rm /tmp/zap.tgz \
@@ -80,8 +86,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends default-jre-hea
 ARG GITLEAKS_VERSION=8.18.4
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then GL_ARCH="x64"; else GL_ARCH="$ARCH"; fi && \
-    curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
-    | tar -C /usr/local/bin -xz gitleaks
+    fetch-verified "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
+        /tmp/gitleaks.tgz && \
+    tar -C /usr/local/bin -xzf /tmp/gitleaks.tgz gitleaks && rm /tmp/gitleaks.tgz
 
 # ── testssl.sh ───────────────────────────────────────────────────────
 RUN git clone --quiet https://github.com/testssl/testssl.sh.git /opt/testssl.sh && git -C /opt/testssl.sh checkout --quiet 3c26038d30c2c882e3554c853890572e65e78e76 \
@@ -136,8 +143,9 @@ RUN nuclei -update-templates 2>/dev/null || true
 
 # ── Wordlists for fuzzing ───────────────────────────────────────────
 RUN mkdir -p /usr/share/wordlists/dirb && \
-    curl -fsSL -o /usr/share/wordlists/dirb/common.txt \
-    https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt
+    fetch-verified \
+    https://raw.githubusercontent.com/danielmiessler/SecLists/cc28d5e100cadf6f8b9aa644ff748ac69d454174/Discovery/Web-Content/common.txt \
+    /usr/share/wordlists/dirb/common.txt
 
 # ── Python dependencies for the bridge ──────────────────────────────
 # Build from monorepo root so shared packages are available:
