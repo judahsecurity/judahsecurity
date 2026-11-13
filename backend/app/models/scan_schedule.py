@@ -514,7 +514,7 @@ CONTINUOUS_SCAN_TYPES = {
             "max_targets": 3,
             "price_limit_usd": 8.0,
             "autonomous_followup": True,
-            "max_turns": 3,
+            "max_turns": 12,
             "max_total_seconds": 3600,
         },
         "recommended_frequency": "weekly",

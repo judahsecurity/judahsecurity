@@ -274,3 +274,152 @@ def test_scheduled_snapshot_loads_from_database_after_local_file_is_gone(session
         path.unlink()
     loaded = run_snapshot.load_run_snapshot(7, "sched-7-work-1")
     assert loaded["capability_map"]["target"] == TARGET
+
+
+# --- Budget-driven continuation and the independent verification turn ------
+
+from app.services.agent.autonomy_limits import (
+    limits_from_config, turn_budget_from_config,
+)
+from app.services.agent.scheduled_hunt import WRAPUP_REVISION
+
+
+def _step(**overrides):
+    values = {
+        "plan": ("rev-a", "Continue"), "pending": [], "agent_complete": False,
+        "prior_revisions": [], "turns_after": 1, "max_turns": 12,
+        "remaining_usd": 7.0, "price_limit_usd": 8.0, "remaining_seconds": 3000,
+        "max_stalled_replans": 2, "target": TARGET,
+    }
+    values.update(overrides)
+    return durable_hunt.next_step(**values)
+
+
+def test_turn_budget_defaults_and_caps():
+    assert turn_budget_from_config({}) == {
+        "max_turns": 12, "max_total_seconds": 3600, "max_stalled_replans": 2,
+    }
+    capped = turn_budget_from_config({
+        "max_turns": 500, "max_total_seconds": 10 ** 6, "max_stalled_replans": 99,
+    })
+    assert capped == {"max_turns": 24, "max_total_seconds": 14400, "max_stalled_replans": 4}
+    assert turn_budget_from_config({"max_stalled_replans": 0})["max_stalled_replans"] == 0
+    # The stored limits dict round-trips an explicit zero.
+    stored = limits_from_config({"max_stalled_replans": 0}, target=TARGET).__dict__
+    assert limits_from_config(stored, target=TARGET).max_stalled_replans == 0
+
+
+def test_new_revision_continues():
+    assert _step() == {"status": "queued", "reason": "", "revision": "rev-a", "prompt": "Continue"}
+
+
+def test_stalled_turn_replans_then_stops():
+    first = _step(prior_revisions=["rev-a"])
+    assert first["status"] == "queued" and "Re-plan" in first["prompt"]
+    second = _step(prior_revisions=["rev-a", "rev-a"])
+    assert second["status"] == "queued"
+    stopped = _step(prior_revisions=["rev-a", "rev-a", "rev-a"])
+    assert stopped["status"] == "blocked"
+    assert "after 2 re-plan" in stopped["reason"]
+    assert _step(prior_revisions=["rev-a"], max_stalled_replans=0)["status"] == "blocked"
+
+
+def test_pending_candidates_get_a_verification_turn_before_stopping():
+    stalled = _step(prior_revisions=["rev-a"] * 3, pending=["cand-1"])
+    assert stalled["status"] == "queued" and stalled["revision"] == WRAPUP_REVISION
+    assert "independent_verify" in stalled["prompt"] and "cand-1" in stalled["prompt"]
+    # Spend inside the reserve stops exploration but still verifies.
+    low = _step(remaining_usd=1.0, pending=["cand-1"])
+    assert low["revision"] == WRAPUP_REVISION
+    # The second-to-last turn is the last exploration turn.
+    last = _step(turns_after=11, pending=["cand-1"])
+    assert last["revision"] == WRAPUP_REVISION
+
+
+def test_agent_completion_with_pending_candidate_is_not_completed():
+    result = _step(plan=None, agent_complete=True, pending=["cand-1"])
+    assert result["status"] == "queued" and result["revision"] == WRAPUP_REVISION
+    assert _step(plan=None, agent_complete=True)["status"] == "completed"
+
+
+def test_candidate_still_pending_after_verification_turn_is_reported():
+    result = _step(
+        plan=None, agent_complete=True, pending=["cand-1", "cand-2"],
+        prior_revisions=["rev-a", WRAPUP_REVISION],
+    )
+    assert result["status"] == "blocked"
+    assert "2 candidate(s) still awaiting independent verification: cand-1, cand-2" in result["reason"]
+
+
+def test_no_verification_turn_without_budget():
+    for overrides in ({"remaining_usd": 0.0}, {"turns_after": 12}, {"remaining_seconds": 60}):
+        result = _step(pending=["cand-1"], **overrides)
+        assert result["status"] == "blocked"
+        assert "awaiting independent verification" in result["reason"]
+
+
+def test_verification_turn_runs_once():
+    result = _step(prior_revisions=["rev-a", WRAPUP_REVISION])
+    assert result["status"] == "blocked"
+    assert "deferred to the next run" in result["reason"]
+
+
+def test_enqueue_uses_budget_defaults(sessions):
+    schedule = SimpleNamespace(
+        id=9, organization_id=7, next_run_at=datetime(2026, 10, 30),
+        config={"autonomous_followup": True},
+    )
+    with sessions() as db:
+        durable_hunt.enqueue_scheduled_hunts(db, schedule, [TARGET], user_id=11)
+        db.commit()
+        row = db.query(AgentAutonomyWork).one()
+        assert row.max_turns == 12 and row.max_total_seconds == 3600
+        assert row.limits["max_stalled_replans"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pending_candidate_runs_verification_turn_end_to_end(sessions, monkeypatch):
+    from app.services.agent import action_ledger, orchestrator, run_snapshot
+
+    with sessions() as db:
+        db.add(_work(max_turns=12, price_limit_usd=8.0))
+        db.commit()
+        assert durable_hunt.claim_next(db, owner="worker-1") == "work-1"
+
+    prompts = []
+    candidate = {"id": "cand-1", "status": "pending", "revision": 1}
+
+    class FakeOrchestrator:
+        async def invoke(self, **kwargs):
+            prompts.append(kwargs["question"])
+            if len(prompts) == 2:
+                candidate["status"] = "confirmed"
+            with sessions() as db:
+                db.merge(AgentRunSnapshot(
+                    session_id=kwargs["session_id"], organization_id=7,
+                    payload={"saved_at": time.time(), "engagement_brain": {}},
+                ))
+                db.commit()
+            return SimpleNamespace(
+                error=None, awaiting_question=False, awaiting_approval=False,
+                task_complete=True, cost_usd=0.5, answer="done",
+            )
+
+    async def get_orchestrator():
+        return FakeOrchestrator()
+
+    monkeypatch.setattr(orchestrator, "get_agent_orchestrator", get_orchestrator)
+    monkeypatch.setattr(durable_hunt, "_authorized", lambda db, row: (True, ""))
+    monkeypatch.setattr(action_ledger, "latest_run", lambda db, **kwargs: {"status": "completed"})
+    monkeypatch.setattr(run_snapshot, "load_run_snapshot", lambda org, sid: {
+        "capability_map": {"target": TARGET},
+        "engagement_brain": {"candidates": [dict(candidate)]},
+    })
+    first = await durable_hunt.process_claimed("work-1", "worker-1")
+    assert first["status"] == "queued"
+    with sessions() as db:
+        assert db.get(AgentAutonomyWork, "work-1").revisions == [WRAPUP_REVISION]
+        assert durable_hunt.claim_next(db, owner="worker-2") == "work-1"
+    second = await durable_hunt.process_claimed("work-1", "worker-2")
+    assert second["status"] == "completed"
+    assert "independent_verify" in prompts[1] and "cand-1" in prompts[1]

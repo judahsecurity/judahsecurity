@@ -22,8 +22,9 @@ their existing execution path.
 3. On a new `tester_process` schedule, autonomous follow-up is already enabled.
    Each work item uses its target host as its default observation and specialist
    scope. The schedule
-   config may also set `max_turns` (default 3, cap 4), `price_limit_usd`
-   (default 8), `max_total_seconds` (default 3600, cap 7200),
+   config may also set `max_turns` (default 12, cap 24), `price_limit_usd`
+   (default 8), `max_total_seconds` (default 3600, cap 14400),
+   `max_stalled_replans` (default 2, cap 4; 0 stops on the first stalled turn),
    `max_specialist_tool_calls` (default 12, cap 40),
    `max_specialist_seconds` (default 300, cap 600), and
    `max_parallel_specialists` (default 3, cap 6). The saved work contract also
@@ -39,6 +40,23 @@ their existing execution path.
    `GET /api/v1/scan-schedules/{id}/autonomy-work/{work_id}/timeline`, to see
    observations, linked hypotheses, specialist attempts, evidence references,
    verdicts, stop reasons, and reported cost without raw tool logs.
+
+## Turn budget and independent verification
+
+Spend and wall time are the limits a run is expected to reach; `max_turns` is a
+backstop. After each turn the worker queues another while open hypotheses,
+coverage cells or pending candidates change. When a turn leaves the same work
+open, the next turn is asked to re-plan with a different specialist, technique,
+identity or input, up to `max_stalled_replans` times.
+
+The last turn, 15% of the spend limit and a few minutes of wall time are held
+back for verification. If any finding candidate is still pending when
+exploration stops, the worker queues one final turn that only runs
+`independent_verify` on those candidates, publishes those the fresh verifier
+confirmed, and closes open coverage cells with their proof gaps. A run never
+reports `completed` while a candidate is pending; if the budget runs out first,
+the stop reason lists the candidates still awaiting independent verification.
+Existing schedules keep their saved `max_turns`; raise it to opt them in.
 
 The opted-in early recon pack adds a bounded CNAME lookup. DNS, live hosts,
 technologies, API endpoints, and first-party scripts enter a shared observation

@@ -136,6 +136,51 @@ def continuation_plan(snapshot: dict, run: dict | None, target: str) -> tuple[st
     return revision, prompt
 
 
+WRAPUP_REVISION = "verification-wrapup"
+
+
+def pending_candidate_ids(snapshot: dict | None) -> list[str]:
+    """Finding candidates the independent verifier has not closed yet."""
+    brain = (snapshot or {}).get("engagement_brain") or {}
+    return sorted(
+        str(row.get("id"))
+        for row in (brain.get("candidates") or [])
+        if isinstance(row, dict) and row.get("id") and row.get("status") == "pending"
+    )
+
+
+def replan_prompt(prompt: str) -> str:
+    """Ask for a different approach when a turn left the same work open."""
+    return (
+        f"{prompt} The previous turn ended with this same open work. Re-plan "
+        "before acting: pick a different specialist, technique, identity or "
+        "observed input for each stuck item, or close an item that cannot "
+        "progress as inconclusive with a specific proof gap. Do not repeat "
+        "probes that already ran."
+    )
+
+
+def wrapup_prompt(target: str, pending: list[str]) -> str:
+    """Final turn: independent verification and closure, no new exploration."""
+    listed = ", ".join(pending[:20]) + (" and more" if len(pending) > 20 else "")
+    verify = (
+        f"Call independent_verify for every pending finding candidate ({listed}) "
+        "and record each verdict from the fresh verifier run. "
+        if pending else
+        "Confirm no finding candidate is still pending independent verification. "
+    )
+    return (
+        f"Final verification turn for the authorized assessment of {target}. "
+        "Do not start new recon, exploration or specialists. "
+        f"{verify}"
+        "Publish only candidates the independent verifier confirmed; a hunter "
+        "receipt is not proof. Close remaining open coverage cells as "
+        "inconclusive with the missing proof and next test; mark a cell "
+        "tested_clean only with cited negative evidence. Summarise what was "
+        "confirmed, refuted, inconclusive and deferred."
+    )
+
+
 async def run_tester_process_targets(
     *,
     organization_id: int,
@@ -152,6 +197,7 @@ async def run_tester_process_targets(
     from app.services.agent.playbooks import build_initial_objective
     from app.services.agent.run_snapshot import load_run_snapshot
     from app.services.agent.action_ledger import latest_run
+    from app.services.agent.autonomy_limits import MAX_TURNS_CAP
     from app.db.database import SessionLocal
 
     orch = await get_agent_orchestrator()
@@ -170,7 +216,7 @@ async def run_tester_process_targets(
         last_run_status = ""
         stop_reason = ""
         try:
-            turn_limit = max(1, min(int(max_turns), 4)) if autonomous_followup else 1
+            turn_limit = max(1, min(int(max_turns), MAX_TURNS_CAP)) if autonomous_followup else 1
             for turn in range(turn_limit):
                 remaining_seconds = max_total_seconds - (time.monotonic() - started)
                 remaining_usd = price_limit_usd - spent

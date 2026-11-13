@@ -553,6 +553,9 @@ class ScheduleWorker:
             db.commit()
             logger.info("Queued %s durable tester-process target(s) for schedule %s", created, schedule.id)
             return
+        from app.services.agent.autonomy_limits import turn_budget_from_config
+
+        turn_budget = turn_budget_from_config(cfg)
         result = await run_tester_process_targets(
             organization_id=schedule.organization_id,
             user_id=str(operator.id),
@@ -561,8 +564,8 @@ class ScheduleWorker:
             schedule_name=schedule.name,
             run_key=f"{schedule.id}:{schedule.next_run_at.isoformat()}",
             autonomous_followup=cfg.get("autonomous_followup") is True,
-            max_turns=max(1, min(int(cfg.get("max_turns") or 3), 4)),
-            max_total_seconds=max(300, min(int(cfg.get("max_total_seconds") or 3600), 7200)),
+            max_turns=turn_budget["max_turns"],
+            max_total_seconds=turn_budget["max_total_seconds"],
         )
         digest = result.get("digest") or ""
         failed = any(r.get("error") for r in (result.get("results") or []))

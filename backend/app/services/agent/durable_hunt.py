@@ -22,10 +22,14 @@ from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot
 from app.models.agent_run_ledger import AgentActionReceipt, AgentRunLedger
 from app.models.scan_schedule import ScanSchedule
 from app.models.user import User, UserRole
-from app.services.agent.scheduled_hunt import continuation_plan, notify_emails
+from app.services.agent.scheduled_hunt import (
+    WRAPUP_REVISION, continuation_plan, notify_emails, pending_candidate_ids,
+    replan_prompt, wrapup_prompt,
+)
 
 logger = logging.getLogger(__name__)
 _LEASE_SECONDS = 120
+_REVISION_HISTORY = 50
 _RECOVERY_READ_ONLY = {
     "assessment_kickoff", "execute_subfinder", "execute_dnsx", "execute_httpx",
     "execute_wafw00f", "execute_whatweb", "spawn_recon_workers",
@@ -50,9 +54,10 @@ def enqueue_scheduled_hunts(
 ) -> int:
     """Create at-most-once work items for one schedule tick."""
     from app.services.agent.playbooks import build_initial_objective
-    from app.services.agent.autonomy_limits import limits_from_config
+    from app.services.agent.autonomy_limits import limits_from_config, turn_budget_from_config
 
     config = schedule.config or {}
+    budget = turn_budget_from_config(config)
     due_at = schedule.next_run_at or datetime.utcnow()
     created = 0
     for target in targets:
@@ -79,9 +84,9 @@ def enqueue_scheduled_hunts(
             status="queued",
             prompt=objective or f"Run tester-process on {target}",
             revisions=[],
-            max_turns=max(1, min(int(config.get("max_turns") or 3), 4)),
+            max_turns=budget["max_turns"],
             price_limit_usd=max(0.01, float(config.get("price_limit_usd") or 8.0)),
-            max_total_seconds=max(300, min(int(config.get("max_total_seconds") or 3600), 7200)),
+            max_total_seconds=budget["max_total_seconds"],
             limits=limits_from_config(config, target=target).__dict__,
         ))
         created += 1
@@ -138,7 +143,7 @@ def recover_expired(db: Any, *, now: datetime | None = None) -> int:
                   and (now - row.created_at).total_seconds() < row.max_total_seconds):
                 row.status = "queued"
                 row.prompt = plan[1]
-                row.revisions = [*(row.revisions or []), plan[0]][-10:]
+                row.revisions = [*(row.revisions or []), plan[0]][-_REVISION_HISTORY:]
                 row.stop_reason = ""
             elif run.status == "completed" and not plan:
                 row.status = "completed"
@@ -259,7 +264,7 @@ def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str =
         row.lease_until = None
         if status == "queued":
             row.prompt = prompt
-            row.revisions = [*(row.revisions or []), revision][-10:]
+            row.revisions = [*(row.revisions or []), revision][-_REVISION_HISTORY:]
         else:
             row.finished_at = datetime.utcnow()
         db.commit()
@@ -267,6 +272,73 @@ def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str =
             "id": work_id, "status": status, "turns": row.turns,
             "spent_usd": row.spent_usd, "stop_reason": row.stop_reason,
         }
+
+
+def next_step(
+    *, plan: tuple[str, str] | None, pending: list[str], agent_complete: bool,
+    prior_revisions: list[str], turns_after: int, max_turns: int,
+    remaining_usd: float, price_limit_usd: float, remaining_seconds: float,
+    max_stalled_replans: int, target: str,
+) -> dict[str, str]:
+    """Decide what follows a finished turn.
+
+    Work continues while spend, time and turns allow. A turn that leaves the
+    same open work gets a bounded number of re-plans. Before the run ends,
+    one turn is held back so every pending candidate goes through the
+    independent verifier; a run never reports completed with one pending.
+    """
+    from app.services.agent.autonomy_limits import WRAPUP_MIN_SECONDS, WRAPUP_RESERVE_FRACTION
+
+    wrapped_up = WRAPUP_REVISION in prior_revisions
+    reserve = price_limit_usd * WRAPUP_RESERVE_FRACTION
+    # Keep the last turn, the spend reserve and some wall time for verification.
+    room_to_explore = (
+        not wrapped_up
+        and turns_after < max_turns - 1
+        and remaining_usd > reserve
+        and remaining_seconds > WRAPUP_MIN_SECONDS * 2
+    )
+    if agent_complete and not pending:
+        return {"status": "completed", "reason": ""}
+
+    stop_reason = ""
+    if plan and not agent_complete:
+        revision, prompt = plan
+        seen = prior_revisions.count(revision)
+        if wrapped_up:
+            stop_reason = "Verification turn finished; remaining open work is deferred to the next run"
+        elif not room_to_explore:
+            stop_reason = "Assessment turn, time or spend budget reached"
+        elif seen == 0:
+            return {"status": "queued", "reason": "", "revision": revision, "prompt": prompt}
+        elif seen <= max_stalled_replans:
+            return {
+                "status": "queued", "reason": "", "revision": revision,
+                "prompt": replan_prompt(prompt),
+            }
+        else:
+            stop_reason = f"No new hypothesis or coverage progress after {seen - 1} re-plan(s)"
+    elif not plan and not agent_complete:
+        stop_reason = "No schedulable work in the saved assessment"
+
+    can_wrap_up = (
+        not wrapped_up
+        and turns_after < max_turns
+        and remaining_usd > 0
+        and remaining_seconds > WRAPUP_MIN_SECONDS
+    )
+    if pending and can_wrap_up:
+        return {
+            "status": "queued", "reason": "", "revision": WRAPUP_REVISION,
+            "prompt": wrapup_prompt(target, pending),
+        }
+    if pending:
+        listed = ", ".join(pending[:10])
+        verification = (
+            f"{len(pending)} candidate(s) still awaiting independent verification: {listed}"
+        )
+        stop_reason = f"{stop_reason}; {verification}" if stop_reason else verification
+    return {"status": "blocked", "reason": stop_reason or "Assessment stopped before completion"}
 
 
 async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
@@ -287,6 +359,9 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
         organization_id, user_id, turns = row.organization_id, row.user_id, row.turns
         max_turns = row.max_turns
         limits_config = dict(row.limits or {})
+        price_limit_usd, spent_before = row.price_limit_usd, float(row.spent_usd or 0)
+        max_total_seconds, created_at = row.max_total_seconds, row.created_at
+        prior_revisions = list(row.revisions or [])
     if not authorized:
         return _finish(work_id, owner, status="blocked", reason=reason, count_turn=False)
     if remaining_seconds <= 0 or remaining_usd <= 0 or turns >= max_turns:
@@ -339,7 +414,7 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
                 db, session_id=session_id, organization_id=int(organization_id), user_id=int(user_id),
             )
             row = db.get(AgentAutonomyWork, work_id)
-            prior_revisions = set(row.revisions or []) if row else set()
+            prior_revisions = list(row.revisions or []) if row else prior_revisions
             saved = db.get(AgentRunSnapshot, session_id)
             fresh_snapshot = bool(
                 saved and saved.organization_id == int(organization_id)
@@ -352,23 +427,24 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
                 reason="This turn has no durable database snapshot; reconcile before resuming",
                 answer=str(response.answer or ""), cost_usd=cost,
             )
-        plan = continuation_plan(load_run_snapshot(organization_id, session_id), run, target)
-        if plan and turns + 1 < max_turns and cost < remaining_usd:
-            revision, next_prompt = plan
-            if revision not in prior_revisions:
-                return _finish(
-                    work_id, owner, status="queued", reason="", answer=str(response.answer or ""),
-                    cost_usd=cost, revision=revision, prompt=next_prompt,
-                )
-        complete = bool(response.task_complete and run and run.get("status") == "completed")
-        reason = "" if complete else (
-            "No new hypothesis or coverage progress" if plan and plan[0] in prior_revisions else
-            "Assessment turn or spend budget reached" if plan else
-            "No schedulable work in the saved assessment"
+        snapshot = load_run_snapshot(organization_id, session_id)
+        decision = next_step(
+            plan=continuation_plan(snapshot, run, target),
+            pending=pending_candidate_ids(snapshot),
+            agent_complete=bool(response.task_complete and run and run.get("status") == "completed"),
+            prior_revisions=prior_revisions,
+            turns_after=turns + 1,
+            max_turns=max_turns,
+            remaining_usd=price_limit_usd - spent_before - cost,
+            price_limit_usd=price_limit_usd,
+            remaining_seconds=max_total_seconds - (datetime.utcnow() - created_at).total_seconds(),
+            max_stalled_replans=limits.max_stalled_replans,
+            target=target,
         )
         return _finish(
-            work_id, owner, status="completed" if complete else "blocked",
-            reason=reason, answer=str(response.answer or ""), cost_usd=cost,
+            work_id, owner, status=decision["status"], reason=decision["reason"],
+            answer=str(response.answer or ""), cost_usd=cost,
+            revision=decision.get("revision", ""), prompt=decision.get("prompt", ""),
         )
     except asyncio.TimeoutError:
         return _finish(work_id, owner, status="blocked", reason="Assessment time budget reached")
