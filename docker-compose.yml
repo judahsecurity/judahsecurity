@@ -1,7 +1,7 @@
 services:
   # PostgreSQL Database
   db:
-    image: postgres:15-alpine
+    image: postgres:15-alpine@sha256:fc41cfa8a90c09e84dd723ee764be4b2f59ba6c98b1e5b3fca540adddf68a5ba
     container_name: asm_database
     restart: unless-stopped
     environment:
@@ -24,7 +24,7 @@ services:
 
   # Redis for caching and async tasks
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     container_name: asm_redis
     restart: unless-stopped
     ports:
@@ -241,7 +241,7 @@ services:
 
   # nginx reverse proxy + TLS termination (Let's Encrypt)
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     container_name: asm_nginx
     restart: unless-stopped
     environment:
@@ -274,7 +274,7 @@ services:
   # then runs in the background renewing every 12h. Nginx is reloaded
   # automatically via signal sharing through the shared network.
   certbot:
-    image: certbot/certbot:latest
+    image: certbot/certbot:latest@sha256:c5698da859429ccee0fcc299a8000368198222d1f9e789ab6e388b491e8ce06d
     container_name: asm_certbot
     restart: unless-stopped
     volumes:
@@ -550,7 +550,7 @@ services:
 
   # Database Admin Interface (optional, for development)
   adminer:
-    image: adminer:latest
+    image: adminer:latest@sha256:3a07decd833c2375ea749aa8018250c1db4859a78bd55354f797bfb591733233
     container_name: asm_adminer
     restart: unless-stopped
     ports:
@@ -564,7 +564,7 @@ services:
 
   # Neo4j Graph Database (for asset relationship modeling)
   neo4j:
-    image: neo4j:5-community
+    image: neo4j:5-community@sha256:577eb43120e8688e62e753e962c47d30044ecaa95147ee5386c29f226b878008
     container_name: asm_neo4j
     restart: unless-stopped
     environment:
@@ -593,7 +593,7 @@ services:
   # Needs ~12–16 GB RAM for qwen2.5:14b (use qwen2.5:7b on smaller instances).
   # Not published on a public interface — backend reaches it as http://ollama:11434/v1
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:latest@sha256:910d0d8107b538fb0894e63163eb195de0cc7aefcbc666dc62d3b18f71124592
     container_name: asm_ollama
     restart: unless-stopped
     volumes:
@@ -614,7 +614,7 @@ services:
 
   # One-shot model pull after Ollama is up (re-runs safely if model already present).
   ollama-init:
-    image: ollama/ollama:latest
+    image: ollama/ollama:latest@sha256:910d0d8107b538fb0894e63163eb195de0cc7aefcbc666dc62d3b18f71124592
     container_name: asm_ollama_init
     depends_on:
       ollama:
@@ -650,7 +650,7 @@ services:
   #   OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
   # Bound to loopback so pentest spans never hit a public interface.
   phoenix:
-    image: arizephoenix/phoenix:latest
+    image: arizephoenix/phoenix:latest@sha256:09ec48906c054a27dd09a88c8e6bcc24fe89649d3ecc94d3a8ed394e21279b31
     container_name: asm_phoenix
     restart: unless-stopped
     ports:

@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-s -w" -o aegis-oracle-cli ./cmd/aegis-oracle-cli
 
 # ── Runtime image ──────────────────────────────────────────────────────
-FROM alpine:3.21
+FROM alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab
 
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S oracle && adduser -S oracle -G oracle

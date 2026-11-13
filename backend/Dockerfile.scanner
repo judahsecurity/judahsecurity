@@ -24,7 +24,7 @@
 # - graphql-cop (GraphQL security auditor)
 # =============================================================================
 
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.11-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39 AS builder
 
 # Install build dependencies.
 # build-essential is required because jsluice pulls in go-tree-sitter which
@@ -110,7 +110,7 @@ RUN chmod +x /tools/*
 # Atlas (pius binary)  - attack-surface cartographer
 # Argus (titus binary) - all-seeing secrets scanner
 # =============================================================================
-FROM golang:1.25-bookworm AS praetorian-builder
+FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS praetorian-builder
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 ENV GOBIN=/praetorian-bin
 RUN mkdir -p /praetorian-bin && \
@@ -122,7 +122,7 @@ RUN mkdir -p /praetorian-bin && \
 # Hermes (trufflehog v3): prebuilt binary from trufflesecurity/trufflehog
 # Janus  (OWASP ZAP):      stable Linux release + packaged python scripts
 # =============================================================================
-FROM debian:bookworm-slim AS aegis-builder
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS aegis-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates tar \
     && rm -rf /var/lib/apt/lists/*
@@ -143,7 +143,7 @@ RUN mkdir -p /aegis-zap && \
 # =============================================================================
 # Final Image
 # =============================================================================
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39
 
 LABEL maintainer="ASM Platform"
 LABEL description="Scanner worker with security scanning tools"
