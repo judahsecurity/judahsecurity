@@ -58,6 +58,47 @@ reports `completed` while a candidate is pending; if the budget runs out first,
 the stop reason lists the candidates still awaiting independent verification.
 Existing schedules keep their saved `max_turns`; raise it to opt them in.
 
+## Request-boundary pacing and request count
+
+During a scheduled turn, every in-process `httpx` request to a host in the
+run's `allowed_hosts` (wildcards included) passes through a per-host governor
+(`egress_governor.py`). Each redirect hop counts as a request. Requests to one
+host are spaced by `request_rate_per_second`; a 429 or 503 response delays that
+host by its `Retry-After` value, or by an exponential backoff capped at 60
+seconds. Model-provider and internal calls made during the turn are not governed.
+The scoped browser paces its document, fetch and XHR requests through the same
+governor; static subresources load unpaced.
+
+`max_run_requests` (default 1000, from 50 to 20000) is a hard count for the
+whole run, kept in the work item's `limits.requests_sent`. Exploration turns
+leave 15% of it for the verification turn. Once the count is spent, further
+requests raise `RequestBudgetExceeded` (an `httpx.TransportError`) instead of
+being sent, exploration stops with "Assessment request budget reached", and any
+pending candidates still get the verification turn. Command-line tools run as
+subprocesses outside this boundary and keep their own rate flags.
+
+## Delegated replay-path approval
+
+By default an operator must name every POST replay path and DELETE cleanup path
+before a run. An operator may instead delegate: with
+`assessment_policy.delegated_replay_approval = {"enabled": true, "max_paths": 4,
+"allow_cleanup": false}` on `/agent`, or `delegate_replay_approval: true` on a
+schedule whose `allowed_actions` include `state_change`, the agent can call
+`propose_replay_path(path, kind, reason)`. A proposal is approved automatically
+only when the exact method and path were captured in this session's traffic
+(a private capture exists, not only a JavaScript lead), the captured URL is in
+scope, no word of the path names a login, account, password, payment, admin,
+user or similar function, cleanup is separately allowed for DELETE paths, and
+the delegated count stays within `max_paths` (operator-named paths do not count
+toward it). Every decision is recorded in `engagement_brain.replay_approvals` and
+the action ledger. Approvals are re-applied each turn only while delegation
+stays on; withdrawing it withdraws them.
+
+Current limit: browser discovery clicks only tabs and disclosure controls and
+aborts unapproved POSTs without recording them, so in an unattended run a POST
+is captured only through Caido-ingested traffic or an earlier operator-approved
+action. Capturing a blocked write without sending it is the next step.
+
 ## Continuous dispatch and signal-earned budget
 
 Within an automatic `attack` dispatch, a finished specialist's result is folded

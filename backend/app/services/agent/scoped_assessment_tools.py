@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import secrets
 from contextvars import ContextVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
@@ -23,6 +24,8 @@ from app.services.agent.scoped_assessment import (
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
 
+
+logger = logging.getLogger(__name__)
 
 SCOPED_ASSESSMENT_TOOLS = (
     "scoped_browser_assessment",
@@ -160,8 +163,102 @@ class ScopedAssessmentTools:
         self._scoped_race_cleanup_paths = set(race_cleanup_paths)
         self._scoped_owner_expectations = approved
         self._scoped_auth_login_path = auth_login_path
+        from app.services.agent.replay_delegation import normalize_delegation
+
+        self._scoped_replay_delegation = normalize_delegation(
+            policy.get("delegated_replay_approval"),
+        )
+        self.apply_delegated_replay_approvals()
         if paths or cleanup_paths or race_action_paths or race_cleanup_paths or approved:
             self._scoped_assessment_started = True
+
+    def apply_delegated_replay_approvals(self) -> None:
+        """Re-apply this run's delegated approvals after the policy is reset.
+
+        Approvals live on the engagement brain so they survive turns and
+        restarts, but they only count while the operator keeps delegation on.
+        """
+        from app.services.agent.replay_delegation import approved_paths
+
+        delegation = getattr(self, "_scoped_replay_delegation", None) or {}
+        if not delegation.get("enabled"):
+            return
+        brain = getattr(self, "_engagement_brain", None) or {}
+        records = brain.get("replay_approvals") if isinstance(brain, dict) else None
+        if not records:
+            return
+        self._scoped_policy_applied = True
+        self._scoped_body_replay_paths = set(self._scoped_body_replay_paths or set()) | set(
+            approved_paths(records, "body_replay")[: delegation["max_paths"]]
+        )
+        if delegation.get("allow_cleanup"):
+            self._scoped_stored_xss_cleanup_paths = set(
+                self._scoped_stored_xss_cleanup_paths or set()
+            ) | set(approved_paths(records, "stored_xss_cleanup")[: delegation["max_paths"]])
+        self._scoped_assessment_started = True
+
+    async def propose_replay_path(self, path: str, kind: str = "body_replay", reason: str = "") -> str:
+        """Ask to unlock a write path you observed, under the operator's delegated rules.
+
+        kind: "body_replay" (an observed POST form/JSON path for scoped_body_probe and
+        observed-input POST probes) or "stored_xss_cleanup" (an observed DELETE path).
+        Approval is automatic only for an exact path captured in this session's browser
+        traffic, inside scope, not touching auth/account/payment/admin functions, and
+        within the operator's path limit. Anything else returns operator_approval_required.
+        """
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.replay_delegation import (
+            approved_paths, decision_record, evaluate,
+        )
+
+        delegation = getattr(self, "_scoped_replay_delegation", None) or {}
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = (
+            self._scoped_body_replay_paths if kind == "body_replay"
+            else self._scoped_stored_xss_cleanup_paths if kind == "stored_xss_cleanup"
+            else set()
+        ) or set()
+        delegated = set(approved_paths(brain.replay_approvals, kind))
+        approved, why, op = evaluate(
+            path=path, kind=kind, delegation=delegation,
+            operations=brain.application_operations,
+            # Operator-named paths do not use up the delegated allowance.
+            approved_paths=delegated if path not in current else delegated | {path},
+            in_scope=lambda url: assert_url_in_scope(self, url),
+        )
+        if approved and path not in current:
+            self._scoped_policy_applied = True
+            if kind == "body_replay":
+                self._scoped_body_replay_paths = set(current) | {path}
+            else:
+                self._scoped_stored_xss_cleanup_paths = set(current) | {path}
+            self._scoped_assessment_started = True
+        if why != "already approved":
+            brain.replay_approvals = [
+                *brain.replay_approvals[-199:],
+                decision_record(path=path, kind=kind, approved=approved, reason=why, op=op, note=reason),
+            ]
+            self._engagement_brain = brain.to_dict()
+            try:
+                import uuid as _uuid
+                from app.services.agent.action_ledger import active_run_id, append_action
+
+                append_action(
+                    active_run_id.get(), _uuid.uuid4().hex,
+                    "completed" if approved else "skipped", "propose_replay_path",
+                    target=str((op or {}).get("url") or path), phase="replay_approval",
+                    detail=f"{'approved' if approved else 'denied'} {kind} {path}: {why}"[:300],
+                )
+            except Exception:
+                logger.debug("replay approval ledger entry skipped", exc_info=True)
+        return json.dumps({
+            "approved": approved,
+            "path": path,
+            "kind": kind,
+            "reason": why,
+            "operation_id": str((op or {}).get("id") or ""),
+            "delegation_enabled": bool(delegation.get("enabled")),
+        })
 
     def _scoped_origin(self, url: str) -> str:
         assert_url_in_scope(self, url)

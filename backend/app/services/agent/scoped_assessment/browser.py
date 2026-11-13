@@ -369,6 +369,11 @@ async def check_browser(
             if scoped_state:
                 context_args["storage_state"] = scoped_state
             context = await browser.new_context(**context_args)
+            # Playwright runs route callbacks outside this context; read the
+            # autonomy request governor here and close over it.
+            from app.services.agent.egress_governor import PACED_BROWSER_TYPES, current_request_governor
+
+            governor = current_request_governor.get()
 
             async def route_request(route):
                 nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
@@ -410,6 +415,13 @@ async def check_browser(
                                    or post_mutation is not None)
                 except ValueError:
                     allowed = False
+                if (allowed and governor is not None
+                        and route.request.resource_type in PACED_BROWSER_TYPES):
+                    host = urlsplit(route.request.url).hostname or ""
+                    if governor.governs(host) and not await governor.acquire(host):
+                        blocked_requests += 1
+                        await route.abort()
+                        return
                 if allowed:
                     if (operation == "check_xhr_xss" and post_xhr
                             and route.request.method.upper() == "POST"):

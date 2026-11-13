@@ -247,7 +247,7 @@ async def _heartbeat(work_id: str, owner: str, stop: asyncio.Event) -> None:
 
 def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str = "",
             cost_usd: float = 0.0, revision: str = "", prompt: str = "",
-            count_turn: bool = True) -> dict[str, Any]:
+            count_turn: bool = True, requests: int = 0) -> dict[str, Any]:
     with SessionLocal() as db:
         row = db.query(AgentAutonomyWork).filter(
             AgentAutonomyWork.id == work_id,
@@ -257,6 +257,10 @@ def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str =
         if count_turn:
             row.turns += 1
         row.spent_usd = round(float(row.spent_usd or 0) + cost_usd, 6)
+        if requests:
+            limits = dict(row.limits or {})
+            limits["requests_sent"] = int(limits.get("requests_sent") or 0) + int(requests)
+            row.limits = limits
         row.status = status
         row.stop_reason = reason[:500]
         row.answer = answer[:800]
@@ -271,6 +275,7 @@ def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str =
         return {
             "id": work_id, "status": status, "turns": row.turns,
             "spent_usd": row.spent_usd, "stop_reason": row.stop_reason,
+            "requests_sent": int((row.limits or {}).get("requests_sent") or 0),
         }
 
 
@@ -278,7 +283,7 @@ def next_step(
     *, plan: tuple[str, str] | None, pending: list[str], agent_complete: bool,
     prior_revisions: list[str], turns_after: int, max_turns: int,
     remaining_usd: float, price_limit_usd: float, remaining_seconds: float,
-    max_stalled_replans: int, target: str,
+    max_stalled_replans: int, target: str, requests_exhausted: bool = False,
 ) -> dict[str, str]:
     """Decide what follows a finished turn.
 
@@ -297,6 +302,7 @@ def next_step(
         and turns_after < max_turns - 1
         and remaining_usd > reserve
         and remaining_seconds > WRAPUP_MIN_SECONDS * 2
+        and not requests_exhausted
     )
     if agent_complete and not pending:
         return {"status": "completed", "reason": ""}
@@ -307,6 +313,8 @@ def next_step(
         seen = prior_revisions.count(revision)
         if wrapped_up:
             stop_reason = "Verification turn finished; remaining open work is deferred to the next run"
+        elif requests_exhausted:
+            stop_reason = "Assessment request budget reached"
         elif not room_to_explore:
             stop_reason = "Assessment turn, time or spend budget reached"
         elif seen == 0:
@@ -370,6 +378,35 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
             count_turn=False,
         )
 
+    from app.services.agent.autonomy_limits import (
+        WRAPUP_REQUEST_RESERVE_FRACTION, limits_from_config as _limits_from_config,
+    )
+    from app.services.agent.egress_governor import (
+        RequestGovernor, current_request_governor, install_httpx_governor,
+    )
+
+    run_limits = _limits_from_config(limits_config, target=target)
+    requests_left = run_limits.max_run_requests - int(limits_config.get("requests_sent") or 0)
+    verifying = bool(prior_revisions) and prior_revisions[-1] == WRAPUP_REVISION
+    if not verifying:
+        # Exploration turns leave the verification turn its share.
+        requests_left -= int(run_limits.max_run_requests * WRAPUP_REQUEST_RESERVE_FRACTION)
+    if requests_left <= 0 and not verifying:
+        return _finish(
+            work_id, owner, status="blocked", reason="Assessment request budget reached",
+            count_turn=False,
+        )
+    install_httpx_governor()
+    governor = RequestGovernor(
+        run_limits.allowed_hosts,
+        rate_per_second=run_limits.request_rate_per_second,
+        max_requests=max(1, requests_left),
+    )
+    governor_token = current_request_governor.set(governor)
+
+    def finish(**values: Any) -> dict[str, Any]:
+        return _finish(work_id, owner, requests=governor.total, **values)
+
     _, todos = build_initial_objective("tester_process", target)
     stop = asyncio.Event()
     heartbeat = asyncio.create_task(_heartbeat(work_id, owner, stop))
@@ -399,19 +436,21 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
                 mode="agent",
                 max_iterations=30,
                 price_limit_usd=remaining_usd,
+                **({"assessment_policy": {"delegated_replay_approval": {"enabled": True}}}
+                   if limits.delegate_replay_approval else {}),
             ), timeout=max(1.0, remaining_seconds))
         finally:
             current_signal_bonus_pool.reset(bonus_token)
             current_autonomy_recon_gate.reset(gate_token)
             current_autonomy_limits.reset(token)
         if response.error or getattr(response, "awaiting_question", False) or getattr(response, "awaiting_approval", False):
-            return _finish(
-                work_id, owner, status="blocked", reason="Agent error or operator input required",
+            return finish(
+                status="blocked", reason="Agent error or operator input required",
                 answer=str(getattr(response, "answer", "") or ""),
             )
         raw_cost = getattr(response, "cost_usd", None)
         if not isinstance(raw_cost, (int, float)) or not math.isfinite(raw_cost) or raw_cost < 0:
-            return _finish(work_id, owner, status="blocked", reason="Agent spend could not be measured")
+            return finish(status="blocked", reason="Agent spend could not be measured")
         cost = float(raw_cost)
         with SessionLocal() as db:
             run = latest_run(
@@ -426,8 +465,8 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
                 and float(saved.payload.get("saved_at") or 0) >= turn_started_at
             )
         if not fresh_snapshot:
-            return _finish(
-                work_id, owner, status="blocked",
+            return finish(
+                status="blocked",
                 reason="This turn has no durable database snapshot; reconcile before resuming",
                 answer=str(response.answer or ""), cost_usd=cost,
             )
@@ -444,20 +483,27 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
             remaining_seconds=max_total_seconds - (datetime.utcnow() - created_at).total_seconds(),
             max_stalled_replans=limits.max_stalled_replans,
             target=target,
+            # Keep a little headroom: a turn that nearly spent its share would
+            # start the next exploration turn with almost nothing.
+            requests_exhausted=bool(governor.denied) or (
+                not verifying and governor.max_requests - governor.total < 10
+            ),
         )
-        return _finish(
-            work_id, owner, status=decision["status"], reason=decision["reason"],
+        return finish(
+            status=decision["status"], reason=decision["reason"],
             answer=str(response.answer or ""), cost_usd=cost,
             revision=decision.get("revision", ""), prompt=decision.get("prompt", ""),
         )
     except asyncio.TimeoutError:
-        return _finish(work_id, owner, status="blocked", reason="Assessment time budget reached")
+        return finish(status="blocked", reason="Assessment time budget reached")
     except asyncio.CancelledError:
         raise  # The lease expires and the next worker quarantines this turn.
     except Exception as exc:
         logger.exception("Durable scheduled assessment %s failed", work_id)
-        return _finish(work_id, owner, status="blocked", reason=f"Agent failed: {str(exc)[:300]}")
+        return finish(status="blocked", reason=f"Agent failed: {str(exc)[:300]}")
     finally:
+        current_request_governor.reset(governor_token)
+        logger.info("Autonomy work %s turn traffic: %s", work_id, governor.summary())
         stop.set()
         await heartbeat
 

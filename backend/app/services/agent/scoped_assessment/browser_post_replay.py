@@ -165,6 +165,11 @@ async def _replay_observed_controls(
                     read_count = 0
                     blocked_count = 0
                     request_cap_hit = False
+                    from app.services.agent.egress_governor import (
+                        PACED_BROWSER_TYPES, current_request_governor,
+                    )
+
+                    governor = current_request_governor.get()
 
                     async def route_request(route):
                         nonlocal selected, selected_request, sent_body, match_mode, volatile_fields
@@ -176,6 +181,12 @@ async def _replay_observed_controls(
                             blocked_count += 1
                             await route.abort()
                             return
+                        if governor is not None and request.resource_type in PACED_BROWSER_TYPES:
+                            host = urlsplit(request.url).hostname or ""
+                            if governor.governs(host) and not await governor.acquire(host):
+                                blocked_count += 1
+                                await route.abort()
+                                return
                         try:
                             in_origin = origin(request.url) == expected_origin
                             path = urlsplit(request.url).path or "/"

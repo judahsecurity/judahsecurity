@@ -103,6 +103,19 @@ class OwnerOnlyResource(BaseModel):
         return self
 
 
+class DelegatedReplayApproval(BaseModel):
+    """Let the agent unlock write paths it observed, under fixed rules.
+
+    Approval is automatic only for an exact path captured in the session's
+    browser traffic, inside scope, not touching auth/account/payment/admin
+    functions, and within ``max_paths``. Everything else still needs a person.
+    """
+
+    enabled: bool = False
+    max_paths: int = Field(default=4, ge=1, le=8)
+    allow_cleanup: bool = False
+
+
 class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
@@ -115,6 +128,7 @@ class AgentAssessmentPolicy(BaseModel):
     # objective to match the authorization regex.
     oob_callbacks_allowed: bool = False
     credential_testing_allowed: bool = False
+    delegated_replay_approval: Optional[DelegatedReplayApproval] = None
 
     @field_validator("auth_login_path")
     @classmethod

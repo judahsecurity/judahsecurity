@@ -20,6 +20,8 @@ DEFAULT_MAX_STALLED_REPLANS = 2
 MAX_STALLED_REPLANS_CAP = 4
 # Share of the spend limit held back for the final verification turn.
 WRAPUP_RESERVE_FRACTION = 0.15
+# Share of the run's request count held back for the verification turn.
+WRAPUP_REQUEST_RESERVE_FRACTION = 0.15
 # Do not start a verification turn with less than this much wall time left.
 WRAPUP_MIN_SECONDS = 180
 
@@ -77,6 +79,12 @@ class AutonomyLimits:
     # time limits are unchanged.
     signal_bonus_pool: int = 24
     signal_bonus_step: int = 4
+    # Hard count of target HTTP requests for the whole run, enforced per
+    # request by egress_governor; part of it is held back for verification.
+    max_run_requests: int = 1000
+    # Operator opt-in: the agent may unlock write paths it observed (see
+    # replay_delegation). Only meaningful when state_change is allowed.
+    delegate_replay_approval: bool = False
 
 
 current_autonomy_limits: ContextVar[AutonomyLimits | None] = ContextVar(
@@ -187,4 +195,8 @@ def limits_from_config(config: dict | None, *, target: str = "") -> AutonomyLimi
         max_stalled_replans=turn_budget_from_config(cfg)["max_stalled_replans"],
         signal_bonus_pool=_explicit_int(cfg, "signal_bonus_pool", 24, 0, 200),
         signal_bonus_step=_explicit_int(cfg, "signal_bonus_step", 4, 0, 20),
+        max_run_requests=_explicit_int(cfg, "max_run_requests", 1000, 50, 20000),
+        delegate_replay_approval=(
+            cfg.get("delegate_replay_approval") is True and "state_change" in actions
+        ),
     )

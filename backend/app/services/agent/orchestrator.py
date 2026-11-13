@@ -2397,6 +2397,14 @@ class AgentOrchestrator:
                 self.tool_manager._engagement_brain = state.get("engagement_brain")
             except Exception:
                 pass
+        # Delegated write-path approvals live on the brain; the per-turn policy
+        # reset clears them from the session, so restore them before any tool.
+        apply_delegated = getattr(self.tool_manager, "apply_delegated_replay_approvals", None)
+        if callable(apply_delegated):
+            try:
+                apply_delegated()
+            except Exception:
+                logger.debug("delegated replay approvals not restored", exc_info=True)
 
         # Auth session handoff: seed browser/deep_crawl/replay with prior login
         # A pilot stays anonymous even when a page sets ordinary session cookies.

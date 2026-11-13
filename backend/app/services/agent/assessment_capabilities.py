@@ -25,6 +25,7 @@ CAPABILITY_TOOLS = (
     "scoped_numeric_sqli",
     "scoped_string_sqli",
     "scoped_body_probe",
+    "propose_replay_path",
     "scoped_owner_only",
     "list_scoped_browser_exchanges",
     "scoped_ingest_caido_exchange",

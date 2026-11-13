@@ -423,3 +423,136 @@ async def test_pending_candidate_runs_verification_turn_end_to_end(sessions, mon
     second = await durable_hunt.process_claimed("work-1", "worker-2")
     assert second["status"] == "completed"
     assert "independent_verify" in prompts[1] and "cand-1" in prompts[1]
+
+
+# --- Request-boundary budget across turns ----------------------------------
+
+def test_request_budget_stops_exploration_but_still_verifies():
+    stopped = _step(requests_exhausted=True)
+    assert stopped["status"] == "blocked"
+    assert stopped["reason"] == "Assessment request budget reached"
+    verify = _step(requests_exhausted=True, pending=["cand-1"])
+    assert verify["revision"] == WRAPUP_REVISION
+
+
+def _request_turn(sessions, monkeypatch, *, requests_per_turn):
+    import httpx
+    from app.services.agent import action_ledger, orchestrator, run_snapshot
+
+    seen = {}
+
+    class FakeOrchestrator:
+        async def invoke(self, **kwargs):
+            transport = httpx.MockTransport(lambda r: httpx.Response(200))
+            async with httpx.AsyncClient(transport=transport) as client:
+                for _ in range(requests_per_turn):
+                    try:
+                        await client.get(f"{TARGET}/probe")
+                    except httpx.TransportError as exc:
+                        seen["error"] = type(exc).__name__
+                        break
+                await client.get("https://api.provider.test/v1/messages")
+            with sessions() as db:
+                db.merge(AgentRunSnapshot(
+                    session_id=kwargs["session_id"], organization_id=7,
+                    payload={"saved_at": time.time(), "engagement_brain": {}},
+                ))
+                db.commit()
+            return SimpleNamespace(
+                error=None, awaiting_question=False, awaiting_approval=False,
+                task_complete=False, cost_usd=0.1, answer="turn",
+            )
+
+    async def get_orchestrator():
+        return FakeOrchestrator()
+
+    monkeypatch.setattr(orchestrator, "get_agent_orchestrator", get_orchestrator)
+    monkeypatch.setattr(durable_hunt, "_authorized", lambda db, row: (True, ""))
+    monkeypatch.setattr(action_ledger, "latest_run", lambda db, **kwargs: {"status": "partial"})
+    monkeypatch.setattr(run_snapshot, "load_run_snapshot", lambda org, sid: {
+        "capability_map": {"target": TARGET},
+        "engagement_brain": {"hypotheses": [{
+            "id": "h1", "title": "Check API", "assumption": "A", "test": "T",
+            "pass_criteria": "P", "kill_criteria": "K", "specialist": "api_authz",
+            "target": TARGET,
+        }]},
+    })
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_turn_requests_are_counted_at_the_request_boundary(sessions, monkeypatch):
+    with sessions() as db:
+        db.add(_work(max_turns=12, price_limit_usd=8.0, limits={"request_rate_per_second": 20}))
+        db.commit()
+        durable_hunt.claim_next(db, owner="w1")
+    _request_turn(sessions, monkeypatch, requests_per_turn=3)
+    result = await durable_hunt.process_claimed("work-1", "w1")
+    assert result["status"] == "queued"
+    assert result["requests_sent"] == 3          # the provider call is not counted
+    with sessions() as db:
+        assert db.get(AgentAutonomyWork, "work-1").limits["requests_sent"] == 3
+
+
+@pytest.mark.asyncio
+async def test_exploration_turn_leaves_the_verification_reserve(sessions, monkeypatch):
+    # 100 requests, 15 held back: exploration may use 85 in total.
+    with sessions() as db:
+        db.add(_work(max_turns=12, price_limit_usd=8.0, limits={
+            "request_rate_per_second": 20, "max_run_requests": 100, "requests_sent": 80,
+        }))
+        db.commit()
+        durable_hunt.claim_next(db, owner="w1")
+    seen = _request_turn(sessions, monkeypatch, requests_per_turn=10)
+    result = await durable_hunt.process_claimed("work-1", "w1")
+    assert seen["error"] == "RequestBudgetExceeded"
+    assert result["requests_sent"] == 85
+    assert result["status"] == "blocked"
+    assert result["stop_reason"] == "Assessment request budget reached"
+
+
+@pytest.mark.asyncio
+async def test_turn_with_no_requests_left_does_not_start(sessions, monkeypatch):
+    with sessions() as db:
+        db.add(_work(limits={"max_run_requests": 100, "requests_sent": 90}))
+        db.commit()
+        durable_hunt.claim_next(db, owner="w1")
+    _request_turn(sessions, monkeypatch, requests_per_turn=1)
+    result = await durable_hunt.process_claimed("work-1", "w1")
+    assert result["status"] == "blocked"
+    assert result["stop_reason"] == "Assessment request budget reached"
+    assert result["turns"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limits,expected", [
+    ({}, None),
+    ({"delegate_replay_approval": True}, None),  # needs state_change too
+    ({"delegate_replay_approval": True, "allowed_actions": ["read", "probe", "state_change"]},
+     {"delegated_replay_approval": {"enabled": True}}),
+])
+async def test_schedule_delegation_reaches_the_agent_policy(sessions, monkeypatch, limits, expected):
+    from app.services.agent import action_ledger, orchestrator, run_snapshot
+
+    with sessions() as db:
+        db.add(_work(limits=limits))
+        db.commit()
+        durable_hunt.claim_next(db, owner="w1")
+    seen = {}
+
+    class FakeOrchestrator:
+        async def invoke(self, **kwargs):
+            seen["policy"] = kwargs.get("assessment_policy")
+            return SimpleNamespace(
+                error=None, awaiting_question=False, awaiting_approval=False,
+                task_complete=False, cost_usd=0.1, answer="",
+            )
+
+    async def get_orchestrator():
+        return FakeOrchestrator()
+
+    monkeypatch.setattr(orchestrator, "get_agent_orchestrator", get_orchestrator)
+    monkeypatch.setattr(durable_hunt, "_authorized", lambda db, row: (True, ""))
+    monkeypatch.setattr(action_ledger, "latest_run", lambda db, **kwargs: None)
+    await durable_hunt.process_claimed("work-1", "w1")
+    assert seen["policy"] == expected

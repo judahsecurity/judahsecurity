@@ -510,6 +510,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_race_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_auth_login_path = SessionValue(lambda: "")
+    _scoped_replay_delegation = SessionValue(dict)
     _scoped_assessment_started = SessionValue(lambda: False)
     _scoped_assessment_partial_reason = SessionValue(lambda: "")
     _proof_engine = SessionValue(lambda: None)

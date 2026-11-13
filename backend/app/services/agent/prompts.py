@@ -900,6 +900,7 @@ TOOL_PHASE_MAP = {
     "scoped_numeric_sqli": ["exploitation", "post_exploitation"],
     "scoped_string_sqli": ["exploitation", "post_exploitation"],
     "scoped_body_probe": ["exploitation", "post_exploitation"],
+    "propose_replay_path": ["informational", "exploitation", "post_exploitation"],
     "scoped_owner_only": ["exploitation", "post_exploitation"],
     # Tester-process control plane
     "compare_requests": ["exploitation", "post_exploitation"],
@@ -970,8 +971,14 @@ create_finding. Never treat prior memory or JavaScript-only leads as proof.
 For scoped SQLi candidates, use the tool result's target (origin + path, no
 query) as the exact candidate target. Keep the title, target, description,
 and severity unchanged between submit_finding_candidate and create_finding.
-scoped_body_probe requires an operator-approved POST path in the assessment
-request. It replays the captured body unchanged as a baseline, then changes
+scoped_body_probe requires an approved POST path: one the operator named in the
+assessment request or, when the operator delegated approval, one approved through
+propose_replay_path(path, kind="body_replay", reason=...). Propose only an exact
+POST path you observed in this session's captured browser traffic (submit the
+form or trigger the request first). A stored-XSS DELETE cleanup path uses
+kind="stored_xss_cleanup". Paths touching login, account, password, payment,
+admin or similar functions always return operator_approval_required; do not
+retry them, record them as needing an operator. It replays the captured body unchanged as a baseline, then changes
 one form or JSON field. A response difference is a lead. For an ordinary
 captured form or JSON string with a database-specific quote error, it repeats
 the error with clean and escaped-quote controls. Without a database error, it

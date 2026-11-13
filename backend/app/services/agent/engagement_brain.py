@@ -98,6 +98,8 @@ class EngagementBrain:
     application_operations: List[Dict[str, Any]] = field(default_factory=list)
     authorization_matrix: List[Dict[str, Any]] = field(default_factory=list)
     proof_receipts: List[Dict[str, Any]] = field(default_factory=list)
+    # Agent-proposed write paths decided under operator delegation (audit log).
+    replay_approvals: List[Dict[str, Any]] = field(default_factory=list)
     js_intelligence: Dict[str, Any] = field(default_factory=dict)
     phase: str = "recon"  # recon | map | attack | coverage | report
     target: str = ""
@@ -127,6 +129,7 @@ class EngagementBrain:
             "application_operations": list(self.application_operations),
             "authorization_matrix": list(self.authorization_matrix),
             "proof_receipts": list(self.proof_receipts),
+            "replay_approvals": list(self.replay_approvals[-200:]),
             "js_intelligence": dict(self.js_intelligence),
             "phase": self.phase,
             "target": self.target,
