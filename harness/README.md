@@ -67,6 +67,24 @@ host, backoffs, bonus grants, replay decisions), and the ledger metrics count
 fireteam refills, bonus grants and replay decisions. Use the same flags for both
 sides of a `ledger_compare`.
 
+To compare two versions of the agent end to end, check out the older commit
+next to this one and run every selected class (positive and negative) on both,
+with the same model and budget. The candidate runs with `--autonomy
+--delegate-replay-approval`; classes the baseline lab lacks run on the candidate
+only:
+
+```bash
+git worktree add ../judah-baseline <older-commit>
+DATABASE_URL="$DEDICATED_ASSESSMENT_DATABASE_URL" PYTHONPATH=backend \
+  python harness/scripts/setup_bench_db.py
+cd harness
+ANTHROPIC_API_KEY=... python -m local_harness.benchmark.compare_lab \
+  --baseline ../../judah-baseline --out runs/compare \
+  --database-url "$DEDICATED_ASSESSMENT_DATABASE_URL" --organization-id 1 --user-id 1
+python -m local_harness.ledger_compare runs/compare/baseline/runs/sqli-positive \
+  runs/compare/candidate/runs/sqli-positive
+```
+
 Repeat the lab server and agent command for each manifest case, changing
 `--class`, `--polarity`, and the sink directory. For the SSRF positive, add
 `--callback-suffix YOUR_CONTROLLED_OAST_SUFFIX` and `--require-oast` to the agent
