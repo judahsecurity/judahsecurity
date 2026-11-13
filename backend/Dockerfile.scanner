@@ -232,7 +232,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/* || echo "Retire.js installation skipped"
 
 # jwt_tool (JWT testing & exploitation - ticarpi/jwt_tool)
-RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool \
+RUN git clone --quiet https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && git -C /opt/jwt_tool checkout --quiet 3bc7407cf2222d6a821dcc19c776e5a1b1cb9a9b \
     && pip install --no-cache-dir pycryptodomex termcolor cprint requests \
     && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
     && chmod +x /usr/local/bin/jwt_tool \
@@ -255,7 +255,7 @@ RUN playwright install --with-deps chromium \
     || echo "WARNING: playwright browser install failed; deep_crawl will use /usr/bin/chromium"
 
 # Install EyeWitness for screenshots (optional fallback)
-RUN git clone --depth 1 https://github.com/RedSiege/EyeWitness.git /opt/EyeWitness && \
+RUN git clone --quiet https://github.com/RedSiege/EyeWitness.git /opt/EyeWitness && git -C /opt/EyeWitness checkout --quiet c3286fb71406e0b55b85a7c38dac76ee50b0f955 && \
     cd /opt/EyeWitness && \
     if [ -f "Python/requirements.txt" ]; then \
         pip install --no-cache-dir -r Python/requirements.txt && \

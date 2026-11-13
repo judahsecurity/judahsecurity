@@ -84,20 +84,20 @@ RUN ARCH=$(dpkg --print-architecture) && \
     | tar -C /usr/local/bin -xz gitleaks
 
 # ── testssl.sh ───────────────────────────────────────────────────────
-RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl.sh \
+RUN git clone --quiet https://github.com/testssl/testssl.sh.git /opt/testssl.sh && git -C /opt/testssl.sh checkout --quiet 3c26038d30c2c882e3554c853890572e65e78e76 \
     && ln -s /opt/testssl.sh/testssl.sh /usr/local/bin/testssl.sh
 
 # ── XSStrike ─────────────────────────────────────────────────────────
-RUN git clone --depth 1 https://github.com/s0md3v/XSStrike.git /opt/xsstrike
+RUN git clone --quiet https://github.com/s0md3v/XSStrike.git /opt/xsstrike && git -C /opt/xsstrike checkout --quiet ab27955d367432f944d8f29897e09c15356e76f7
 
 # ── CMSeeK ───────────────────────────────────────────────────────────
-RUN git clone --depth 1 https://github.com/Tuhinshubhra/CMSeeK.git /opt/cmseek
+RUN git clone --quiet https://github.com/Tuhinshubhra/CMSeeK.git /opt/cmseek && git -C /opt/cmseek checkout --quiet 03a6e7f8580527a704c1f3c7429c3f474cfa42cf
 
 # ── Arjun (HTTP parameter discovery) ────────────────────────────────
 RUN python3 -m pip install --break-system-packages arjun
 
 # ── WhatWeb ──────────────────────────────────────────────────────────
-RUN git clone --depth 1 https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb \
+RUN git clone --quiet https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb && git -C /opt/whatweb checkout --quiet d279d93042d034f3fd29d5a893d44ccc0595d3f8 \
     && ln -s /opt/whatweb/whatweb /usr/local/bin/whatweb
 
 # ── wafw00f ──────────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ RUN python3 -m pip install --break-system-packages sslyze
 
 # ── AutoSwagger (intruder-io) ────────────────────────────────────────
 # Discover, parse, and test OpenAPI/Swagger endpoints; PII + secret detection
-RUN git clone --depth 1 https://github.com/intruder-io/autoswagger.git /opt/autoswagger \
+RUN git clone --quiet https://github.com/intruder-io/autoswagger.git /opt/autoswagger && git -C /opt/autoswagger checkout --quiet 6859eaf2266387f8e12ce024eb6fd3ed0020c4dd \
     && python3 -m pip install --break-system-packages \
         -r /opt/autoswagger/requirements.txt \
         presidio-analyzer presidio-anonymizer \
@@ -122,7 +122,7 @@ RUN git clone --depth 1 https://github.com/intruder-io/autoswagger.git /opt/auto
     && ln -sf /opt/autoswagger/autoswagger.py /usr/local/bin/autoswagger.py
 
 # ── sqlmap ───────────────────────────────────────────────────────────
-RUN git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap \
+RUN git clone --quiet https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap && git -C /opt/sqlmap checkout --quiet 8b78b676c1376ae28feccd957b03bbecea05eff1 \
     && ln -s /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap
 
 # ── Commix (command injection) ───────────────────────────────────────

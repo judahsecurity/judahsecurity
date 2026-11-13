@@ -9,7 +9,7 @@
 # Usage:
 #   1. Launch an EC2 instance with Ubuntu 22.04 or Amazon Linux 2023
 #   2. SSH into the instance
-#   3. Run: curl -sSL https://raw.githubusercontent.com/.../setup.sh | bash
+#   3. Clone the repository and review this script before running it
 #   Or clone the repo and run: ./aws/ec2-single/setup.sh
 #
 # =============================================================================

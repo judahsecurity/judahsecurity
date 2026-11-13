@@ -75,12 +75,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpcap-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 https://github.com/robertdavidgraham/masscan.git /tmp/masscan \
+RUN git clone --quiet https://github.com/robertdavidgraham/masscan.git /tmp/masscan && git -C /tmp/masscan checkout --quiet 8e6b3b0c07a81e8ea61d557c06134a21a6881614 \
     && cd /tmp/masscan && make -j$(nproc) \
     && cp bin/masscan /tools/ \
     && rm -rf /tmp/masscan
 
-RUN git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns \
+RUN git clone --quiet https://github.com/blechschmidt/massdns.git /tmp/massdns && git -C /tmp/massdns checkout --quiet 30c380908b4f9afd0931d3d83f85884844831846 \
     && cd /tmp/massdns && make -j$(nproc) \
     && cp bin/massdns /tools/ \
     && rm -rf /tmp/massdns
@@ -179,7 +179,7 @@ RUN mkdir -p /opt/projectdiscovery && \
 COPY wordlists/ /opt/wordlists/
 
 # Install EyeWitness
-RUN git clone --depth 1 https://github.com/RedSiege/EyeWitness.git /opt/EyeWitness \
+RUN git clone --quiet https://github.com/RedSiege/EyeWitness.git /opt/EyeWitness && git -C /opt/EyeWitness checkout --quiet c3286fb71406e0b55b85a7c38dac76ee50b0f955 \
     && cd /opt/EyeWitness \
     && python3 -m venv eyewitness-venv \
     && ./eyewitness-venv/bin/pip install --upgrade pip \
@@ -262,7 +262,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
 
 # jwt_tool (JWT testing & exploitation - ticarpi/jwt_tool). Wrapper on PATH so
 # `jwt_tool <token> <flags>` works from the MCP handler.
-RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool \
+RUN git clone --quiet https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && git -C /opt/jwt_tool checkout --quiet 3bc7407cf2222d6a821dcc19c776e5a1b1cb9a9b \
     && pip install --no-cache-dir pycryptodomex termcolor cprint requests \
     && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
     && chmod +x /usr/local/bin/jwt_tool \
@@ -303,7 +303,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends nikto \
     && rm -rf /var/lib/apt/lists/* || echo "Nikto installation skipped"
 
 # WhatWeb (tech fingerprint — was vanguard-only)
-RUN git clone --depth 1 https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb \
+RUN git clone --quiet https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb && git -C /opt/whatweb checkout --quiet d279d93042d034f3fd29d5a893d44ccc0595d3f8 \
     && ln -sf /opt/whatweb/whatweb /usr/local/bin/whatweb \
     || echo "WhatWeb installation skipped"
 
@@ -311,7 +311,7 @@ RUN git clone --depth 1 https://github.com/urbanadventurer/WhatWeb.git /opt/what
 RUN pip install --no-cache-dir commix || echo "Commix installation skipped"
 
 # Install testssl.sh (TLS/SSL testing)
-RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl \
+RUN git clone --quiet https://github.com/testssl/testssl.sh.git /opt/testssl && git -C /opt/testssl checkout --quiet 3c26038d30c2c882e3554c853890572e65e78e76 \
     && chmod +x /opt/testssl/testssl.sh \
     && ln -sf /opt/testssl/testssl.sh /usr/local/bin/testssl \
     || echo "testssl.sh installation skipped"

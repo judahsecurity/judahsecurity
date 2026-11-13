@@ -67,6 +67,9 @@ def run_steps(text: str) -> list[tuple[int, str]]:
                 continue
             start = number
         current.append(line)
+        # Docker keeps comment lines inside a continued RUN instruction.
+        if stripped.startswith("#") and len(current) > 1:
+            continue
         if not stripped.endswith("\\"):
             steps.append((start, "\n".join(current)))
             current = []
