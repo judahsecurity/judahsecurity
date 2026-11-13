@@ -1162,4 +1162,6 @@ def render_system_prompt(*, mode: str, **context: object) -> str:
     rendered = template.format(**context)
     if mode != "pilot":
         rendered += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
-    return rendered
+    from app.services.agent.untrusted_output import UNTRUSTED_RULE
+
+    return rendered + "\n\n" + UNTRUSTED_RULE

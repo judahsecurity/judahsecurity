@@ -2746,10 +2746,12 @@ class AgentOrchestrator:
         truncated_output = tool_output[:max_chars] if len(tool_output) > max_chars else tool_output
         
         # Build analysis prompt
+        from app.services.agent.untrusted_output import UNTRUSTED_RULE, wrap_untrusted
+
         analysis_prompt = OUTPUT_ANALYSIS_PROMPT.format(
             tool_name=tool_name,
             tool_args=json_dumps_safe(step_data.get("tool_args") or {}),
-            tool_output=truncated_output,
+            tool_output=UNTRUSTED_RULE + "\n" + wrap_untrusted(truncated_output, source=tool_name),
             current_target_info=json_dumps_safe(state.get("target_info") or {}, indent=2),
         )
         

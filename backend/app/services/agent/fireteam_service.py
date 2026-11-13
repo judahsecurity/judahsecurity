@@ -1288,7 +1288,9 @@ async def _run_specialist(
     if skill_pack:
         suffix_parts.append(skill_pack)
     from app.services.agent.proof_policy import PROOF_GUIDANCE
+    from app.services.agent.untrusted_output import UNTRUSTED_RULE
     suffix_parts.append(PROOF_GUIDANCE)
+    suffix_parts.append(UNTRUSTED_RULE)
     from app.services.agent.prompts import APPLICATION_ASSESSMENT_GUIDANCE
     suffix_parts.append(APPLICATION_ASSESSMENT_GUIDANCE)
     if not getattr(tools_manager, "_credential_testing_allowed", False):
@@ -1543,7 +1545,7 @@ async def _run_specialist(
                 {
                     "tool": tr.tool,
                     "success": tr.success,
-                    "summary": tr.summary[:6000],
+                    "summary": wrap_untrusted(tr.summary[:6000], source=tr.tool),
                     "evidence_ids": tr.evidence_ids,
                     "error": tr.error,
                 }
@@ -1624,6 +1626,8 @@ def _action_kind(tool_name: str, args: dict) -> str:
             return "state_change"
     return "probe"
 
+
+from app.services.agent.untrusted_output import wrap_untrusted  # noqa: E402
 
 _SIGNAL_MARKERS = tuple(f'"{verdict}"' for verdict in (
     "LIKELY_IMPACT", "MUTANT_BYPASS_CANDIDATE", "TIME_BASED_INJECTION_CANDIDATE",
