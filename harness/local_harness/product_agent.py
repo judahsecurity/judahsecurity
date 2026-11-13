@@ -15,6 +15,68 @@ import uuid
 from pathlib import Path
 
 
+class _Autonomy:
+    """Scheduled-run limits, request governor and signal pool for one assessment."""
+
+    def __init__(self, args):
+        from urllib.parse import urlsplit
+
+        from app.services.agent.autonomy_limits import (
+            SignalBonusPool, current_autonomy_limits, current_signal_bonus_pool,
+            limits_from_config,
+        )
+        from app.services.agent.egress_governor import (
+            RequestGovernor, current_request_governor, install_httpx_governor,
+        )
+
+        hosts = sorted({
+            (urlsplit(item if "://" in item else f"https://{item}").hostname or "").lower()
+            for item in [args.target, *str(args.scope or "").replace("\n", ",").split(",")]
+            if item.strip()
+        } - {""})
+        delegate = bool(getattr(args, "delegate_replay_approval", False))
+        self.limits = limits_from_config({
+            "allowed_hosts": hosts,
+            "allowed_actions": ["read", "probe", *(["state_change"] if delegate else [])],
+            "delegate_replay_approval": delegate,
+        }, target=args.target)
+        install_httpx_governor()
+        self.governor = RequestGovernor(
+            self.limits.allowed_hosts,
+            rate_per_second=self.limits.request_rate_per_second,
+            max_requests=self.limits.max_run_requests,
+        )
+        self.pool = SignalBonusPool(self.limits.signal_bonus_pool, self.limits.signal_bonus_step)
+        self._resets = [
+            (current_autonomy_limits, current_autonomy_limits.set(self.limits)),
+            (current_request_governor, current_request_governor.set(self.governor)),
+            (current_signal_bonus_pool, current_signal_bonus_pool.set(self.pool)),
+        ]
+
+    def close(self, manager) -> dict:
+        for var, token in reversed(self._resets):
+            var.reset(token)
+        brain = getattr(manager, "_engagement_brain", None) or {}
+        decisions = brain.get("replay_approvals") if isinstance(brain, dict) else None
+        decisions = [row for row in decisions or [] if isinstance(row, dict)]
+        return {
+            "enabled": True,
+            "traffic": self.governor.summary(),
+            "signal_bonus": {
+                "granted": dict(self.pool.granted),
+                "remaining": self.pool.remaining,
+            },
+            "replay_approvals": {
+                "approved": sum(row.get("decision") == "approved" for row in decisions),
+                "denied": sum(row.get("decision") == "denied" for row in decisions),
+            },
+        }
+
+
+def _autonomy_context(args):
+    return _Autonomy(args) if getattr(args, "autonomy", False) else None
+
+
 async def assess(args, orchestrator=None):
     session_id = uuid.uuid4().hex
     real_runtime = orchestrator is None
@@ -79,6 +141,11 @@ async def assess(args, orchestrator=None):
     response = None
     run_ledgers = []
     ledger_export_error = None
+    autonomy = _autonomy_context(args)
+    invoke_extra = (
+        {"assessment_policy": {"delegated_replay_approval": {"enabled": True}}}
+        if getattr(args, "delegate_replay_approval", False) else {}
+    )
     for turn in range(max(1, args.max_turns)):
         response = await orchestrator.invoke(
             question=prompt
@@ -90,6 +157,7 @@ async def assess(args, orchestrator=None):
             mode="agent",
             max_iterations=args.max_iterations,
             price_limit_usd=args.price_limit_usd,
+            **invoke_extra,
         )
         if real_runtime:
             try:
@@ -114,6 +182,8 @@ async def assess(args, orchestrator=None):
             or getattr(response, "awaiting_approval", False)
         ):
             break
+    autonomy_summary = autonomy.close(manager) if autonomy else {"enabled": False}
+    autonomy_summary["delegated_replay_approval"] = bool(invoke_extra)
     from .agent_eval import summarize_run_ledgers
 
     ledger_metrics = summarize_run_ledgers(run_ledgers)
@@ -138,6 +208,7 @@ async def assess(args, orchestrator=None):
         "oast": oast_status,
         "ledger_metrics": ledger_metrics,
         "ledger_export_error": ledger_export_error,
+        "autonomy": autonomy_summary,
     }
     output = sink.parent
     output.mkdir(parents=True, exist_ok=True)
@@ -169,6 +240,16 @@ def main(argv=None):
         "--require-oast",
         action="store_true",
         help="Fail preflight unless the standalone Interactsh callback client is healthy.",
+    )
+    parser.add_argument(
+        "--autonomy",
+        action="store_true",
+        help="Apply scheduled-run limits: request governor, signal-earned budget and specialist contracts.",
+    )
+    parser.add_argument(
+        "--delegate-replay-approval",
+        action="store_true",
+        help="Let the agent unlock write paths it observed (implies state_change in --autonomy).",
     )
     args = parser.parse_args(argv)
     return asyncio.run(assess(args))

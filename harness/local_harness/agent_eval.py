@@ -83,6 +83,16 @@ def summarize_run_ledgers(runs: Sequence[dict]) -> Dict[str, Any]:
         "published_findings": sum(int(row.get("published_findings") or 0) for row in coverage),
         "duration_seconds": round(sum(float(row.get("duration_seconds") or 0) for row in coverage), 1),
         "timeout_runs": sum(run.get("status") in {"timeout", "interrupted", "stalled"} for run in valid),
+        "fireteam_refills": sum(action.get("tool_name") == "fireteam_refill" for action in actions),
+        "signal_bonus_grants": sum(action.get("tool_name") == "signal_bonus" for action in actions),
+        "replay_paths_approved": sum(
+            action.get("tool_name") == "propose_replay_path" and action.get("status") == "completed"
+            for action in actions
+        ),
+        "replay_paths_denied": sum(
+            action.get("tool_name") == "propose_replay_path" and action.get("status") == "skipped"
+            for action in actions
+        ),
         "receipt_complete": bool(valid and actions and terminal and no_open_actions and action_count_matches),
     }
 

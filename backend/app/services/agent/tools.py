@@ -11547,6 +11547,19 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 live.task_graph = brain.task_graph
                 self._engagement_brain = live.to_dict()
                 _checkpoint_task_graph()
+                try:
+                    from uuid import uuid4
+
+                    from app.services.agent.action_ledger import active_run_id, append_action
+
+                    append_action(
+                        active_run_id.get(), uuid4().hex, "completed", "fireteam_refill",
+                        target=default_target or "", phase="dispatch",
+                        detail=f"after {report.specialist}: "
+                               + ",".join(profile.name for profile, _ in additions),
+                    )
+                except Exception:
+                    logger.debug("refill ledger entry skipped", exc_info=True)
             return additions
 
         result = await run_fireteam(

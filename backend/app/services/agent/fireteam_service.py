@@ -1527,6 +1527,16 @@ async def _run_specialist(
                 budget.bonus_requests += granted
                 max_iter += -(-granted // max(1, profile.max_tools_per_iteration))
                 report.bonus_tool_calls += granted
+                try:
+                    from app.services.agent.action_ledger import active_run_id, append_action
+
+                    append_action(
+                        active_run_id.get(), uuid.uuid4().hex, "completed", "signal_bonus",
+                        target=directive.target, phase=profile.name,
+                        detail=f"{profile.name} +{granted} calls on a signal",
+                    )
+                except Exception:
+                    logger.debug("signal bonus ledger entry skipped", exc_info=True)
 
         feedback = {
             "tool_results": [
