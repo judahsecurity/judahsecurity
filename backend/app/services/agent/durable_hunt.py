@@ -376,14 +376,17 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
     try:
         orchestrator = await get_agent_orchestrator()
         from app.services.agent.autonomy_limits import (
-            AutonomyRequestGate, current_autonomy_limits, current_autonomy_recon_gate,
-            limits_from_config,
+            AutonomyRequestGate, SignalBonusPool, current_autonomy_limits,
+            current_autonomy_recon_gate, current_signal_bonus_pool, limits_from_config,
         )
 
         limits = limits_from_config(limits_config, target=target)
         token = current_autonomy_limits.set(limits)
         gate_token = current_autonomy_recon_gate.set(AutonomyRequestGate(
             limits.max_recon_tool_starts, limits.specialist_interval_ms,
+        ))
+        bonus_token = current_signal_bonus_pool.set(SignalBonusPool(
+            limits.signal_bonus_pool, limits.signal_bonus_step,
         ))
         try:
             turn_started_at = time.time()
@@ -398,6 +401,7 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
                 price_limit_usd=remaining_usd,
             ), timeout=max(1.0, remaining_seconds))
         finally:
+            current_signal_bonus_pool.reset(bonus_token)
             current_autonomy_recon_gate.reset(gate_token)
             current_autonomy_limits.reset(token)
         if response.error or getattr(response, "awaiting_question", False) or getattr(response, "awaiting_approval", False):

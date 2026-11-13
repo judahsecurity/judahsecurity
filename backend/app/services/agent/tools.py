@@ -11471,6 +11471,83 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             150.0 if bounded_first_pass else 420.0,
             max(1.0, _remaining_dispatch_time() - reserve),
         )
+
+        # Continuous dispatch: when a hunter finishes, fold its result into the
+        # task graph at once and start specialists whose hypotheses became
+        # ready (unblocked dependencies or spawned follow-ups), instead of
+        # waiting for the whole wave. Each specialist runs at most once per
+        # dispatch, so leases and coverage stay keyed by specialist name.
+        from app.services.agent.penetration_task_graph import NODE_READY, _release_lease
+
+        refill_enabled = bool(auto and mode == "attack" and not bounded_first_pass)
+        refill_cap = 12
+        dispatched_names: set[str] = set(chosen)
+        live_applied: set[int] = set()
+        live_spawned: list = []
+        refilled: list[str] = []
+
+        async def _refill_from_graph(report):
+            nonlocal graph
+            if not refill_enabled or len(dispatched_names) >= refill_cap:
+                return []
+            summary = parse_executor_summary(report)
+            if summary.rewrite_hint.startswith("execution_timeout"):
+                return []  # Interrupted work is reconciled after the wave.
+            new_spawn = apply_executor_summary(graph, brain, summary)
+            live_applied.add(id(report))
+            if new_spawn:
+                live_spawned.extend(new_spawn)
+                ensure_spawned_hypotheses(brain, new_spawn)
+                graph = sync_graph_from_brain(brain)
+            names = [
+                name for name in ready_wave(graph, max_specialists=refill_cap)
+                if name not in dispatched_names and name != "app_mapper"
+            ]
+            names = permitted_specialists(
+                names, allow_credential_testing=bool(self._credential_testing_allowed),
+            )[: refill_cap - len(dispatched_names)]
+            new_leases = claim_task_leases(graph, names) if names else {}
+            new_profiles = {
+                name: get_specialist(name) for name in new_leases if get_specialist(name)
+            }
+            new_directives = directives_from_hypotheses(
+                brain=brain,
+                profiles_by_name=new_profiles,
+                specialists=list(new_profiles),
+                default_target=default_target or "",
+                task_leases=new_leases,
+                coverage_leases={},
+            ) if new_profiles else {}
+            additions = []
+            for name, lease in new_leases.items():
+                profile = new_profiles.get(name)
+                directive = new_directives.get(name)
+                if profile is None or directive is None:
+                    # Never start a specialist without its contract; give the
+                    # hypothesis back to the queue untouched.
+                    node = graph.nodes.get(lease.hypothesis_id)
+                    if node is not None:
+                        _release_lease(node)
+                        node.status = NODE_READY
+                        node.attempts = max(0, node.attempts - 1)
+                    continue
+                dispatched_names.add(name)
+                profiles[name] = profile
+                task_leases[name] = lease
+                directives[name] = directive
+                chosen.append(name)
+                refilled.append(name)
+                additions.append((profile, directive))
+            persist_graph(brain, graph)
+            if additions:
+                # Make the new leases durable before the specialists act, without
+                # replacing receipts other hunters are writing to the live brain.
+                live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                live.task_graph = brain.task_graph
+                self._engagement_brain = live.to_dict()
+                _checkpoint_task_graph()
+            return additions
+
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
@@ -11484,6 +11561,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             report_callback=_verify_completed_hunter,
             member_timeout_sec=max(1.0, first_wave_timeout - 10.0),
             wave_timeout_sec=first_wave_timeout,
+            refill=_refill_from_graph if refill_enabled else None,
         )
 
         from app.services.agent.auto_prompter import (
@@ -11493,10 +11571,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             should_rewrite,
         )
         executor_summaries = [parse_executor_summary(r) for r in result.reports]
-        spawned: list = []
+        spawned: list = list(live_spawned)
         rewrites: list = []
         for summary, report in zip(executor_summaries, result.reports):
-            spawned.extend(apply_executor_summary(graph, brain, summary))
+            if id(report) not in live_applied:
+                spawned.extend(apply_executor_summary(graph, brain, summary))
             if summary.rewrite_hint.startswith("execution_timeout"):
                 continue
             rewrite = should_rewrite(graph, summary, report)
@@ -11669,6 +11748,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "surface_signature": surface_signature[:32],
             "pending_input_count": max(0, pending_input_count) if isinstance(pending_input_count, int) else 0,
             "specialists_requested": chosen,
+            "refilled_specialists": refilled,
             "specialists_epithets": {
                 n: epithet_for(n) for n in chosen
             },

@@ -58,6 +58,28 @@ reports `completed` while a candidate is pending; if the budget runs out first,
 the stop reason lists the candidates still awaiting independent verification.
 Existing schedules keep their saved `max_turns`; raise it to opt them in.
 
+## Continuous dispatch and signal-earned budget
+
+Within an automatic `attack` dispatch, a finished specialist's result is folded
+into the task graph as soon as it returns. Hypotheses it unblocks, or follow-ups
+it spawns, are leased and started in the freed slot while the rest of the wave
+keeps running. A specialist runs at most once per dispatch, at most 12 run per
+dispatch, and none starts with less than 90 seconds of the wave left. Its lease
+is checkpointed before it acts, and its result is applied to the graph once.
+The dispatch result lists these as `refilled_specialists`. Explicit specialist
+lists and the recon, observed-input and coverage follow-up modes keep their
+fixed waves.
+
+During a scheduled turn, a specialist whose own tool result is a signal (a
+submitted finding candidate, a queued proof escalation, or a `LIKELY_IMPACT`,
+`MUTANT_BYPASS_CANDIDATE` or `TIME_BASED_INJECTION_CANDIDATE` verdict) receives
+`signal_bonus_step` more tool calls and requests (default 4, cap 20) from a pool
+shared by the turn (`signal_bonus_pool`, default 24, cap 200; 0 disables it).
+Ordinary successful probes do not count. No specialist exceeds three times its
+base allowance. The specialist's spend and time limits and the turn's spend
+and time limits are unchanged, and a signal remains a lead until the
+independent verifier confirms it.
+
 The opted-in early recon pack adds a bounded CNAME lookup. DNS, live hosts,
 technologies, API endpoints, and first-party scripts enter a shared observation
 contract with a target, source, timestamp, evidence reference, scope, and

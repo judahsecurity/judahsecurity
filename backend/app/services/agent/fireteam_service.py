@@ -1116,6 +1116,7 @@ class SpecialistReport:
     lease_id: str = ""
     coverage_cell_id: str = ""
     coverage_lease_id: str = ""
+    bonus_tool_calls: int = 0             # adaptive allowance granted on signals
 
 
 @dataclass
@@ -1419,8 +1420,9 @@ async def _run_specialist(
     iteration = 0
     max_tool_calls = directive.max_tool_calls if isinstance(directive, OperationDirective) else 0
     budget = _SpecialistBudget(directive) if isinstance(directive, OperationDirective) else None
-    from app.services.agent.autonomy_limits import current_autonomy_limits
+    from app.services.agent.autonomy_limits import current_autonomy_limits, current_signal_bonus_pool
     strict_scope = bool(current_autonomy_limits.get())
+    bonus_pool = current_signal_bonus_pool.get() if budget and max_tool_calls else None
     scope_target = (
         directive.target if isinstance(directive, OperationDirective) else
         target_list[0] if target_list else ""
@@ -1516,6 +1518,16 @@ async def _run_specialist(
         for tc, tr in zip(tool_calls, tool_results):
             report.tool_calls.append(tr)
 
+        granted = 0
+        if bonus_pool is not None and any(invocation_has_signal(tr) for tr in tool_results):
+            granted = bonus_pool.grant(profile.name, directive.max_tool_calls)
+            if granted:
+                # Follow a live lead further; turn spend and time stay fixed.
+                max_tool_calls += granted
+                budget.bonus_requests += granted
+                max_iter += -(-granted // max(1, profile.max_tools_per_iteration))
+                report.bonus_tool_calls += granted
+
         feedback = {
             "tool_results": [
                 {
@@ -1528,6 +1540,13 @@ async def _run_specialist(
                 for tr in tool_results
             ],
         }
+        if granted:
+            feedback["budget_extended"] = {
+                "extra_tool_calls": granted,
+                "tool_calls_remaining": max_tool_calls - len(report.tool_calls),
+                "reason": "This result is a lead. Use the extra calls to take it to a "
+                          "candidate or refute it; a signal is still not a finding.",
+            }
         messages.append(HumanMessage(content=json.dumps(feedback)))
 
     report.duration_seconds = (datetime.utcnow() - start).total_seconds()
@@ -1596,9 +1615,28 @@ def _action_kind(tool_name: str, args: dict) -> str:
     return "probe"
 
 
+_SIGNAL_MARKERS = tuple(f'"{verdict}"' for verdict in (
+    "LIKELY_IMPACT", "MUTANT_BYPASS_CANDIDATE", "TIME_BASED_INJECTION_CANDIDATE",
+)) + ('"proof_escalation": {',)
+
+
+def invocation_has_signal(invocation: ToolInvocation) -> bool:
+    """A result strong enough to earn more budget: a candidate or proof lead.
+
+    Ordinary successful probes do not count; clean negatives also succeed.
+    """
+    if not invocation.success:
+        return False
+    if invocation.tool == "submit_finding_candidate":
+        return True
+    summary = invocation.summary or ""
+    return any(marker in summary for marker in _SIGNAL_MARKERS)
+
+
 class _SpecialistBudget:
     def __init__(self, directive: OperationDirective):
         self.directive = directive
+        self.bonus_requests = 0
         self.count = 0
         self.next_at = 0.0
         self.lock = asyncio.Lock()
@@ -1624,7 +1662,7 @@ class _SpecialistBudget:
                 ):
                     return "specialist_scope_denied"
         async with self.lock:
-            if directive.max_requests and self.count >= directive.max_requests:
+            if directive.max_requests and self.count >= directive.max_requests + self.bonus_requests:
                 return "specialist_request_budget_exhausted"
             delay = self.next_at - time.monotonic()
             if delay > 0:
@@ -1767,6 +1805,8 @@ async def run_fireteam(
     llm_for_specialist: Optional[Callable[[SpecialistProfile], Any]] = None,
     member_timeout_sec: float = 600.0,
     wave_timeout_sec: float = 1200.0,
+    refill: Optional[Callable[[SpecialistReport], Awaitable[list]]] = None,
+    min_refill_seconds: float = 90.0,
 ) -> FireteamResult:
     """Run a bounded fireteam and return completed and interrupted receipts.
 
@@ -1774,9 +1814,14 @@ async def run_fireteam(
     or fully custom :class:`SpecialistProfile` instances (for ad-hoc missions).
     ``directives`` maps specialist name → OperationDirective (optional).
     ``report_callback`` receives each completed member before the whole wave ends.
+    ``refill`` is awaited after each member finishes. It may return
+    ``(profile, directive)`` pairs, which start at once in the freed slot while
+    at least ``min_refill_seconds`` of the wave remain. The pool therefore keeps
+    working as results unlock new work, instead of waiting for a whole wave.
     """
     start = datetime.utcnow()
-    directives = directives or {}
+    wave_deadline = time.monotonic() + max(0.01, wave_timeout_sec)
+    directives = dict(directives or {})
 
     resolved: list[SpecialistProfile] = []
     for s in specialists:
@@ -1908,25 +1953,60 @@ async def run_fireteam(
         except Exception:
             logger.exception("Fireteam task failed after its deadline")
 
-    execution_progress = [{"tool_inflight": False, "completed_calls": []}
-                          for _ in resolved]
-    tasks = [asyncio.create_task(_run(p, progress))
-             for p, progress in zip(resolved, execution_progress)]
+    members: list[tuple[SpecialistProfile, asyncio.Task, Dict[str, Any]]] = []
+
+    def _start(profile: SpecialistProfile) -> asyncio.Task:
+        progress = {"tool_inflight": False, "completed_calls": []}
+        task = asyncio.create_task(_run(profile, progress))
+        members.append((profile, task, progress))
+        return task
+
+    running = {_start(p) for p in resolved}
     try:
-        _, pending = await asyncio.wait(
-            tasks, timeout=max(0.01, wave_timeout_sec)
-        )
+        while running:
+            remaining = wave_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, running = await asyncio.wait(
+                running, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done or refill is None:
+                continue
+            for task in done:
+                if task.cancelled() or task.exception() is not None:
+                    continue
+                if wave_deadline - time.monotonic() < min_refill_seconds:
+                    continue
+                try:
+                    additions = await refill(task.result()) or []
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Fireteam refill failed; continuing with running members")
+                    additions = []
+                for profile, directive in additions:
+                    if directive is not None:
+                        directives[profile.name] = directive
+                    running.add(_start(profile))
+        if running:
+            # Deadline reached: let members that are already finishing settle,
+            # as a single wait with a timeout would, before cancelling the rest.
+            for _ in range(20):
+                if all(task.done() for task in running):
+                    break
+                await asyncio.sleep(0)
     except BaseException:
-        for task in tasks:
+        for _, task, _ in members:
             task.cancel()
             task.add_done_callback(_log_late_failure)
         raise
+    pending = {task for _, task, _ in members if not task.done()}
     for task in pending:
         task.cancel()
         task.add_done_callback(_log_late_failure)
 
     reports = []
-    for profile, task, progress in zip(resolved, tasks, execution_progress):
+    for profile, task, progress in members:
         if task in pending:
             reports.append(_interrupted_report(
                 profile, f"fireteam wave timed out after {wave_timeout_sec:g}s",
