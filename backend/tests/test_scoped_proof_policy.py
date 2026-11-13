@@ -175,22 +175,57 @@ def test_response_match_requires_direct_anonymous_get():
             "response": {"status": 200, "url": target, "body": "private diagnostic configuration"},
         },
     }
-    store = SimpleNamespace(records={"verifier": row})
+    control_url = "https://app.example.test/aegis-control-0123456789abcdef"
+    control = {
+        "id": "control", "kind": "http_exchange", "identity": "anonymous",
+        "payload": {
+            "request": {"method": "GET", "url": control_url},
+            "response": {"status": 404, "url": control_url, "body": "not found"},
+        },
+    }
+    store = SimpleNamespace(records={"verifier": row, "control": control})
     candidate = SimpleNamespace(title="Sensitive configuration exposure", description="")
     proof = {"kind": "response_match", "artifact_id": "verifier",
-             "contains": "private diagnostic configuration"}
-    assert validate_proof(store, candidate, proof, ["verifier"])[0]
+             "contains": "private diagnostic configuration", "control_id": "control"}
+    ids = ["verifier", "control"]
+    assert validate_proof(store, candidate, proof, ids)[0]
     row["identity"] = "legacy"
-    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    assert not validate_proof(store, candidate, proof, ids)[0]
     row["identity"] = "anonymous"
     row["payload"]["response"]["url"] = "https://app.example.test/login"
-    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    assert not validate_proof(store, candidate, proof, ids)[0]
     row["payload"]["response"]["url"] = target
     row["payload"]["request"]["headers"] = {"Authorization": "Bearer redacted"}
-    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    assert not validate_proof(store, candidate, proof, ids)[0]
     row["payload"]["request"]["headers"] = {}
     candidate.description = "This might also enable SQL injection"
-    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    assert not validate_proof(store, candidate, proof, ids)[0]
+
+
+def test_response_match_rejects_catch_all_routes_and_missing_controls():
+    target = "https://app.example.test/.env"
+    page = "<!DOCTYPE html><html><div id=root></div></html>"
+    row = {"id": "verifier", "kind": "http_exchange", "identity": "anonymous", "payload": {
+        "request": {"method": "GET", "url": target},
+        "response": {"status": 200, "url": target, "body": page},
+    }}
+    control_url = "https://app.example.test/aegis-control-0123456789abcdef"
+    control = {"id": "control", "kind": "http_exchange", "identity": "anonymous", "payload": {
+        "request": {"method": "GET", "url": control_url},
+        "response": {"status": 200, "url": control_url, "body": page},
+    }}
+    store = SimpleNamespace(records={"verifier": row, "control": control})
+    candidate = SimpleNamespace(title="Exposed .env file", description="")
+    proof = {"kind": "response_match", "artifact_id": "verifier",
+             "contains": "<!DOCTYPE html><html>", "control_id": "control"}
+    ok, why = validate_proof(store, candidate, proof, ["verifier", "control"])
+    assert not ok and "catch-all" in why
+    ok, why = validate_proof(store, candidate, {**proof, "control_id": ""}, ["verifier"])
+    assert not ok and "control_id" in why
+    control["payload"]["request"]["url"] = "https://app.example.test/robots.txt"
+    control["payload"]["response"]["body"] = "User-agent: *"
+    ok, why = validate_proof(store, candidate, proof, ["verifier", "control"])
+    assert not ok and "random" in why
 
 
 def record(artifact_id, kind, payload, created_at):

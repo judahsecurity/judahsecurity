@@ -777,9 +777,26 @@ def test_prose_and_bypass_flags_cannot_publish(manager):
     )[0]
 
 
+CONTROL_PATH = "/aegis-control-0123456789abcdef"
+
+
+def exposure_app(req):
+    """Serve the claimed file, and a 404 for the verifier's random control path."""
+    if req.url.path == CONTROL_PATH:
+        return httpx.Response(404, text="not found")
+    return httpx.Response(200, text="private diagnostic configuration")
+
+
+def control_url(target):
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(target)
+    return f"{parts.scheme}://{parts.netloc}{CONTROL_PATH}"
+
+
 @pytest.mark.asyncio
 async def test_fresh_http_proof_confirms_then_refutation_revokes(manager, transport):
-    transport(lambda req: httpx.Response(200, text="private diagnostic configuration"))
+    transport(exposure_app)
     cand = candidate(manager)
     token = verification_run.set(
         VerificationRun("verify-1", cand.id, cand.revision, cand.nonce)
@@ -789,16 +806,20 @@ async def test_fresh_http_proof_confirms_then_refutation_revokes(manager, transp
             "GET", cand.target, use_auth_session=False
         )
         eid = response["evidence_id"]
+        cid = (await manager._http_exchange(
+            "GET", control_url(cand.target), use_auth_session=False
+        ))["evidence_id"]
         verdict = apply_verdict(
             manager,
             candidate_id=cand.id,
             verdict="confirmed",
             evidence="Private diagnostic configuration was disclosed",
-            evidence_ids=[eid],
+            evidence_ids=[eid, cid],
             proof={
                 "kind": "response_match",
                 "artifact_id": eid,
                 "contains": "private diagnostic configuration",
+                "control_id": cid,
             },
         )
         assert verdict.status == "confirmed"
@@ -844,22 +865,24 @@ async def test_errors_and_empty_success_do_not_confirm(
 
 @pytest.mark.asyncio
 async def test_candidate_update_invalidates_verified_revision(manager, transport):
-    transport(lambda req: httpx.Response(200, text="private diagnostic configuration"))
+    transport(exposure_app)
     cand = candidate(manager)
     token = verification_run.set(VerificationRun("verify-1", cand.id, 1, cand.nonce))
     try:
         result = await manager._http_exchange("GET", cand.target)
         eid = result["evidence_id"]
+        cid = (await manager._http_exchange("GET", control_url(cand.target)))["evidence_id"]
         apply_verdict(
             manager,
             candidate_id=cand.id,
             verdict="confirmed",
             evidence="Private config exposed",
-            evidence_ids=[eid],
+            evidence_ids=[eid, cid],
             proof={
                 "kind": "response_match",
                 "artifact_id": eid,
                 "contains": "private diagnostic configuration",
+                "control_id": cid,
             },
         )
         assert check(manager, cand)
@@ -1377,7 +1400,7 @@ async def test_verifier_loop_requires_evidence_and_valid_proof(
     monkeypatch.setattr(palace, "store_specialist_diary", lambda *a, **kw: None)
     # Keep offline context assembly from opening model/vector-store connections.
     monkeypatch.setattr(manager, "_cheap_llm", lambda: None)
-    transport(lambda req: httpx.Response(200, text="private diagnostic configuration"))
+    transport(exposure_app)
     cand = candidate(manager)
 
     class ScriptedVerifier:
@@ -1392,7 +1415,11 @@ async def test_verifier_loop_requires_evidence_and_valid_proof(
                         {
                             "tool": "replay_http_request",
                             "args": {"url": cand.target, "identity": "anonymous"},
-                        }
+                        },
+                        {
+                            "tool": "replay_http_request",
+                            "args": {"url": control_url(cand.target), "identity": "anonymous"},
+                        },
                     ]
                 }
             elif self.calls == 2:
@@ -1401,7 +1428,8 @@ async def test_verifier_loop_requires_evidence_and_valid_proof(
                     for r in evidence_store(manager).records.values()
                     if r["kind"] == "http_exchange"
                 ]
-                eid = rows[-1]["id"]
+                eid = next(r["id"] for r in rows if not r["target"].endswith(CONTROL_PATH))
+                cid = next(r["id"] for r in rows if r["target"].endswith(CONTROL_PATH))
                 payload = {
                     "tool_calls": [
                         {
@@ -1410,11 +1438,12 @@ async def test_verifier_loop_requires_evidence_and_valid_proof(
                                 "candidate_id": cand.id,
                                 "verdict": "confirmed",
                                 "evidence": "Private configuration exposed",
-                                "evidence_ids": [eid],
+                                "evidence_ids": [eid, cid],
                                 "proof": {
                                     "kind": "response_match",
                                     "artifact_id": eid,
                                     "contains": "private diagnostic configuration",
+                                    "control_id": cid,
                                 },
                             },
                         }
@@ -1482,7 +1511,16 @@ async def test_authorization_proof_requires_distinct_verified_owners(
 ):
     from app.services.agent.proof_policy import validate_proof
 
-    transport(lambda req: httpx.Response(200, json={"owner_id": "A"}))
+    seen = []
+
+    def protected_object(req):
+        # A and B are served the object; the anonymous control is refused.
+        seen.append(req)
+        if len(seen) == 3:
+            return httpx.Response(401, json={"error": "login required"})
+        return httpx.Response(200, json={"owner_id": "A"})
+
+    transport(protected_object)
     cand = candidate(manager, "IDOR on private test object")
     for name in ("A", "B"):
         await manager.register_test_identity(name, "https://app.test/")
@@ -1493,12 +1531,14 @@ async def test_authorization_proof_requires_distinct_verified_owners(
     try:
         baseline = await manager._http_exchange("GET", cand.target, identity="A")
         mutant = await manager._http_exchange("GET", cand.target, identity="B")
-        ids = [baseline["evidence_id"], mutant["evidence_id"]]
+        control = await manager._http_exchange("GET", cand.target, use_auth_session=False)
+        ids = [baseline["evidence_id"], mutant["evidence_id"], control["evidence_id"]]
         proof = {
             "kind": "authorization",
             "baseline_id": ids[0],
             "mutant_id": ids[1],
             "field": "owner_id",
+            "control_id": ids[2],
         }
         assert validate_proof(evidence_store(manager), cand, proof, ids)[0]
         proof["field"] = "nonexistent"

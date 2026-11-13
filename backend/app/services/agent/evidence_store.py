@@ -453,6 +453,7 @@ class EvidenceStore:
                 "scoped_browser_check_form_xss", "scoped_browser_check_xhr_xss",
                 "scoped_browser_check_stored_xss",
                 "scoped_browser_check_client", "scoped_response_probe",
+                "scoped_race_probe", "scoped_xml_xxe",
             }:
                 try:
                     if origin(row["target"]) != origin(target):
@@ -477,6 +478,9 @@ class EvidenceStore:
                                  and isinstance(payload.get("readback_status"), int)
                                  and 200 <= payload["readback_status"] < 300
                                  and payload.get("cleanup_success") is True)))
+                elif row["kind"] == "scoped_xml_xxe":
+                    # The parser fetched the run's own fresh interaction domain.
+                    proven = payload.get("callback_observed") is True
                 elif row["kind"] == "scoped_browser_check_client":
                     proven = (payload.get("behavior_observed") is True
                               and (payload.get("observations") or {}).get(

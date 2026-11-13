@@ -613,13 +613,42 @@ def validate_proof(
                     or request.get("url") != response.get("url")
                     or headers & {"authorization", "cookie", "proxy-authorization", "x-api-key"}):
                 return False, "Exposure requires a direct anonymous GET observation"
-        if successful(item) and isinstance(marker, str) and len(marker.strip()) >= 12:
-            if marker in item["payload"]["response"].get("body", ""):
-                return True, ""
-        return (
-            False,
-            "Cite a substantial literal observation from the successful response",
-        )
+        if not (successful(item) and isinstance(marker, str) and len(marker.strip()) >= 12
+                and marker in item["payload"]["response"].get("body", "")):
+            return (
+                False,
+                "Cite a substantial literal observation from the successful response",
+            )
+        # Negative control: a fresh anonymous GET to a random path that should
+        # not exist. A catch-all route (e.g. an SPA serving index.html for every
+        # path) returns the same marker there, so the exposure is not proven.
+        control = row("control_id")
+        if not control or control.get("kind") != "http_exchange" or control is item:
+            return False, (
+                "Exposure needs control_id: a fresh anonymous GET to a random "
+                "non-existent path on the same origin"
+            )
+        c_request = control["payload"].get("request", {})
+        c_response = control["payload"].get("response", {})
+        c_headers = {str(name).lower() for name in (c_request.get("headers") or {})}
+        try:
+            same_origin = (urlsplit(str(c_request.get("url") or "")).netloc
+                           == urlsplit(str(item["payload"]["request"].get("url") or "")).netloc)
+        except ValueError:
+            same_origin = False
+        control_path = urlsplit(str(c_request.get("url") or "")).path
+        if (control.get("identity") != "anonymous" or c_request.get("method") != "GET"
+                or not same_origin
+                or control_path == urlsplit(str(item["payload"]["request"].get("url") or "")).path
+                or not re.search(r"[0-9a-f]{12,}", control_path)
+                or c_headers & {"authorization", "cookie", "proxy-authorization", "x-api-key"}):
+            return False, "Exposure control must be an anonymous GET to a random same-origin path"
+        if marker in (c_response.get("body") or ""):
+            return False, (
+                "The cited content is also served for a random path; this looks like a "
+                "catch-all route, not an exposed file"
+            )
+        return True, ""
     if kind == "authorization":
         baseline, mutant = row("baseline_id"), row("mutant_id")
         field = proof.get("field")
@@ -663,6 +692,26 @@ def validate_proof(
             "principal_id"
         ):
             return False, "Both sessions represent the same principal"
+        if mutant["identity"] != "anonymous":
+            # Negative control: the same request without credentials must be
+            # refused, or the object is simply public and its owner field leaks
+            # nothing another user should not see.
+            control = row("control_id")
+            if not control or control is baseline or control is mutant:
+                return False, (
+                    "Cross-user access needs control_id: the same request as anonymous, "
+                    "which must be denied"
+                )
+            c = control["payload"]["request"]
+            if (control.get("identity") != "anonymous" or c.get("url") != b.get("url")
+                    or c.get("method") != b.get("method") or c.get("body") != b.get("body")):
+                return False, "The control must replay the same request anonymously"
+            c_status = control["payload"]["response"].get("status", 0)
+            if 200 <= c_status < 300 and _object_field(_json(control), field) == owner:
+                return False, (
+                    "Anonymous access returns the same object; it is public, not a "
+                    "cross-user authorization failure"
+                )
         return True, ""
     if kind == "state_change":
         write, read, cleanup = row("write_id"), row("read_id"), row("cleanup_id")

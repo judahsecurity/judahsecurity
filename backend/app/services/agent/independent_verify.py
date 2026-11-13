@@ -636,8 +636,13 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "Read complete observations with read_evidence(evidence_id, offset). "
         "When done, call record_verify_verdict(candidate_id, verdict, evidence, evidence_ids, proof) "
         "with IDs from YOUR HTTP exchanges and a structured proof: "
-        "response_match {kind, artifact_id, contains} for exposure; "
-        "authorization {kind, baseline_id, mutant_id, field} for cross-identity JSON object access; "
+        "response_match {kind, artifact_id, contains, control_id} for exposure, where "
+        "control_id is your own anonymous GET to a random non-existent path on the same "
+        "origin (include a 16+ hex-character random segment) whose body must not contain "
+        "the cited text; "
+        "authorization {kind, baseline_id, mutant_id, field, control_id} for cross-identity "
+        "JSON object access, where control_id is the same request replayed anonymously and "
+        "it must be denied (required when the mutant identity is not anonymous); "
         "field may be a named nested path such as data.node.ownerId for GraphQL, "
         "but both identities must replay the same query and variables. "
         "state_change {kind, write_id, read_id, cleanup_id, field, value, owner_identity?} "
@@ -1930,7 +1935,10 @@ def apply_verdict(
             candidate_id=cand.id,
             evidence=evidence,
             nonce=cand.nonce,
-            nonce_observed=True,
+            # True only when the fresh run that produced the validated evidence
+            # was bound to this candidate revision's nonce; it does not claim
+            # the nonce appeared in target traffic.
+            nonce_observed=bool(run.nonce) and run.nonce == cand.nonce,
             evidence_ids=evidence_ids,
             run_id=run.id,
             revision=cand.revision,
