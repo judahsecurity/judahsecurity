@@ -8,7 +8,7 @@ load a second copy of `playbooks.py` into context.
 | File | Max lines | Loaded when |
 |------|-----------|-------------|
 | `SKILL.md` | **150** | Skill is invoked |
-| Linked reference (`schema.md`, `gate.md`, `researchers.md`) | **200** | Skill tells Claude to Read it |
+| Linked reference (`schema.md`, `gate.md`, `researchers.md`, `rea.md`) | **200** | Skill tells Claude to Read it |
 | This README / operator docs | unbounded | Humans, not the session |
 
 `tests/test_skills_size.py` enforces the SKILL.md cap.

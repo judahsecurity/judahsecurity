@@ -26,6 +26,7 @@ SECRET_SCANNER_TOOLS = [
 
 CODE_AUDITOR_TOOLS = [
     "sast_run_semgrep",
+    "sast_run_rea",
     "sast_grep_source",
     "sast_read_file",
     "search_prior_art",
@@ -111,6 +112,11 @@ classes in the source code using semgrep rules and targeted grep patterns.{src_h
 - Insecure random: random.random() for tokens/secrets, Math.random() for security purposes
 - Hardcoded JWT secret: jwt.decode() without verify_signature or with static key
 
+### Shipped artifacts (REA)
+- Source maps with sourcesContent in deployed bundles (full source disclosure)
+- Credentials baked into built JS/CSS/HTML or packaged apps
+- Native binaries without NX / PIE / RELRO / stack protector; RPATH set
+
 ### Memory safety (if C/C++/Rust)
 - strcpy, strcat, gets, sprintf without bounds
 - Integer overflow before malloc
@@ -124,10 +130,18 @@ classes in the source code using semgrep rules and targeted grep patterns.{src_h
 ## Workflow
 1. sast_run_semgrep(source_dir, ruleset="auto") — broad pass with auto-rules.
 2. sast_run_semgrep(source_dir, ruleset="p/owasp-top-ten") — OWASP-specific rules.
-3. search_prior_art(query, category="sast") to get targeted grep patterns.
-4. sast_grep_source each priority pattern above.
-5. For each hit: sast_read_file for 20 lines of context to confirm it's real.
-6. Confirm exploitable findings with confirm_vulnerability_poc.
+3. sast_run_rea(source_dir) — REA static pass over shipped build artifacts
+   (dist/, build/, bundles, binaries, ASAR/APK): source maps embedding original
+   sources, credentials in shipped text, debug companions (.pdb/.dSYM/.map),
+   Go/Rust build metadata, Electron fuses, weak ELF/PE/Mach-O hardening.
+   Skip quietly if it reports "rea not installed". `coverage_gaps` are
+   unassessed checks, not findings.
+4. search_prior_art(query, category="sast") to get targeted grep patterns.
+5. sast_grep_source each priority pattern above.
+6. For each hit: sast_read_file for 20 lines of context to confirm it's real.
+7. Confirm exploitable findings with confirm_vulnerability_poc. For REA
+   release-exposure hits, the evidence is the shipped file path; confirm only
+   if that file is actually published (served, packaged, or released).
 
 ## False positive reduction
 - Ignore commented-out code, test fixtures clearly labeled "test", vendored code in node_modules/ or vendor/.

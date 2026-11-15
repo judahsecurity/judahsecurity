@@ -2034,6 +2034,30 @@ def sast_run_semgrep(source_dir: str, ruleset: str = "auto", timeout: int = 600)
 
 
 @security_tool(category="vuln_analysis", risk="safe")
+def sast_run_rea(source_dir: str, max_artifacts: int = 50, timeout: int = 900) -> str:
+    """Static scan of shipped build artifacts in a checkout with REA.
+
+    Finds what source SAST misses in build output: source maps that embed
+    original sources, provider-prefixed credentials in shipped text/bundles,
+    .pdb/.dSYM/.debug/.map companions, Go build paths, Rust dependency
+    metadata, Electron fuse issues, and weak ELF/PE/Mach-O hardening
+    (PIE, NX, RELRO, stack protector, ASLR, CFG, RPATH). Static only: REA
+    parses files and does not execute them. Requires the `rea` CLI
+    (npm package rea-agents).
+
+    Args:
+        source_dir: Absolute path to source code directory
+        max_artifacts: Max binaries/packages to inspect (largest first)
+        timeout: Max seconds per REA command
+    """
+    import scanners
+    result = scanners.run_rea(
+        source_dir, bridge=_get_bridge(), max_artifacts=max_artifacts, timeout=timeout,
+    )
+    return json.dumps(result, default=str)
+
+
+@security_tool(category="vuln_analysis", risk="safe")
 def sast_grep_source(
     pattern: str,
     source_dir: str,
@@ -2179,6 +2203,7 @@ CHAIN_TOOLS = [
 SAST_TOOLS = [
     "sast_scan_secrets",
     "sast_run_semgrep",
+    "sast_run_rea",
     "sast_grep_source",
     "sast_read_file",
     "search_prior_art",

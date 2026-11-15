@@ -5079,6 +5079,42 @@ def run_semgrep(
     }
 
 
+def run_rea(
+    source_dir: str,
+    bridge: Optional[ASMBridge] = None,
+    max_artifacts: int = 50,
+    timeout: int = 900,
+) -> Dict[str, Any]:
+    """Run REA's static artifact pass (release exposure + binary hardening).
+
+    Covers shipped build output in a checkout: source maps with embedded
+    sources, credentials in shipped text, debug companions, Go/Rust build
+    metadata, Electron fuses, and ELF/PE/Mach-O hardening. See rea_scanner.py.
+    """
+    import rea_scanner
+
+    result = rea_scanner.scan(source_dir, max_artifacts=max_artifacts, timeout=timeout)
+    findings = result.get("findings") or []
+    if bridge and findings:
+        host = result.get("source_dir", source_dir)
+        for f in findings[:50]:
+            bridge.submit_vulnerability(
+                host=host,
+                title=f["title"],
+                severity=f.get("severity") or "info",
+                source="rea",
+                template_id=f.get("rule"),
+                description=f"Found in {f.get('file', '?')}. {f.get('remediation') or ''}".strip(),
+                confidence="potential",
+                tags=["sast", "rea", f.get("rule", "rea")],
+                raw_data=f,
+            )
+        bridge.flush()
+    # Keep tool output small for the agent: drop the raw per-command results.
+    slim = {k: v for k, v in result.items() if k not in ("audits", "hardening")}
+    return slim
+
+
 def grep_source(
     pattern: str,
     source_dir: str,

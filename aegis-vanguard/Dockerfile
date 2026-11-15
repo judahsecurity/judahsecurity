@@ -5,7 +5,7 @@ ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # ── System dependencies ──────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
-    curl wget git unzip jq python3 python3-pip python3-venv python-is-python3 \
+    curl wget git unzip xz-utils jq python3 python3-pip python3-venv python-is-python3 \
     dnsutils nmap masscan libpcap-dev whois \
     nikto ruby ruby-dev build-essential libffi-dev \
     openssl openssh-client hydra \
@@ -82,6 +82,20 @@ RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then GL_ARCH="x64"; else GL_ARCH="$ARCH"; fi && \
     curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
     | tar -C /usr/local/bin -xz gitleaks
+
+# ── REA (Reverse Engineer Anything) ──────────────────────────────────
+# Static artifact pass for SAST: release exposure (source maps, shipped
+# credentials, debug companions, Electron fuses) + ELF/PE/Mach-O hardening.
+# https://github.com/morluto/rea — needs Node.js >= 22.23.4. Pinned, and
+# --ignore-scripts because the CLI needs no install hooks.
+ARG NODE_VERSION=22.23.4
+ARG REA_VERSION=6.9.0
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "amd64" ]; then NODE_ARCH="x64"; else NODE_ARCH="$ARCH"; fi && \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+    | tar -C /usr/local --strip-components=1 -xJ --exclude="*/CHANGELOG.md" --exclude="*/LICENSE" --exclude="*/README.md" \
+    && npm install --global --ignore-scripts "rea-agents@${REA_VERSION}" \
+    && rea --version
 
 # ── testssl.sh ───────────────────────────────────────────────────────
 RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl.sh \

@@ -47,6 +47,19 @@ instead of treating tool activity as coverage. See
 `docs/vanguard-system-card.md`. Claude Code playbook: `CLAUDE.md` +
 `.claude/skills/` (see `docs/skills/README.md`). Pass a real checkout or URL.
 
+## Static artifact pass (REA)
+
+When `--source-dir` is set, the SAST phase's Code Auditor also runs
+[REA](https://github.com/morluto/rea) (`sast_run_rea`) over the build output in
+the checkout: source maps that embed original sources, credentials in shipped
+text, debug companions (.pdb/.dSYM/.map), Go/Rust build metadata, Electron
+fuses, and ELF/PE/Mach-O hardening. REA parses files and never executes them.
+The `/code-scan` skill runs the same pass via `.claude/skills/_lib/rea_scan.py`
+(see `.claude/skills/code-scan/rea.md`). The Docker image pins
+`rea-agents@6.9.0`. Outside Docker, install it with
+`npm install -g --ignore-scripts rea-agents@6.9.0` (Node 22.23.4+). If `rea` is
+missing, the pass is skipped. Logic lives in `rea_scanner.py`.
+
 ## Setup
 
 ### 1. Build the scanner container

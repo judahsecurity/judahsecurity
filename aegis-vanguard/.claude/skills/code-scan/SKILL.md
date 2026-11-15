@@ -13,6 +13,7 @@ allowed-tools:
   - Write
   - Task
   - Bash(python3 .claude/skills/_lib/run_dir.py:*)
+  - Bash(python3 .claude/skills/_lib/rea_scan.py:*)
   - Bash(ls:*)
   - Bash(rg:*)
 ---
@@ -47,7 +48,10 @@ before spawning Task agents.
 4. Adversarial pass (orchestrator): try to refute each candidate (unreachable,
    mitigated one layer up, docs-only, duplicate). Refuted hits are not findings.
 
-Optional tools if already installed: Semgrep / Gitleaks. Skip quietly if missing.
+5. Shipped artifacts: run the REA pass on the checkout (build output, bundles,
+   source maps, binaries). Read [rea.md](rea.md) first. Same refute rules apply.
+
+Optional tools if already installed: Semgrep / Gitleaks / REA. Skip quietly if missing.
 Keep a hit only if it instantiates a threat row.
 
 ## Write
