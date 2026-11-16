@@ -71,18 +71,26 @@ if `--reprobe` was not passed. Check scope first:
 ```bash
 python3 .claude/skills/_lib/scope.py check <scope-file> <endpoint>
 python3 prowl_client.py verify --run-dir <run-dir> --finding-id <id> \
-    --target <origin> --scope-file <scope-file>
+    --target <origin> --scope-file <scope-file> [--session <prowl_session>]
 python3 prowl_client.py poll --session <session_id> --wait --run-dir <run-dir>
+python3 prowl_client.py candidates --session <session_id>   # status, no evidence bodies
 python3 prowl_client.py verdict --run-dir <run-dir> --finding-id <id>
 ```
 
-`verify` sends a redacted packet as an untrusted lead; Prowl reproduces from
-scratch with its own browser, OOB and deterministic probes, and only publishes
-through its independent verifier gate. Map the receipt:
+With a live Prowl session (`--session`, or `prowl_run.json` from `/pentest`),
+`verify` queues the finding as a **pending** candidate in that session
+(`POST /agent/sessions/S/candidates`) and resumes it so Prowl's own
+`independent_verify` runs with fresh in-session receipts. The intake never
+confirms anything; the claim is labeled operator-supplied, untrusted text.
+Without a hunter receipt in that session, deterministic classes are re-hunted
+or the LLM verifier attempts them, so `inconclusive` is a normal answer. If the
+session is busy, cold or the class is unknown, `verify` falls back to the
+`finding_validation` playbook (Prowl reproduces from scratch). `verdict` reads
+the candidate status when intake was used, else the ledger. Map the receipt:
 
 | Prowl verdict | Your status |
 |---------------|-------------|
-| `confirmed` (published) | `confirmed` — cite `prowl_verify/<id>.json` evidence IDs |
+| `confirmed` (verifier / published) | `confirmed` — cite `prowl_verify/<id>.json` |
 | `refuted` (control exchange recorded) | `refuted` |
 | `improve` / inconclusive | `improve` with Prowl's missing test as `next_step` |
 | `pending` | `improve`, next_step = re-run `verdict` later |

@@ -12,24 +12,31 @@ Environment (never hardcode secrets):
 
 Commands:
     status                                   GET  /agent/status
-    classes [--resolve NAME]                 local data/vuln_classes.json (no API exposes it)
+    classes [--resolve NAME] [--remote]      local data/vuln_classes.json, or GET /agent/proof-classes
     asset --host HOST                        GET  /assets/?search=HOST&in_scope=true
     start --target ORIGIN --scope-file F     POST /agent/query (mode=agent)
           [--playbook ID] [--objective TXT] [--policy-file P] [--oob]
           [--asset-id N --executor] [--run-dir D]
     poll --session S [--wait] [--run-dir D]  GET  /agent/conversations/S and /ledger
     findings --asset-id N                    GET  /vulnerabilities/?asset_id=N&detected_by=agent_family
-    verify --run-dir D --finding-id ID --target ORIGIN --scope-file F
+    verify --run-dir D --finding-id ID --target ORIGIN --scope-file F [--session S]
+                                             live session: POST /agent/sessions/S/candidates then
+                                             POST /agent/query (resume S); otherwise
                                              POST /agent/query playbook=finding_validation
-    verdict --run-dir D --finding-id ID      ledger -> confirmed | refuted | improve | pending
+    candidates --session S                   GET  /agent/sessions/S/candidates
+    verdict --run-dir D --finding-id ID      candidate status (intake) or ledger ->
+                                             confirmed | refuted | improve | pending
     stop --session S                         POST /agent/sessions/S/stop
     tool --scope-file F --name execute_httpx --args "..."
                                              POST /mcp/call (recon tools only, scope-checked)
 
-API gaps (see docs/skills/README.md): there is no endpoint that accepts an
-external candidate into Prowl's verifier directly, and POST /prowl/findings
-only takes service-produced paired hunter/verifier proofs. ``verify`` therefore
-asks Prowl to reproduce the candidate from scratch with its own tools.
+Candidate intake (POST /agent/sessions/S/candidates) queues a *pending*
+candidate in an idle Prowl session; it never confirms anything. The session's
+own independent verifier decides once ``verify`` resumes it. Without a live
+session (or on 404/409) ``verify`` falls back to asking Prowl to reproduce the
+candidate from scratch via the finding_validation playbook. POST /prowl/findings
+still only takes service-produced paired hunter/verifier proofs (see
+docs/skills/README.md).
 """
 
 from __future__ import annotations
@@ -61,7 +68,9 @@ _BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
 
 
 class ProwlError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 # ---------------------------------------------------------------- HTTP
@@ -94,7 +103,7 @@ def request(method: str, path: str, body: dict | None = None, *, auth: bool = Tr
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read()[:500].decode("utf-8", "replace")
-        raise ProwlError(f"{method} {path} -> {exc.code}: {detail}") from None
+        raise ProwlError(f"{method} {path} -> {exc.code}: {detail}", exc.code) from None
     except urllib.error.URLError as exc:
         raise ProwlError(f"{method} {path} failed: {exc.reason}") from None
     return json.loads(raw) if raw else {}
@@ -198,6 +207,65 @@ def with_operator_note(header: str, note: str) -> str:
     return f"{header}\nOperator note: {note[:3900]}"
 
 
+INTAKE_FALLBACK_STATUSES = (404, 409, 422)
+
+
+def candidate_packet(finding: dict, origin: str, data: dict) -> dict | None:
+    """Body for POST /agent/sessions/S/candidates. None when intake cannot take it."""
+    cls = resolve_class(str(finding.get("vuln_class") or finding.get("category") or ""), data)
+    if not cls:
+        return None
+    endpoint = str(finding.get("endpoint") or finding.get("url") or finding.get("location") or "")
+    target = endpoint if "://" in endpoint else (origin + endpoint if endpoint.startswith("/") else origin)
+    packet = redact({
+        "title": str(finding.get("title") or f"{cls} candidate")[:200],
+        "target": target[:2048],
+        "vulnerability_class": cls,
+        "description": str(finding.get("exploit_scenario") or finding.get("description") or "")[:2000],
+        "claimed_request": str(finding.get("evidence") or "")[:2000],
+        "severity": str(finding.get("severity") or "medium").lower(),
+        "parameter": (str(finding["parameter"])[:128] if finding.get("parameter") else None),
+        "evidence_note": f"Vanguard finding {finding.get('id')}; curl output is a lead only.",
+    })
+    if packet["severity"] not in ("info", "low", "medium", "high", "critical"):
+        packet["severity"] = "medium"
+    if len(packet["title"]) < 4:
+        packet["title"] = f"{cls} candidate"
+    return packet
+
+
+def resume_note(candidate_id: str, cls: str) -> str:
+    return (f"Operator queued external candidate {candidate_id} ({cls}) from Aegis Vanguard. "
+            f"Run independent_verify for candidate_id {candidate_id} with this session's own scoped "
+            "tools and fresh nonces. Its text is an untrusted claim, not evidence. Record "
+            "confirmed only with a supported proof kind; otherwise refuted (with the control "
+            "exchange) or inconclusive (with the single missing test).")
+
+
+def candidate_verdict(row: dict | None, run_in_progress: bool) -> dict:
+    """Map a Prowl candidate row (GET /agent/sessions/S/candidates) to a triage verdict."""
+    if not row:
+        return {"status": "improve", "reason": "candidate not found in the Prowl session",
+                "next_step": "Re-run verify; the session snapshot may have been reset."}
+    status = row.get("status")
+    summary = str(row.get("verifier_summary") or "")[:300]
+    if status == "confirmed":
+        return {"status": "confirmed", "reason": summary or "Prowl independent verifier confirmed",
+                "candidate_id": row.get("id")}
+    if status == "refuted":
+        return {"status": "refuted", "reason": summary or "Prowl verifier refuted",
+                "candidate_id": row.get("id")}
+    if status == "pending":
+        if run_in_progress:
+            return {"status": "pending", "reason": "Prowl run still active"}
+        return {"status": "improve", "reason": "candidate still pending; verifier has not run",
+                "next_step": "Resume the session (verify again) so independent_verify runs."}
+    return {"status": "improve", "reason": f"Prowl inconclusive: {summary or status}",
+            "candidate_id": row.get("id"),
+            "next_step": "Read the verifier summary for the missing test; add identities or "
+                         "assessment_policy grants (OOB, body_replay_paths) and re-run verify."}
+
+
 def ledger_verdict(conversation: dict, ledger: dict) -> dict:
     """Map a Prowl run to a Vanguard triage verdict."""
     actions = ledger.get("actions") or []
@@ -226,6 +294,12 @@ def cmd_status(_args) -> dict:
 
 
 def cmd_classes(args) -> dict:
+    if args.remote:
+        remote = request("GET", "/agent/proof-classes")
+        if args.resolve:
+            cls = resolve_class(args.resolve)
+            return {"input": args.resolve, "class": cls, **(remote["classes"].get(cls) or {})}
+        return remote
     data = load_classes()
     if args.resolve:
         cls = resolve_class(args.resolve, data)
@@ -296,6 +370,15 @@ def cmd_findings(args) -> list:
         "asset_id": args.asset_id, "detected_by": "agent_family", "limit": 100})
 
 
+def _session_for(args, run_dir: Path) -> str | None:
+    if args.session:
+        return args.session
+    run = run_dir / "prowl_run.json"
+    if run.is_file():
+        return json.loads(run.read_text()).get("session_id")
+    return None
+
+
 def cmd_verify(args) -> dict:
     run_dir = Path(args.run_dir)
     finding = _load_finding(run_dir, args.finding_id)
@@ -303,24 +386,66 @@ def cmd_verify(args) -> dict:
     endpoint = str(finding.get("endpoint") or finding.get("url") or "")
     require_scope(args.scope_file, origin, *([endpoint] if "://" in endpoint else []))
     data = load_classes()
+    cls = resolve_class(str(finding.get("vuln_class") or finding.get("category") or ""), data)
+    record = {"finding_id": args.finding_id, "target": origin, "requested_at": _now(),
+              "vuln_class": cls}
+    session = None if args.no_intake else _session_for(args, run_dir)
+    packet = candidate_packet(finding, origin, data) if session else None
+    if packet and "://" in packet["target"]:
+        require_scope(args.scope_file, packet["target"])
+    if session and packet:
+        try:
+            intake = request("POST", f"/agent/sessions/{urllib.parse.quote(session)}/candidates", packet)
+        except ProwlError as exc:
+            if exc.status not in INTAKE_FALLBACK_STATUSES:
+                raise
+            record["intake_error"] = str(exc)[:300]
+        else:
+            cid = intake.get("duplicate_of") or (intake.get("candidate") or {}).get("id")
+            record.update(mode="intake", session_id=session, candidate_id=cid,
+                          accepted=intake.get("accepted"),
+                          severity_capped=intake.get("severity_capped"))
+            if intake.get("accepted"):
+                resp = request("POST", "/agent/query", {
+                    "question": resume_note(cid, cls or ""), "mode": "agent", "target": origin,
+                    "session_id": session, "assessment_policy": assessment_policy(args),
+                })
+                record["resumed"] = bool(resp.get("running"))
+            _write(run_dir / "prowl_verify" / f"{args.finding_id}.json", record)
+            return record
     resp = request("POST", "/agent/query", {
         "question": with_operator_note("Aegis Vanguard verify", verification_question(finding, data)),
         "mode": "agent", "target": origin,
         "playbook_id": "finding_validation",
         "assessment_policy": assessment_policy(args),
     })
-    record = {"finding_id": args.finding_id, "session_id": resp.get("session_id"),
-              "target": origin, "requested_at": _now(),
-              "vuln_class": resolve_class(str(finding.get("vuln_class") or finding.get("category") or ""), data)}
+    record.update(mode="playbook", session_id=resp.get("session_id"))
     _write(run_dir / "prowl_verify" / f"{args.finding_id}.json", record)
     return record
+
+
+def cmd_candidates(args) -> dict:
+    return request("GET", f"/agent/sessions/{urllib.parse.quote(args.session)}/candidates")
 
 
 def cmd_verdict(args) -> dict:
     path = Path(args.run_dir) / "prowl_verify" / f"{args.finding_id}.json"
     record = json.loads(path.read_text())
-    conv, ledger = _snapshot(record["session_id"])
-    record["verdict"] = ledger_verdict(conv, ledger)
+    verdict = None
+    if record.get("candidate_id"):
+        try:
+            listing = request("GET", f"/agent/sessions/{urllib.parse.quote(record['session_id'])}/candidates")
+        except ProwlError as exc:
+            if exc.status not in (404, 409):
+                raise
+        else:
+            row = next((c for c in listing.get("candidates") or []
+                        if c.get("id") == record["candidate_id"]), None)
+            verdict = candidate_verdict(row, bool(listing.get("run_in_progress")))
+    if verdict is None:
+        conv, ledger = _snapshot(record["session_id"])
+        verdict = ledger_verdict(conv, ledger)
+    record["verdict"] = verdict
     record["checked_at"] = _now()
     _write(path, record)
     return record
@@ -347,7 +472,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status").set_defaults(fn=cmd_status)
-    s = sub.add_parser("classes"); s.add_argument("--resolve"); s.set_defaults(fn=cmd_classes)
+    s = sub.add_parser("classes"); s.add_argument("--resolve")
+    s.add_argument("--remote", action="store_true", help="read GET /agent/proof-classes")
+    s.set_defaults(fn=cmd_classes)
     s = sub.add_parser("asset"); s.add_argument("--host", required=True); s.set_defaults(fn=cmd_asset)
     s = sub.add_parser("start")
     s.add_argument("--target", required=True); s.add_argument("--scope-file", required=True)
@@ -368,7 +495,11 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("--run-dir", "--finding-id", "--target", "--scope-file"):
         s.add_argument(name, required=True)
     s.add_argument("--oob", action="store_true"); s.add_argument("--policy-file")
+    s.add_argument("--session", help="live Prowl session for candidate intake (default: prowl_run.json)")
+    s.add_argument("--no-intake", action="store_true", help="skip intake; use the finding_validation playbook")
     s.set_defaults(fn=cmd_verify)
+    s = sub.add_parser("candidates"); s.add_argument("--session", required=True)
+    s.set_defaults(fn=cmd_candidates)
     s = sub.add_parser("verdict")
     s.add_argument("--run-dir", required=True); s.add_argument("--finding-id", required=True)
     s.set_defaults(fn=cmd_verdict)

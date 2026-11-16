@@ -369,13 +369,22 @@ def _observed_input_batch_step(
     }
 
 
+# Classes whose independent verifier is a scripted replay of a hunter receipt
+# (no LLM), so a pending candidate can be verified as a forced step.
+DETERMINISTIC_REPLAY_CLASSES = frozenset({
+    "sql_injection", "xss", "crlf", "open_redirect", "cors", "race_condition",
+    "dom_open_redirect", "client_template_injection", "client_prototype_pollution",
+    "ssti", "command_injection", "path_traversal", "nosql", "csrf", "jwt",
+})
+
+
 def _pending_candidate_verify_step(
     state: Dict[str, Any], trace: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     for candidate in ((state.get("engagement_brain") or {}).get("candidates") or []):
         if not isinstance(candidate, dict) or candidate.get("status") != "pending":
             continue
-        if (candidate.get("vulnerability_class") not in {"sql_injection", "xss"}
+        if (candidate.get("vulnerability_class") not in DETERMINISTIC_REPLAY_CLASSES
                 and candidate.get("specialist") not in {"sqli", "xss"}):
             continue
         candidate_id = str(candidate.get("id") or "")

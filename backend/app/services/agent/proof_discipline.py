@@ -89,7 +89,8 @@ def check_discipline(kind: str, hunter: dict, verifier: dict) -> tuple[bool, str
     ok, why = marker_ok(hunter, verifier)
     if not ok:
         return ok, why
-    if kind in {"scoped_ssti_eval", "scoped_cmdi_eval", "scoped_traversal_read"}:
+    if kind in {"scoped_ssti_eval", "scoped_cmdi_eval", "scoped_traversal_read",
+                "scoped_nosql_operator", "scoped_jwt_forgery"}:
         for row in (hunter, verifier):
             ok, why = body_diff_ok(row)
             if not ok:

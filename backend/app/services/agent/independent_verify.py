@@ -770,6 +770,9 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_csrf_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_jwt_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 report = await _run_specialist(
                     profile, mission, [cand.target], llm, tools_manager,
                 )
@@ -1086,6 +1089,7 @@ def _confirm_or_explain(tools_manager: Any, store: Any, cand: FindingCandidate, 
 
 
 _INJECTION_PROOF_KINDS = {
+    "nosql": "scoped_nosql_operator",
     "ssti": "scoped_ssti_eval",
     "command_injection": "scoped_cmdi_eval",
     "path_traversal": "scoped_traversal_read",
@@ -1095,15 +1099,12 @@ _INJECTION_PROOF_KINDS = {
 async def _verify_scoped_injection_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any,
 ) -> Optional[Dict[str, Any]]:
-    """Repeat the hunter's SSTI/command/traversal recipe with fresh values."""
-    import asyncio
+    """Repeat the hunter's SSTI/command/traversal/NoSQL recipe with fresh values."""
     import secrets
     from urllib.parse import urlsplit
 
     from app.services.agent.evidence_store import evidence_store
-    from app.services.agent.scoped_assessment.injection_probe import (
-        new_factors, probe_injection,
-    )
+    from app.services.agent.scoped_assessment.injection_probe import new_factors
 
     claim = cand.vulnerability_class
     if claim not in _INJECTION_PROOF_KINDS:
@@ -1113,7 +1114,7 @@ async def _verify_scoped_injection_candidate(
                  if row.get("id") == cand.coverage_cell_id
                  and row.get("test_type") == claim
                  and row.get("source") == "parameter_inventory"
-                 and row.get("method") == "GET"
+                 and row.get("method") in {"GET", "POST"}
                  and row.get("path") == (urlsplit(cand.target).path or "/")), None)
     identity = str(cand.identity or "anonymous")
     hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
@@ -1129,25 +1130,20 @@ async def _verify_scoped_injection_candidate(
         payload = receipt.get("payload", {})
         location, separator, parameter = str(cell.get("parameter") or "").partition(":")
         recipe = str(payload.get("recipe") or "")
-        if location == "query" and separator and parameter and recipe:
+        if (location in {"query", "body_form", "body_json"} and separator and parameter
+                and (recipe or claim == "nosql")):
             target = urlsplit(cand.target)
             scoped_origin = f"{target.scheme}://{target.netloc}"
             nonce = secrets.token_hex(8)
             factors = new_factors() if claim != "path_traversal" else (0, 0)
             try:
-                urls, context = tools_manager._injection_probe_urls(
-                    cand.target, parameter, claim, nonce, factors, identity,
-                    capture_id=str(cell.get("capture_id") or ""),
+                replay, context = await tools_manager._run_injection_probe(
+                    cell, cand.target, parameter, claim, nonce, factors, identity,
+                    scoped_origin=scoped_origin,
+                    recipe="" if claim == "nosql" else recipe,
                 )
-                if context != payload.get("request_context") or recipe not in urls:
+                if context != payload.get("request_context"):
                     raise ValueError("Observed injection baseline changed")
-                urls = {"control": urls["control"], recipe: urls[recipe]}
-                tools_manager._scoped_claim_gets(2)
-                replay = await asyncio.to_thread(
-                    probe_injection, urls, test_type=claim, allowed_origin=scoped_origin,
-                    state=tools_manager._scoped_state(identity, cand.target),
-                    nonce=nonce, factors=factors,
-                )
                 summary = {"test_type": claim, "parameter": parameter, "path": cell["path"],
                            "request_context": context, "nonce": nonce, **replay}
                 artifact_id = store.record(
@@ -1172,6 +1168,71 @@ async def _verify_scoped_injection_candidate(
             except Exception:
                 logging.getLogger(__name__).exception("Injection verifier replay failed")
                 failure = "Injection verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_jwt_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the hunter's forged-token recipe with a fresh nonce claim."""
+    import asyncio
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.assessment_sessions import identity_registry
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.scoped_assessment.jwt_probe import probe_jwt
+
+    if cand.vulnerability_class != "jwt":
+        return None
+    store = evidence_store(tools_manager)
+    identity = str(cand.identity or "")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_jwt_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "A forged-token acceptance receipt is required"
+    if hunter and identity not in {"", "anonymous", "unspecified", "legacy"}:
+        hunter_id, receipt = hunter
+        recipe = str(receipt.get("payload", {}).get("recipe") or "")
+        target = urlsplit(cand.target)
+        scoped_origin = f"{target.scheme}://{target.netloc}"
+        try:
+            tools_manager._scoped_origin(cand.target)
+            session = identity_registry(tools_manager).resolve(identity, cand.target)
+            tools_manager._scoped_claim_gets(4)
+            nonce = secrets.token_hex(8)
+            replay = await asyncio.to_thread(
+                probe_jwt, cand.target, allowed_origin=scoped_origin, session=session,
+                nonce=nonce, recipes=(recipe,),
+            )
+            artifact_id = store.record(
+                "scoped_jwt_probe", {"nonce": nonce, **replay}, target=cand.target,
+                identity=identity, test_type="jwt", success=replay["proof_confirmed"],
+            )
+            if replay.get("proof_confirmed") is True:
+                proof = {"kind": "scoped_jwt_forgery",
+                         "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                confirmed, failure = _confirm_or_explain(
+                    tools_manager, store, cand, run, proof, artifact_id,
+                    "A fresh forged token was accepted like the valid token.",
+                )
+                if confirmed:
+                    return {"candidate_id": cand.id, "title": cand.title,
+                            "status": "confirmed", "verifier_summary":
+                            "Fresh forged-token probe matched the hunter receipt",
+                            "key_findings": [], "tool_calls": 1, "error": None}
+            else:
+                failure = "Fresh forged token was not accepted"
+        except Exception:
+            logging.getLogger(__name__).exception("JWT verifier replay failed")
+            failure = "JWT verifier replay failed"
     apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
                   evidence=failure, summary=failure)
     return {"candidate_id": cand.id, "title": cand.title,
@@ -2247,8 +2308,12 @@ def submit_candidate(
                                     for r in brain.candidates]
             cid = twin.id
             title, target = twin.title, twin.target
-            # Keep the original candidate's cell binding; only evidence merges.
+            # Keep the original candidate's cell binding and claim; only evidence
+            # merges. A reworded duplicate must never reopen a confirmed verdict.
             coverage_cell_id = capture_id = proof_escalation_id = ""
+            evidence = description = claimed_request = vulnerability_class = ""
+            severity = twin.severity
+            specialist = parameter = test_type = ""
     existing = []
     for raw in getattr(brain, "candidates", None) or []:
         c = raw if isinstance(raw, FindingCandidate) else candidate_from_dict(raw)

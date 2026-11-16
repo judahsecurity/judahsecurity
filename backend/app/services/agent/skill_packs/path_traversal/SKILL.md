@@ -14,6 +14,9 @@ leads to report, not to exploit.
 
 ## Proof rules (override everything below)
 
+* Observed GET query inputs and operator-approved POST bodies (`body_replay_paths`,
+  form or JSON) are both supported by `scoped_injection_probe_assigned`.
+
 * A different status code, a canned 403/500, or your path **echoed** in an error
   (`failed to open '/var/www/../../etc/passwd'`) is a lead, not a read.
 * Medium+ needs a receipt from `scoped_injection_probe_assigned` with proof kind

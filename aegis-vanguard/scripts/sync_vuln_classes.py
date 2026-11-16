@@ -51,7 +51,7 @@ COVERAGE_TO_PROOF = {
     "xss": "xss",
     "stored_xss": "xss",
     "crlf": "crlf",
-    "nosql": None,
+    "nosql": "nosql",
     "ssti": "ssti",
     "ssrf": "ssrf",
     "open_redirect": "open_redirect",

@@ -17,7 +17,10 @@ def test_proof_kind_must_match_the_claimed_vulnerability():
         ("Reflected XSS", "response_match", False),
         ("CVE-2025-12345 affects server", "response_match", False),
         ("CVE-2025-12345 stored XSS", "browser_xss", True),
-        ("Command injection in export", "oob_callback", False),
+        # Blind command injection may use a callback; proof_policy then also
+        # requires the server-owned nslookup payload in the planted request.
+        ("Command injection in export", "oob_callback", True),
+        ("Command injection in export", "scoped_ssti_eval", False),
         ("XXE in XML upload", "oob_callback", True),
         ("Sensitive configuration exposure", "response_match", True),
         ("Sensitive configuration exposure", "workflow", False),

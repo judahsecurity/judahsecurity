@@ -36,7 +36,9 @@ ACCEPTED_CATEGORIES = {
 # still run and scored, but the report marks them so a 0 verified recall reads
 # as a tracked gap rather than a regression.
 KNOWN_GAPS = {
-    "jwt": "No deterministic Prowl JWT validator yet; expected verified recall is 0.",
+    "jwt": ("Prowl's scoped_jwt_probe needs a registered identity whose session carries "
+            "the JWT (Authorization: Bearer); the lab identity uses a cookie session, so "
+            "expected verified recall stays 0 until the lab registers a bearer identity."),
 }
 
 

@@ -28,6 +28,19 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- fingerprint_api on captured samples (Judah traffic, not Caido). If blocked/no-data, crawl first.\n"
         "- Do not spray Nuclei; hand off to attack specialists."
     ),
+    "http_protocol": (
+        "SKILL PACK — HTTP protocol (request smuggling / web cache poisoning):\n"
+        "- These are lead-only classes: a positive automated test can poison a shared cache "
+        "or desync another user's connection, so there is no automated proof.\n"
+        "- test_request_smuggling: timing-detection mode only (CL.TE / TE.CL / TE.TE). "
+        "Never send a follow-up request designed to capture or prefix another user's request.\n"
+        "- test_cache_poisoning: every probe already carries a unique prowlcb cache-buster; "
+        "do not remove it or replay the poisoning header on the real cache key.\n"
+        "- Discipline: a timing difference needs repeated interleaved samples; an unkeyed "
+        "header reflected only in the poisoning response is not served-from-cache proof.\n"
+        "- Record results with save_note and update_hypothesis for operator follow-up; "
+        "do not submit finding candidates."
+    ),
     "auth_logic": (
         "SKILL PACK — authentication testing (Ezra):\n"
         "- Enumerate login/session/password-reset from the map.\n"

@@ -357,6 +357,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_jwt",
             "scoped_race_assigned",
             "scoped_csrf_assigned",
+            "scoped_jwt_probe",
             "compare_requests",
             "list_captured_requests",
             "mutate_captured_request",
@@ -437,6 +438,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_astf",
             "discover_parameters",
             "execute_arjun",
+            "scoped_jwt_probe",
             "compare_requests",
             "mutate_captured_request",
             "list_captured_requests",
@@ -605,6 +607,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "get_parameter_inventory",
             "scoped_injection_probe_assigned",
             "scoped_response_probe_assigned",
+            "execute_interactsh",
             "execute_commix",
             "compare_requests",
             "list_captured_requests",
@@ -623,8 +626,36 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "proof. Submit a candidate only from a positive receipt, with the exact "
             "vulnerability_class and evidence_id. Never send destructive commands, "
             "write files, open shells, or read secrets; arithmetic and world-readable "
-            "file signatures are the whole proof. NoSQL stays a lead unless an "
-            "authorization proof with distinct identities shows impact."
+            "file signatures are the whole proof. NoSQL GET inputs use the operator "
+            "differential in the same tool. For blind command injection with OOB "
+            "authorized, call run_oob_callback_workflow with cmdi_shell set "
+            "(posix_subshell|posix_separator|windows_separator) and field=<parameter>."
+        ),
+    ),
+    SpecialistProfile(
+        name="http_protocol",
+        role=(
+            "HTTP protocol specialist for request smuggling and web cache poisoning. "
+            "Records leads for operator follow-up; these classes have no automated proof "
+            "because a positive test can affect other users."
+        ),
+        allowed_tools=[
+            "test_request_smuggling",
+            "test_cache_poisoning",
+            "compare_requests",
+            "list_captured_requests",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "save_note",
+        ],
+        max_iterations=6,
+        system_prompt_suffix=(
+            "Use test_request_smuggling in timing-detection mode only and "
+            "test_cache_poisoning (it adds a unique cache-buster to every probe). "
+            "Never send a poisoning request on a shared cache key and never chain a "
+            "desync into another user's request. Record results as leads with "
+            "save_note and update_hypothesis; do not submit finding candidates."
         ),
     ),
     SpecialistProfile(

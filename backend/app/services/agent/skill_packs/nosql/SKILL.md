@@ -1,6 +1,6 @@
 ---
 name: nosql
-description: NoSQL (MongoDB-style) operator injection in JSON bodies and bracketed query/form params ($ne/$gt/$regex/$in), auth bypass and filter widening. No deterministic validator: leads unless an authorization proof shows impact.
+description: NoSQL (MongoDB-style) operator injection in JSON bodies and bracketed query/form params ($ne/$gt/$regex/$in), auth bypass and filter widening. GET query inputs confirm via scoped_injection_probe_assigned (scoped_nosql_operator); other shapes stay leads.
 ---
 
 # NoSQL injection
@@ -13,12 +13,17 @@ object where it expected a string.
 
 ## Proof rules (override everything below)
 
-* There is **no deterministic NoSQL validator yet.** A 500, a `CastError`, a
-  changed result count, or a different status on `$ne` is a lead. Findings stay
-  lead/inconclusive unless an authorization proof demonstrates impact: distinct
-  identities with proof kind `owner_only` (identity B obtains an object or
-  session that belongs only to A, absent from B's baseline) or `state_change`
-  (bounded canary, readback, cleanup). The independent verifier replays it.
+* Observed GET query inputs: call `scoped_injection_probe_assigned` on the
+  leased `nosql` cell. It runs an interleaved operator differential
+  (`param=<nonce>`, `param[$ne]=<nonce>`, `param[$eq]=<nonce>`, repeated) and
+  confirms `scoped_nosql_operator` only when `$ne` returns a stable body that
+  differs from the control while `$eq` matches the control. A server that
+  ignores brackets returns the same body for both and is not confirmed.
+* JSON bodies and form fields have no deterministic validator yet. A 500, a
+  `CastError`, a changed result count, or a different status on `$ne` is a lead.
+  These stay lead/inconclusive unless an authorization proof demonstrates
+  impact: distinct identities with proof kind `owner_only` or `state_change`.
+  The independent verifier replays it.
 * Auth bypass must show a session for an identity you were not given
   credentials for, and that session must read A-only data. "Login returned 200"
   is not enough.

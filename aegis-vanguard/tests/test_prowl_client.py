@@ -66,7 +66,8 @@ def test_resolve_class_aliases():
     assert client.resolve_class("IDOR") == "authorization"
     assert client.resolve_class("lfi") == "path_traversal"
     assert client.resolve_class("sqli") == "sql_injection"
-    assert client.resolve_class("nosql") is None
+    assert client.resolve_class("nosql") == "nosql"
+    assert client.resolve_class("graphql") is None
 
 
 def test_redact_and_question():
@@ -119,3 +120,84 @@ def test_start_posts_agent_query(scope_file, monkeypatch, tmp_path):
     assert seen["path"] == "/agent/query" and seen["body"]["mode"] == "agent"
     assert seen["body"]["target"] == "https://app.example.com"
     assert json.loads((tmp_path / "prowl_run.json").read_text())["session_id"] == "s1"
+
+
+def _run_dir(tmp_path, finding):
+    (tmp_path / "findings.json").write_text(json.dumps({"findings": [finding]}))
+    return tmp_path
+
+
+FINDING = {"id": "f1", "title": "IDOR on invoice", "category": "idor", "severity": "high",
+           "endpoint": "/api/invoices/42", "parameter": "invoice_id",
+           "evidence": "GET /api/invoices/42\nCookie: session=abcdef"}
+
+
+def test_verify_uses_candidate_intake_on_live_session(scope_file, monkeypatch, tmp_path):
+    run_dir = _run_dir(tmp_path, FINDING)
+    calls = []
+
+    def fake(method, path, body=None, **kw):
+        calls.append((method, path, body))
+        if path.endswith("/candidates"):
+            return {"accepted": True, "candidate": {"id": "c-1", "status": "pending"}}
+        return {"session_id": "s1", "running": True}
+
+    monkeypatch.setattr(client, "request", fake)
+    rc = client.main(["verify", "--run-dir", str(run_dir), "--finding-id", "f1",
+                      "--target", "https://app.example.com", "--scope-file", str(scope_file),
+                      "--session", "s1"])
+    assert rc == 0
+    (m1, p1, b1), (m2, p2, b2) = calls
+    assert p1 == "/agent/sessions/s1/candidates"
+    assert b1["vulnerability_class"] == "authorization"
+    assert b1["target"] == "https://app.example.com/api/invoices/42"
+    assert "abcdef" not in json.dumps(b1)
+    assert p2 == "/agent/query" and b2["session_id"] == "s1" and "c-1" in b2["question"]
+    assert "playbook_id" not in b2
+    record = json.loads((run_dir / "prowl_verify" / "f1.json").read_text())
+    assert record["mode"] == "intake" and record["candidate_id"] == "c-1"
+
+
+def test_verify_falls_back_to_playbook_on_409(scope_file, monkeypatch, tmp_path):
+    run_dir = _run_dir(tmp_path, FINDING)
+    calls = []
+
+    def fake(method, path, body=None, **kw):
+        calls.append(path)
+        if path.endswith("/candidates"):
+            raise client.ProwlError("busy", 409)
+        return {"session_id": "s2", "running": True}
+
+    monkeypatch.setattr(client, "request", fake)
+    rc = client.main(["verify", "--run-dir", str(run_dir), "--finding-id", "f1",
+                      "--target", "https://app.example.com", "--scope-file", str(scope_file),
+                      "--session", "s1"])
+    assert rc == 0 and calls == ["/agent/sessions/s1/candidates", "/agent/query"]
+    record = json.loads((run_dir / "prowl_verify" / "f1.json").read_text())
+    assert record["mode"] == "playbook" and record["session_id"] == "s2"
+    assert "intake_error" in record
+
+
+def test_verdict_reads_candidate_status(monkeypatch, tmp_path):
+    (tmp_path / "prowl_verify").mkdir()
+    (tmp_path / "prowl_verify" / "f1.json").write_text(json.dumps(
+        {"finding_id": "f1", "session_id": "s1", "candidate_id": "c-1", "mode": "intake"}))
+    listing = {"run_in_progress": False, "candidates": [
+        {"id": "c-1", "status": "refuted", "verifier_summary": "control matched"}]}
+    monkeypatch.setattr(client, "request", lambda m, p, b=None, **k: listing)
+    assert client.main(["verdict", "--run-dir", str(tmp_path), "--finding-id", "f1"]) == 0
+    record = json.loads((tmp_path / "prowl_verify" / "f1.json").read_text())
+    assert record["verdict"]["status"] == "refuted"
+    assert client.candidate_verdict({"id": "c", "status": "pending"}, True)["status"] == "pending"
+    assert client.candidate_verdict({"id": "c", "status": "pending"}, False)["status"] == "improve"
+    assert client.candidate_verdict({"id": "c", "status": "confirmed"}, False)["status"] == "confirmed"
+    assert client.candidate_verdict(None, False)["status"] == "improve"
+
+
+def test_classes_remote_and_candidates(monkeypatch):
+    seen = []
+    monkeypatch.setattr(client, "request", lambda m, p, b=None, **k: seen.append(p) or {
+        "classes": {"authorization": {"proof_kinds": ["owner_only"]}}, "candidates": []})
+    assert client.main(["classes", "--remote", "--resolve", "idor"]) == 0
+    assert client.main(["candidates", "--session", "s1"]) == 0
+    assert seen == ["/agent/proof-classes", "/agent/sessions/s1/candidates"]

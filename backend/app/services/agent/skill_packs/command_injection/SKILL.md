@@ -23,6 +23,14 @@ not prove a shell; the computed echo does.
 * **Arithmetic echo only.** Never run `id`, `whoami`, `cat`, `curl`/`wget`
   downloads, file writes, `rm`, `kill`, `shutdown`, `sleep` loops, fork bombs,
   reverse shells, or anything that changes host state. No persistence.
+* Blind sinks (no output in the response): when the run authorizes OOB, call
+  `run_oob_callback_workflow` with `cmdi_shell` set to `posix_subshell`,
+  `posix_separator`, or `windows_separator` and `field=<parameter>`. The server
+  builds a single `nslookup` of a fresh collaborator; proof kind `oob_callback`
+  is accepted for command injection only when the planted request carries that
+  lookup. A URL-fetch callback is SSRF, not command injection.
+* POST form/JSON fields work the same way through `scoped_injection_probe_assigned`
+  when the path is in operator-approved `body_replay_paths`.
 * `execute_commix` is for a high-signal lead the scoped probe could not close,
   and only in its non-destructive detection mode.
 

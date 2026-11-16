@@ -36,9 +36,13 @@ PROOFS_BY_CLASS = {
     "client_template_injection": frozenset({"scoped_browser_client"}),
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
     "ssti": frozenset({"scoped_ssti_eval"}),
-    "command_injection": frozenset({"scoped_cmdi_eval"}),
+    "nosql": frozenset({"scoped_nosql_operator"}),
+    # Blind command injection: a correlated DNS lookup from a server-owned
+    # nslookup payload (cmdi_shell on run_oob_callback_workflow).
+    "command_injection": frozenset({"scoped_cmdi_eval", "oob_callback"}),
     "path_traversal": frozenset({"scoped_traversal_read"}),
     "csrf": frozenset({"scoped_csrf_state_change"}),
+    "jwt": frozenset({"scoped_jwt_forgery"}),
     # A version inside a published range is a lead. A CVE whose behavior is
     # proven is filed under that behavior's class (traversal, SSTI, ...);
     # version-only claims are capped at low by finding_gate.
@@ -62,6 +66,7 @@ def _post_xhr_match_valid(row: dict) -> bool:
             and len(fields) == len(set(fields)))
 
 _CLAIM_PATTERNS = (
+    ("nosql", r"\bNoSQL\b|\bNoSQLi\b|\boperator injection\b"),
     ("sql_injection", r"\bSQLi\b|\bSQL\s+injection\b"),
     ("xss", r"\bXSS\b|cross[ -]?site scripting|\bscript injection\b"),
     ("crlf", r"\bCRLF\b|\bresponse header injection\b|\bHTTP response splitting\b"),
@@ -74,6 +79,7 @@ _CLAIM_PATTERNS = (
     ("client_template_injection", r"\bclient[ -]?side template injection\b|\bCSTI\b"),
     ("client_prototype_pollution", r"\bclient[ -]?side prototype pollution\b"),
     ("ssti", r"\bSSTI\b|server[ -]?side template injection|\btemplate injection\b"),
+    ("jwt", r"\bJWT\b|JSON web token|\balg(?:orithm)?[\s:=\"']*none\b"),
     ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
     ("xxe", r"\bXXE\b|XML external entity"),
     ("command_injection", r"\b(?:OS|shell|command) injection\b|\bRCE\b|remote code execution"),
@@ -139,6 +145,7 @@ def _object_field(data: dict, path: str):
 
 
 _SERVER_INJECTION_KINDS = {
+    "scoped_nosql_operator": "nosql",
     "scoped_ssti_eval": "ssti",
     "scoped_cmdi_eval": "command_injection",
     "scoped_traversal_read": "path_traversal",
@@ -153,7 +160,8 @@ def _validate_hunter_verifier_pair(store, candidate, proof: dict,
     hunter = (store.records.get(hunter_id)
               if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
     verifier = store.records.get(verifier_id) if verifier_id in evidence_ids else None
-    expected = "scoped_csrf_probe" if kind == "scoped_csrf_state_change" else "scoped_injection_probe"
+    expected = {"scoped_csrf_state_change": "scoped_csrf_probe",
+                "scoped_jwt_forgery": "scoped_jwt_probe"}.get(kind, "scoped_injection_probe")
     if (not hunter or not verifier or hunter["id"] == verifier["id"]
             or hunter["kind"] != expected or verifier["kind"] != expected
             or hunter["created_at"] >= verifier["created_at"]):
@@ -163,6 +171,12 @@ def _validate_hunter_verifier_pair(store, candidate, proof: dict,
     if hunter["identity"] != verifier["identity"]:
         return False, "Hunter and verifier must use the same test identity"
     first, second = hunter["payload"], verifier["payload"]
+    if kind == "scoped_jwt_forgery":
+        from app.services.agent.scoped_assessment.jwt_probe import jwt_pair_valid
+
+        if candidate.vulnerability_class != "jwt" or not jwt_pair_valid(first, second):
+            return False, "Independent forged-token acceptance on the same endpoint is required"
+        return True, ""
     if kind == "scoped_csrf_state_change":
         from app.services.agent.scoped_assessment.csrf_probe import csrf_proof_valid
 
@@ -200,7 +214,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in _SERVER_INJECTION_KINDS or kind == "scoped_csrf_state_change":
+    if kind in _SERVER_INJECTION_KINDS or kind in {"scoped_csrf_state_change", "scoped_jwt_forgery"}:
         ok, why = _validate_hunter_verifier_pair(store, candidate, proof, evidence_ids, kind)
         if not ok:
             return False, why
@@ -625,7 +639,17 @@ def validate_proof(
             for e in events
         ):
             return False, "No matching callback for this canary"
-        if (getattr(candidate, "vulnerability_class", "") or inferred_vulnerability_class(candidate)) == "xxe":
+        claim_class = (getattr(candidate, "vulnerability_class", "")
+                       or inferred_vulnerability_class(candidate))
+        if claim_class == "command_injection":
+            from app.services.agent.scoped_assessment.cmdi_oob import LOOKUP_COMMAND
+
+            # The callback must come from the injected lookup, not from a URL
+            # fetch of the planted host (which would be SSRF, not command injection).
+            if not re.search(re.escape(LOOKUP_COMMAND) + r"(?:\s|\+)+[\w.-]*" + re.escape(domain),
+                             request_text):
+                return False, "Command injection callback must follow the server-owned nslookup payload"
+        if claim_class == "xxe":
             hunter_id = proof.get("hunter_artifact_id")
             hunter = (store.records.get(hunter_id)
                       if isinstance(hunter_id, str)

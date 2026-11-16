@@ -68,35 +68,78 @@ above only with a proof kind for the class; classes without proof kinds and
 | `start --executor` | `POST /agent/scoped-assessments` (legacy scoped executor) | JWT |
 | `poll` | `GET /agent/conversations/{sid}`, `GET /agent/conversations/{sid}/ledger` | JWT |
 | `findings` | `GET /vulnerabilities/?asset_id=&detected_by=agent_family` | JWT |
-| `verify` | `POST /agent/query` with `playbook_id=finding_validation` + redacted packet | JWT |
-| `verdict` | ledger receipts (`create_finding` published / `independent_verify`) | JWT |
+| `verify` (live session) | `POST /agent/sessions/{sid}/candidates`, then `POST /agent/query` (resume `sid`) | JWT |
+| `verify` (fallback) | `POST /agent/query` with `playbook_id=finding_validation` + redacted packet | JWT |
+| `candidates` | `GET /agent/sessions/{sid}/candidates` | JWT |
+| `verdict` | candidate status from `candidates` when intake was used; else ledger receipts | JWT |
 | `stop` | `POST /agent/sessions/{sid}/stop` | JWT |
 | `tool` | `POST /mcp/call` (subfinder, dnsx, httpx, katana, waybackurls; scope-checked) | JWT |
 | `classes` | local `data/vuln_classes.json` | — |
+| `classes --remote` | `GET /agent/proof-classes` | JWT |
 
-### API gaps (documented, not invented)
+### Candidate intake (closed gap)
 
-1. **No external candidate intake to Prowl's verifier.** Candidates and the
-   verifier capability live inside a Prowl session (`submit_candidate`,
-   `independent_verify`); no REST route accepts a Vanguard candidate.
-   `verify` asks Prowl to reproduce from scratch via the `finding_validation`
-   playbook. With `playbook_id`, the backend keeps only the text after
-   `Operator note:` (≤4000 chars), so the packet is trimmed and redacted.
-2. **`POST /prowl/findings` is not usable by Vanguard.** It requires the
+`POST /agent/sessions/{sid}/candidates` (JWT; owner user + org of that
+conversation, agent-mode sessions only) takes
+`{title, target, vulnerability_class, description, claimed_request (<=2000),
+severity, parameter?, evidence_note?}`:
+
+- `target` must be inside the session's scope (the session's saved seed,
+  checked with `assessment_scope.assert_url_in_scope`); `vulnerability_class`
+  must be a `PROOFS_BY_CLASS` key (resolve aliases client side).
+- The candidate is appended as **pending** through `submit_candidate` with
+  `specialist=vanguard_external`, no `evidence_ids` and empty `evidence`.
+  Text is length-capped, control characters stripped, and wrapped in
+  `[OPERATOR-SUPPLIED CANDIDATE CLAIM ...]` markers because the verifier LLM
+  sees it. Severity is capped at `low` for `known_cve` and classes with no
+  proof kind.
+- An existing candidate with the same id or root cause is reported as
+  `duplicate_of` and left untouched: external text cannot reopen or rewrite a
+  session verdict. At most 25 external candidates per session (429).
+- Persistence: the brain lives in LangGraph state during a run and in the run
+  snapshot (`run_snapshot.py`, `~/.aegis/sessions` or the DB for `sched-`
+  sessions) between runs; every resume restores it from that snapshot. Intake
+  writes the snapshot, so it is refused with **409** while a run is active or
+  when the session has no snapshot/target. Single-process only, like
+  `run_control`.
+- Nothing is confirmed by intake. Resuming the session (`POST /agent/query`,
+  same `session_id`) lets Prowl verify it: the tester loop forces
+  `independent_verify` for pending `sql_injection`/`xss`; for other classes the
+  resume note names the candidate id. Deterministic replays need a hunter
+  receipt from that session; without one the class is re-hunted or the LLM
+  verifier attempts it, and `inconclusive` is expected.
+
+`GET /agent/sessions/{sid}/candidates` lists id, title, class, severity,
+status, verifier_summary, root_cause, duplicate_titles (no evidence bodies,
+nonces or requests) from the last snapshot, plus `run_in_progress`.
+
+`GET /agent/proof-classes` returns `PROOFS_BY_CLASS` (sorted kinds), coverage
+classes with their proof class and lane, `severity_caps` and
+`non_confirmable`. `data/vuln_classes.json` stays as the offline copy.
+
+### Remaining API gaps (documented, not invented)
+
+1. **`POST /prowl/findings` is not usable by Vanguard.** It requires the
    `PROWL_INGEST_KEY` service key and paired hunter/verifier observations with
    run/candidate/verification IDs produced by the scoped executor. Vanguard
-   must not fabricate those.
-3. **No endpoint exposes `PROOFS_BY_CLASS` or coverage classes**; hence the
-   synced JSON.
-4. **Findings are not linked to a session in the list API**
+   must not fabricate those. Use candidate intake instead.
+2. **No intake into a running session.** The run would overwrite the snapshot,
+   and the orchestrator has no candidate inbox. Wait, or `stop`, then `verify`.
+   Without a live session `verify` uses the `finding_validation` playbook; with
+   `playbook_id` the backend keeps only the text after `Operator note:`
+   (<=4000 chars), so that packet is trimmed and redacted.
+3. **Findings are not linked to a session in the list API**
    (`VulnerabilityResponse` has no session id); per-run results come from the
-   ledger receipts, per-asset results from `/vulnerabilities`.
-5. **JWT only.** `/agent/*` uses user access tokens (expire); ingest API keys
+   ledger receipts and `candidates`, per-asset results from `/vulnerabilities`.
+4. **JWT only.** `/agent/*` uses user access tokens (expire); ingest API keys
    (`tfasm_…`) are not accepted. `/agent/status` and `/agent/playbooks` are
    unauthenticated.
-6. **No per-probe REST.** Browser, OOB and scoped proof probes are agent tools
-   only; `/mcp/call` exposes CLI wrappers (nuclei, httpx, curl …), not proofs.
-7. `POST /ingest/findings` (API key) bypasses the gate; do not use it for
+5. **No per-probe REST, by design.** Browser, OOB and scoped proof probes run
+   only inside a Prowl session, where coverage leases, scope, operator write
+   approvals and budget apply. Exposing them over REST would bypass all four.
+   Reach them with `start` (or an existing session) + candidate intake +
+   resume. `/mcp/call` exposes CLI recon wrappers, not proofs.
+6. `POST /ingest/findings` (API key) bypasses the gate; do not use it for
    medium+ Vanguard findings.
 
 ## Requirements

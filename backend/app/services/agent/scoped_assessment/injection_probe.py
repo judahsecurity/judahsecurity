@@ -12,6 +12,11 @@ confirms only on a signal the payload itself cannot produce by reflection:
 * ``path_traversal``: a read of a world-readable, fixed-content system file
   (``/etc/passwd`` or ``win.ini``) whose signature is absent from a control that
   traverses to a nonexistent, nonce-named file.
+* ``nosql``: an operator differential. ``param[$ne]=<nonce>`` (always true)
+  must return a stable body that differs from ``param=<nonce>``, while
+  ``param[$eq]=<nonce>`` (same meaning as the control) must match the control.
+  A server that ignores the bracket syntax returns the same body for both
+  operators and is not confirmed.
 
 The model never chooses payloads, factors, or URLs. Only fixed labels and digests
 leave this module; response bodies are not returned to the agent.
@@ -31,7 +36,8 @@ from .browser import assert_in_scope
 from .http_observe import _NoRedirect, _cookie_header
 
 MAX_BODY = 256 * 1024
-TEST_TYPES = ("ssti", "command_injection", "path_traversal")
+TEST_TYPES = ("ssti", "command_injection", "path_traversal", "nosql")
+NOSQL_SEQUENCE = ("control_first", "true_first", "false_first", "true_second", "control_last")
 MIN_MARKER_LENGTH = 8
 
 # Fixed probe recipes. ``{a}``/``{b}`` are fresh random factors per run.
@@ -66,7 +72,32 @@ def recipes_for(test_type: str) -> tuple[str, ...]:
         return tuple(name for name, _ in CMDI_RECIPES)
     if test_type == "path_traversal":
         return tuple(name for name, *_ in TRAVERSAL_RECIPES)
+    if test_type == "nosql":
+        return ("operator_ne",)
     raise ValueError("Unsupported injection probe")
+
+
+def nosql_field_name(parameter: str, step: str) -> str:
+    """The query field name for one NoSQL step; controls keep the original name."""
+    if step.startswith("true"):
+        return f"{parameter}[$ne]"
+    if step.startswith("false"):
+        return f"{parameter}[$eq]"
+    return parameter
+
+
+def rename_query_field(url: str, parameter: str, new_name: str) -> str:
+    """Rename exactly one query field, keeping its value and every other field."""
+    from urllib.parse import quote, unquote_plus, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    fields = parts.query.split("&")
+    matches = [i for i, f in enumerate(fields) if f and unquote_plus(f.split("=", 1)[0]) == parameter]
+    if len(matches) != 1:
+        raise ValueError("observed_query_baseline_missing")
+    name, _, value = fields[matches[0]].partition("=")
+    fields[matches[0]] = quote(new_name, safe="") + "=" + value
+    return urlunsplit(parts._replace(query="&".join(fields)))
 
 
 def new_factors() -> tuple[int, int]:
@@ -77,6 +108,8 @@ def new_factors() -> tuple[int, int]:
 
 
 def control_value(test_type: str, nonce: str) -> str:
+    if test_type == "nosql":
+        return f"prowl{nonce}"
     if test_type == "path_traversal":
         return f"../../../../../../../../etc/prowl-absent-{nonce}"
     return f"prowl{nonce}"
@@ -177,6 +210,46 @@ def probe_injection(urls: dict, *, test_type: str, allowed_origin: str,
     }
 
 
+_VOLATILE = re.compile(rb"[A-Za-z0-9+/=_-]{16,}")
+_DIGITS = re.compile(rb"\d+")
+
+
+def _stable_digest(body: bytes) -> str:
+    """Digest with long tokens and numbers removed so CSRF tokens and clocks don't vary it."""
+    return hashlib.sha256(_DIGITS.sub(b"0", _VOLATILE.sub(b"", body))).hexdigest()[:16]
+
+
+def probe_nosql(urls: dict, *, allowed_origin: str, state: dict | None, nonce: str,
+                fetch=_fetch) -> dict:
+    """Interleaved operator differential; ``urls`` maps each NOSQL_SEQUENCE step."""
+    if not nonce or len(nonce) < MIN_MARKER_LENGTH or len(nonce) > 40 or not nonce.isalnum():
+        raise ValueError("A random alphanumeric nonce of at least 8 characters is required")
+    if set(urls) != set(NOSQL_SEQUENCE):
+        raise ValueError("Every NoSQL differential step needs a URL")
+    checks = {}
+    for step in NOSQL_SEQUENCE:
+        status, body = fetch(urls[step], allowed_origin=allowed_origin, state=state)
+        checks[step] = {"status": status, "length": len(body),
+                        "sha256": _stable_digest(body)}
+    digest = {step: row["sha256"] for step, row in checks.items()}
+    stable_control = digest["control_first"] == digest["control_last"] == digest["false_first"]
+    stable_true = digest["true_first"] == digest["true_second"]
+    differs = digest["true_first"] != digest["control_first"]
+    ok_status = all(200 <= row["status"] < 300 for row in checks.values())
+    confirmed = bool(stable_control and stable_true and differs and ok_status)
+    return {
+        "operation": "scoped_injection_probe", "test_type": "nosql",
+        "requests_sent": len(NOSQL_SEQUENCE), "checks": checks,
+        "recipe": "operator_ne" if confirmed else "",
+        "control": {"signal": False, "sha256": digest["control_first"]},
+        "probes": [{"recipe": "operator_ne", "signal": confirmed,
+                    "sha256": digest["true_first"]}],
+        "signature": "operator_differential", "marker_length": len(nonce),
+        "proof_confirmed": confirmed,
+        "finding": False,
+    }
+
+
 def injection_proof_valid(row: dict) -> bool:
     """Structural check used by proof policy on stored hunter/verifier receipts."""
     if not isinstance(row, dict) or row.get("operation") != "scoped_injection_probe":
@@ -191,7 +264,15 @@ def injection_proof_valid(row: dict) -> bool:
         return False
     if hit.get("sha256") == control.get("sha256"):
         return False
-    if test_type != "path_traversal" and int(row.get("marker_length") or 0) < MIN_MARKER_LENGTH:
+    if test_type == "nosql":
+        checks = row.get("checks") or {}
+        if set(checks) != set(NOSQL_SEQUENCE):
+            return False
+        d = {step: (checks[step] or {}).get("sha256") for step in NOSQL_SEQUENCE}
+        if not (d["control_first"] == d["control_last"] == d["false_first"]
+                and d["true_first"] == d["true_second"] != d["control_first"]):
+            return False
+    elif test_type != "path_traversal" and int(row.get("marker_length") or 0) < MIN_MARKER_LENGTH:
         return False
     nonce = str(row.get("nonce") or "")
     if len(nonce) < MIN_MARKER_LENGTH:

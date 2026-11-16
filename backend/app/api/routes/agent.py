@@ -855,6 +855,90 @@ async def load_prior_hunt(
     return {"ok": True, "session_id": session_id, "source_session_id": request.source_session_id}
 
 
+# =============================================================================
+# PROOF CLASSES + EXTERNAL CANDIDATE INTAKE (Aegis Vanguard -> Prowl verifier)
+# =============================================================================
+
+class ExternalCandidateRequest(BaseModel):
+    """An operator-supplied lead. Every field is untrusted text, never evidence."""
+
+    title: str = Field(min_length=4, max_length=200)
+    target: str = Field(min_length=8, max_length=2048)
+    vulnerability_class: str = Field(min_length=2, max_length=64)
+    description: str = Field(default="", max_length=2000)
+    claimed_request: str = Field(default="", max_length=2000)
+    severity: Literal["info", "low", "medium", "high", "critical"] = "medium"
+    parameter: Optional[str] = Field(default=None, max_length=128)
+    evidence_note: Optional[str] = Field(default=None, max_length=1000)
+
+
+def _owned_conversation(db: Session, session_id: str, current_user: User) -> tuple:
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    conv = db.query(AgentConversation).filter(AgentConversation.session_id == session_id).first()
+    if conv is None or conv.user_id != current_user.id or conv.organization_id != org_id:
+        # Same answer for "missing" and "someone else's" so ids cannot be probed.
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv, org_id
+
+
+@router.get("/proof-classes")
+async def get_proof_classes(current_user: User = Depends(get_current_user)):
+    """PROOFS_BY_CLASS, coverage classes and severity caps (read-only)."""
+    from app.services.agent.external_candidates import proof_class_catalog
+
+    return proof_class_catalog()
+
+
+@router.post("/sessions/{session_id}/candidates", status_code=201)
+async def submit_session_candidate(
+    session_id: str,
+    request: ExternalCandidateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Queue an external candidate as *pending* in an idle session's engagement brain.
+
+    Never confirms anything. Resume the session (POST /query, same session_id)
+    so its own independent verifier re-derives the proof in-session.
+    """
+    conv, org_id = _owned_conversation(db, session_id, current_user)
+    if conv.mode != "agent":
+        raise HTTPException(status_code=409, detail="Candidate intake requires an agent-mode session")
+    from app.services.agent.external_candidates import IntakeError, submit_external_candidate
+
+    try:
+        # Synchronous: running-task check and snapshot write share one event-loop slice.
+        result = submit_external_candidate(
+            org_id, session_id,
+            title=request.title, target=request.target,
+            vulnerability_class=request.vulnerability_class,
+            description=request.description, claimed_request=request.claimed_request,
+            severity=request.severity, parameter=request.parameter or "",
+            evidence_note=request.evidence_note or "",
+        )
+    except IntakeError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from None
+    logger.info("External candidate intake user=%s session=%s accepted=%s",
+                current_user.id, session_id, result.get("accepted"))
+    return {"session_id": session_id, **result}
+
+
+@router.get("/sessions/{session_id}/candidates")
+async def list_session_candidates(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Candidate status from the session's durable snapshot (no evidence bodies)."""
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    from app.services.agent.external_candidates import list_candidates
+    from app.services.agent.run_control import has_running_task
+
+    return {**list_candidates(org_id, session_id), "run_in_progress": has_running_task(session_id)}
+
+
 @router.get("/playbooks")
 async def get_agent_playbooks():
     """List preset playbook objectives for the agent."""

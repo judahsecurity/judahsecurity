@@ -15,6 +15,9 @@ location for every probe and control.
 
 ## Proof rules (override everything below)
 
+* Observed GET query inputs and operator-approved POST bodies (`body_replay_paths`,
+  form or JSON) are both supported by `scoped_injection_probe_assigned`.
+
 * Reflection, `{{7*7}}` echoed literally, a 500, a stack trace, or an engine
   name in an error are **leads**, not proof.
 * Medium+ needs a deterministic receipt from `scoped_injection_probe_assigned`

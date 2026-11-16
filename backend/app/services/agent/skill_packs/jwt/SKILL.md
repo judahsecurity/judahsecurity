@@ -1,6 +1,6 @@
 ---
 name: jwt
-description: JWT / token-crypto weaknesses (alg none, RS256->HS256 confusion, kid/jku/x5u/jwk header injection, weak HMAC secret, unenforced exp). No deterministic validator: leads unless an authorization proof shows impact.
+description: JWT / token-crypto weaknesses (alg none, RS256->HS256 confusion, kid/jku/x5u/jwk header injection, weak HMAC secret, unenforced exp). Signature non-enforcement confirms via scoped_jwt_probe (scoped_jwt_forgery); impact beyond that needs an authorization proof.
 ---
 
 # JWT and token crypto
@@ -12,15 +12,18 @@ forged payload the app cannot parse fails for the wrong reason.
 
 ## Proof rules (override everything below)
 
-* There is **no deterministic JWT validator yet.** A forged token being
-  "accepted" (200, no 401) is a lead. Findings stay lead/inconclusive unless an
-  authorization proof demonstrates impact: distinct identities, with proof kind
-  `owner_only` (identity B reads an object only identity A owns, absent from B's
-  own baseline) or `state_change` (a bounded nonce canary on A's resource
-  changes, verified by readback and cleaned up). The independent verifier
-  replays it.
-* A forged token that only returns your own data proves the forge mechanism,
-  not impact. Keep at lead.
+* Signature enforcement: call `scoped_jwt_probe(target_url, identity)` on an
+  observed endpoint with a registered identity whose session carries the JWT.
+  It first shows auth is enforced (no token and a malformed token both 401/403,
+  the layer-ordering control), then sends the identity's own token with a nonce
+  claim either unsigned (`alg: none`) or with a non-matching signature. Proof
+  kind `scoped_jwt_forgery` confirms only when a forged token returns the same
+  body as the valid one. Submit with `vulnerability_class=jwt`.
+* That proves integrity is not verified. Claiming account takeover or
+  cross-user access additionally needs an authorization proof with distinct
+  identities (`owner_only` or `state_change`). RS256→HS256 confusion, `kid`,
+  `jku`/`x5u` injection and weak secrets have no automated validator; keep them
+  as leads.
 * Non-destructive: no admin actions (user deletion, role grants to others),
   no data dumps. Read one foreign object or change one restorable canary.
 * Offline secret guessing must be bounded (small, known-weak wordlist) and
