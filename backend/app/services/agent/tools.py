@@ -3270,6 +3270,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                 detail=f"{len(parameters)} named inputs observed; no vulnerability inferred",
                                 evidence_ids=[parameter_id],
                             )
+                        placed: list = []
                         for observation in (capability_map.get("reflection_observations") or [])[:20]:
                             if not isinstance(observation, dict):
                                 continue
@@ -3288,6 +3289,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                         "browser execution unverified"),
                                 evidence_ids=[reflection_id],
                             )
+                            if observation.get("reflection_contexts"):
+                                placed.append((observation, reflection_id))
+                        if placed:
+                            # Where a canary landed justifies checks its name
+                            # did not (a redirect echo -> open_redirect/CRLF).
+                            from urllib.parse import urlsplit as _urlsplit
+
+                            from app.services.agent.coverage_cells import seed_parameter_coverage_cells
+                            from app.services.agent.engagement_brain import engagement_brain_from_dict
+                            from app.services.agent.parameter_inventory import collect_parameter_inventory
+                            from app.services.agent.work_leads import apply_reflection_observations
+
+                            reflection_brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                            seed_parameter_coverage_cells(reflection_brain, collect_parameter_inventory(capability_map))
+                            apply_reflection_observations(
+                                reflection_brain, [row for row, _ in placed],
+                                host=_urlsplit(target_origin).netloc,
+                                evidence_ids=[eid for _, eid in placed],
+                            )
+                            self._engagement_brain = reflection_brain.to_dict()
                     except Exception:
                         logger.exception("Could not record crawl parameter evidence")
                 if pilot is not None and tool_name == "execute_browser":
@@ -11656,6 +11677,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     else "Specialist did not return a coverage receipt"
                 ),
             )
+        # Cross-specialist handoff: a lead becomes work only when it cites
+        # evidence that specialist's own tool calls produced.
+        from app.services.agent.work_leads import apply_specialist_leads
+
+        lead_results: list = []
+        cells_by_id = {cell.get("id"): cell for cell in brain.coverage_cells if isinstance(cell, dict)}
+        for report in result.reports:
+            if not getattr(report, "leads", None):
+                continue
+            own_evidence = [
+                evidence_id
+                for invocation in (report.tool_calls or [])
+                for evidence_id in (invocation.evidence_ids or [])
+            ]
+            leased_cell = cells_by_id.get(getattr(report, "coverage_cell_id", "")) or {}
+            own_evidence.extend(leased_cell.get("evidence_ids") or [])
+            lead_results.extend(apply_specialist_leads(
+                brain, report.leads, specialist=report.specialist,
+                allowed_evidence_ids=own_evidence,
+            ))
         self._engagement_brain = brain.to_dict()
         pending = [
             c
@@ -11733,6 +11774,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "retry_deferred": retry_deferred,
             "verification_deferred": verification_deferred,
             "spawned": spawned,
+            "lead_cells": lead_results,
             "open_hypotheses": [
                 {"id": h.id, "title": h.title, "specialist": h.specialist, "status": h.status}
                 for h in brain.hypotheses
@@ -11760,6 +11802,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "coverage_lease_id": r.coverage_lease_id,
                     "evidence": (r.evidence or "")[:800],
                     "spawn": r.spawn,
+                    "leads": r.leads,
                     "key_findings": r.key_findings,
                     "tool_calls": [
                         {"tool": t.tool, "success": t.success, "summary": t.summary[:500]}

@@ -47,6 +47,11 @@ def lead_packet_for_cell(cell: dict[str, Any]) -> dict[str, Any]:
         "xss_next_tests": list(xss.get("next_tests") or [])[:2],
         "xss_remaining_attempts": int(xss.get("remaining_attempts") or 0),
         "sqli_trace": sqli,
+        # Why this check exists when evidence, not a name match, created it.
+        "lead_basis": [
+            {key: row.get(key) for key in ("origin", "evidence_ids", "reason", "proposed_by")}
+            for row in (cell.get("lead_basis") or [])[-2:] if isinstance(row, dict)
+        ],
     }
 
 

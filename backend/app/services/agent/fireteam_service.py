@@ -1110,6 +1110,7 @@ class SpecialistReport:
     hypothesis_ids: list[str] = field(default_factory=list)
     evidence: str = ""
     spawn: list[str] = field(default_factory=list)
+    leads: list[dict] = field(default_factory=list)
     rewrite_hint: str = ""
     hypothesis_results: list[dict] = field(default_factory=list)
     assigned_hypothesis_id: str = ""
@@ -1147,6 +1148,9 @@ def _fill_summary_contract(report: SpecialistReport, payload: dict) -> None:
         spawn = [spawn]
     if isinstance(spawn, list):
         report.spawn = [str(x).strip() for x in spawn if str(x).strip()][:8]
+    from app.services.agent.work_leads import normalize_leads
+
+    report.leads = normalize_leads(payload.get("leads"))
     hint = payload.get("rewrite_hint") or payload.get("next_attempt")
     if hint:
         report.rewrite_hint = str(hint)[:500]
@@ -1206,9 +1210,16 @@ INSTRUCTIONS:
      "hypothesis_ids": ["id from the directive"],
      "hypothesis_results": [{{"hypothesis_id": "one id", "verdict": "killed|blocked|inconclusive|retry", "evidence_ids": ["execution-owned evidence_id"], "evidence": "what this specific test established"}}],
      "evidence": "tool-backed proof only — quote tool output, never imagined",
+     "leads": [{{"coverage_cell_id": "cell you observed it on (or method+path+parameter like query:file)", "test_type": "another class this input needs, e.g. path_traversal|ssrf|open_redirect|ssti|authz", "evidence_ids": ["execution-owned evidence_id from YOUR tool calls"], "reason": "what the response showed"}}],
      "spawn": ["optional specialist names to enqueue, e.g. graphql_api"],
      "rewrite_hint": "if retry: what to try differently"
    }}
+
+   leads: when a response shows behavior outside your lane on an input you touched
+   (a value fetched as a URL, a file read, a redirect, a template evaluated, another
+   user's object), hand it off as a lead. A lead without your own evidence_ids, or on
+   an input not in the coverage ledger, is rejected. New endpoints go through
+   ingest_urls_into_map, not leads. Prefer leads over spawn.
 
 6. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
    Write demonstrated-compromise reports (description + impact + assets + remediation),

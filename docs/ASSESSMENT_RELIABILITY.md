@@ -31,6 +31,18 @@ Each published finding records a `verification_level`. A finding the independent
 
 External scanners feed the same gates as leads, never as findings. `execute_ffuf` (run with `-of json`) and `execute_sqlmap` output is normalized into in-scope parameter-inventory rows — ffuf discovered paths (`source=ffuf_discovery`) and sqlmap injectable parameters (`source=sqlmap_lead`) — that seed coverage cells. Out-of-scope hosts and miss statuses are dropped; Cookie, User-Agent, and Referer injection points become `cookie` / `header` inventory rows (session and credential cookies stay untestable). A scanner's own verdict confirms nothing: the resulting cell is proved by the scoped probes and the independent verifier before any candidate is published.
 
+## Choosing which checks an input gets
+
+Every observed, testable input gets checks from three sources, in rising order of weight:
+
+1. **Name and location rules** (`vulnerability_catalog.parameter_test_classes` / `endpoint_test_classes`). Every query, form, and body input gets SQLi and XSS. Names such as `callbackUrl`, `next`, `file`, or `*_id` add SSRF, open redirect, path traversal, or authorization checks. These rules are the guaranteed minimum.
+2. **Value shape.** The inventory stores a value-free label for each observed value (`classify_value_shape`): `url`, `path`, `uuid`, `positive_integer`, `json`, `xml`, `template`, `markup`, and so on. The value itself is never stored. A shape adds the classes it can carry whatever the field is called: a `url` value adds SSRF and open redirect, `path` adds traversal, `template` adds SSTI, an identifier adds authorization, and an identifier in the URL path (`/orders/42`) adds authorization alongside SQLi.
+3. **Evidence-backed work** (`work_leads.py`). These cells get `priority_rank=0`, so they are leased before checks justified only by a name:
+   - *Observed behavior.* The crawl's benign GET canary records where the marker landed, using the browser vocabulary (`html_text`, `html_attribute`, `url_attribute`, `javascript`, `css`) plus `location_header` and `response_header`. A redirect that echoes the marker is no longer discarded: it creates open-redirect and CRLF checks on that input.
+   - *Specialist leads.* A specialist's done-payload may include `leads: [{coverage_cell_id | method+path+parameter, test_type, evidence_ids, reason}]` for another class on an input it touched. Code accepts a lead only when (a) every cited evidence ID came from that specialist's own tool calls or its leased cell, (b) the input is already in the coverage ledger, (c) the class is known and the input's location can carry it, and (d) a reason is given. Rejected leads are reported in `fireteam_dispatch.lead_cells` with the reason. Endpoints that are not yet in the ledger go through `ingest_urls_into_map`, not leads.
+
+The evidence that justifies a check is stored in `lead_basis`, not `evidence_ids`, so the cell still reads as unattempted until a probe receipt lands on it. A lead never reopens a `tested_clean`, `finding`, or `skipped` cell. The leasing specialist sees the basis in its directive's lead packet. All of this creates work only; the scoped probes and the independent verifier still decide every verdict.
+
 ## Execution and verification
 
 `replay_http_request` and `compare_requests` return an `evidence_id` for each HTTP exchange. Browser XSS checks and Interactsh registration/polling return `evidence_ids`. `read_evidence(evidence_id, offset, limit)` retrieves observations beyond the specialist's preview.

@@ -217,7 +217,7 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
         for name, value in pairs[:40]:
             add(method=method, url=url, name=name, location="query",
                 source=source, identity=identity, artifact_id=artifact_id,
-                value_type="positive_integer" if _POSITIVE_INTEGER.fullmatch(value) else "")
+                value_type=classify_value_shape(value))
 
     for page in (cmap.get("pages_visited") or [])[:120]:
         if isinstance(page, str):
@@ -306,9 +306,10 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
             except ValueError:
                 if "application/x-www-form-urlencoded" in request_type:
                     try:
-                        for name, _ in parse_qsl(body, keep_blank_values=True, max_num_fields=100)[:40]:
+                        for name, value in parse_qsl(body, keep_blank_values=True, max_num_fields=100)[:40]:
                             add(method=method, url=url, name=name, location="body_form",
                                 source="captured_api", identity=sample_identity,
+                                value_type=classify_value_shape(value),
                                 artifact_id=sample.get("artifact_id", ""))
                     except ValueError:
                         pass
@@ -334,9 +335,8 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
                 elif pointer:
                     add(method=method, url=url, name=pointer, location="body_json",
                         source="captured_api", identity=sample_identity,
-                        value_type=("positive_integer" if isinstance(value, int)
-                                    and not isinstance(value, bool) and 0 < value <= 999_999_999
-                                    else ""), artifact_id=sample.get("artifact_id", ""))
+                        value_type=classify_value_shape(value),
+                        artifact_id=sample.get("artifact_id", ""))
                     emitted += 1
 
             walk_json(body)
@@ -417,6 +417,78 @@ def inventory_with_operations(cmap: dict, operations: list[dict]) -> dict:
         ][:MAX_PARAMETERS],
     })
     return merged
+
+
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.I)
+_NUMBER = re.compile(r"-?[0-9]{1,15}(?:\.[0-9]{1,15})?\Z")
+_EMAIL = re.compile(r"[^@\s/]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}\Z")
+_JWT = re.compile(r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*\Z")
+_URL_VALUE = re.compile(r"(?:[a-z][a-z0-9+.-]{1,15}:)?//[^\s/?#]+", re.I)
+_TEMPLATE_VALUE = re.compile(r"\{\{.*\}\}|\$\{.*\}|<%.*%>|\{%.*%\}|#\{.*\}", re.S)
+_MARKUP_VALUE = re.compile(r"<\s*/?\s*[A-Za-z][A-Za-z0-9:-]*[^<>]*>")
+_FILE_VALUE = re.compile(
+    r"(?:\A\.{0,2}[/\\]|[/\\]\.{1,2}(?:[/\\]|\Z)|"
+    r"\.(?:html?|php|aspx?|jsp|txt|pdf|png|jpe?g|gif|svg|xml|json|ya?ml|csv|log|"
+    r"conf|cfg|ini|tpl|twig|md|zip|docx?|xlsx?)\Z)",
+    re.I,
+)
+_ENCODED = re.compile(r"[A-Za-z0-9+/_-]{24,}={0,2}\Z")
+# Labels a value shape may carry. They describe form, never content, so the
+# inventory stays value-free while applicability can use what was observed.
+VALUE_SHAPES = frozenset({
+    "positive_integer", "number", "boolean", "uuid", "email", "jwt", "url",
+    "path", "json", "xml", "markup", "template", "encoded",
+})
+
+
+def classify_value_shape(value: object) -> str:
+    """Return a value-free shape label for one observed request value.
+
+    The label is the only thing kept: an input observed as ``https://...`` is
+    recorded as ``url`` so SSRF applies even when its name says nothing.
+    """
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "positive_integer" if 0 < value <= 999_999_999 else "number"
+    if isinstance(value, float):
+        return "number"
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or len(text) > 4096:
+        return ""
+    if _POSITIVE_INTEGER.fullmatch(text):
+        return "positive_integer"
+    if _NUMBER.fullmatch(text):
+        return "number"
+    if text.lower() in {"true", "false"}:
+        return "boolean"
+    if _UUID.fullmatch(text):
+        return "uuid"
+    if _JWT.fullmatch(text):
+        return "jwt"
+    if _EMAIL.fullmatch(text):
+        return "email"
+    if _URL_VALUE.match(text):
+        return "url"
+    if text[0] in "{[":
+        try:
+            json.loads(text)
+            return "json"
+        except ValueError:
+            pass
+    if text.startswith("<?xml"):
+        return "xml"
+    if _TEMPLATE_VALUE.search(text):
+        return "template"
+    if _MARKUP_VALUE.search(text):
+        return "markup"
+    if " " not in text and _FILE_VALUE.search(text):
+        return "path"
+    if _ENCODED.fullmatch(text):
+        return "encoded"
+    return ""
 
 
 def parameters_for_specialist(cmap: dict, specialist: str) -> list[dict]:
