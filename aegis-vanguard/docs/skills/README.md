@@ -101,16 +101,22 @@ severity, parameter?, evidence_note?}`:
   sessions) between runs; every resume restores it from that snapshot. Idle
   intake writes the snapshot (**201**). While a run is active the same
   validation runs, then the wrapped payload goes into the session's
-  in-process candidate inbox (`run_control`, same storage as operator steers)
-  and the route returns **202** `{accepted, queued: true, next_step}`. The
+  durable candidate inbox (`run_control`: written through to
+  `~/.aegis/sessions/{org}_{sid}.inbox.jsonl` before the response, with an
+  in-memory cache) and the route returns **202** `{accepted, queued: true, next_step}`. The
   orchestrator drains the inbox where it drains steers (start of each think
   turn), submits each item through the same `submit_candidate` path into the
   live brain, and records an `external_candidate_intake` trace step plus a
   `candidates_ingested` status event; a root-cause duplicate found at drain
   time is reported as `duplicate_of` and not modified. The 25 cap counts
-  queued items. **409** only when the session has no snapshot/target.
-  Single-process only, like `run_control`; queued items not yet drained are
-  lost on a backend restart.
+  queued items, including ones left on disk by an earlier process. **409** only
+  when the session has no snapshot/target. Delivery is at-least-once: an item
+  is removed from the inbox only after the run snapshot holding it is saved; a
+  re-delivered item merges as a duplicate (never inserted twice). A backend
+  restart before the drain keeps the item; the next think turn of the resumed
+  run (same `session_id`) drains it. A run ending without a drain also keeps it.
+  The file lock covers one host; `sched-` sessions are checked against their DB
+  snapshot but their inbox is still the file on the host that ran them.
 - Nothing is confirmed by intake. Resuming an idle session (`POST /agent/query`,
   same `session_id`), or the live run after the inbox drains, lets Prowl verify it: the tester loop forces
   `independent_verify` for pending `sql_injection`/`xss`; for other classes the
@@ -133,9 +139,9 @@ classes with their proof class and lane, `severity_caps` and
    `PROWL_INGEST_KEY` service key and paired hunter/verifier observations with
    run/candidate/verification IDs produced by the scoped executor. Vanguard
    must not fabricate those. Use candidate intake instead.
-2. **Candidate inbox is in-process.** Intake into a running session is queued
-   (202) and merged at the next think turn, but the inbox lives in memory like
-   steers: a backend restart before the drain drops it (re-run `verify`).
+2. **Candidate inbox is single-host.** Intake into a running session is queued
+   (202) in a file-locked inbox beside the run snapshot and survives restarts,
+   but backends on several hosts do not share it (no DB inbox table yet).
    Without a live session `verify` uses the `finding_validation` playbook; with
    `playbook_id` the backend keeps only the text after `Operator note:`
    (<=4000 chars), so that packet is trimmed and redacted.

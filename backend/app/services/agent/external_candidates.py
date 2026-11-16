@@ -11,9 +11,16 @@ is in flight and in the durable run snapshot (``run_snapshot``) between runs.
 ``_initialize_node`` restores the brain from that snapshot on every resume, so
 the snapshot is the only safe write target for an idle session. A running
 session would overwrite the snapshot on its next save, so while a run is
-active the validated, wrapped payload is queued in the in-process candidate
-inbox (``run_control``, same storage as operator steers) and the orchestrator
-merges it into the live brain when it drains steers (202 queued).
+active the validated, wrapped payload is queued in the session's candidate
+inbox (``run_control``) and the orchestrator merges it into the live brain
+when it drains steers (202 queued).
+
+The inbox is durable (JSON-lines file beside the run snapshot, written through
+before the 202): a restart before the next think turn does not lose it. The
+think node claims items, merges them, saves the snapshot, then calls
+``settle_candidate_inbox``, which removes only items the saved snapshot now
+holds (at-least-once; the merge dedups by id / root cause). A resumed run
+drains whatever an earlier process left behind.
 """
 
 from __future__ import annotations
@@ -268,7 +275,7 @@ def list_candidates(organization_id: int, session_id: str) -> Dict[str, Any]:
     brain = snapshot.get("engagement_brain") or {}
     rows = [candidate_summary(r) for r in (brain.get("candidates") or []) if isinstance(r, dict)]
     stored = {r["id"] for r in rows}
-    rows += [queued_summary(p) for p in peek_candidate_inbox(session_id)
+    rows += [queued_summary(p) for p in peek_candidate_inbox(session_id, organization_id)
              if p.get("candidate_id") not in stored]
     return {"session_id": session_id, "snapshot_saved_at": snapshot.get("saved_at"),
             "candidates": rows}
@@ -387,9 +394,9 @@ def submit_external_candidate(
     """Add one pending external candidate to a session.
 
     Idle session: appended to the durable brain in the run snapshot.
-    Running session: validated identically, then queued in the in-process
-    candidate inbox (``run_control``) that the orchestrator drains at the same
-    point it drains operator steers (``drain_candidate_inbox_into_brain``).
+    Running session: validated identically, then queued (write-through to the
+    durable per-session inbox) in ``run_control``; the orchestrator drains it at
+    the same point it drains operator steers (``drain_candidate_inbox_into_brain``).
 
     Synchronous on purpose: the route checks for a running task and writes the
     snapshot/inbox with no await in between, so no run can start inside the window.
@@ -418,7 +425,7 @@ def submit_external_candidate(
     raw_brain = dict(snapshot.get("engagement_brain") or {})
     brain = engagement_brain_from_dict(raw_brain)
     existing = [r for r in (brain.candidates or []) if isinstance(r, dict)]
-    queued = peek_candidate_inbox(session_id)
+    queued = peek_candidate_inbox(session_id, organization_id)
     external = sum(1 for r in existing if r.get("specialist") == EXTERNAL_SPECIALIST) + len(queued)
     if external >= MAX_EXTERNAL_CANDIDATES_PER_SESSION:
         raise IntakeError(429, f"Session already holds {external} external candidates "
@@ -444,7 +451,11 @@ def submit_external_candidate(
         # The live brain is in LangGraph state; the snapshot would be overwritten
         # on the run's next save. Hand the inert payload to the orchestrator.
         payload["queued_at"] = time.time()
-        if not queue_candidate(session_id, payload):
+        try:
+            ok = queue_candidate(session_id, payload, organization_id)
+        except OSError:
+            raise IntakeError(503, "Candidate could not be persisted to the session inbox.") from None
+        if not ok:
             raise IntakeError(429, "Candidate inbox for this running session is full.")
         return {
             "accepted": True,
@@ -474,6 +485,7 @@ def submit_external_candidate(
 def drain_candidate_inbox_into_brain(
     session_id: Optional[str],
     brain_state: Any,
+    organization_id: Optional[int] = None,
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """Merge queued external candidates into a running session's live brain.
 
@@ -482,11 +494,15 @@ def drain_candidate_inbox_into_brain(
     nothing was added. Each payload was validated and wrapped at intake, so it
     is inert data. Duplicates (by id or root cause) never modify the existing
     candidate; the outcome reports ``duplicate_of`` instead.
+
+    Durable items are only *claimed* here. Call ``settle_candidate_inbox``
+    after the snapshot is saved to remove them; a crash before that re-delivers
+    them next turn, where they merge as duplicates (no double insert).
     """
     from app.services.agent.engagement_brain import engagement_brain_from_dict
-    from app.services.agent.run_control import drain_candidate_inbox
+    from app.services.agent.run_control import claim_candidate_inbox
 
-    payloads = drain_candidate_inbox(session_id)
+    payloads = claim_candidate_inbox(session_id, organization_id)
     if not payloads:
         return None, []
     raw_brain = dict(brain_state.to_dict() if hasattr(brain_state, "to_dict")
@@ -515,6 +531,34 @@ def drain_candidate_inbox_into_brain(
         return None, outcomes
     raw_brain["candidates"] = list(brain.candidates)
     return raw_brain, outcomes
+
+
+def settle_candidate_inbox(organization_id: Optional[int], session_id: Optional[str]) -> int:
+    """Remove inbox items the saved run snapshot already accounts for.
+
+    An item is settled when the stored brain has a candidate with its id or
+    root cause, or when the stored brain is already at the external-candidate
+    limit (the item can never be added). Everything else stays queued for the
+    next think turn. Reads the snapshot through ``load_run_snapshot``, so
+    ``sched-`` sessions are checked against the database copy. Returns how many
+    items were removed.
+    """
+    from app.services.agent.run_control import ack_candidate_inbox, peek_candidate_inbox
+    from app.services.agent.run_snapshot import load_run_snapshot
+
+    if not organization_id or not session_id:
+        return 0
+    pending = peek_candidate_inbox(session_id, organization_id)
+    if not pending:
+        return 0
+    stored = (load_run_snapshot(organization_id, session_id).get("engagement_brain") or {})
+    rows = [r for r in (stored.get("candidates") or []) if isinstance(r, dict)]
+    full = sum(1 for r in rows if r.get("specialist") == EXTERNAL_SPECIALIST) >= \
+        MAX_EXTERNAL_CANDIDATES_PER_SESSION
+    done = [p.get("candidate_id") for p in pending
+            if full or _matching_row(rows, p.get("candidate_id") or "",
+                                     p.get("root_cause") or "") is not None]
+    return ack_candidate_inbox(session_id, done, organization_id)
 
 
 def inbox_outcome_note(outcomes: List[Dict[str, Any]]) -> str:

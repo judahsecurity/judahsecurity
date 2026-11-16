@@ -1289,25 +1289,33 @@ class AgentOrchestrator:
         # Same drain point as steers; payloads were validated and wrapped as
         # [OPERATOR-SUPPLIED CANDIDATE CLAIM] at intake and enter the brain
         # only as pending candidates with no evidence ids.
+        # The inbox is durable: items are claimed, merged, the snapshot is
+        # saved, and only then settled (removed). A crash in between re-delivers
+        # them next turn as duplicates of the restored brain; a resumed run
+        # (brain restored by _initialize_node) drains leftovers here too.
         inbox_brain_update = None
         inbox_trace: list = []
         try:
             from app.services.agent.external_candidates import (
                 drain_candidate_inbox_into_brain,
                 inbox_outcome_note,
+                settle_candidate_inbox,
             )
 
             inbox_brain_update, inbox_outcomes = drain_candidate_inbox_into_brain(
-                session_id, state.get("engagement_brain"),
+                session_id, state.get("engagement_brain"), org_id,
             )
             if inbox_outcomes:
                 inbox_note = inbox_outcome_note(inbox_outcomes)
                 if inbox_brain_update is not None:
                     state = {**state, "engagement_brain": inbox_brain_update}
-                    if org_id and session_id:
-                        from app.services.agent.run_snapshot import save_run_snapshot
+                if org_id and session_id:
+                    from app.services.agent.run_snapshot import save_run_snapshot
 
-                        save_run_snapshot(org_id, session_id, state)
+                    # Saved even for duplicate-only drains so the live rows they
+                    # matched are durable and the items can be settled now.
+                    save_run_snapshot(org_id, session_id, state)
+                    settle_candidate_inbox(org_id, session_id)
                 inbox_trace.append(
                     ExecutionStep(
                         iteration=iteration,

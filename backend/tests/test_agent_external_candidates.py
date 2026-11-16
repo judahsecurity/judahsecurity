@@ -219,7 +219,8 @@ def test_drain_adds_pending_external_candidate_to_live_brain(env, running):
     cid = env.client.post("/agent/sessions/s1/candidates", json=BODY).json()["candidate"]["id"]
     live = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]
     brain, outcomes = drain_candidate_inbox_into_brain("s1", live)
-    assert running.peek_candidate_inbox("s1") == []
+    # Claimed, not removed: the durable item stays until the snapshot holds it.
+    assert [p["candidate_id"] for p in running.peek_candidate_inbox("s1", 12)] == [cid]
     assert outcomes[0]["accepted"] is True and outcomes[0]["candidate_id"] == cid
     by_id = {c["id"]: c for c in brain["candidates"]}
     ext = by_id[cid]
@@ -229,7 +230,13 @@ def test_drain_adds_pending_external_candidate_to_live_brain(env, running):
     assert by_id["cand-hunter"]["status"] == "confirmed"
     assert brain["notes"] == ["keep me"]
     assert "added as pending" in inbox_outcome_note(outcomes)
-    assert drain_candidate_inbox_into_brain("s1", brain) == (None, [])
+    from app.services.agent.external_candidates import _state_for_save, settle_candidate_inbox
+
+    snap = run_snapshot.load_run_snapshot(12, "s1")
+    run_snapshot.save_run_snapshot(12, "s1", _state_for_save(snap, brain))
+    assert settle_candidate_inbox(12, "s1") == 1
+    assert running.peek_candidate_inbox("s1", 12) == []
+    assert drain_candidate_inbox_into_brain("s1", brain, 12) == (None, [])
 
 
 def test_drain_never_modifies_existing_root_cause(env, running):
@@ -281,9 +288,11 @@ def test_think_node_drains_inbox_into_live_brain(env, running, monkeypatch):
     orch._resolve_llm = lambda *_args: pytest.fail("no model call expected")
     live = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]
     result = asyncio.run(orch._think_node({
-        "user_id": "7", "session_id": "s1", "mode": "agent", "current_iteration": 3,
-        "current_phase": "exploitation", "execution_trace": [], "engagement_brain": live,
-        "target_info": {"primary_target": "https://app.example.com"},
+        "user_id": "7", "session_id": "s1", "organization_id": 12, "mode": "agent",
+        "current_iteration": 3, "current_phase": "exploitation", "execution_trace": [],
+        "engagement_brain": live, "target_info": {"primary_target": "https://app.example.com"},
+        "capability_map": {"target": "https://app.example.com"},
+        "original_objective": "Assess https://app.example.com",
     }))
     by_id = {c["id"]: c for c in result["engagement_brain"]["candidates"]}
     assert by_id[cid]["status"] == "pending" and by_id[cid]["specialist"] == "vanguard_external"
@@ -295,3 +304,151 @@ def test_think_node_drains_inbox_into_live_brain(env, running, monkeypatch):
     assert any(e.get("type") == "candidates_ingested" for e in events)
     listing = env.client.get("/agent/sessions/s1/candidates").json()
     assert all(c["status"] != "queued" for c in listing["candidates"])
+    # Snapshot saved, then the durable item settled.
+    assert running.peek_candidate_inbox("s1", 12) == []
+    assert not list(run_snapshot._DIR.glob("*.inbox.jsonl"))
+
+
+# ------------------------------------------------------- durable inbox
+
+def _simulate_restart(run_control):
+    """Drop every in-process trace of the inbox, as a backend restart would."""
+    run_control._candidate_inbox.clear()
+    run_control._inbox_orgs.clear()
+
+
+def _payload(n):
+    return {"candidate_id": f"c{n:03d}", "root_cause": f"authorization|app.example.com/x{n}|id",
+            "title": f"Lead number {n}", "target": f"https://app.example.com/x{n}",
+            "vulnerability_class": "authorization", "parameter": "id", "severity": "low",
+            "severity_capped": False, "description": "d", "claimed_request": ""}
+
+
+def test_inbox_survives_restart_and_resume_drains_it(env, running, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.services.agent import recon_workers, tester_loop
+    from app.services.agent.orchestrator import AgentOrchestrator
+
+    out = env.client.post("/agent/sessions/s1/candidates",
+                          json={**BODY, "claimed_request": "GET /x\nCookie: sid=abc123"}).json()
+    cid = out["candidate"]["id"]
+    files = list(run_snapshot._DIR.glob("*.inbox.jsonl"))
+    assert [f.name for f in files] == ["12_s1.inbox.jsonl"]
+    assert oct(files[0].stat().st_mode & 0o777) == "0o600"
+    assert "abc123" not in files[0].read_text()  # same at-rest redaction as the snapshot
+
+    _simulate_restart(running)
+    monkeypatch.setattr(running, "has_running_task", lambda sid: False)
+    # Idle listing and the per-session cap still see the durable item.
+    listing = env.client.get("/agent/sessions/s1/candidates").json()
+    assert {c["id"]: c["status"] for c in listing["candidates"]}[cid] == "queued"
+    dup = env.client.post("/agent/sessions/s1/candidates", json=BODY).json()
+    assert dup["accepted"] is False and dup["duplicate_of"] == cid
+
+    # Resume: _initialize_node restores the brain from the snapshot, then the
+    # first think turn drains what the previous process queued.
+    monkeypatch.setattr(recon_workers, "drain_completed", AsyncMock(return_value=[]))
+    monkeypatch.setattr(tester_loop, "forced_next_step",
+                        lambda state: {"tool_name": "get_engagement_brain", "tool_args": {},
+                                       "thought": "look"})
+    orch = AgentOrchestrator()
+    orch._emit_status = AsyncMock()
+    orch._resolve_llm = lambda *_args: pytest.fail("no model call expected")
+    snap = run_snapshot.load_run_snapshot(12, "s1")
+    result = asyncio.run(orch._think_node({
+        "user_id": "7", "session_id": "s1", "organization_id": 12, "mode": "agent",
+        "current_iteration": 1, "current_phase": "exploitation", "execution_trace": [],
+        "engagement_brain": snap["engagement_brain"],
+        "capability_map": snap["capability_map"], "original_objective": snap["original_objective"],
+        "target_info": {"primary_target": "https://app.example.com"},
+    }))
+    ext = {c["id"]: c for c in result["engagement_brain"]["candidates"]}[cid]
+    assert ext["status"] == "pending" and ext["description"].startswith(
+        "[OPERATOR-SUPPLIED CANDIDATE CLAIM")
+    stored = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]["candidates"]
+    assert any(c["id"] == cid for c in stored)
+    assert running.peek_candidate_inbox("s1", 12) == []
+    assert not list(run_snapshot._DIR.glob("*.inbox.jsonl"))
+
+
+def test_crash_before_settle_redelivers_without_double_insert(env, running):
+    from app.services.agent.external_candidates import (
+        _state_for_save, drain_candidate_inbox_into_brain, settle_candidate_inbox,
+    )
+
+    cid = env.client.post("/agent/sessions/s1/candidates", json=BODY).json()["candidate"]["id"]
+    live = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]
+    brain, _ = drain_candidate_inbox_into_brain("s1", live, 12)
+    # Snapshot not saved yet: settle keeps the item.
+    assert settle_candidate_inbox(12, "s1") == 0
+    _simulate_restart(running)
+    # Live brain already merged it (process survived) -> duplicate, no second row.
+    again, outcomes = drain_candidate_inbox_into_brain("s1", brain, 12)
+    assert again is None and outcomes[0]["duplicate_of"] == cid
+    snap = run_snapshot.load_run_snapshot(12, "s1")
+    run_snapshot.save_run_snapshot(12, "s1", _state_for_save(snap, brain))
+    assert settle_candidate_inbox(12, "s1") == 1
+    stored = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]["candidates"]
+    assert sum(1 for c in stored if c["id"] == cid) == 1
+
+
+def test_inbox_cap_counts_durable_items(env, running):
+    for n in range(running._MAX_INBOX):
+        assert running.queue_candidate("s1", _payload(n), 12)
+    _simulate_restart(running)
+    assert len(running.peek_candidate_inbox("s1", 12)) == running._MAX_INBOX
+    assert running.queue_candidate("s1", _payload(99), 12) is False
+    # The route's external-candidate limit counts them too.
+    assert env.client.post("/agent/sessions/s1/candidates", json=BODY).status_code == 429
+
+
+def test_concurrent_queue_and_drain_lose_nothing(env, running):
+    import threading
+
+    total, merged, stop = 60, [], threading.Event()
+
+    def producer(offset):
+        n = offset
+        while n < total:
+            while not running.queue_candidate("s1", _payload(n), 12):
+                pass  # inbox full; the consumer will make room
+            n += 3
+
+    def consumer():
+        while not stop.is_set() or running.peek_candidate_inbox("s1", 12):
+            items = running.claim_candidate_inbox("s1", 12)
+            merged.extend(p["candidate_id"] for p in items)
+            running.ack_candidate_inbox("s1", [p["candidate_id"] for p in items], 12)
+
+    producers = [threading.Thread(target=producer, args=(i,)) for i in range(3)]
+    drain = threading.Thread(target=consumer)
+    drain.start()
+    for t in producers:
+        t.start()
+    for t in producers:
+        t.join(30)
+    stop.set()
+    drain.join(30)
+    assert sorted(set(merged)) == sorted(f"c{n:03d}" for n in range(total))
+    assert running.peek_candidate_inbox("s1", 12) == []
+
+
+def test_clear_session_controls_deletes_durable_inbox(env, running):
+    assert running.queue_candidate("s1", _payload(1), 12)
+    _simulate_restart(running)
+    running.clear_session_controls("s1", 12)
+    assert running.peek_candidate_inbox("s1", 12) == []
+    assert not list(run_snapshot._DIR.glob("*.inbox.jsonl"))
+
+
+def test_inbox_without_organization_stays_in_memory(tmp_path, monkeypatch):
+    from app.services.agent import run_control
+
+    monkeypatch.setattr(run_snapshot, "_DIR", tmp_path / "sessions")
+    run_control.clear_candidate_inbox("mem-only")
+    assert run_control.queue_candidate("mem-only", _payload(1))
+    assert [p["candidate_id"] for p in run_control.drain_candidate_inbox("mem-only")] == ["c001"]
+    assert run_control.peek_candidate_inbox("mem-only") == []
+    assert not (tmp_path / "sessions").exists()
