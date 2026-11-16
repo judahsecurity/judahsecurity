@@ -158,6 +158,34 @@ def test_verify_uses_candidate_intake_on_live_session(scope_file, monkeypatch, t
     assert record["mode"] == "intake" and record["candidate_id"] == "c-1"
 
 
+def test_verify_queued_intake_steers_instead_of_resuming(scope_file, monkeypatch, tmp_path):
+    run_dir = _run_dir(tmp_path, FINDING)
+    calls = []
+
+    def fake(method, path, body=None, **kw):
+        calls.append((method, path, body))
+        if path.endswith("/candidates"):
+            return {"accepted": True, "queued": True,
+                    "candidate": {"id": "c-2", "status": "queued"}}
+        return {"ok": True, "queued": True}
+
+    monkeypatch.setattr(client, "request", fake)
+    rc = client.main(["verify", "--run-dir", str(run_dir), "--finding-id", "f1",
+                      "--target", "https://app.example.com", "--scope-file", str(scope_file),
+                      "--session", "s1"])
+    assert rc == 0
+    paths = [p for _, p, _ in calls]
+    assert paths == ["/agent/sessions/s1/candidates", "/agent/sessions/s1/steer"]
+    assert "/agent/query" not in paths
+    assert "c-2" in calls[1][2]["message"] and calls[1][2]["session_id"] == "s1"
+    record = json.loads((run_dir / "prowl_verify" / "f1.json").read_text())
+    assert record["mode"] == "intake_queued" and record["candidate_id"] == "c-2"
+    assert record["steered"] is True and "resumed" not in record
+    verdict = client.candidate_verdict({"id": "c-2", "status": "queued"}, True)
+    assert verdict["status"] == "pending"
+    assert client.candidate_verdict({"id": "c-2", "status": "queued"}, False)["status"] == "pending"
+
+
 def test_verify_falls_back_to_playbook_on_409(scope_file, monkeypatch, tmp_path):
     run_dir = _run_dir(tmp_path, FINDING)
     calls = []

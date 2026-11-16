@@ -9,8 +9,11 @@ when the session is resumed (``POST /agent/query`` with the same session_id).
 Persistence: a session's engagement brain lives in LangGraph state while a run
 is in flight and in the durable run snapshot (``run_snapshot``) between runs.
 ``_initialize_node`` restores the brain from that snapshot on every resume, so
-the snapshot is the only safe write target. A running session would overwrite
-it on its next save, so intake is refused (409) while a run is active.
+the snapshot is the only safe write target for an idle session. A running
+session would overwrite the snapshot on its next save, so while a run is
+active the validated, wrapped payload is queued in the in-process candidate
+inbox (``run_control``, same storage as operator steers) and the orchestrator
+merges it into the live brain when it drains steers (202 queued).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import ast
 import contextvars
 import inspect
 import re
+import time
 import unicodedata
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -235,51 +239,63 @@ def candidate_summary(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def queued_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Status view of an inbox item the running orchestrator has not drained yet."""
+    return {
+        "id": payload.get("candidate_id"),
+        "title": payload.get("title"),
+        "vulnerability_class": payload.get("vulnerability_class") or "",
+        "severity": payload.get("severity"),
+        "target": payload.get("target"),
+        "status": "queued",
+        "revision": None,
+        "specialist": EXTERNAL_SPECIALIST,
+        "external": True,
+        "verifier_summary": "",
+        "root_cause": payload.get("root_cause") or "",
+        "duplicate_titles": [],
+        "verified_at": "",
+        "finding_id": "",
+        "queued_at": payload.get("queued_at"),
+    }
+
+
 def list_candidates(organization_id: int, session_id: str) -> Dict[str, Any]:
+    from app.services.agent.run_control import peek_candidate_inbox
     from app.services.agent.run_snapshot import load_run_snapshot
 
     snapshot = load_run_snapshot(organization_id, session_id)
     brain = snapshot.get("engagement_brain") or {}
     rows = [candidate_summary(r) for r in (brain.get("candidates") or []) if isinstance(r, dict)]
+    stored = {r["id"] for r in rows}
+    rows += [queued_summary(p) for p in peek_candidate_inbox(session_id)
+             if p.get("candidate_id") not in stored]
     return {"session_id": session_id, "snapshot_saved_at": snapshot.get("saved_at"),
             "candidates": rows}
 
 
-def submit_external_candidate(
-    organization_id: int,
-    session_id: str,
+def _matching_row(rows: List[Dict[str, Any]], cid: str, root: str) -> Optional[Dict[str, Any]]:
+    for row in rows:
+        if row.get("id") == cid or (root and row.get("root_cause") == root):
+            return row
+    return None
+
+
+def _validated_payload(
+    seed: str,
     *,
     title: str,
     target: str,
     vulnerability_class: str,
-    description: str = "",
-    claimed_request: str = "",
-    severity: str = "medium",
-    parameter: str = "",
-    evidence_note: str = "",
+    description: str,
+    claimed_request: str,
+    severity: str,
+    parameter: str,
+    evidence_note: str,
 ) -> Dict[str, Any]:
-    """Append one pending external candidate to an idle session's durable brain.
-
-    Synchronous on purpose: the route checks for a running task and writes the
-    snapshot with no await in between, so no run can start inside the window.
-    """
-    from app.services.agent.engagement_brain import engagement_brain_from_dict
-    from app.services.agent.independent_verify import candidate_id, root_cause_key, submit_candidate
+    """Scope/class/severity checks + sanitization. Returns the wrapped, inert payload."""
+    from app.services.agent.independent_verify import candidate_id, root_cause_key
     from app.services.agent.proof_policy import PROOFS_BY_CLASS
-    from app.services.agent.run_control import has_running_task
-    from app.services.agent.run_snapshot import load_run_snapshot, save_run_snapshot
-
-    if has_running_task(session_id):
-        raise IntakeError(409, "A Prowl run is active for this session. Candidate intake only "
-                               "accepts idle, resumable sessions; wait for the run to finish or "
-                               "stop it, then submit and resume with POST /agent/query.")
-    snapshot = load_run_snapshot(organization_id, session_id)
-    if not snapshot or not (snapshot.get("engagement_brain") or snapshot.get("capability_map")):
-        raise IntakeError(409, "Session has no resumable Prowl state (no run snapshot). Start a "
-                               "Prowl assessment for this target first.")
-    seed = session_seed(snapshot)
-    if not seed:
-        raise IntakeError(409, "Session has no recoverable assessment target; cannot bind scope.")
 
     vclass = clean_text(vulnerability_class, FIELD_LIMITS["vulnerability_class"]).lower()
     if vclass not in PROOFS_BY_CLASS:
@@ -297,11 +313,113 @@ def submit_external_candidate(
     if original_severity not in SEVERITY_ORDER:
         raise IntakeError(422, f"severity must be one of {list(SEVERITY_ORDER)}")
     final_severity, capped = capped_severity(vclass, original_severity)
+    return {
+        "candidate_id": candidate_id(clean_title, clean_target),
+        "root_cause": root_cause_key(vclass, clean_target, clean_param),
+        "title": clean_title,
+        "target": clean_target,
+        "vulnerability_class": vclass,
+        "parameter": clean_param,
+        "severity": final_severity,
+        "severity_capped": capped,
+        "description": wrapped_description(
+            clean_text(description, FIELD_LIMITS["description"], multiline=True),
+            clean_text(evidence_note, FIELD_LIMITS["evidence_note"], multiline=True),
+            original_severity=original_severity,
+        ),
+        "claimed_request": wrapped_request(
+            clean_text(claimed_request, FIELD_LIMITS["claimed_request"], multiline=True)),
+    }
+
+
+def _submit_payload(brain: Any, payload: Dict[str, Any]) -> Any:
+    """The one write path for idle intake and inbox drain: pending, no evidence ids."""
+    from app.services.agent.independent_verify import submit_candidate
+
+    return submit_candidate(
+        brain,
+        title=payload["title"],
+        description=payload["description"],
+        severity=payload["severity"],
+        target=payload["target"],
+        evidence="",
+        claimed_request=payload["claimed_request"],
+        specialist=EXTERNAL_SPECIALIST,
+        parameter=payload["parameter"],
+        evidence_ids=[],
+        vulnerability_class=payload["vulnerability_class"],
+    )
+
+
+def _next_step(vclass: str, *, queued: bool) -> str:
+    deterministic = vclass in {"sql_injection", "xss"}
+    head = (
+        "Queued for the running Prowl session; it is merged into the live engagement brain "
+        "at the next think turn (GET .../candidates shows status 'queued' until then). Do not "
+        "resume the session while it is running. "
+        if queued else
+        "Resume the session with POST /agent/query (same session_id, mode=agent). "
+    )
+    return (
+        head
+        + ("The tester loop forces independent_verify for pending sql_injection/xss "
+           "candidates. " if deterministic else
+           ("Send a steer naming the candidate so the agent runs independent_verify. " if queued
+            else "Name the candidate id in the resume note so the agent runs independent_verify. "))
+        + "Deterministic replays need an in-session hunter receipt; without one the class is "
+          "re-hunted or the LLM verifier attempts it, and the verdict may be inconclusive."
+    )
+
+
+def submit_external_candidate(
+    organization_id: int,
+    session_id: str,
+    *,
+    title: str,
+    target: str,
+    vulnerability_class: str,
+    description: str = "",
+    claimed_request: str = "",
+    severity: str = "medium",
+    parameter: str = "",
+    evidence_note: str = "",
+) -> Dict[str, Any]:
+    """Add one pending external candidate to a session.
+
+    Idle session: appended to the durable brain in the run snapshot.
+    Running session: validated identically, then queued in the in-process
+    candidate inbox (``run_control``) that the orchestrator drains at the same
+    point it drains operator steers (``drain_candidate_inbox_into_brain``).
+
+    Synchronous on purpose: the route checks for a running task and writes the
+    snapshot/inbox with no await in between, so no run can start inside the window.
+    """
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.run_control import (
+        has_running_task, peek_candidate_inbox, queue_candidate,
+    )
+    from app.services.agent.run_snapshot import load_run_snapshot, save_run_snapshot
+
+    snapshot = load_run_snapshot(organization_id, session_id)
+    if not snapshot or not (snapshot.get("engagement_brain") or snapshot.get("capability_map")):
+        raise IntakeError(409, "Session has no resumable Prowl state (no run snapshot). Start a "
+                               "Prowl assessment for this target first.")
+    seed = session_seed(snapshot)
+    if not seed:
+        raise IntakeError(409, "Session has no recoverable assessment target; cannot bind scope.")
+
+    payload = _validated_payload(
+        seed, title=title, target=target, vulnerability_class=vulnerability_class,
+        description=description, claimed_request=claimed_request, severity=severity,
+        parameter=parameter, evidence_note=evidence_note,
+    )
+    capped = payload["severity_capped"]
 
     raw_brain = dict(snapshot.get("engagement_brain") or {})
     brain = engagement_brain_from_dict(raw_brain)
     existing = [r for r in (brain.candidates or []) if isinstance(r, dict)]
-    external = sum(1 for r in existing if r.get("specialist") == EXTERNAL_SPECIALIST)
+    queued = peek_candidate_inbox(session_id)
+    external = sum(1 for r in existing if r.get("specialist") == EXTERNAL_SPECIALIST) + len(queued)
     if external >= MAX_EXTERNAL_CANDIDATES_PER_SESSION:
         raise IntakeError(429, f"Session already holds {external} external candidates "
                                f"(limit {MAX_EXTERNAL_CANDIDATES_PER_SESSION}).")
@@ -309,32 +427,34 @@ def submit_external_candidate(
     # submit_candidate merges on id or root cause and can re-open a verified
     # candidate when the claim text changes. External text must never reset a
     # session's own verdict, so an existing match is reported, not touched.
-    cid = candidate_id(clean_title, clean_target)
-    root = root_cause_key(vclass, clean_target, clean_param)
-    for row in existing:
-        if row.get("id") == cid or (root and row.get("root_cause") == root):
-            return {"accepted": False, "duplicate_of": row.get("id"),
-                    "candidate": candidate_summary(row), "severity_capped": capped,
-                    "reason": "An existing candidate covers this root cause; its verdict is unchanged."}
+    cid, root = payload["candidate_id"], payload["root_cause"]
+    row = _matching_row(existing, cid, root)
+    if row is not None:
+        return {"accepted": False, "duplicate_of": row.get("id"),
+                "candidate": candidate_summary(row), "severity_capped": capped,
+                "reason": "An existing candidate covers this root cause; its verdict is unchanged."}
+    pending = next((p for p in queued if p.get("candidate_id") == cid
+                    or (root and p.get("root_cause") == root)), None)
+    if pending is not None:
+        return {"accepted": False, "duplicate_of": pending.get("candidate_id"),
+                "candidate": queued_summary(pending), "severity_capped": capped,
+                "reason": "A queued candidate already covers this root cause."}
 
-    cand = submit_candidate(
-        brain,
-        title=clean_title,
-        description=wrapped_description(
-            clean_text(description, FIELD_LIMITS["description"], multiline=True),
-            clean_text(evidence_note, FIELD_LIMITS["evidence_note"], multiline=True),
-            original_severity=original_severity,
-        ),
-        severity=final_severity,
-        target=clean_target,
-        evidence="",
-        claimed_request=wrapped_request(
-            clean_text(claimed_request, FIELD_LIMITS["claimed_request"], multiline=True)),
-        specialist=EXTERNAL_SPECIALIST,
-        parameter=clean_param,
-        evidence_ids=[],
-        vulnerability_class=vclass,
-    )
+    if has_running_task(session_id):
+        # The live brain is in LangGraph state; the snapshot would be overwritten
+        # on the run's next save. Hand the inert payload to the orchestrator.
+        payload["queued_at"] = time.time()
+        if not queue_candidate(session_id, payload):
+            raise IntakeError(429, "Candidate inbox for this running session is full.")
+        return {
+            "accepted": True,
+            "queued": True,
+            "candidate": queued_summary(payload),
+            "severity_capped": capped,
+            "next_step": _next_step(payload["vulnerability_class"], queued=True),
+        }
+
+    cand = _submit_payload(brain, payload)
     # Only the candidate list changes; keep every other brain key byte-for-byte.
     raw_brain["candidates"] = list(brain.candidates)
     save_run_snapshot(organization_id, session_id, _state_for_save(snapshot, raw_brain))
@@ -342,17 +462,71 @@ def submit_external_candidate(
     if not any(isinstance(r, dict) and r.get("id") == cand.id
                for r in ((stored.get("engagement_brain") or {}).get("candidates") or [])):
         raise IntakeError(503, "Candidate could not be persisted to the session snapshot.")
-    deterministic = vclass in {"sql_injection", "xss"}
     return {
         "accepted": True,
+        "queued": False,
         "candidate": candidate_summary(cand.to_dict()),
         "severity_capped": capped,
-        "next_step": (
-            "Resume the session with POST /agent/query (same session_id, mode=agent). "
-            + ("The tester loop forces independent_verify for pending sql_injection/xss "
-               "candidates. " if deterministic else
-               "Name the candidate id in the resume note so the agent runs independent_verify. ")
-            + "Deterministic replays need an in-session hunter receipt; without one the class is "
-              "re-hunted or the LLM verifier attempts it, and the verdict may be inconclusive."
-        ),
+        "next_step": _next_step(payload["vulnerability_class"], queued=False),
     }
+
+
+def drain_candidate_inbox_into_brain(
+    session_id: Optional[str],
+    brain_state: Any,
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Merge queued external candidates into a running session's live brain.
+
+    Called by the orchestrator's think node right after ``drain_steers``.
+    Returns ``(new_brain_dict_or_None, outcomes)``; the brain is None when
+    nothing was added. Each payload was validated and wrapped at intake, so it
+    is inert data. Duplicates (by id or root cause) never modify the existing
+    candidate; the outcome reports ``duplicate_of`` instead.
+    """
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.run_control import drain_candidate_inbox
+
+    payloads = drain_candidate_inbox(session_id)
+    if not payloads:
+        return None, []
+    raw_brain = dict(brain_state.to_dict() if hasattr(brain_state, "to_dict")
+                     else (brain_state or {}))
+    brain = engagement_brain_from_dict(raw_brain)
+    outcomes: List[Dict[str, Any]] = []
+    added = False
+    for payload in payloads:
+        if not isinstance(payload, dict) or not payload.get("title"):
+            continue
+        rows = [r for r in (brain.candidates or []) if isinstance(r, dict)]
+        base = {"title": payload.get("title"), "candidate_id": payload.get("candidate_id")}
+        row = _matching_row(rows, payload.get("candidate_id") or "", payload.get("root_cause") or "")
+        if row is not None:
+            outcomes.append({**base, "accepted": False, "duplicate_of": row.get("id")})
+            continue
+        if sum(1 for r in rows if r.get("specialist") == EXTERNAL_SPECIALIST) >= \
+                MAX_EXTERNAL_CANDIDATES_PER_SESSION:
+            outcomes.append({**base, "accepted": False, "reason": "external candidate limit"})
+            continue
+        cand = _submit_payload(brain, payload)
+        added = True
+        outcomes.append({**base, "accepted": True, "candidate_id": cand.id,
+                         "vulnerability_class": payload.get("vulnerability_class")})
+    if not added:
+        return None, outcomes
+    raw_brain["candidates"] = list(brain.candidates)
+    return raw_brain, outcomes
+
+
+def inbox_outcome_note(outcomes: List[Dict[str, Any]]) -> str:
+    """One short line per drained item for the execution trace / status event."""
+    lines = []
+    for item in outcomes:
+        title = str(item.get("title") or "")[:120]
+        if item.get("accepted"):
+            lines.append(f"queued external candidate {item.get('candidate_id')} added as pending: {title}")
+        elif item.get("duplicate_of"):
+            lines.append(f"queued external candidate skipped, duplicate_of={item['duplicate_of']} "
+                         f"(existing verdict unchanged): {title}")
+        else:
+            lines.append(f"queued external candidate skipped ({item.get('reason')}): {title}")
+    return "\n".join(lines)

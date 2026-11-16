@@ -1285,6 +1285,51 @@ class AgentOrchestrator:
                 "pending": len(steer_notes),
             })
 
+        # External candidate inbox (Vanguard intake while this run is live).
+        # Same drain point as steers; payloads were validated and wrapped as
+        # [OPERATOR-SUPPLIED CANDIDATE CLAIM] at intake and enter the brain
+        # only as pending candidates with no evidence ids.
+        inbox_brain_update = None
+        inbox_trace: list = []
+        try:
+            from app.services.agent.external_candidates import (
+                drain_candidate_inbox_into_brain,
+                inbox_outcome_note,
+            )
+
+            inbox_brain_update, inbox_outcomes = drain_candidate_inbox_into_brain(
+                session_id, state.get("engagement_brain"),
+            )
+            if inbox_outcomes:
+                inbox_note = inbox_outcome_note(inbox_outcomes)
+                if inbox_brain_update is not None:
+                    state = {**state, "engagement_brain": inbox_brain_update}
+                    if org_id and session_id:
+                        from app.services.agent.run_snapshot import save_run_snapshot
+
+                        save_run_snapshot(org_id, session_id, state)
+                inbox_trace.append(
+                    ExecutionStep(
+                        iteration=iteration,
+                        phase=phase,
+                        thought="Operator-supplied external candidates entered the brain as pending",
+                        reasoning="Untrusted leads; the independent verifier must re-derive proof",
+                        tool_name="external_candidate_intake",
+                        tool_args={"count": len(inbox_outcomes)},
+                        tool_output=inbox_note[:4000],
+                        success=inbox_brain_update is not None,
+                    ).model_dump()
+                )
+                await self._emit_status({
+                    "type": "candidates_ingested",
+                    "message": inbox_note[:400],
+                    "accepted": sum(1 for o in inbox_outcomes if o.get("accepted")),
+                    "duplicates": [o["duplicate_of"] for o in inbox_outcomes
+                                   if o.get("duplicate_of")],
+                })
+        except Exception:
+            logger.exception("external candidate inbox drain failed")
+
         compacted_brief = (state.get("compacted_brief") or "").strip()
         compacted_trace = list(state.get("execution_trace", []) or [])
         if consume_compact(session_id) or should_auto_compact(compacted_trace):
@@ -1308,7 +1353,7 @@ class AgentOrchestrator:
         # Drain completed parallel recon streams into state before the LLM thinks
         # (non-blocking collect; soft 1.5s join so fast httpx/waf results land early).
         drained_briefs: List[str] = list(state.get("recon_worker_briefs") or [])
-        drain_trace_extra: list = []
+        drain_trace_extra: list = list(inbox_trace)
         recon_map_update = None
         recon_brain_update = None
         try:
@@ -1795,6 +1840,8 @@ class AgentOrchestrator:
                 if recon_map_update is not None:
                     unavailable["capability_map"] = recon_map_update
                     unavailable["engagement_brain"] = recon_brain_update
+                elif inbox_brain_update is not None:
+                    unavailable["engagement_brain"] = inbox_brain_update
                 return unavailable
             from app.services.agent.observability import model_id, record_llm_usage
             step_usage = record_llm_usage(
@@ -1898,6 +1945,8 @@ class AgentOrchestrator:
         if recon_map_update is not None:
             updates["capability_map"] = recon_map_update
             updates["engagement_brain"] = recon_brain_update
+        elif inbox_brain_update is not None:
+            updates["engagement_brain"] = inbox_brain_update
 
         
         # Handle actions

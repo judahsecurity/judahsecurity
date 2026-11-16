@@ -5,14 +5,14 @@ Stop / ping messages could not be read until the run finished (and tokens
 kept burning). Runs now register their asyncio Task here so the UI can cancel
 them immediately.
 
-Steer/compact queues are drained at the start of each think node so the
+Steer/compact/candidate-inbox queues are drained at the start of each think node so the
 operator can redirect a hunt without killing it (CAI Ctrl+C analog).
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 _stop_requested: set[str] = set()
 _running: dict[str, asyncio.Task] = {}
@@ -20,6 +20,8 @@ _steers: dict[str, List[str]] = {}
 _compact_requested: set[str] = set()
 _load_briefs: dict[str, List[str]] = {}
 _price_limits: dict[str, float] = {}
+_candidate_inbox: dict[str, List[Dict[str, Any]]] = {}
+_MAX_INBOX = 25
 
 
 def register_run(session_id: str, task: Optional[asyncio.Task]) -> None:
@@ -87,6 +89,33 @@ def drain_steers(session_id: Optional[str]) -> List[str]:
     return [n for n in notes if n]
 
 
+def queue_candidate(session_id: str, payload: Dict[str, Any]) -> bool:
+    """Queue a validated, wrapped external candidate for the next think node.
+
+    Same lifecycle as steers: in-process, drained by the orchestrator. The
+    payload is inert data (external_candidates wraps every text field).
+    """
+    if not session_id or not isinstance(payload, dict):
+        return False
+    box = _candidate_inbox.setdefault(session_id, [])
+    if len(box) >= _MAX_INBOX:
+        return False
+    box.append(dict(payload))
+    return True
+
+
+def peek_candidate_inbox(session_id: Optional[str]) -> List[Dict[str, Any]]:
+    if not session_id:
+        return []
+    return [dict(p) for p in _candidate_inbox.get(session_id, [])]
+
+
+def drain_candidate_inbox(session_id: Optional[str]) -> List[Dict[str, Any]]:
+    if not session_id:
+        return []
+    return [p for p in _candidate_inbox.pop(session_id, []) if p]
+
+
 def request_compact(session_id: str) -> None:
     if session_id:
         _compact_requested.add(session_id)
@@ -127,6 +156,7 @@ def clear_session_controls(session_id: str) -> None:
     if not session_id:
         return
     _steers.pop(session_id, None)
+    _candidate_inbox.pop(session_id, None)
     _compact_requested.discard(session_id)
     _load_briefs.pop(session_id, None)
     _price_limits.pop(session_id, None)

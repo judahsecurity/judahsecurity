@@ -68,7 +68,7 @@ above only with a proof kind for the class; classes without proof kinds and
 | `start --executor` | `POST /agent/scoped-assessments` (legacy scoped executor) | JWT |
 | `poll` | `GET /agent/conversations/{sid}`, `GET /agent/conversations/{sid}/ledger` | JWT |
 | `findings` | `GET /vulnerabilities/?asset_id=&detected_by=agent_family` | JWT |
-| `verify` (live session) | `POST /agent/sessions/{sid}/candidates`, then `POST /agent/query` (resume `sid`) | JWT |
+| `verify` (live session) | `POST /agent/sessions/{sid}/candidates`, then `POST /agent/query` (resume `sid`) when idle (201), or `POST /agent/sessions/{sid}/steer` when the run is active (202 `queued`; `mode=intake_queued`) | JWT |
 | `verify` (fallback) | `POST /agent/query` with `playbook_id=finding_validation` + redacted packet | JWT |
 | `candidates` | `GET /agent/sessions/{sid}/candidates` | JWT |
 | `verdict` | candidate status from `candidates` when intake was used; else ledger receipts | JWT |
@@ -98,20 +98,30 @@ severity, parameter?, evidence_note?}`:
   session verdict. At most 25 external candidates per session (429).
 - Persistence: the brain lives in LangGraph state during a run and in the run
   snapshot (`run_snapshot.py`, `~/.aegis/sessions` or the DB for `sched-`
-  sessions) between runs; every resume restores it from that snapshot. Intake
-  writes the snapshot, so it is refused with **409** while a run is active or
-  when the session has no snapshot/target. Single-process only, like
-  `run_control`.
-- Nothing is confirmed by intake. Resuming the session (`POST /agent/query`,
-  same `session_id`) lets Prowl verify it: the tester loop forces
+  sessions) between runs; every resume restores it from that snapshot. Idle
+  intake writes the snapshot (**201**). While a run is active the same
+  validation runs, then the wrapped payload goes into the session's
+  in-process candidate inbox (`run_control`, same storage as operator steers)
+  and the route returns **202** `{accepted, queued: true, next_step}`. The
+  orchestrator drains the inbox where it drains steers (start of each think
+  turn), submits each item through the same `submit_candidate` path into the
+  live brain, and records an `external_candidate_intake` trace step plus a
+  `candidates_ingested` status event; a root-cause duplicate found at drain
+  time is reported as `duplicate_of` and not modified. The 25 cap counts
+  queued items. **409** only when the session has no snapshot/target.
+  Single-process only, like `run_control`; queued items not yet drained are
+  lost on a backend restart.
+- Nothing is confirmed by intake. Resuming an idle session (`POST /agent/query`,
+  same `session_id`), or the live run after the inbox drains, lets Prowl verify it: the tester loop forces
   `independent_verify` for pending `sql_injection`/`xss`; for other classes the
-  resume note names the candidate id. Deterministic replays need a hunter
+  resume note (or, for a running session, a steer) names the candidate id. Deterministic replays need a hunter
   receipt from that session; without one the class is re-hunted or the LLM
   verifier attempts it, and `inconclusive` is expected.
 
 `GET /agent/sessions/{sid}/candidates` lists id, title, class, severity,
 status, verifier_summary, root_cause, duplicate_titles (no evidence bodies,
-nonces or requests) from the last snapshot, plus `run_in_progress`.
+nonces or requests) from the last snapshot, plus undrained inbox items with
+status `queued`, plus `run_in_progress`. `verdict` maps `queued` to `pending`.
 
 `GET /agent/proof-classes` returns `PROOFS_BY_CLASS` (sorted kinds), coverage
 classes with their proof class and lane, `severity_caps` and
@@ -123,8 +133,9 @@ classes with their proof class and lane, `severity_caps` and
    `PROWL_INGEST_KEY` service key and paired hunter/verifier observations with
    run/candidate/verification IDs produced by the scoped executor. Vanguard
    must not fabricate those. Use candidate intake instead.
-2. **No intake into a running session.** The run would overwrite the snapshot,
-   and the orchestrator has no candidate inbox. Wait, or `stop`, then `verify`.
+2. **Candidate inbox is in-process.** Intake into a running session is queued
+   (202) and merged at the next think turn, but the inbox lives in memory like
+   steers: a backend restart before the drain drops it (re-run `verify`).
    Without a live session `verify` uses the `finding_validation` playbook; with
    `playbook_id` the backend keeps only the text after `Operator note:`
    (<=4000 chars), so that packet is trimmed and redacted.

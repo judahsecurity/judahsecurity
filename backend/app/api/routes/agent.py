@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Literal, List
 from urllib.parse import urlsplit
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Response
 from pydantic import BaseModel, field_validator, model_validator, Field
 
 from sqlalchemy.orm import Session
@@ -895,13 +895,18 @@ async def get_proof_classes(current_user: User = Depends(get_current_user)):
 async def submit_session_candidate(
     session_id: str,
     request: ExternalCandidateRequest,
+    response: Response,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Queue an external candidate as *pending* in an idle session's engagement brain.
+    """Add an external candidate as *pending* to a session's engagement brain.
 
-    Never confirms anything. Resume the session (POST /query, same session_id)
-    so its own independent verifier re-derives the proof in-session.
+    Idle session: written to the durable snapshot (201); resume the session
+    (POST /query, same session_id) so its own independent verifier re-derives
+    the proof in-session. Running session: validated the same way, then queued
+    in the session's candidate inbox (202, ``queued: true``); the orchestrator
+    merges it into the live brain where it drains operator steers. Never
+    confirms anything.
     """
     conv, org_id = _owned_conversation(db, session_id, current_user)
     if conv.mode != "agent":
@@ -920,8 +925,10 @@ async def submit_session_candidate(
         )
     except IntakeError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail) from None
-    logger.info("External candidate intake user=%s session=%s accepted=%s",
-                current_user.id, session_id, result.get("accepted"))
+    if result.get("queued"):
+        response.status_code = 202
+    logger.info("External candidate intake user=%s session=%s accepted=%s queued=%s",
+                current_user.id, session_id, result.get("accepted"), bool(result.get("queued")))
     return {"session_id": session_id, **result}
 
 
@@ -931,7 +938,7 @@ async def list_session_candidates(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Candidate status from the session's durable snapshot (no evidence bodies)."""
+    """Candidate status from the durable snapshot plus undrained inbox items (status "queued")."""
     _conv, org_id = _owned_conversation(db, session_id, current_user)
     from app.services.agent.external_candidates import list_candidates
     from app.services.agent.run_control import has_running_task

@@ -21,7 +21,9 @@ Commands:
     findings --asset-id N                    GET  /vulnerabilities/?asset_id=N&detected_by=agent_family
     verify --run-dir D --finding-id ID --target ORIGIN --scope-file F [--session S]
                                              live session: POST /agent/sessions/S/candidates then
-                                             POST /agent/query (resume S); otherwise
+                                             POST /agent/query (resume S) when idle, or
+                                             POST .../S/steer when the run is active (202 queued);
+                                             otherwise
                                              POST /agent/query playbook=finding_validation
     candidates --session S                   GET  /agent/sessions/S/candidates
     verdict --run-dir D --finding-id ID      candidate status (intake) or ledger ->
@@ -31,8 +33,11 @@ Commands:
                                              POST /mcp/call (recon tools only, scope-checked)
 
 Candidate intake (POST /agent/sessions/S/candidates) queues a *pending*
-candidate in an idle Prowl session; it never confirms anything. The session's
-own independent verifier decides once ``verify`` resumes it. Without a live
+candidate in a Prowl session; it never confirms anything. Idle session: 201,
+written to the snapshot, and ``verify`` resumes it. Running session: 202
+``queued``; the run merges it into its live brain at the next think turn, so
+``verify`` records mode=intake_queued and sends a steer instead of resuming.
+The session's own independent verifier decides. Without a live
 session (or on 404/409) ``verify`` falls back to asking Prowl to reproduce the
 candidate from scratch via the finding_validation playbook. POST /prowl/findings
 still only takes service-produced paired hunter/verifier proofs (see
@@ -255,6 +260,9 @@ def candidate_verdict(row: dict | None, run_in_progress: bool) -> dict:
     if status == "refuted":
         return {"status": "refuted", "reason": summary or "Prowl verifier refuted",
                 "candidate_id": row.get("id")}
+    if status == "queued":
+        return {"status": "pending", "candidate_id": row.get("id"),
+                "reason": "candidate queued in the running session's inbox; not merged yet"}
     if status == "pending":
         if run_in_progress:
             return {"status": "pending", "reason": "Prowl run still active"}
@@ -405,7 +413,19 @@ def cmd_verify(args) -> dict:
             record.update(mode="intake", session_id=session, candidate_id=cid,
                           accepted=intake.get("accepted"),
                           severity_capped=intake.get("severity_capped"))
-            if intake.get("accepted"):
+            if intake.get("queued"):
+                # 202: the session is running; the orchestrator merges the
+                # candidate into its live brain at the next think turn.
+                # Resuming would start a second run, so steer instead.
+                record["mode"] = "intake_queued"
+                try:
+                    request("POST", f"/agent/sessions/{urllib.parse.quote(session)}/steer",
+                            {"session_id": session, "message": resume_note(cid, cls or "")})
+                    record["steered"] = True
+                except ProwlError as exc:
+                    record["steered"] = False
+                    record["steer_error"] = str(exc)[:300]
+            elif intake.get("accepted"):
                 resp = request("POST", "/agent/query", {
                     "question": resume_note(cid, cls or ""), "mode": "agent", "target": origin,
                     "session_id": session, "assessment_policy": assessment_policy(args),

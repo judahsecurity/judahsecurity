@@ -144,9 +144,6 @@ def test_intake_session_state_checks(env, monkeypatch):
     assert env.client.post("/agent/sessions/cold/candidates", json=BODY).status_code == 409
     assert env.client.post("/agent/sessions/pilot/candidates", json=BODY).status_code == 409
     assert env.client.post("/agent/sessions/missing/candidates", json=BODY).status_code == 404
-    monkeypatch.setattr(run_control, "has_running_task", lambda sid: sid == "s1")
-    resp = env.client.post("/agent/sessions/s1/candidates", json=BODY)
-    assert resp.status_code == 409 and "active" in resp.json()["detail"]
 
 
 def test_other_user_cannot_read_or_write(env):
@@ -164,3 +161,137 @@ def test_external_candidate_limit(env, monkeypatch):
     assert env.client.post("/agent/sessions/s1/candidates", json=BODY).status_code == 201
     body = {**BODY, "title": "Second lead", "target": "https://app.example.com/b"}
     assert env.client.post("/agent/sessions/s1/candidates", json=body).status_code == 429
+
+
+@pytest.fixture
+def running(monkeypatch):
+    from app.services.agent import run_control
+
+    monkeypatch.setattr(run_control, "has_running_task", lambda sid: sid == "s1")
+    run_control.drain_candidate_inbox("s1")
+    yield run_control
+    run_control.drain_candidate_inbox("s1")
+
+
+def test_running_session_queues_candidate(env, running):
+    before = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]
+    resp = env.client.post("/agent/sessions/s1/candidates", json=BODY)
+    assert resp.status_code == 202, resp.text
+    out = resp.json()
+    assert out["accepted"] is True and out["queued"] is True and out["next_step"]
+    assert out["candidate"]["status"] == "queued"
+    # Snapshot untouched: the live run owns the brain.
+    assert run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"] == before
+    (payload,) = running.peek_candidate_inbox("s1")
+    assert payload["description"].startswith("[OPERATOR-SUPPLIED CANDIDATE CLAIM")
+    assert payload["description"].count("[END OPERATOR-SUPPLIED CLAIM]") == 1
+    assert "\x07" not in payload["description"]
+    assert payload["claimed_request"].startswith("[OPERATOR-SUPPLIED CLAIMED REQUEST")
+
+    listing = env.client.get("/agent/sessions/s1/candidates").json()
+    rows = {c["id"]: c for c in listing["candidates"]}
+    assert rows[out["candidate"]["id"]]["status"] == "queued"
+    assert rows["cand-hunter"]["status"] == "confirmed"
+    assert listing["run_in_progress"] is True
+
+    # Same validation as idle intake; queued duplicates are reported, not re-queued.
+    assert env.client.post("/agent/sessions/s1/candidates",
+                           json={**BODY, "target": "https://evil.example.net/x"}).status_code == 422
+    again = env.client.post("/agent/sessions/s1/candidates", json=BODY).json()
+    assert again["accepted"] is False and again["duplicate_of"] == out["candidate"]["id"]
+    assert len(running.peek_candidate_inbox("s1")) == 1
+
+
+def test_running_session_cap_counts_queued(env, running, monkeypatch):
+    from app.services.agent import external_candidates
+
+    monkeypatch.setattr(external_candidates, "MAX_EXTERNAL_CANDIDATES_PER_SESSION", 1)
+    assert env.client.post("/agent/sessions/s1/candidates", json=BODY).status_code == 202
+    body = {**BODY, "title": "Second lead", "target": "https://app.example.com/b"}
+    assert env.client.post("/agent/sessions/s1/candidates", json=body).status_code == 429
+
+
+def test_drain_adds_pending_external_candidate_to_live_brain(env, running):
+    from app.services.agent.external_candidates import (
+        drain_candidate_inbox_into_brain, inbox_outcome_note,
+    )
+
+    cid = env.client.post("/agent/sessions/s1/candidates", json=BODY).json()["candidate"]["id"]
+    live = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]
+    brain, outcomes = drain_candidate_inbox_into_brain("s1", live)
+    assert running.peek_candidate_inbox("s1") == []
+    assert outcomes[0]["accepted"] is True and outcomes[0]["candidate_id"] == cid
+    by_id = {c["id"]: c for c in brain["candidates"]}
+    ext = by_id[cid]
+    assert ext["status"] == "pending" and ext["specialist"] == "vanguard_external"
+    assert ext["evidence_ids"] == [] and ext["evidence"] == ""
+    assert ext["description"].startswith("[OPERATOR-SUPPLIED CANDIDATE CLAIM")
+    assert by_id["cand-hunter"]["status"] == "confirmed"
+    assert brain["notes"] == ["keep me"]
+    assert "added as pending" in inbox_outcome_note(outcomes)
+    assert drain_candidate_inbox_into_brain("s1", brain) == (None, [])
+
+
+def test_drain_never_modifies_existing_root_cause(env, running):
+    from app.services.agent.external_candidates import (
+        drain_candidate_inbox_into_brain, inbox_outcome_note,
+    )
+
+    # Queued while the live brain had not yet produced the hunter's candidate.
+    run_snapshot.save_run_snapshot(12, "s1", {
+        "engagement_brain": {"candidates": []},
+        "capability_map": {"target": "https://app.example.com"},
+        "original_objective": "Assess https://app.example.com",
+    })
+    body = {**BODY, "title": "Reworded SQL injection", "vulnerability_class": "sql_injection",
+            "target": "https://app.example.com/a?id=1", "parameter": "id"}
+    assert env.client.post("/agent/sessions/s1/candidates", json=body).status_code == 202
+    hunter = {"id": "cand-hunter", "title": "Confirmed SQLi", "status": "confirmed",
+              "vulnerability_class": "sql_injection", "target": "https://app.example.com/a?id=1",
+              "root_cause": "sql_injection|app.example.com/a|id", "specialist": "sqli",
+              "revision": 1, "nonce": "n1", "evidence_ids": ["e1"]}
+    brain, outcomes = drain_candidate_inbox_into_brain("s1", {"candidates": [dict(hunter)]})
+    assert brain is None
+    assert outcomes == [{"title": "Reworded SQL injection", "candidate_id": outcomes[0]["candidate_id"],
+                         "accepted": False, "duplicate_of": "cand-hunter"}]
+    assert "duplicate_of=cand-hunter" in inbox_outcome_note(outcomes)
+
+
+def test_think_node_drains_inbox_into_live_brain(env, running, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.services.agent import recon_workers, tester_loop
+    from app.services.agent.orchestrator import AgentOrchestrator
+
+    cid = env.client.post("/agent/sessions/s1/candidates", json=BODY).json()["candidate"]["id"]
+    seen = []
+
+    async def no_recon(*_args, **_kwargs):
+        return []
+
+    def next_step(state):
+        seen.append(state)
+        return {"tool_name": "get_engagement_brain", "tool_args": {}, "thought": "look"}
+
+    monkeypatch.setattr(recon_workers, "drain_completed", no_recon)
+    monkeypatch.setattr(tester_loop, "forced_next_step", next_step)
+    orch = AgentOrchestrator()
+    orch._emit_status = AsyncMock()
+    orch._resolve_llm = lambda *_args: pytest.fail("no model call expected")
+    live = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]
+    result = asyncio.run(orch._think_node({
+        "user_id": "7", "session_id": "s1", "mode": "agent", "current_iteration": 3,
+        "current_phase": "exploitation", "execution_trace": [], "engagement_brain": live,
+        "target_info": {"primary_target": "https://app.example.com"},
+    }))
+    by_id = {c["id"]: c for c in result["engagement_brain"]["candidates"]}
+    assert by_id[cid]["status"] == "pending" and by_id[cid]["specialist"] == "vanguard_external"
+    assert by_id["cand-hunter"]["status"] == "confirmed"
+    assert any(c["id"] == cid for c in seen[0]["engagement_brain"]["candidates"])
+    step = next(s for s in result["execution_trace"] if s["tool_name"] == "external_candidate_intake")
+    assert cid in step["tool_output"]
+    events = [call.args[0] for call in orch._emit_status.await_args_list]
+    assert any(e.get("type") == "candidates_ingested" for e in events)
+    listing = env.client.get("/agent/sessions/s1/candidates").json()
+    assert all(c["status"] != "queued" for c in listing["candidates"])

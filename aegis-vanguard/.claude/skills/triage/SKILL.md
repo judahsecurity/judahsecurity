@@ -80,11 +80,14 @@ python3 prowl_client.py verdict --run-dir <run-dir> --finding-id <id>
 With a live Prowl session (`--session`, or `prowl_run.json` from `/pentest`),
 `verify` queues the finding as a **pending** candidate in that session
 (`POST /agent/sessions/S/candidates`) and resumes it so Prowl's own
-`independent_verify` runs with fresh in-session receipts. The intake never
+`independent_verify` runs with fresh in-session receipts. If that session's
+run is still active, intake returns 202 `queued`: the run merges it at its next
+think turn, `verify` records `mode=intake_queued` and steers instead of
+resuming, and `verdict` reports `pending` until it is verified. The intake never
 confirms anything; the claim is labeled operator-supplied, untrusted text.
 Without a hunter receipt in that session, deterministic classes are re-hunted
 or the LLM verifier attempts them, so `inconclusive` is a normal answer. If the
-session is busy, cold or the class is unknown, `verify` falls back to the
+session is cold or the class is unknown, `verify` falls back to the
 `finding_validation` playbook (Prowl reproduces from scratch). `verdict` reads
 the candidate status when intake was used, else the ledger. Map the receipt:
 
