@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { SeverityWeightsCard } from '@/components/settings/SeverityWeightsCard';
+import { AgentToolAccessCard } from '@/components/settings/AgentToolAccessCard';
 import { useToast } from '@/hooks/use-toast';
 
 interface ApiConfig {
@@ -1018,6 +1019,9 @@ export default function SettingsPage() {
 
         {/* Severity evaluation: organization default factor weights */}
         <SeverityWeightsCard />
+
+        {/* Agent tool access: phases, specialists, approval policy */}
+        <AgentToolAccessCard />
 
         {/* Notifications */}
         <Card>

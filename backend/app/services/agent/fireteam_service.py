@@ -1080,6 +1080,39 @@ def get_specialist(name: str) -> Optional[SpecialistProfile]:
     return _SPECIALISTS_BY_NAME.get(name)
 
 
+OOB_GRANT_TOOLS = frozenset({"execute_interactsh", "run_oob_callback_workflow"})
+_AUTHZ_WORKFLOW_SPECIALISTS = ("auth_logic", "independent_verifier", "api_logic", "coverage")
+_AUTHZ_WORKFLOW_TOOLS = (
+    "generate_authorization_matrix",
+    "run_authorization_proof",
+    "get_assessment_coverage",
+    "map_application_traffic",
+    "list_proof_captures",
+    "list_authorization_leads",
+    "prepare_captured_authorization_proof",
+)
+
+
+def specialist_tool_list(profile: SpecialistProfile, *, oob_allowed: bool) -> list[str]:
+    """Tools a specialist may call, before per-wave directive and pilot filters.
+
+    Shared by the runtime and the tool-access view so they cannot drift.
+    """
+    allowed_tools = list(profile.allowed_tools)
+    if not oob_allowed:
+        allowed_tools = [tool for tool in allowed_tools if tool not in OOB_GRANT_TOOLS]
+    allowed_tools.extend(t for t in ("read_evidence", "list_test_identities") if t not in allowed_tools)
+    if profile.name in _AUTHZ_WORKFLOW_SPECIALISTS:
+        allowed_tools.extend(t for t in _AUTHZ_WORKFLOW_TOOLS if t not in allowed_tools)
+    if "execute_interactsh" in allowed_tools and "run_oob_callback_workflow" not in allowed_tools:
+        allowed_tools.append("run_oob_callback_workflow")
+    if "compare_requests" in allowed_tools:
+        allowed_tools.extend(t for t in ("check_test_identity", "test_authorization_boundary", "run_assessment_workflow") if t not in allowed_tools)
+    if "search_memory" not in allowed_tools:
+        allowed_tools.append("search_memory")
+    return allowed_tools
+
+
 # ---------------------------------------------------------------------------
 # Reports
 # ---------------------------------------------------------------------------
@@ -1323,12 +1356,9 @@ async def _run_specialist(
         mission_for_prompt = mission
         max_iter = profile.max_iterations
 
-    allowed_tools = list(profile.allowed_tools)
-    if not getattr(tools_manager, "_oob_callbacks_allowed", False):
-        allowed_tools = [
-            tool for tool in allowed_tools
-            if tool not in {"execute_interactsh", "run_oob_callback_workflow"}
-        ]
+    allowed_tools = specialist_tool_list(
+        profile, oob_allowed=bool(getattr(tools_manager, "_oob_callbacks_allowed", False)),
+    )
     if (isinstance(directive, OperationDirective)
             and directive.parameter_work
             and not directive.parameter_work.get("scoped_capture_id")):
@@ -1336,27 +1366,6 @@ async def _run_specialist(
             tool for tool in allowed_tools
             if tool not in {"scoped_assessment_probe_assigned", "scoped_assessment_candidate"}
         ]
-    allowed_tools.extend(t for t in ("read_evidence", "list_test_identities") if t not in allowed_tools)
-    if profile.name in ("auth_logic", "independent_verifier", "api_logic", "coverage"):
-        allowed_tools.extend(
-            t
-            for t in (
-                "generate_authorization_matrix",
-                "run_authorization_proof",
-                "get_assessment_coverage",
-                "map_application_traffic",
-                "list_proof_captures",
-                "list_authorization_leads",
-                "prepare_captured_authorization_proof",
-            )
-            if t not in allowed_tools
-        )
-    if "execute_interactsh" in allowed_tools and "run_oob_callback_workflow" not in allowed_tools:
-        allowed_tools.append("run_oob_callback_workflow")
-    if "compare_requests" in allowed_tools:
-        allowed_tools.extend(t for t in ("check_test_identity", "test_authorization_boundary", "run_assessment_workflow") if t not in allowed_tools)
-    if "search_memory" not in allowed_tools:
-        allowed_tools.append("search_memory")
     from app.services.agent.pilot_policy import current_pilot
 
     pilot = current_pilot()

@@ -2589,6 +2589,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getAgentToolAccess(): Promise<AgentToolAccess> {
+    const response = await this.client.get('/agent/tool-access');
+    return response.data;
+  }
+
   async getAgentPlaybooks(): Promise<{ id: string; name: string; description: string }[]> {
     const response = await this.client.get('/agent/playbooks');
     return response.data;
@@ -3742,3 +3747,24 @@ class ApiClient {
 
 export const api = new ApiClient();
 export default api;
+
+export type ToolDecision = 'auto' | 'confirm' | 'deny';
+
+export interface AgentToolAccessRow {
+  name: string;
+  source: 'builtin' | 'recipe';
+  registered: boolean;
+  phases: string[];
+  specialists: string[];
+  confirmation: { interactive: ToolDecision; autonomous: ToolDecision; reason: string };
+  installed: boolean | null;
+  denylist_checked: boolean;
+  requires_grant: string | null;
+}
+
+export interface AgentToolAccess {
+  phases: string[];
+  specialists: { name: string; epithet: string; role: string }[];
+  tools: AgentToolAccessRow[];
+  notes: string[];
+}

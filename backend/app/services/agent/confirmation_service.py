@@ -321,6 +321,41 @@ def _resolve_decision(policy_map: dict, tool_name: str) -> str:
     return best[1]
 
 
+def describe_policy_decision(
+    policy_cfg: dict, tool_name: str, *, roe_requires_confirmation: bool,
+) -> dict[str, str]:
+    """What ``gate`` decides for a tool from org policy alone.
+
+    Mirrors ``gate`` for an ordinary call: no pilot run, no login crawl, and no
+    argument-dependent exceptions (bounded informational Nuclei runs auto).
+    Returns ``{"interactive", "autonomous", "reason"}``; ``autonomous`` is the
+    decision in an unattended run.
+    """
+    from app.services.tool_recipes import is_auto_approved
+
+    if not policy_cfg.get("tool_confirmation_enabled", True):
+        return {"interactive": "auto", "autonomous": "auto", "reason": "confirmation disabled"}
+    if policy_cfg.get("tool_confirmation_readonly_auto_allow", True) and tool_name in READONLY_TOOLS:
+        return {"interactive": "auto", "autonomous": "auto", "reason": "read-only"}
+
+    decision = _resolve_decision(policy_cfg.get("tool_confirmation_policy") or {}, tool_name)
+    reason = "org policy"
+    safe_recon = tool_name in SAFE_RECON_TOOLS or is_auto_approved(tool_name)
+    if safe_recon and decision != "deny":
+        decision, reason = "auto", "light recon"
+    roe_escalated = False
+    if (decision == "auto" and roe_requires_confirmation
+            and tool_name not in READONLY_TOOLS and not safe_recon):
+        decision, reason, roe_escalated = "confirm", "Rules of Engagement", True
+
+    autonomous = decision
+    if (decision == "confirm" and not roe_escalated
+            and tool_name not in {"run_intruder_batch"}
+            and policy_cfg.get("agent_autonomous_auto_approve", False)):
+        autonomous = "auto"
+    return {"interactive": decision, "autonomous": autonomous, "reason": reason}
+
+
 def _is_bounded_nuclei_recon(tool_name: str, tool_args: Optional[dict]) -> bool:
     """Informational Nuclei recon (tech/exposure/panel) is light recon, not CVE spray."""
     if tool_name != "execute_nuclei":

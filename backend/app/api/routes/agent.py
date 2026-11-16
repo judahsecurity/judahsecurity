@@ -853,6 +853,27 @@ async def get_agent_playbooks():
     return list_playbooks()
 
 
+@router.get("/tool-access")
+def get_tool_access(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Which tools the agent and each specialist may call, by phase and org policy."""
+    from app.models.project_settings import (
+        MODULE_AGENT, MODULE_RULES_OF_ENGAGEMENT, ProjectSettings,
+    )
+    from app.services.agent.tool_access import build_tool_access
+
+    org_id = _resolve_agent_organization_id(current_user, db)
+    policy_cfg = ProjectSettings.get_config(db, org_id, MODULE_AGENT) if org_id else {}
+    roe = ProjectSettings.get_config(db, org_id, MODULE_RULES_OF_ENGAGEMENT) if org_id else {}
+    return build_tool_access(
+        policy_cfg or {},
+        roe_requires_confirmation=bool(roe.get("enabled"))
+        and bool(roe.get("requires_agent_confirmation", True)),
+    )
+
+
 @router.get("/status")
 async def get_agent_status():
     """Check if the AI agent is available."""
