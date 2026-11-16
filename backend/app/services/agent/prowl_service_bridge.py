@@ -231,6 +231,15 @@ def capability_map_from_observation(observation: dict) -> dict | None:
                 parameters.append(common | {"name": field.get("path"),
                                             "value_type": field.get("value_type", ""),
                                             "location": "body_json" if field.get("location") == "json" else "body_form"})
+    for cookie in (result.get("cookie_inputs") or [])[:60]:
+        # Names only: the browser keeps cookie values. The inventory marks
+        # session/credential cookies untestable and the rest as SQLi inputs.
+        if isinstance(cookie, dict) and isinstance(cookie.get("name"), str):
+            parameters.append({
+                "method": "GET", "path": in_origin_path(cookie.get("path")) or "/",
+                "name": cookie["name"], "location": "cookie", "source": "browser_cookie",
+                "identity": result.get("identity", "anonymous"),
+            })
     for script in (result.get("scripts") or [])[:20]:
         if not isinstance(script, dict) or not isinstance(script.get("analysis"), dict):
             continue

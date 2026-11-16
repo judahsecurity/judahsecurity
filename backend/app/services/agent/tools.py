@@ -6546,11 +6546,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         """Change one field on a captured request and send it (Repeater + one mutation)."""
         from app.services.agent.pilot_policy import current_pilot
         from urllib.parse import urlsplit
+        from app.services.agent.parameter_inventory import is_credential_cookie
         from app.services.agent.request_mutate import (
             apply_one_mutation,
             normalize_sample,
             sample_reference,
             samples_from_map,
+            set_cookie_pair,
         )
 
         cmap = self._identity_captures.get(identity, {}) if identity is not None else (getattr(self, "_capability_map", None) or {})
@@ -6611,8 +6613,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             cookie_header = self._pilot_request_cookie_headers.get(str(sample.get("capture_id") or ""))
             if cookie_header:
                 baseline["headers"]["Cookie"] = cookie_header
-                mutant["headers"]["Cookie"] = cookie_header
+                mutant["headers"]["Cookie"] = (
+                    set_cookie_pair(cookie_header, field, value)
+                    if str(location).lower() == "cookie" else cookie_header
+                )
 
+        if str(location).lower() == "cookie" and is_credential_cookie(field):
+            return json.dumps({"ok": False, "error": (
+                "Session, credential, and CSRF cookies are not injection targets; "
+                "test application-state cookies (language, region, branch, cart, ...)"
+            )})
         if identity is not None and location == "header" and field.lower() in ("cookie", "authorization"):
             return json.dumps({"error": "Use explicit unauthenticated requests for credential-header mutations"})
         if identity is not None:
@@ -9174,8 +9184,22 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         assert_url_in_scope(self, url)
         from app.services.agent.pilot_policy import current_pilot
         pilot = current_pilot()
+        from app.services.agent.parameter_inventory import is_credential_cookie
+
+        def _cookie_override_names(value) -> list[str]:
+            if isinstance(value, dict):
+                return [str(k) for k in value]
+            if isinstance(value, list):
+                return [str(c.get("name") or "") for c in value if isinstance(c, dict)]
+            return ["<unparsed>"] if value else []
+
+        override_names = _cookie_override_names(cookies)
+        # Application-state cookies (language, region, branch) are request data,
+        # not credentials; only those may be overridden alongside a session.
+        credential_override = any(not name or is_credential_cookie(name) or name == "<unparsed>"
+                                  for name in override_names)
         if pilot is not None:
-            if identity not in (None, "anonymous") or cookies:
+            if identity not in (None, "anonymous") or credential_override:
                 raise ValueError("Pilot first pass is anonymous only")
             if any(str(key).lower() in {
                 "authorization", "cookie", "proxy-authorization", "host",
@@ -9190,7 +9214,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if identity is not None:
             session = identity_registry(self).resolve(identity, url)
             protected_headers = {k.lower() for k in session.get("headers", {})} | {"host", "cookie", "authorization", "proxy-authorization"}
-            if cookies or any(k.lower() in protected_headers for k in hdrs):
+            identity_cookie_names = {str(c.get("name") or "") for c in session.get("cookies", [])
+                                     if isinstance(c, dict)}
+            if (credential_override or identity_cookie_names.intersection(override_names)
+                    or any(k.lower() in protected_headers for k in hdrs)):
                 raise ValueError("Named identities cannot be combined with credential overrides")
             hdrs = {**session.get("headers", {}), **hdrs}
         elif use_auth_session:

@@ -29,8 +29,9 @@ _FFUF_KEEP_STATUS = frozenset({
 #       Type: boolean-based blind
 # The place in parentheses maps to an input location.
 _SQLMAP_PARAM = re.compile(
-    r"^\s*Parameter:\s*(?P<name>[^\s(]{1,128})\s*\((?P<place>GET|POST|URI|COOKIE|JSON)\)",
-    re.MULTILINE,
+    r"^\s*Parameter:\s*(?P<name>[^\s(]{1,128})\s*"
+    r"\((?P<place>GET|POST|URI|COOKIE|JSON|USER-AGENT|REFERER)\)",
+    re.MULTILINE | re.IGNORECASE,
 )
 _SQLMAP_URL = re.compile(r"\bURL:\s*(?P<url>https?://[^\s]{1,2048})", re.IGNORECASE)
 _PLACE_LOCATION = {
@@ -38,8 +39,11 @@ _PLACE_LOCATION = {
     "URI": ("query", "GET"),
     "POST": ("body_form", "POST"),
     "JSON": ("body_json", "POST"),
-    # COOKIE injections are recorded but excluded from automatic injection work,
-    # so they are not emitted as probe leads here.
+    # Cookie and header injections are real server-read inputs. Session and
+    # credential cookies are marked untestable later by the inventory.
+    "COOKIE": ("cookie", "GET"),
+    "USER-AGENT": ("header", "GET"),
+    "REFERER": ("header", "GET"),
 }
 
 

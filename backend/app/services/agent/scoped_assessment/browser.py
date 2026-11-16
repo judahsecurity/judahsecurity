@@ -93,6 +93,27 @@ def _storage_for_origin(state: dict | None, target: str) -> dict | None:
     return {"cookies": cookies, "origins": origins}
 
 
+def _cookie_inputs(cookies: list[dict], expected_origin: str) -> list[dict]:
+    """Cookie names the site set during the crawl. Values never leave the browser.
+
+    Server-read cookies (language, country, branch, cart) are injection points
+    just like query parameters; the inventory decides which are credentials.
+    """
+    host = (urlsplit(expected_origin).hostname or "").lower()
+    out: dict[str, dict] = {}
+    for cookie in cookies or []:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name") or "")
+        domain = str(cookie.get("domain") or "").lower().lstrip(".")
+        if not name or len(name) > 80 or not host or not (host == domain or host.endswith("." + domain)):
+            continue
+        path = str(cookie.get("path") or "/")
+        out.setdefault(name, {"name": name, "path": path if path.startswith("/") else "/",
+                              "http_only": bool(cookie.get("httpOnly"))})
+    return list(out.values())[:60]
+
+
 def _crawl_links(hrefs: list[str], allowed_origins: list[str]) -> list[str]:
     """Queue only same-origin link paths; never carry query secrets forward."""
     from .browser_actions import allowed_discovery_path
@@ -1070,6 +1091,10 @@ async def check_browser(
                 result["links"] = _crawl_links(hrefs, [expected_origin])
                 result["link_query_inputs"] = _link_query_inputs(hrefs, [expected_origin])
                 result["forms"] = await _forms(page, expected_origin)
+                try:
+                    result["cookie_inputs"] = _cookie_inputs(await context.cookies(), expected_origin)
+                except Exception:
+                    result["cookie_inputs"] = []
             elif operation == "check_client":
                 server_body_checked = False
                 server_marker = False

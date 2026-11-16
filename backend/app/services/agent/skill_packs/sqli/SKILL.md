@@ -11,6 +11,45 @@ does not exclude SQLi: the same input can have separate XSS and SQLi cells.
 Preserve the captured request, identity, parameter location, and any observed
 encoding when forming controls. Do not infer a database sink from a name alone.
 
+## Injection points: find all of them first
+
+The parameter inventory lists every place a request carries data the server
+reads. Each row has a `location`; every testable row is SQLi work:
+
+| location | Where the value lives | How to send a controlled value |
+|---|---|---|
+| `query` | URL query string | scoped probes, or `mutate_captured_request(location="query")` |
+| `body_form` / `body_json` | request body | approved POST replay, `mutate_captured_request` |
+| `cookie` | one cookie by name (e.g. `site_Language_Preference`) | `compare_requests` with `cookies: {name: value}` on baseline and mutant, or `mutate_captured_request(location="cookie", field=name)` |
+| `header` | `User-Agent`, `Referer`, `X-Forwarded-For`, `Accept-Language`, custom `X-*` | `compare_requests` with that header changed |
+| `path` | an ID-like path segment, named `path[N]` (`/item/42` → `path[2]`) | `mutate_captured_request(location="path", field="path[N]")` |
+
+Cookies and headers ride on every page, so each name is listed once, on the
+page where it was first seen. Session, auth, CSRF, and analytics cookies are
+listed but marked untestable. Never inject into them. If the inventory has no
+cookie rows, look at `Set-Cookie` on the entry page and add the
+application-state cookies you see (language, country, region, branch,
+currency, cart, view, sort).
+
+## Determine the context before choosing a payload
+
+Compare against the observed value (for example `1`) using
+`generate_payloads("sqli", technique="context_probe")`:
+
+* `2-1` and `1*1` behave like `1` while `1'` differs → **numeric** context. Use
+  unquoted payloads: `1 AND 1=1` vs `1 AND 1=2`, `0 UNION SELECT <hex marker>-- -`.
+* `1'` breaks and `1''` restores → single-quoted string: `' AND '1'='1`.
+* `1"` breaks and `1""` restores → double-quoted string.
+* `1)` breaks and `1)-- -` restores → inside parentheses.
+
+A quote-led payload against a numeric sink fails silently: it is a wrong
+guess, not a clean result. For an in-band UNION, use
+`technique="union_based"`. The marker is hex-encoded, so seeing the decoded
+plaintext in the response proves the database ran the query. Raise the NULL
+column count (1–6) until it reflects.
+
+## Procedure
+
 1. Prioritize captured catalog search/filter/product inputs and real login/auth
    requests. Probe login POST form or JSON fields only with a valid captured
    session and CSRF workflow; do not guess a login request.

@@ -11,9 +11,28 @@ import json
 import re
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
-LOCATIONS = ("query", "header", "body_json", "body_form", "body_xml", "path", "method")
+LOCATIONS = ("query", "header", "cookie", "body_json", "body_form", "body_xml", "path", "method")
+
+_COOKIE_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,80}\Z")
+_PATH_INDEX = re.compile(r"path\[([1-9][0-9]?)\]\Z")
+
+
+def set_cookie_pair(header: str, name: str, value: str) -> str:
+    """Replace (or append) one cookie in a Cookie header, keeping the others."""
+    pairs = [part.strip() for part in str(header or "").split(";") if part.strip()]
+    out, replaced = [], False
+    for pair in pairs:
+        key = pair.partition("=")[0].strip()
+        if key == name and not replaced:
+            out.append(f"{name}={value}")
+            replaced = True
+        elif key != name:
+            out.append(pair)
+    if not replaced:
+        out.append(f"{name}={value}")
+    return "; ".join(out)
 
 
 def coerce_request_body(
@@ -157,8 +176,28 @@ def apply_one_mutation(
         hdrs = dict(mutant["headers"])
         hdrs[field] = value
         mutant["headers"] = hdrs
+    elif loc == "cookie":
+        # One cookie changes; every other cookie on the request is preserved.
+        if not _COOKIE_NAME.fullmatch(field):
+            raise ValueError("cookie field must be a cookie name")
+        if any(ch in str(value) for ch in ";\r\n"):
+            raise ValueError("cookie value cannot contain ';' or line breaks; URL-encode them")
+        cookie_key = next((k for k in mutant["headers"] if k.lower() == "cookie"), None)
+        if cookie_key:
+            mutant["headers"] = dict(mutant["headers"])
+            mutant["headers"][cookie_key] = set_cookie_pair(mutant["headers"][cookie_key], field, value)
+        mutant["cookies"] = {**(mutant.get("cookies") or {}), field: value}
     elif loc == "query":
         mutant["url"] = _set_query(mutant["url"], field, value)
+    elif loc == "path" and _PATH_INDEX.fullmatch(field):
+        # path[N] targets the Nth "/"-separated segment (as in the inventory).
+        parsed = urlparse(mutant["url"])
+        segments = (parsed.path or "/").split("/")
+        index = int(_PATH_INDEX.fullmatch(field).group(1))
+        if index >= len(segments) or not segments[index]:
+            raise ValueError(f"{field} is not a segment of the captured path")
+        segments[index] = quote(str(value), safe="")
+        mutant["url"] = urlunparse(parsed._replace(path="/".join(segments)))
     elif loc == "path":
         parsed = urlparse(mutant["url"])
         path = parsed.path or "/"

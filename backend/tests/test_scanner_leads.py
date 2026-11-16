@@ -86,13 +86,28 @@ def test_sqlmap_drops_results_without_an_in_scope_url():
     assert sqlmap_rows(no_url, allowed_hosts=HOSTS) == []
 
 
-def test_sqlmap_ignores_cookie_injection_points():
-    cookie_only = """
-URL: https://app.example.test/items.php?id=1
+def test_sqlmap_keeps_cookie_and_header_injection_points():
+    output = """
+URL: https://app.example.test/
+Parameter: site_Language_Preference (Cookie)
+    Type: UNION query
+Parameter: User-Agent (User-Agent)
+    Type: time-based blind
 Parameter: session (COOKIE)
     Type: boolean-based blind
 """
-    assert sqlmap_rows(cookie_only, allowed_hosts=HOSTS) == []
+    rows = sqlmap_rows(output, allowed_hosts=HOSTS)
+    by_name = {row["name"]: row for row in rows}
+    assert by_name["site_Language_Preference"]["location"] == "cookie"
+    assert by_name["User-Agent"]["location"] == "header"
+    # Emitted as a lead; the inventory marks the session cookie untestable.
+    assert by_name["session"]["location"] == "cookie"
+    from app.services.agent.parameter_inventory import collect_parameter_inventory
+    inventory = collect_parameter_inventory({
+        "target": "https://app.example.test/", "parameter_inventory": rows,
+    })
+    testable = {row["name"]: row["testable"] for row in inventory if row["location"] == "cookie"}
+    assert testable == {"site_Language_Preference": True, "session": False}
 
 
 def test_scanner_rows_dispatches_by_tool_name():
