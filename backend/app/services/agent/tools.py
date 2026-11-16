@@ -9803,6 +9803,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         seed_js_coverage_cells(brain, cmap if isinstance(cmap, dict) else {})
         from app.services.agent.runtime_mapper import ingest_capability_map_operations
         ingest_capability_map_operations(brain, cmap if isinstance(cmap, dict) else {})
+        planning = await self._plan_brain_hypotheses(brain)
         graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
 
@@ -9821,6 +9822,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "task_graph_prompt": format_graph_for_scheduler(graph),
                 "threat_model": brain.threat_model or None,
                 "focus_areas": brain.focus_areas[:8],
+                "hypothesis_planning": planning,
                 "prompt_view": format_engagement_brain_for_prompt(self._engagement_brain),
                 "engagement_brain": self._engagement_brain,
                 "parameter_coverage": {
@@ -9848,6 +9850,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         return json.dumps({
             "phase": out["phase"], "target": out["target"],
             "suggested_specialists": out["suggested_specialists"],
+            "hypothesis_planning": out["hypothesis_planning"],
             "parameter_coverage": out["parameter_coverage"],
             "js_coverage": out["js_coverage"],
             "task_graph_prompt": out["task_graph_prompt"][:2000],
@@ -10318,6 +10321,35 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             },
             indent=2,
         )[:_tool_output_max_chars()]
+
+    async def _plan_brain_hypotheses(self, brain):
+        """Reason over new evidence before assigning eligible coverage work."""
+        from app.services.agent.brain_hypothesis_planner import (
+            pending_hypothesis_cells, plan_coverage_hypotheses,
+        )
+
+        if not pending_hypothesis_cells(brain):
+            return {"reviewed": 0, "hypotheses": 0, "status": "unchanged"}
+        try:
+            return await plan_coverage_hypotheses(brain, self._hypothesis_llm())
+        except Exception as exc:
+            logger.warning("Brain hypothesis planning unavailable: %s", type(exc).__name__)
+            return {"reviewed": 0, "hypotheses": 0,
+                    "status": "unavailable", "error_type": type(exc).__name__}
+
+    def _hypothesis_llm(self):
+        """Use the engagement's reasoning model for Brain hypothesis planning."""
+        from app.services.agent.model_router import LLMTask, get_llm_for_task
+
+        _, org_id = get_tenant_context()
+        db = SessionLocal()
+        try:
+            return get_llm_for_task(
+                db, org_id, LLMTask.REASONING,
+                temperature=0, max_tokens=2400, timeout=45, max_retries=1,
+            )
+        finally:
+            db.close()
 
     def _cheap_llm(self):
         """Resolve a specialist/verifier LLM the same provider-aware way the main
@@ -11040,6 +11072,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ingest_capability_map_operations(brain, cmap.to_dict())
             self._engagement_brain = brain.to_dict()
 
+        # This entry point can be called without sync_engagement_brain. Review
+        # fresh observed inputs before choosing specialists and claiming cells.
+        hypothesis_planning = await self._plan_brain_hypotheses(brain)
+
         # Resolve specialists: "auto" → open hypotheses, else capability-map selection
         auto = False
         if specialists is None:
@@ -11720,6 +11756,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "remaining": sum(1 for c in brain.coverage_cells if c.get("source") == "js_inventory" and c.get("status") not in {"finding", "tested_clean", "skipped"}),
             },
             "specialists_run": result.specialists_run,
+            "hypothesis_planning": hypothesis_planning,
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
             "capability_map_ready": bool(cmap and cmap.ready_for_attack),
@@ -11785,6 +11822,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 return serialized
         return json.dumps({
             "specialists_run": out["specialists_run"],
+            "hypothesis_planning": out["hypothesis_planning"],
             "selection_source": out["selection_source"],
             "task_leases": out["task_leases"],
             "coverage_leases": out["coverage_leases"],
