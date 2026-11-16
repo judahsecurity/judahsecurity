@@ -1700,6 +1700,10 @@ async def _safe_invoke(
                     ids = list(dict.fromkeys([*ids, receipt_id]))
         if result.get("artifact_id"):
             summary = f"artifact_id={result['artifact_id']} (read_evidence for full output)\n" + summary
+        # Specialist LLMs read the same redacted/fenced view as the lead agent.
+        from app.services.agent.content_shield import shield_tool_output
+
+        summary, _shield = shield_tool_output(tool_name, summary)
         return ToolInvocation(
             tool=tool_name,
             args=args or {},

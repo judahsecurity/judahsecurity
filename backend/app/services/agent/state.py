@@ -93,6 +93,9 @@ class ExecutionStep(BaseModel):
     timestamp: datetime = Field(default_factory=utc_now)
     token_usage: Optional[Dict[str, Any]] = None
     llm_model: Optional[str] = None
+    # "model" when the LLM chose this step, "forced" when the deterministic
+    # pipeline did. Stack-specific forced steps wait on model-chosen progress.
+    decision_source: Optional[str] = None
 
 
 class PhaseTransitionRequest(BaseModel):

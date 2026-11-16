@@ -61,6 +61,41 @@ def _directory_index_detected(data: bytes, content_type: str) -> bool:
     return bool((apache_or_nginx or python_index) and marker)
 
 
+MODEL_EXCERPT_CHARS = 6000
+_TEXT_TYPES = (
+    "application/json", "application/javascript", "application/x-javascript",
+    "application/xml", "application/ld+json", "application/manifest+json",
+    "application/rss+xml", "application/atom+xml", "application/x-yaml",
+)
+
+
+def model_body_excerpt(data: bytes, content_type: str) -> dict:
+    """Bounded, redacted, injection-fenced text view of a response for the model.
+
+    Recon needs to read generator tags, readme "Stable tag" lines, forms, and
+    REST indexes. Secrets and personal data never reach the model in clear;
+    the full body stays in the private capture for verifier replay.
+    """
+    ctype = (content_type or "").lower()
+    if not data or not (ctype.startswith("text/") or ctype in _TEXT_TYPES or not ctype):
+        return {"body_excerpt": "", "body_excerpt_truncated": False}
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        if ctype:
+            text = data.decode("latin-1")
+        else:
+            return {"body_excerpt": "", "body_excerpt_truncated": False}
+    from app.services.agent.content_shield import sanitize_for_model
+
+    excerpt = text[:MODEL_EXCERPT_CHARS]
+    safe, report = sanitize_for_model(excerpt)
+    out = {"body_excerpt": safe, "body_excerpt_truncated": len(text) > MODEL_EXCERPT_CHARS}
+    if report.injection or report.redactions:
+        out["content_shield"] = report.to_dict()
+    return out
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         return None

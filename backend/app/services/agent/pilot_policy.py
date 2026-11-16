@@ -22,14 +22,22 @@ from urllib.parse import urlsplit
 PILOT_NETWORK_TOOLS = frozenset({
     "execute_browser", "replay_http_request", "compare_requests",
     "mutate_captured_request", "run_intruder_batch", "probe_pilot_ports",
+    # One homepage GET through the budgeted exchange, then a CVE lookup.
+    "check_cve_applicability",
 })
 PILOT_LOCAL_TOOLS = frozenset({
     "list_captured_requests", "plan_intruder_mutations", "get_coverage",
     "get_assessment_coverage", "record_surface_coverage",
     "submit_finding_candidate", "independent_verify", "record_verify_verdict",
     "create_finding", "assess_finding_risk", "read_evidence",
+    "record_recon_inventory",
 })
-PILOT_ALLOWED_TOOLS = PILOT_NETWORK_TOOLS | PILOT_LOCAL_TOOLS
+# Vulnerability research: third-party intel APIs only, never target traffic.
+# Queries that name the target host are refused by the tools themselves.
+PILOT_RESEARCH_TOOLS = frozenset({
+    "web_search", "lookup_component_vulns", "search_vulnx", "vulnx_query", "search_cve",
+})
+PILOT_ALLOWED_TOOLS = PILOT_NETWORK_TOOLS | PILOT_LOCAL_TOOLS | PILOT_RESEARCH_TOOLS
 PILOT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
