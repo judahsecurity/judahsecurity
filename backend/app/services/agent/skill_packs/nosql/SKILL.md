@@ -1,6 +1,6 @@
 ---
 name: nosql
-description: NoSQL (MongoDB-style) operator injection in JSON bodies and bracketed query/form params ($ne/$gt/$regex/$in), auth bypass and filter widening. GET query inputs confirm via scoped_injection_probe_assigned (scoped_nosql_operator); other shapes stay leads.
+description: NoSQL (MongoDB-style) operator injection in JSON bodies and bracketed query/form params ($ne/$gt/$regex/$in), auth bypass and filter widening. GET query and approved JSON-body inputs confirm via scoped_injection_probe_assigned (scoped_nosql_operator); form fields stay leads.
 ---
 
 # NoSQL injection
@@ -19,7 +19,10 @@ object where it expected a string.
   confirms `scoped_nosql_operator` only when `$ne` returns a stable body that
   differs from the control while `$eq` matches the control. A server that
   ignores brackets returns the same body for both and is not confirmed.
-* JSON bodies and form fields have no deterministic validator yet. A 500, a
+* JSON body fields on operator-approved `body_replay_paths`: the same tool sets
+  the field to `"prowl<nonce>"`, `{"$ne": ...}` and `{"$eq": ...}` and applies
+  the same differential.
+* Form fields have no deterministic validator yet. A 500, a
   `CastError`, a changed result count, or a different status on `$ne` is a lead.
   These stay lead/inconclusive unless an authorization proof demonstrates
   impact: distinct identities with proof kind `owner_only` or `state_change`.

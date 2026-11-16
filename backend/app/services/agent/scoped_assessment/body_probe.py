@@ -56,7 +56,11 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("Invalid JSON number")
 
 
-def _mutate_json(data: bytes, pointer: str, payload: str = "'", *, replace: bool = False) -> bytes:
+_KEEP = object()
+
+
+def _mutate_json(data: bytes, pointer: str, payload: str = "'", *, replace: bool = False,
+                 value_override: object = _KEEP) -> bytes:
     if not pointer.startswith("/") or len(pointer) > 300:
         raise ValueError("A bounded JSON pointer is required")
     try:
@@ -91,7 +95,10 @@ def _mutate_json(data: bytes, pointer: str, payload: str = "'", *, replace: bool
         raise ValueError("JSON pointer does not identify an observed field")
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError("Body probe requires a string or numeric field")
-    setter(payload if replace else str(value) + payload)
+    if value_override is not _KEEP:
+        setter(value_override)
+    else:
+        setter(payload if replace else str(value) + payload)
     changed = json.dumps(document, ensure_ascii=False, separators=(",", ":"),
                          allow_nan=False).encode()
     if len(changed) > MAX_REPLAY_BODY:
@@ -333,6 +340,17 @@ def plan_observed_body(private_exchange: bytes, *, parameter: str,
     changed = (_mutate_json(body, parameter, payload, replace=replace)
                if json_body else _mutate_form(body, parameter, payload, replace=replace))
     return url, mime, body, changed
+
+
+def plan_json_value_body(private_exchange: bytes, *, parameter: str,
+                         allowed_origins: list[str], value: object) -> tuple[str, str, bytes]:
+    """Set one observed JSON field to a fixed (possibly non-string) value."""
+    url, mime, body, _changed = plan_observed_body(
+        private_exchange, parameter=parameter, allowed_origins=allowed_origins, payload="x",
+    )
+    if mime != "application/json" and not mime.endswith("+json"):
+        raise ValueError("Typed JSON values require a captured JSON body")
+    return url, mime, _mutate_json(body, parameter, value_override=value)
 
 
 def plan_sql_error_body(private_exchange: bytes, *, parameter: str,

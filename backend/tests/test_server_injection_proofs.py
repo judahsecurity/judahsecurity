@@ -615,3 +615,206 @@ def test_reworded_duplicate_cannot_reopen_confirmed_candidate():
     assert again.status == "confirmed"
     assert again.description == "original claim" and again.specialist == "server_injection"
     assert "e9" in again.evidence_ids
+
+
+# --- Advanced JWT recipes -------------------------------------------------------
+
+def _hs_token(secret: bytes, header: dict | None = None) -> str:
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import json as _json
+
+    head = _b64(_json.dumps(header or {"alg": "HS256", "typ": "JWT"}).encode())
+    body = _b64(_json.dumps({"sub": "alice"}).encode())
+    sig = _b64(_hmac.new(secret, f"{head}.{body}".encode(), _hashlib.sha256).digest())
+    return f"{head}.{body}.{sig}"
+
+
+def _verifying_server(key_for):
+    """Accepts a token only when its HS256 signature matches key_for(header)."""
+    import base64
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import json as _json
+
+    def send(url, *, token, **_):
+        if token is None:
+            return 401, b"login required"
+        try:
+            head, body, sig = token.split(".")
+            header = _json.loads(base64.urlsafe_b64decode(head + "=="))
+        except Exception:
+            return 401, b"bad token"
+        key = key_for(header)
+        if key is None or header.get("alg") != "HS256":
+            return 401, b"bad alg"
+        expected = _b64(_hmac.new(key, f"{head}.{body}".encode(), _hashlib.sha256).digest())
+        return (200, b'{"user":"alice"}') if _hmac.compare_digest(expected, sig) else (401, b"bad sig")
+    return send
+
+
+def test_jwt_kid_null_recipe():
+    from app.services.agent.scoped_assessment.jwt_probe import KID_NULL_PATH, probe_jwt
+
+    real = b"strong-random-secret-not-in-list"
+    token = _hs_token(real, {"alg": "HS256", "typ": "JWT", "kid": "k1"})
+
+    def key_for(header):  # vulnerable: reads the key from a file named by kid
+        return b"" if header.get("kid") == KID_NULL_PATH else real
+
+    session = {"headers": {"Authorization": f"Bearer {token}"}, "cookies": []}
+    result = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                       nonce="0a1b2c3d4e5f6071", send=_verifying_server(key_for))
+    assert result["proof_confirmed"] is True and result["recipe"] == "kid_null"
+    safe = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                     nonce="0a1b2c3d4e5f6071", send=_verifying_server(lambda h: real))
+    assert safe["proof_confirmed"] is False
+
+
+def test_jwt_weak_secret_is_cracked_offline_and_proven():
+    from app.services.agent.scoped_assessment.jwt_probe import crack_weak_secret, probe_jwt
+
+    token = _hs_token(b"changeme")
+    assert crack_weak_secret(token) == b"changeme"
+    assert crack_weak_secret(_hs_token(b"strong-random-secret-not-in-list")) is None
+    session = {"headers": {"Authorization": f"Bearer {token}"}, "cookies": []}
+    result = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                       nonce="0a1b2c3d4e5f6071",
+                       send=_verifying_server(lambda h: b"changeme"))
+    assert result["proof_confirmed"] is True and result["recipe"] == "weak_secret"
+    # Only one HTTP request per applicable recipe; guessing is offline.
+    assert result["requests_sent"] == 3 + len(result["probes"])
+
+
+def test_jwt_rs_hs_key_confusion():
+    import base64
+    import json as _json
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    from app.services.agent.scoped_assessment.jwt_probe import jwk_to_pem, probe_jwt
+
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    numbers = private.public_key().public_numbers()
+    to_b64 = lambda n: _b64(n.to_bytes((n.bit_length() + 7) // 8, "big"))  # noqa: E731
+    jwks = {"keys": [{"kty": "RSA", "kid": "rsa1", "n": to_b64(numbers.n), "e": to_b64(numbers.e)}]}
+    pem = jwk_to_pem(jwks, "rsa1")
+    assert pem == private.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    head = _b64(_json.dumps({"alg": "RS256", "typ": "JWT", "kid": "rsa1"}).encode())
+    body = _b64(_json.dumps({"sub": "alice"}).encode())
+    sig = _b64(private.sign(f"{head}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256()))
+    token = f"{head}.{body}.{sig}"
+
+    def send(url, *, token, **_):
+        if token is None:
+            return 401, b"login required"
+        try:
+            h, b, s = token.split(".")
+            header = _json.loads(base64.urlsafe_b64decode(h + "=="))
+        except Exception:
+            return 401, b"bad"
+        if header.get("alg") == "RS256" and token == f"{head}.{body}.{sig}":
+            return 200, b'{"user":"alice"}'
+        if header.get("alg") == "HS256":  # vulnerable: verifies HS256 with the public key
+            return _verifying_server(lambda _h: pem)(url, token=token)
+        return 401, b"bad"
+
+    session = {"headers": {"Authorization": f"Bearer {token}"}, "cookies": []}
+    result = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                       nonce="0a1b2c3d4e5f6071", send=send, public_pem=pem)
+    assert result["proof_confirmed"] is True and result["recipe"] == "rs_hs_confusion"
+    without_key = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                            nonce="0a1b2c3d4e5f6071", send=send)
+    assert without_key["proof_confirmed"] is False
+
+
+# --- NoSQL in JSON bodies -------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parses,expected", [(True, True), (False, False)])
+async def test_nosql_json_body_operator_differential(monkeypatch, parses, expected):
+    import base64
+    import json as _json
+
+    from app.services.agent.assessment_scope import register_scope
+    from app.services.agent.coverage_cells import (
+        claim_coverage_cell_leases, seed_parameter_coverage_cells,
+    )
+    from app.services.agent.scoped_assessment import body_probe
+    from app.services.agent.tools import ASMToolsManager
+
+    target = "https://app.example.test"
+    brain = EngagementBrain(target=target)
+    seed_parameter_coverage_cells(brain, [{
+        "method": "POST", "path": "/api/login", "host": "app.example.test",
+        "name": "/username", "location": "body_json", "source": "browser_traffic",
+        "identity": "anonymous", "testable": True, "artifact_id": "cap1",
+    }])
+    lease = claim_coverage_cell_leases(
+        brain, ["server_injection"], allowed_test_types=frozenset({"nosql"}),
+    )["server_injection"]
+    assert lease is not None
+    manager = ASMToolsManager()
+    manager._fallback_target = target
+    manager._capability_map = {"target": target, "scope": target}
+    manager._engagement_brain = brain.to_dict()
+    manager._scoped_body_replay_paths = {"/api/login"}
+    register_scope(manager, "app.example.test")
+    exchange = _json.dumps({
+        "method": "POST", "resource_type": "fetch", "url": target + "/api/login",
+        "request_content_type": "application/json",
+        "request_body_base64": base64.b64encode(b'{"username":"bob","password":"x"}').decode(),
+    }).encode()
+    monkeypatch.setattr(manager, "_scoped_exchange", lambda artifact_id, identity: exchange)
+
+    def observe_post(url, mime, body, allowed, state, **_):
+        value = _json.loads(body)["username"]
+        if isinstance(value, dict) and parses:
+            ok = "$ne" in value
+        else:
+            ok = isinstance(value, dict)  # an unparsed object is just truthy
+        return {"status": 200, "_private_body": b'{"login":"ok"}' if ok else b'{"login":"failed"}'}
+
+    monkeypatch.setattr(body_probe, "_observe_post", observe_post)
+    result = await manager.scoped_injection_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] is True, result
+    assert result["proof_confirmed"] is expected
+
+
+def test_jwt_embedded_jwk_recipe():
+    import base64
+    import json as _json
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
+
+    from app.services.agent.scoped_assessment.jwt_probe import probe_jwt
+
+    def dec(part):
+        return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+    good = _token()
+
+    def trusts_header_jwk(url, *, token, **_):
+        if token is None:
+            return 401, b"login required"
+        if token == good:
+            return 200, b'{"user":"alice"}'
+        try:
+            h, b, s = token.split(".")
+            header = _json.loads(dec(h))
+            jwk = header["jwk"]
+            key = RSAPublicNumbers(int.from_bytes(dec(jwk["e"]), "big"),
+                                   int.from_bytes(dec(jwk["n"]), "big")).public_key()
+            key.verify(dec(s), f"{h}.{b}".encode(), padding.PKCS1v15(), hashes.SHA256())
+            return 200, b'{"user":"alice"}'
+        except Exception:
+            return 401, b"bad"
+
+    session = {"headers": {"Authorization": f"Bearer {good}"}, "cookies": []}
+    result = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                       nonce="0a1b2c3d4e5f6071", send=trusts_header_jwk)
+    assert result["proof_confirmed"] is True and result["recipe"] == "embedded_jwk"

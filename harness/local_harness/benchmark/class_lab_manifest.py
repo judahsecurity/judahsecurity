@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
+from local_harness.benchmark.class_lab import issue_lab_jwt
+
 
 CASES = {
     "sqli": ("sqli", "/search", "sqli"),
@@ -35,11 +37,12 @@ ACCEPTED_CATEGORIES = {
 # Classes Prowl cannot yet confirm through a deterministic validator. They are
 # still run and scored, but the report marks them so a 0 verified recall reads
 # as a tracked gap rather than a regression.
-KNOWN_GAPS = {
-    "jwt": ("Prowl's scoped_jwt_probe needs a registered identity whose session carries "
-            "the JWT (Authorization: Bearer); the lab identity uses a cookie session, so "
-            "expected verified recall stays 0 until the lab registers a bearer identity."),
-}
+KNOWN_GAPS: dict[str, str] = {}
+
+# Classes whose run needs a class-specific identities file (written next to the
+# shared one). The jwt identities carry each account's lab-issued bearer token
+# so Prowl's scoped_jwt_probe can locate and forge it.
+CLASS_IDENTITIES = {"jwt": "class_lab_jwt_identities.json"}
 
 
 def build_manifest(target: str) -> dict:
@@ -57,15 +60,23 @@ def build_manifest(target: str) -> dict:
                     "accepted_categories": ACCEPTED_CATEGORIES.get(bug_class, []),
                 }] if polarity == "positive" else [],
                 **({"known_gap": KNOWN_GAPS[bug_class]} if bug_class in KNOWN_GAPS else {}),
+                **({"identities": CLASS_IDENTITIES[bug_class]}
+                   if bug_class in CLASS_IDENTITIES else {}),
             })
     return {"cases": cases}
 
 
-def build_identities(target: str) -> list[dict]:
+def build_identities(target: str, bug_class: str | None = None) -> list[dict]:
+    """Return lab test identities; ``bug_class="jwt"`` adds a bearer JWT header."""
+    def headers(name: str) -> dict:
+        if bug_class == "jwt":
+            return {"X-Lab-Identity": name, "Authorization": "Bearer " + issue_lab_jwt(name)}
+        return {"X-Lab-Identity": name}
+
     return [
         {
             "name": name, "target": target,
-            "headers": {"X-Lab-Identity": name},
+            "headers": headers(name),
             "cookies": {"lab_session": name},
             "role": "owner" if name == "A" else "peer",
             "check": {"url": target + "/whoami", "field": "principal_id", "expected": name},
@@ -86,6 +97,10 @@ def main(argv=None):
     identities.write_text(json.dumps(build_identities(target), indent=2) + "\n")
     print(args.out)
     print(identities)
+    for bug_class, filename in CLASS_IDENTITIES.items():
+        path = args.out.with_name(filename)
+        path.write_text(json.dumps(build_identities(target, bug_class), indent=2) + "\n")
+        print(path)
 
 
 if __name__ == "__main__":

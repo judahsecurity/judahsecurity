@@ -54,10 +54,18 @@ positive supports `scoped_csrf_state_change`: log in with `POST /login`
 (`username=A&password=lab-pass`) for a `lab_session` cookie, replay a
 cross-site `application/x-www-form-urlencoded` `POST /profile` with no token,
 read back via `GET /profile`, confirm anonymous replay gets 401, and reset with
-`DELETE /profile`. `jwt` is marked `known_gap` in the manifest (Prowl has no
-deterministic JWT validator yet, so verified recall is expected to be 0); the
-report shows that note per class, and known-gap classes do not affect the
-scorer's exit code. The lab binds
+`DELETE /profile`. The JWT positive supports `scoped_jwt_probe`: the lab signs
+HS256 tokens with a fixed loopback-only key (`LAB_JWT_KEY`), so the manifest
+generator mints each identity's token up front and writes
+`class_lab_jwt_identities.json`, whose identities carry
+`Authorization: Bearer <jwt>` (the jwt manifest cases name that file in their
+`identities` field; pass it as `--identities` for those two runs only). The
+crawler finds `/api/documents/1` linked from `/`; it returns 401 with no token or
+a malformed token, 200 with A's token, and in the positive also 200 with the
+same body for an `alg: none` token carrying an extra claim. The safe twin
+verifies every signature and returns 401. Classes listed in `KNOWN_GAPS` (none
+at present) are marked `known_gap`; the report shows that note per class, and
+known-gap classes do not affect the scorer's exit code. The lab binds
 only to `127.0.0.1`. The SSRF positive fixture makes a DNS lookup only for a
 host beneath an explicitly supplied controlled OAST suffix. Start one case at
 a time, using a dedicated assessment database and the **same model, budget,
@@ -77,7 +85,8 @@ python -m local_harness.product_class_benchmark runs/class_lab/corpus.json \
 ```
 
 Repeat the lab server and agent command for each manifest case, changing
-`--class`, `--polarity`, and the sink directory. For the SSRF positive, add
+`--class`, `--polarity`, and the sink directory. For `jwt-positive` and
+`jwt-negative`, use `--identities runs/class_lab/class_lab_jwt_identities.json`. For the SSRF positive, add
 `--callback-suffix YOUR_CONTROLLED_OAST_SUFFIX` and `--require-oast` to the agent
 command. Use a fresh sink path for every run; the adapter refuses an existing
 findings file. The scorer exits `0` only when all classes pass, `2` for measured

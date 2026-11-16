@@ -6,7 +6,7 @@ from io import BytesIO
 from types import SimpleNamespace
 
 from local_harness.benchmark.class_lab import _b64url, handler_for
-from local_harness.benchmark.class_lab_manifest import build_manifest
+from local_harness.benchmark.class_lab_manifest import KNOWN_GAPS, build_identities, build_manifest
 
 
 class MemorySocket:
@@ -94,7 +94,9 @@ def test_manifest_has_positive_and_negative_cases_for_each_class():
     assert by_id["ssti-positive"]["specialist"] == "server_injection"
     assert by_id["command_injection-positive"]["expected_findings"][0]["category"] == "rce"
     assert by_id["path_traversal-positive"]["expected_findings"][0]["category"] == "lfi"
-    assert by_id["jwt-positive"]["known_gap"] and by_id["jwt-negative"]["known_gap"]
+    assert "known_gap" not in by_id["jwt-positive"] and "known_gap" not in by_id["jwt-negative"]
+    assert by_id["jwt-positive"]["specialist"] == "auth_logic"
+    assert by_id["jwt-positive"]["identities"] == "class_lab_jwt_identities.json"
     assert "known_gap" not in by_id["csrf-positive"]
     for bug_class in {case["bug_class"] for case in cases}:
         assert {case["polarity"] for case in cases if case["bug_class"] == bug_class} == {
@@ -262,3 +264,95 @@ def test_csrf_positive_supports_scoped_state_change_proof():
         assert "anonymous-canary" not in request(handler, "/profile", headers=cookie)[1]
         assert request(handler, "/profile", method="DELETE", headers=cookie)[0] == 200
         assert json.loads(request(handler, "/profile", headers=cookie)[1])["display_name"] == "initial"
+
+
+def _bearer(token):
+    return {"Authorization": "Bearer " + token}
+
+
+def _jwt_identity_token(name):
+    identities = {row["name"]: row for row in build_identities("http://127.0.0.1:8765", "jwt")}
+    header = identities[name]["headers"]["Authorization"]
+    assert header.startswith("Bearer ")
+    return header[len("Bearer "):]
+
+
+def test_jwt_identities_carry_lab_bearer_token_and_jwt_is_not_a_known_gap():
+    assert "jwt" not in KNOWN_GAPS
+    shared = build_identities("http://127.0.0.1:8765")
+    assert all("Authorization" not in row["headers"] for row in shared)
+    jwt_rows = build_identities("http://127.0.0.1:8765", "jwt")
+    assert [row["name"] for row in jwt_rows] == ["A", "B"]
+    for row in jwt_rows:
+        assert row["headers"]["X-Lab-Identity"] == row["name"]
+        assert row["check"]["url"].endswith("/whoami")
+        token = _jwt_identity_token(row["name"])
+        payload = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
+        assert payload == {"sub": row["name"]}
+    # The token minted at identity-build time matches what a fresh lab issues.
+    for vulnerable in (True, False):
+        handler = handler_for("jwt", vulnerable, "")
+        issued = json.loads(request(handler, "/api/token", identity="A")[1])["token"]
+        assert issued == _jwt_identity_token("A")
+
+
+def test_manifest_cli_writes_jwt_bearer_identities(tmp_path):
+    from local_harness.benchmark import class_lab_manifest
+
+    class_lab_manifest.main(["--out", str(tmp_path / "corpus.json")])
+    rows = json.loads((tmp_path / "class_lab_jwt_identities.json").read_text())
+    assert rows[0]["name"] == "A"
+    assert rows[0]["headers"]["Authorization"] == "Bearer " + _jwt_identity_token("A")
+    shared = json.loads((tmp_path / "class_lab_identities.json").read_text())
+    assert all("Authorization" not in row["headers"] for row in shared)
+
+
+def test_jwt_documents_gate_and_forged_token_by_polarity():
+    token_a = _jwt_identity_token("A")
+    header_b64, _payload, _signature = token_a.split(".")
+    forged_payload = _b64url(json.dumps({"sub": "A", "prowl_nonce": "abcdef1234"}).encode())
+    alg_none = ".".join([_b64url(json.dumps({"alg": "none", "typ": "JWT"}).encode()),
+                         forged_payload, ""])
+    for vulnerable in (True, False):
+        handler = handler_for("jwt", vulnerable, "")
+        no_token = request(handler, "/api/documents/1")
+        malformed = request(handler, "/api/documents/1", headers=_bearer("prowl.abcdef1234.invalid"))
+        valid = request(handler, "/api/documents/1", headers=_bearer(token_a))
+        forged = request(handler, "/api/documents/1", headers=_bearer(alg_none))
+        assert no_token[0] == 401 and malformed[0] == 401
+        assert valid[0] == 200 and "aegis-lab-private-record" in valid[1]
+        if vulnerable:
+            assert forged == valid
+        else:
+            assert forged[0] == 401 and "aegis-lab-private-record" not in forged[1]
+
+
+def test_backend_probe_jwt_confirms_only_on_positive():
+    import pytest
+
+    jwt_probe = pytest.importorskip("app.services.agent.scoped_assessment.jwt_probe")
+    target = "http://127.0.0.1:8765"
+    identity = next(row for row in build_identities(target, "jwt") if row["name"] == "A")
+    session = {"target": target, "headers": identity["headers"],
+               "cookies": [{"name": k, "value": v} for k, v in identity["cookies"].items()]}
+    for vulnerable in (True, False):
+        handler = handler_for("jwt", vulnerable, "")
+
+        def send(url, *, allowed_origin, session, where, name, token):
+            assert where == "header" and url.startswith(allowed_origin)
+            headers = {k: v for k, v in session["headers"].items() if k.lower() != "authorization"}
+            if token is not None:
+                headers[name] = "Bearer " + token
+            status, body = request(handler, urllib.parse.urlsplit(url).path, headers=headers)
+            return status, body.encode()
+
+        proof = jwt_probe.probe_jwt(target + "/api/documents/1", allowed_origin=target,
+                                    session=session, nonce="abcdef1234", send=send)
+        assert proof["credential_location"] == "header"
+        assert proof["auth_enforced"] is True
+        assert proof["proof_confirmed"] is vulnerable
+        assert jwt_probe.jwt_proof_valid({**proof, "nonce": "abcdef1234"}) is vulnerable
+        if vulnerable:
+            assert proof["recipe"] == "alg_none"
+        else:
+            assert proof["probes"] and all(p["status"] == 401 for p in proof["probes"])

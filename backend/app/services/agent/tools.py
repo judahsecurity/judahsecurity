@@ -2014,7 +2014,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         post_input = (method == "POST" and location in {"body_form", "body_json"}
                       and bool((cell or {}).get("capture_id"))
                       and (cell or {}).get("observation_source") == "browser_traffic"
-                      and (cell or {}).get("test_type") != "nosql")
+                      and ((cell or {}).get("test_type") != "nosql" or location == "body_json"))
         if (not cell or cell.get("status") != "leased"
                 or cell.get("lease_id") != coverage_lease_id
                 or float(cell.get("lease_deadline") or 0) <= time.time()
@@ -2090,6 +2090,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if location in {"body_form", "body_json"}:
             requests, context, fetch = self._injection_probe_bodies(
                 cell, parameter, test_type, nonce, factors, identity, scoped_origin)
+            if test_type == "nosql":
+                self._scoped_claim_posts(len(requests))
+                proof = await asyncio.to_thread(
+                    injection_probe.probe_nosql, requests, allowed_origin=scoped_origin,
+                    state=state, nonce=nonce, fetch=fetch,
+                )
+                return proof, context
             if recipe:
                 if recipe not in requests:
                     raise ValueError("Observed injection baseline changed")
@@ -2155,10 +2162,22 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             )
             return mime, changed
 
-        mime, control = plan(control_value(test_type, nonce))
-        requests = {"control": control}
-        for name in recipes_for(test_type):
-            requests[name] = plan(probe_value(test_type, name, a, b))[1]
+        if test_type == "nosql":
+            from app.services.agent.scoped_assessment.injection_probe import NOSQL_SEQUENCE
+
+            literal = control_value(test_type, nonce)
+            values = {"control": literal, "true": {"$ne": literal}, "false": {"$eq": literal}}
+            requests = {}
+            for step in NOSQL_SEQUENCE:
+                _url, mime, requests[step] = body_probe.plan_json_value_body(
+                    private, parameter=parameter, allowed_origins=[allowed],
+                    value=values[step.split("_", 1)[0]],
+                )
+        else:
+            mime, control = plan(control_value(test_type, nonce))
+            requests = {"control": control}
+            for name in recipes_for(test_type):
+                requests[name] = plan(probe_value(test_type, name, a, b))[1]
         headers = body_probe.safe_replay_headers(private)
         state = self._scoped_state(identity, url)
 
@@ -2206,7 +2225,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             urls[recipe] = probe_url
         return urls, context
 
-    async def scoped_jwt_probe(self, target_url: str, identity: str) -> Dict[str, Any]:
+    async def scoped_jwt_probe(self, target_url: str, identity: str,
+                               jwks_url: str = "") -> Dict[str, Any]:
         """Check whether an observed endpoint verifies the identity's JWT signature.
 
         Uses the registered identity's own token, adds a nonce claim, and sends it
@@ -2219,7 +2239,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.assessment_sessions import identity_registry
         from app.services.agent.evidence_store import evidence_store
         from app.services.agent.parameter_inventory import _origin
-        from app.services.agent.scoped_assessment.jwt_probe import probe_jwt
+        from app.services.agent.scoped_assessment import jwt_probe
 
         identity = str(identity or "")
         if identity in {"", "anonymous", "unspecified", "legacy"}:
@@ -2236,14 +2256,24 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         try:
             self._scoped_origin(target_url)
             session = identity_registry(self).resolve(identity, target_url)
-            self._scoped_claim_gets(5)
+            public_pem = None
+            if jwks_url:
+                if _origin(str(jwks_url)) != scoped_origin:
+                    raise ValueError("jwks_url must be on the assessed origin")
+                self._scoped_origin(jwks_url)
+                self._scoped_claim_gets(1)
+                jwks = await asyncio.to_thread(
+                    jwt_probe.fetch_jwks, jwks_url, allowed_origin=scoped_origin)
+                _, _, _, header, _ = jwt_probe._decode(jwt_probe.locate_token(session)[2])
+                public_pem = jwt_probe.jwk_to_pem(jwks, header.get("kid"))
+            self._scoped_claim_gets(8)
             proof = await asyncio.to_thread(
-                probe_jwt, target_url, allowed_origin=scoped_origin, session=session,
-                nonce=nonce,
+                jwt_probe.probe_jwt, target_url, allowed_origin=scoped_origin,
+                session=session, nonce=nonce, public_pem=public_pem,
             )
         except (ValueError, OSError) as exc:
             return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
-        summary = {"nonce": nonce, **proof}
+        summary = {"nonce": nonce, "jwks_url": str(jwks_url or ""), **proof}
         artifact_id = evidence_store(self).record(
             "scoped_jwt_probe", summary, target=target_url, identity=identity,
             test_type="jwt", success=proof["proof_confirmed"],

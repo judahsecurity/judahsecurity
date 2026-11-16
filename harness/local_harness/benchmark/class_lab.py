@@ -113,6 +113,12 @@ def resolve_lab_file(value: str, vulnerable: bool) -> str | None:
 
 
 # --- JWT: HS256 tokens; the positive also accepts unsigned ``alg: none``. ---
+# The signing key is fixed so the manifest generator can mint each lab
+# identity's bearer token before the server starts. Loopback-only fixture: the
+# key protects nothing real.
+LAB_JWT_KEY = hashlib.sha256(b"aegis-class-lab-jwt-key-v1").digest()
+
+
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -121,7 +127,7 @@ def _b64url_decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
-def issue_lab_jwt(subject: str, key: bytes) -> str:
+def issue_lab_jwt(subject: str, key: bytes = LAB_JWT_KEY) -> str:
     signing_input = (_b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()) + "."
                      + _b64url(json.dumps({"sub": subject}).encode()))
     signature = hmac.new(key, signing_input.encode(), hashlib.sha256).digest()
@@ -157,7 +163,7 @@ JWT_DOCUMENTS = {"1": ("A", "aegis-lab-private-record"), "2": ("B", "peer docume
 
 def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
     state = {"profile": "initial", "uploads": {}, "csrf_tokens": set(),
-             "jwt_key": secrets.token_bytes(32)}
+             "jwt_key": LAB_JWT_KEY}
 
     class LabHandler(BaseHTTPRequestHandler):
         def _send(self, status, body, content_type="application/json", headers=None):

@@ -1185,7 +1185,7 @@ async def _verify_scoped_jwt_candidate(
 
     from app.services.agent.assessment_sessions import identity_registry
     from app.services.agent.evidence_store import evidence_store
-    from app.services.agent.scoped_assessment.jwt_probe import probe_jwt
+    from app.services.agent.scoped_assessment import jwt_probe
 
     if cand.vulnerability_class != "jwt":
         return None
@@ -1206,14 +1206,24 @@ async def _verify_scoped_jwt_candidate(
         try:
             tools_manager._scoped_origin(cand.target)
             session = identity_registry(tools_manager).resolve(identity, cand.target)
+            jwks_url = str(receipt.get("payload", {}).get("jwks_url") or "")
+            public_pem = None
+            if recipe == "rs_hs_confusion" and jwks_url:
+                tools_manager._scoped_origin(jwks_url)
+                tools_manager._scoped_claim_gets(1)
+                jwks = await asyncio.to_thread(
+                    jwt_probe.fetch_jwks, jwks_url, allowed_origin=scoped_origin)
+                _, _, _, header, _ = jwt_probe._decode(jwt_probe.locate_token(session)[2])
+                public_pem = jwt_probe.jwk_to_pem(jwks, header.get("kid"))
             tools_manager._scoped_claim_gets(4)
             nonce = secrets.token_hex(8)
             replay = await asyncio.to_thread(
-                probe_jwt, cand.target, allowed_origin=scoped_origin, session=session,
-                nonce=nonce, recipes=(recipe,),
+                jwt_probe.probe_jwt, cand.target, allowed_origin=scoped_origin,
+                session=session, nonce=nonce, recipes=(recipe,), public_pem=public_pem,
             )
             artifact_id = store.record(
-                "scoped_jwt_probe", {"nonce": nonce, **replay}, target=cand.target,
+                "scoped_jwt_probe", {"nonce": nonce, "jwks_url": jwks_url, **replay},
+                target=cand.target,
                 identity=identity, test_type="jwt", success=replay["proof_confirmed"],
             )
             if replay.get("proof_confirmed") is True:

@@ -21,9 +21,13 @@ forged payload the app cannot parse fails for the wrong reason.
   body as the valid one. Submit with `vulnerability_class=jwt`.
 * That proves integrity is not verified. Claiming account takeover or
   cross-user access additionally needs an authorization proof with distinct
-  identities (`owner_only` or `state_change`). RS256→HS256 confusion, `kid`,
-  `jku`/`x5u` injection and weak secrets have no automated validator; keep them
-  as leads.
+  identities (`owner_only` or `state_change`).
+* The same tool also tries `kid` → `/dev/null` with an empty HMAC key, a short
+  offline default-secret check on HS256 (no traffic while guessing), and,
+  given `jwks_url` (same-origin JWKS/OpenID keys), RS256→HS256 key confusion
+  with the server's public key, and an embedded `jwk` header holding a
+  throwaway key generated for the run. `jku`/`x5u` need an attacker-hosted
+  key and stay leads.
 * Non-destructive: no admin actions (user deletion, role grants to others),
   no data dumps. Read one foreign object or change one restorable canary.
 * Offline secret guessing must be bounded (small, known-weak wordlist) and
