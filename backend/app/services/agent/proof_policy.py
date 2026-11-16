@@ -42,7 +42,8 @@ PROOFS_BY_CLASS = {
     "command_injection": frozenset({"scoped_cmdi_eval", "oob_callback"}),
     "path_traversal": frozenset({"scoped_traversal_read"}),
     "csrf": frozenset({"scoped_csrf_state_change"}),
-    "jwt": frozenset({"scoped_jwt_forgery"}),
+    # scoped_jwt_key_url_fetch: the server fetched a jku/x5u URL Prowl supplied.
+    "jwt": frozenset({"scoped_jwt_forgery", "scoped_jwt_key_url_fetch"}),
     # A version inside a published range is a lead. A CVE whose behavior is
     # proven is filed under that behavior's class (traversal, SSTI, ...);
     # version-only claims are capped at low by finding_gate.
@@ -161,7 +162,8 @@ def _validate_hunter_verifier_pair(store, candidate, proof: dict,
               if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
     verifier = store.records.get(verifier_id) if verifier_id in evidence_ids else None
     expected = {"scoped_csrf_state_change": "scoped_csrf_probe",
-                "scoped_jwt_forgery": "scoped_jwt_probe"}.get(kind, "scoped_injection_probe")
+                "scoped_jwt_forgery": "scoped_jwt_probe",
+                "scoped_jwt_key_url_fetch": "scoped_jwt_probe"}.get(kind, "scoped_injection_probe")
     if (not hunter or not verifier or hunter["id"] == verifier["id"]
             or hunter["kind"] != expected or verifier["kind"] != expected
             or hunter["created_at"] >= verifier["created_at"]):
@@ -171,6 +173,12 @@ def _validate_hunter_verifier_pair(store, candidate, proof: dict,
     if hunter["identity"] != verifier["identity"]:
         return False, "Hunter and verifier must use the same test identity"
     first, second = hunter["payload"], verifier["payload"]
+    if kind == "scoped_jwt_key_url_fetch":
+        from app.services.agent.scoped_assessment.jwt_probe import jwt_key_url_pair_valid
+
+        if candidate.vulnerability_class != "jwt" or not jwt_key_url_pair_valid(first, second):
+            return False, "Two independent jku/x5u fetches of fresh collaborator URLs are required"
+        return True, ""
     if kind == "scoped_jwt_forgery":
         from app.services.agent.scoped_assessment.jwt_probe import jwt_pair_valid
 
@@ -214,7 +222,8 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in _SERVER_INJECTION_KINDS or kind in {"scoped_csrf_state_change", "scoped_jwt_forgery"}:
+    if kind in _SERVER_INJECTION_KINDS or kind in {"scoped_csrf_state_change", "scoped_jwt_forgery",
+                                                    "scoped_jwt_key_url_fetch"}:
         ok, why = _validate_hunter_verifier_pair(store, candidate, proof, evidence_ids, kind)
         if not ok:
             return False, why

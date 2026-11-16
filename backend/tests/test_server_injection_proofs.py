@@ -818,3 +818,105 @@ def test_jwt_embedded_jwk_recipe():
     result = probe_jwt(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
                        nonce="0a1b2c3d4e5f6071", send=trusts_header_jwk)
     assert result["proof_confirmed"] is True and result["recipe"] == "embedded_jwk"
+
+
+# --- NoSQL in form fields --------------------------------------------------------
+
+def test_form_operator_body_renames_field():
+    import base64
+    import json as _json
+
+    from app.services.agent.scoped_assessment.body_probe import plan_form_operator_body
+
+    exchange = _json.dumps({
+        "method": "POST", "resource_type": "fetch", "url": ORIGIN + "/login",
+        "request_content_type": "application/x-www-form-urlencoded",
+        "request_body_base64": base64.b64encode(b"user=bob&pass=x").decode(),
+    }).encode()
+    _, _, body = plan_form_operator_body(exchange, parameter="user", allowed_origins=[ORIGIN],
+                                         operator="$ne", value="prowl1234abcd")
+    assert body == b"user%5B%24ne%5D=prowl1234abcd&pass=x"
+    _, _, control = plan_form_operator_body(exchange, parameter="user", allowed_origins=[ORIGIN],
+                                            operator="", value="prowl1234abcd")
+    assert control == b"user=prowl1234abcd&pass=x"
+    with pytest.raises(ValueError):
+        plan_form_operator_body(exchange, parameter="user", allowed_origins=[ORIGIN],
+                                operator="$where", value="x")
+
+
+# --- JWT jku / x5u key-URL fetch -------------------------------------------------
+
+def _key_url_harness(*, fetches: bool, protocol: str = "http"):
+    import base64
+    import json as _json
+
+    state = {"registered": 0, "stopped": [], "planted": []}
+
+    def register():
+        state["registered"] += 1
+        unique = f"c{state['registered']}abcdef"
+        return {"success": True, "session_id": f"s{state['registered']}",
+                "payload_domain": f"{unique}.oast.example",
+                "payload_url": f"https://{unique}.oast.example"}
+
+    def send(url, *, token, **_):
+        if token is None:
+            return 401, b"login"
+        header = _json.loads(base64.urlsafe_b64decode(token.split(".")[0] + "=="))
+        state["planted"].append(header.get("jku") or header.get("x5u"))
+        return 401, b"bad signature"
+
+    def poll(session_id):
+        if not fetches:
+            return {"success": True, "interactions": []}
+        unique = state["planted"][-1].split("/")[2].split(".")[0]
+        return {"success": True, "interactions": [{"protocol": protocol, "unique_id": unique}]}
+
+    def stop(session_id):
+        state["stopped"].append(session_id)
+
+    return state, dict(register=register, poll=poll, stop=stop, send=send, sleep=lambda _s: None)
+
+
+@pytest.mark.parametrize("fetches,protocol,expected", [
+    (True, "http", True), (False, "http", False), (True, "dns", False),
+])
+def test_jwt_key_url_fetch_probe(fetches, protocol, expected):
+    from app.services.agent.scoped_assessment.jwt_probe import (
+        jwt_key_url_proof_valid, probe_jwt_key_url,
+    )
+
+    state, hooks = _key_url_harness(fetches=fetches, protocol=protocol)
+    session = {"headers": {"Authorization": f"Bearer {_token()}"}, "cookies": []}
+    result = probe_jwt_key_url(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                               nonce="0a1b2c3d4e5f6071", header_name="jku", **hooks)
+    assert result["proof_confirmed"] is expected
+    assert jwt_key_url_proof_valid({**result, "nonce": "0a1b2c3d4e5f6071"}) is expected
+    assert state["stopped"] == ["s1"]  # the collaborator session is always closed
+    assert state["planted"][0].endswith("/jku-0a1b2c3d4e5f6071.json")
+
+
+def test_jwt_key_url_pair_requires_distinct_registrations():
+    from app.services.agent.scoped_assessment.jwt_probe import (
+        jwt_key_url_pair_valid, probe_jwt_key_url,
+    )
+
+    session = {"headers": {"Authorization": f"Bearer {_token()}"}, "cookies": []}
+    _, hooks = _key_url_harness(fetches=True)
+    first = {**probe_jwt_key_url(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                                 nonce="aaaaaaaa11111111", header_name="x5u", **hooks),
+             "nonce": "aaaaaaaa11111111"}
+    second = {**probe_jwt_key_url(f"{ORIGIN}/api/me", allowed_origin=ORIGIN, session=session,
+                                  nonce="bbbbbbbb22222222", header_name="x5u", **hooks),
+              "nonce": "bbbbbbbb22222222"}
+    assert jwt_key_url_pair_valid(first, second)
+    assert not jwt_key_url_pair_valid(first, {**second, "callback_domain": first["callback_domain"]})
+
+
+@pytest.mark.asyncio
+async def test_jwt_key_url_tool_requires_oob_authorization():
+    from app.services.agent.tools import ASMToolsManager
+
+    manager = ASMToolsManager()
+    result = await manager.scoped_jwt_key_url_probe("https://app.example.test/api/me", "alice")
+    assert result["error"] == "oob_not_authorized"

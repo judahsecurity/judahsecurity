@@ -109,7 +109,8 @@
     },
     "jwt": {
       "proof_kinds": [
-        "scoped_jwt_forgery"
+        "scoped_jwt_forgery",
+        "scoped_jwt_key_url_fetch"
       ],
       "confirmable": true,
       "severity_cap": null,

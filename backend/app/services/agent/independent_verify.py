@@ -1175,6 +1175,10 @@ async def _verify_scoped_injection_candidate(
             "key_findings": [], "tool_calls": 1, "error": None}
 
 
+class _VerifierDone(Exception):
+    """Ends a replay branch with a recorded, non-error failure reason."""
+
+
 async def _verify_scoped_jwt_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any,
 ) -> Optional[Dict[str, Any]]:
@@ -1206,6 +1210,38 @@ async def _verify_scoped_jwt_candidate(
         try:
             tools_manager._scoped_origin(cand.target)
             session = identity_registry(tools_manager).resolve(identity, cand.target)
+            if recipe in {"jku_fetch", "x5u_fetch"}:
+                from app.services import interactsh_service
+
+                if not getattr(tools_manager, "_oob_callbacks_allowed", False):
+                    raise ValueError("Out-of-band callbacks are not authorized")
+                tools_manager._scoped_claim_gets(2)
+                nonce = secrets.token_hex(8)
+                replay = await asyncio.to_thread(
+                    jwt_probe.probe_jwt_key_url, cand.target, allowed_origin=scoped_origin,
+                    session=session, nonce=nonce, header_name=recipe.split("_", 1)[0],
+                    register=interactsh_service.register, poll=interactsh_service.poll,
+                    stop=interactsh_service.stop,
+                )
+                artifact_id = store.record(
+                    "scoped_jwt_probe", {"nonce": nonce, **replay}, target=cand.target,
+                    identity=identity, test_type="jwt", success=replay["proof_confirmed"],
+                )
+                if replay.get("proof_confirmed") is True:
+                    proof = {"kind": "scoped_jwt_key_url_fetch",
+                             "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                    confirmed, failure = _confirm_or_explain(
+                        tools_manager, store, cand, run, proof, artifact_id,
+                        "A fresh collaborator URL in the token header was fetched again.",
+                    )
+                    if confirmed:
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary":
+                                "Fresh jku/x5u fetch matched the hunter receipt",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                else:
+                    failure = "Fresh key URL was not fetched"
+                raise _VerifierDone(failure)
             jwks_url = str(receipt.get("payload", {}).get("jwks_url") or "")
             public_pem = None
             if recipe == "rs_hs_confusion" and jwks_url:
@@ -1240,6 +1276,8 @@ async def _verify_scoped_jwt_candidate(
                             "key_findings": [], "tool_calls": 1, "error": None}
             else:
                 failure = "Fresh forged token was not accepted"
+        except _VerifierDone as done:
+            failure = str(done) or failure
         except Exception:
             logging.getLogger(__name__).exception("JWT verifier replay failed")
             failure = "JWT verifier replay failed"

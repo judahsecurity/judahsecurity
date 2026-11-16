@@ -19,6 +19,10 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 from urllib.parse import urlparse
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _CRAWL_TOOLS = {
     "execute_interceptor",
     "execute_deep_crawl",
@@ -838,7 +842,8 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
         registry_only = is_registry_primary(state)
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     pipeline = web and not registry_only
     handoff_failures = (_failed_first_pass_handoffs(state, primary_web_target(state))
                         if pipeline else [])
@@ -893,7 +898,8 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
                 ),
             }
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     if state.get("assessment_resume") and pipeline:
         pending = _pending_first_pass_count(state)
         missing = ([{
@@ -1019,13 +1025,15 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
         missing.extend(registry_missing_probes(state))
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     try:
         from app.services.agent.wordpress_surface import wordpress_missing_probes
 
         missing.extend(wordpress_missing_probes(state))
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
 
     next_action = missing[0]["next"] if missing else ""
     return {
@@ -1347,7 +1355,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             # Registry hosts are not websites — do not Interceptor-crawl /v2/.
             return None
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     if not is_web_target(state):
         return None
     try:
@@ -1366,7 +1375,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         if is_cve_applicability_question(state):
             return None
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     target = primary_web_target(state)
     if not target:
         return None
@@ -1518,7 +1528,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         if wp_step:
             return wp_step
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
 
     if not dir_done and waits < 2:
         return {
@@ -1602,7 +1613,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         if wp_step:
             return wp_step
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     try:
         from app.services.agent.registry_surface import registry_forced_step
 
@@ -1610,5 +1622,6 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         if reg_step:
             return reg_step
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     return None

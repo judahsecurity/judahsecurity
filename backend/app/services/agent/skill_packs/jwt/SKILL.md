@@ -26,8 +26,11 @@ forged payload the app cannot parse fails for the wrong reason.
   offline default-secret check on HS256 (no traffic while guessing), and,
   given `jwks_url` (same-origin JWKS/OpenID keys), RS256→HS256 key confusion
   with the server's public key, and an embedded `jwk` header holding a
-  throwaway key generated for the run. `jku`/`x5u` need an attacker-hosted
-  key and stay leads.
+  throwaway key generated for the run.
+* `jku`/`x5u`: with OOB authorized, `scoped_jwt_key_url_probe(target_url,
+  identity, header)` puts a fresh collaborator URL in the header; proof kind
+  `scoped_jwt_key_url_fetch` needs an HTTP fetch of that registration (DNS
+  alone is a lead). Serving a forged key from that URL is out of scope.
 * Non-destructive: no admin actions (user deletion, role grants to others),
   no data dumps. Read one foreign object or change one restorable canary.
 * Offline secret guessing must be bounded (small, known-weak wordlist) and

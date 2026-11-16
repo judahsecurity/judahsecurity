@@ -353,6 +353,31 @@ def plan_json_value_body(private_exchange: bytes, *, parameter: str,
     return url, mime, _mutate_json(body, parameter, value_override=value)
 
 
+def plan_form_operator_body(private_exchange: bytes, *, parameter: str,
+                            allowed_origins: list[str], operator: str,
+                            value: str) -> tuple[str, str, bytes]:
+    """Rename one observed form field to ``name[$op]`` (qs/PHP bracket syntax)."""
+    from urllib.parse import quote
+
+    url, mime, body, _changed = plan_observed_body(
+        private_exchange, parameter=parameter, allowed_origins=allowed_origins, payload="x",
+    )
+    if mime != "application/x-www-form-urlencoded":
+        raise ValueError("Operator field names require a captured form body")
+    if operator not in {"", "$ne", "$eq"}:
+        raise ValueError("Unsupported operator")
+    fields = body.decode("ascii").split("&")
+    matches = [i for i, f in enumerate(fields) if f and unquote_plus(f.split("=", 1)[0]) == parameter]
+    if len(matches) != 1:
+        raise ValueError("Form field must occur exactly once")
+    name = parameter + (f"[{operator}]" if operator else "")
+    fields[matches[0]] = quote(name, safe="") + "=" + quote(value, safe="")
+    changed = "&".join(fields).encode("ascii")
+    if len(changed) > MAX_REPLAY_BODY:
+        raise ValueError("Mutated body exceeds replay limit")
+    return url, mime, changed
+
+
 def plan_sql_error_body(private_exchange: bytes, *, parameter: str,
                         allowed_origins: list[str]) -> tuple[str, str, bytes, bytes, bytes]:
     """Plan a bounded error proof from one ordinary captured form or JSON value."""

@@ -745,6 +745,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_injection_probe_assigned": self.scoped_injection_probe_assigned,
             "scoped_csrf_assigned": self.scoped_csrf_assigned,
             "scoped_jwt_probe": self.scoped_jwt_probe,
+            "scoped_jwt_key_url_probe": self.scoped_jwt_key_url_probe,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -2014,7 +2015,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         post_input = (method == "POST" and location in {"body_form", "body_json"}
                       and bool((cell or {}).get("capture_id"))
                       and (cell or {}).get("observation_source") == "browser_traffic"
-                      and ((cell or {}).get("test_type") != "nosql" or location == "body_json"))
+                      and location in {"body_form", "body_json"})
         if (not cell or cell.get("status") != "leased"
                 or cell.get("lease_id") != coverage_lease_id
                 or float(cell.get("lease_deadline") or 0) <= time.time()
@@ -2166,13 +2167,22 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             from app.services.agent.scoped_assessment.injection_probe import NOSQL_SEQUENCE
 
             literal = control_value(test_type, nonce)
+            location = str(cell.get("parameter") or "").partition(":")[0]
             values = {"control": literal, "true": {"$ne": literal}, "false": {"$eq": literal}}
+            operators = {"control": "", "true": "$ne", "false": "$eq"}
             requests = {}
             for step in NOSQL_SEQUENCE:
-                _url, mime, requests[step] = body_probe.plan_json_value_body(
-                    private, parameter=parameter, allowed_origins=[allowed],
-                    value=values[step.split("_", 1)[0]],
-                )
+                kind = step.split("_", 1)[0]
+                if location == "body_form":
+                    _url, mime, requests[step] = body_probe.plan_form_operator_body(
+                        private, parameter=parameter, allowed_origins=[allowed],
+                        operator=operators[kind], value=literal,
+                    )
+                else:
+                    _url, mime, requests[step] = body_probe.plan_json_value_body(
+                        private, parameter=parameter, allowed_origins=[allowed],
+                        value=values[kind],
+                    )
         else:
             mime, control = plan(control_value(test_type, nonce))
             requests = {"control": control}
@@ -2282,6 +2292,60 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "proof_confirmed": proof["proof_confirmed"],
                 "probe_result": {k: proof[k] for k in
                                  ("auth_enforced", "recipe", "probes", "requests_sent")}}
+
+    async def scoped_jwt_key_url_probe(self, target_url: str, identity: str,
+                                       header: str = "jku") -> Dict[str, Any]:
+        """Check whether an observed endpoint fetches a jku/x5u URL from the token.
+
+        Needs out-of-band callbacks authorized for the run. Registers a fresh
+        collaborator, puts its URL in the identity's token header, and confirms
+        only on an HTTP fetch of that registration.
+        """
+        import asyncio
+        import secrets
+
+        from app.services import interactsh_service
+        from app.services.agent.assessment_sessions import identity_registry
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment import jwt_probe
+
+        if not getattr(self, "_oob_callbacks_allowed", False):
+            return {"success": False, "error": "oob_not_authorized"}
+        if header not in jwt_probe.KEY_URL_HEADERS:
+            return {"success": False, "error": "header must be jku or x5u"}
+        identity = str(identity or "")
+        if identity in {"", "anonymous", "unspecified", "legacy"}:
+            return {"success": False, "error": "registered_identity_required"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        observed = set(cmap.get("pages_visited") or []) | {
+            row.get("url") for row in (cmap.get("discovered_links") or []) if isinstance(row, dict)
+        } | {row.get("url") for row in (cmap.get("api_samples") or []) if isinstance(row, dict)}
+        if (not scoped_origin or target_url not in observed
+                or _origin(str(target_url)) != scoped_origin):
+            return {"success": False, "error": "observed_endpoint_required"}
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(target_url)
+            session = identity_registry(self).resolve(identity, target_url)
+            self._scoped_claim_gets(2)
+            proof = await asyncio.to_thread(
+                jwt_probe.probe_jwt_key_url, target_url, allowed_origin=scoped_origin,
+                session=session, nonce=nonce, header_name=header,
+                register=interactsh_service.register, poll=interactsh_service.poll,
+                stop=interactsh_service.stop,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        artifact_id = evidence_store(self).record(
+            "scoped_jwt_probe", {"nonce": nonce, **proof}, target=target_url,
+            identity=identity, test_type="jwt", success=proof["proof_confirmed"],
+        )
+        return {"success": True, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof.get(k) for k in
+                                 ("auth_enforced", "recipe", "interactions", "requests_sent")}}
 
     async def scoped_csrf_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,

@@ -358,6 +358,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scoped_race_assigned",
             "scoped_csrf_assigned",
             "scoped_jwt_probe",
+            "scoped_jwt_key_url_probe",
+            "scoped_jwt_key_url_probe",
             "compare_requests",
             "list_captured_requests",
             "mutate_captured_request",
