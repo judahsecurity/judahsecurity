@@ -17,6 +17,7 @@ Design goals:
 Default hooks installed:
   PRE:
     - block_ssrf_targets        (cloud metadata + localhost across all tools)
+    - block_denylisted_targets  (never-touch hosts/patterns; see denylist.py)
     - block_destructive_flags   (per-tool flag denylist; sqlmap --os-shell, etc.)
     - inject_safe_defaults      (centralized --batch / --no-banner / etc.)
     - enforce_scope             (delegates to the registered ScopeResolver)
@@ -36,6 +37,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from aegis_praetorium.config import get_config
+from aegis_praetorium.denylist import evaluate as evaluate_denylist
 from aegis_praetorium.scope import get_scope_resolver
 
 logger = logging.getLogger("aegis.lictor")
@@ -238,6 +240,28 @@ def block_ssrf_targets(ctx: HookContext) -> HookResult:
     return HookResult(allowed=True)
 
 
+def block_denylisted_targets(ctx: HookContext) -> HookResult:
+    """Refuse calls whose arguments name a never-touch host or pattern.
+
+    Callers that pass structured arguments (not one CLI string) should put the
+    joined string values in ``metadata["argument_text"]`` so they are inspected.
+    """
+    texts = [ctx.text(), str(ctx.metadata.get("argument_text") or "")]
+    verdict = evaluate_denylist(texts, org_id=ctx.org_id)
+    if verdict.blocked:
+        logger.warning(
+            "lictor.block_denylisted_targets: blocked %s — %s", ctx.tool_name, verdict.matched,
+        )
+        return HookResult(
+            allowed=False,
+            reason=f"Lictor blocked {ctx.tool_name}: {verdict.reason}",
+            metadata={"denylist_blocked": verdict.matched},
+        )
+    if verdict.would_block:
+        return HookResult(allowed=True, metadata={"denylist_would_block": verdict.dry_run_hits})
+    return HookResult(allowed=True)
+
+
 def block_destructive_flags(ctx: HookContext) -> HookResult:
     """Per-tool denylist for high-risk CLI flags (sqlmap --os-shell, etc.)."""
     flags = _DESTRUCTIVE_FLAGS.get(_canonical_tool(ctx.tool_name))
@@ -420,6 +444,7 @@ class Lictor:
     def _install_defaults(self) -> None:
         # Order matters: cheap denies first, then mutators, then rate limit last.
         self.add_pre_hook(block_ssrf_targets)
+        self.add_pre_hook(block_denylisted_targets)
         self.add_pre_hook(block_destructive_flags)
         self.add_pre_hook(inject_safe_defaults)
         self.add_pre_hook(enforce_scope)

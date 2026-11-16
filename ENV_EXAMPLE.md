@@ -242,6 +242,12 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # Agent tool output truncation (chars passed to LLM; default 20000)
 # AGENT_TOOL_OUTPUT_MAX_CHARS=20000
 
+# Never-touch denylist on every agent tool call: gov/mil defaults plus the org's
+# RoE scope_out and deny_patterns (edit via GET/PUT /api/v1/roe/{org}/denylist).
+# DRY_RUN logs "would block" instead of refusing, for a staged rollout.
+# AGENT_DENYLIST_ENABLED=true
+# AGENT_DENYLIST_DRY_RUN=false
+
 # Agent request timeout in seconds (default 3600). WebSocket hunts use this too —
 # 11 minutes is too short for crawl + fireteam on a live app.
 # AGENT_REQUEST_TIMEOUT_SECONDS=3600

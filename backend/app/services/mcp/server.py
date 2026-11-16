@@ -46,6 +46,14 @@ def _current_tenant_context() -> tuple:
     except Exception:
         return (None, None, None)
 
+def _argument_text(arguments: Any) -> str:
+    try:
+        from app.services.agent_denylist import argument_text
+        return argument_text(arguments)
+    except Exception:
+        return ""
+
+
 # Help commands should return quickly; use short timeout so missing binaries fail fast
 MCP_HELP_TIMEOUT = 15
 
@@ -2854,6 +2862,8 @@ class MCPServer:
                 org_id=org_id,
                 user_id=user_id,
                 session_id=session_id,
+                # Structured (non-``args``) values are inspected by the denylist hook.
+                metadata={"argument_text": _argument_text(arguments)},
             )
             pre_result = lictor.run_pre(pre_ctx)
             if not pre_result.allowed:

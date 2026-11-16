@@ -29,7 +29,7 @@ class AgentActionReceipt(Base):
     id = Column(Integer, primary_key=True)
     run_id = Column(String(64), ForeignKey("agent_run_ledger.id", ondelete="CASCADE"), nullable=False, index=True)
     action_id = Column(String(64), nullable=False, index=True)
-    event = Column(String(24), nullable=False)  # started / completed / failed / interrupted / skipped
+    event = Column(String(24), nullable=False)  # started / completed / failed / interrupted / skipped / blocked
     tool_name = Column(String(128), nullable=False)
     target = Column(String(512), nullable=False, default="")
     phase = Column(String(32), nullable=False, default="")

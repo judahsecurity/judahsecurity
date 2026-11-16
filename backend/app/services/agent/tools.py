@@ -2537,6 +2537,39 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         except Exception:
             logger.debug("record_invocation skipped", exc_info=True)
 
+    def _denylist_refusal(self, tool_name: str, tool_args: Any,
+                          run_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Refuse calls that name a never-touch target (all tools, not just CLI ones).
+
+        Lictor applies the same rules inside the MCP server; this covers the
+        Python HTTP, browser, and probe tools that never reach Lictor.
+        """
+        from app.services import agent_denylist
+        from app.services.agent.action_ledger import append_action
+
+        if not getattr(settings, "AGENT_LICTOR_ENABLED", True):
+            return None
+        verdict = agent_denylist.check_tool_call(
+            tool_name, tool_args, current_organization_id.get(),
+        )
+        if verdict.would_block:
+            logger.warning("denylist dry-run on %s: %s", tool_name, verdict.dry_run_hits)
+        if not verdict.blocked:
+            return None
+        try:
+            append_action(run_id, os.urandom(16).hex(), "blocked", tool_name,
+                          target=verdict.matched,
+                          detail=f"denylist rule {verdict.rule.pattern!r} ({verdict.rule.source})")
+        except Exception as e:  # the refusal must not depend on the ledger
+            logger.error("denylist ledger write failed: %s", e)
+        return {
+            "success": False,
+            "output": "",
+            "error": verdict.reason,
+            "denylist_blocked": True,
+            "matched": verdict.matched,
+        }
+
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute once for concurrent identical recon calls in this run."""
         from app.services.agent.action_fingerprint import action_fingerprint
@@ -2546,6 +2579,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.tool_singleflight import SHAREABLE_TOOLS
 
         run_id = active_run_id.get()
+        denied = self._denylist_refusal(tool_name, tool_args, run_id)
+        if denied is not None:
+            return denied
         if (run_id and current_pilot() is not None and not verification_run.get()
                 and tool_name in {"submit_finding_candidate", "record_surface_coverage",
                                   "record_verify_verdict"}):

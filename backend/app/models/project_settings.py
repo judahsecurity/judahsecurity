@@ -361,6 +361,11 @@ def default_rules_of_engagement_config():
         "max_rps_global": 10,
         "max_concurrency": 10,
         "requires_agent_confirmation": True,
+        # Never-touch rules for agent tool calls (enforced even when RoE is
+        # disabled). scope_out hosts are also never-touch. Regexes are searched
+        # case-insensitively in each tool call's argument text.
+        "deny_patterns": [],
+        "deny_dry_run": False,
         "contacts": [],
         "notes": "",
         "accepted_by": "",

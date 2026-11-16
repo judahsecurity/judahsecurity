@@ -19,6 +19,8 @@ Two configuration modes:
          AEGIS_RATE_CAPACITY=30
          AEGIS_RATE_PER_MINUTE=30
          AEGIS_TOOL_OUTPUT_MAX_CHARS=20000
+         AEGIS_DENYLIST_ENABLED=true
+         AEGIS_DENYLIST_DRY_RUN=false
 
 If no ``set_config`` call is made and no env vars are set, defaults apply
 (everything on except scope enforcement).
@@ -44,6 +46,8 @@ class PraetoriumConfig:
     rate_capacity: int = 30                  # token bucket burst size
     rate_per_minute: int = 30                # token bucket sustained refill
     tool_output_max_chars: int = 20_000      # Augur output cap
+    denylist_enabled: bool = True            # never-touch targets (see denylist.py)
+    denylist_dry_run: bool = False           # log "would block" instead of blocking
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -74,6 +78,8 @@ def load_from_env() -> PraetoriumConfig:
         rate_capacity=_env_int("AEGIS_RATE_CAPACITY", 30),
         rate_per_minute=_env_int("AEGIS_RATE_PER_MINUTE", 30),
         tool_output_max_chars=_env_int("AEGIS_TOOL_OUTPUT_MAX_CHARS", 20_000),
+        denylist_enabled=_env_bool("AEGIS_DENYLIST_ENABLED", True),
+        denylist_dry_run=_env_bool("AEGIS_DENYLIST_DRY_RUN", False),
     )
 
 

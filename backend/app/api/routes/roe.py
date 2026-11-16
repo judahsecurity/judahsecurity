@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_admin, require_analyst
 from app.db.database import get_db
 from app.models.user import User
-from app.services import roe_service
+from app.models.project_settings import MODULE_RULES_OF_ENGAGEMENT, ProjectSettings
+from app.services import agent_denylist, roe_service
 
 router = APIRouter(prefix="/roe", tags=["rules-of-engagement"])
 
@@ -88,6 +89,7 @@ def update_roe(
         notes=payload.notes,
         enabled=payload.enabled,
     )
+    agent_denylist.invalidate(organization_id)
     return updated
 
 
@@ -125,6 +127,7 @@ async def upload_roe(
         notes=parsed.get("notes"),
         enabled=True,
     )
+    agent_denylist.invalidate(organization_id)
     return {
         "parsed": parsed,
         "config": updated,
@@ -149,3 +152,102 @@ def check_roe(
         "reason": reason,
         "rejected_targets": rejected,
     }
+
+
+# ---------------------------------------------------------------------------
+# Agent never-touch denylist (enforced on every agent tool call, RoE on or off)
+# ---------------------------------------------------------------------------
+
+
+class DenylistPayload(BaseModel):
+    scope_out: Optional[list[str]] = None
+    deny_patterns: Optional[list[str]] = None
+    deny_dry_run: Optional[bool] = None
+
+
+class DenylistPreviewRequest(DenylistPayload):
+    targets: list[str] = Field(..., min_length=1, max_length=100)
+
+
+def _denylist_view(roe: dict) -> dict:
+    from aegis_praetorium.denylist import DEFAULT_DENY_RULES
+
+    policy = agent_denylist.policy_from_roe(roe)
+    return {
+        "scope_out": roe.get("scope_out") or [],
+        "deny_patterns": roe.get("deny_patterns") or [],
+        "deny_dry_run": bool(roe.get("deny_dry_run")),
+        "default_rules": [r.pattern for r in DEFAULT_DENY_RULES],
+        "default_overrides": list(policy.allow_hosts),
+    }
+
+
+def _validate_patterns(patterns: Optional[list[str]]) -> Optional[list[str]]:
+    from aegis_praetorium.denylist import compile_pattern
+
+    if patterns is None:
+        return None
+    cleaned = [p for p in (str(x).strip() for x in patterns) if p]
+    for p in cleaned:
+        try:
+            compile_pattern(p)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return list(dict.fromkeys(cleaned))
+
+
+@router.get("/{organization_id}/denylist")
+def get_denylist(
+    organization_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    if not _check_org_access(current_user, organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return _denylist_view(roe_service.load_roe(db, organization_id))
+
+
+@router.put("/{organization_id}/denylist")
+def update_denylist(
+    organization_id: int,
+    payload: DenylistPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Edit never-touch rules without re-accepting the RoE document."""
+    if not _check_org_access(current_user, organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    changes: dict = {}
+    patterns = _validate_patterns(payload.deny_patterns)
+    if patterns is not None:
+        changes["deny_patterns"] = patterns
+    if payload.scope_out is not None:
+        changes["scope_out"] = list(dict.fromkeys(s.strip() for s in payload.scope_out if s.strip()))
+    if payload.deny_dry_run is not None:
+        changes["deny_dry_run"] = payload.deny_dry_run
+    if changes:
+        ProjectSettings.set_config(db, organization_id, MODULE_RULES_OF_ENGAGEMENT, changes)
+        db.commit()
+        agent_denylist.invalidate(organization_id)
+    return _denylist_view(roe_service.load_roe(db, organization_id))
+
+
+@router.post("/{organization_id}/denylist/preview")
+def preview_denylist(
+    organization_id: int,
+    payload: DenylistPreviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Show which sample targets would be blocked, optionally with unsaved edits."""
+    if not _check_org_access(current_user, organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    roe = dict(roe_service.load_roe(db, organization_id))
+    patterns = _validate_patterns(payload.deny_patterns)
+    if patterns is not None:
+        roe["deny_patterns"] = patterns
+    if payload.scope_out is not None:
+        roe["scope_out"] = payload.scope_out
+    if payload.deny_dry_run is not None:
+        roe["deny_dry_run"] = payload.deny_dry_run
+    return agent_denylist.preview(payload.targets, roe)

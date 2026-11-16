@@ -24,6 +24,7 @@ from aegis_praetorium import (
     PraetoriumConfig,
     ScopeResolver,
     set_config,
+    set_deny_policy_provider,
     set_scope_resolver,
 )
 from app.core.config import settings
@@ -96,12 +97,18 @@ def bootstrap_aegis_praetorium() -> None:
         enforce_scope=getattr(settings, "AGENT_ENFORCE_ORG_SCOPE", False),
         rate_capacity=getattr(settings, "AGENT_TOOL_RATE_CAPACITY", 30),
         rate_per_minute=getattr(settings, "AGENT_TOOL_RATE_PER_MINUTE", 30),
+        denylist_enabled=getattr(settings, "AGENT_DENYLIST_ENABLED", True),
+        denylist_dry_run=getattr(settings, "AGENT_DENYLIST_DRY_RUN", False),
     )
     set_config(cfg)
     set_scope_resolver(_AssetTableScopeResolver())
+    from app.services.agent_denylist import RoEDenyPolicyProvider
+
+    set_deny_policy_provider(RoEDenyPolicyProvider())
     logger.info(
         "aegis_praetorium configured: lictor=%s censor=%s augur=%s enforce_scope=%s "
-        "rate=%d/min (burst %d) — scope resolver: AssetTable",
+        "rate=%d/min (burst %d) denylist=%s dry_run=%s — scope resolver: AssetTable",
         cfg.lictor_enabled, cfg.censor_enabled, cfg.augur_enabled,
         cfg.enforce_scope, cfg.rate_per_minute, cfg.rate_capacity,
+        cfg.denylist_enabled, cfg.denylist_dry_run,
     )

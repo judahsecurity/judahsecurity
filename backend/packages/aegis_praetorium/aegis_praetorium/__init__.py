@@ -6,7 +6,7 @@ Houses the three shared "magistrate" components that sit between every agent
 and every security tool invocation:
 
     Censor  — input validator (rejects malformed / dangerous arguments early)
-    Lictor  — pre/post tool-execution enforcer (SSRF, scope, destructive flags,
+    Lictor  — pre/post tool-execution enforcer (SSRF, denylist, scope, destructive flags,
               safe defaults, rate limit, audit log)
     Augur   — output interpreter (smart per-tool filters that retain actionable
               info/low findings and emit deterministic next-step pivots)
@@ -36,6 +36,16 @@ from aegis_praetorium.config import (
     get_config,
     load_from_env,
     set_config,
+)
+from aegis_praetorium.denylist import (
+    DEFAULT_DENY_RULES,
+    DenyPolicy,
+    DenyPolicyProvider,
+    DenyRule,
+    DenyVerdict,
+    StaticDenyPolicyProvider,
+    get_deny_policy_provider,
+    set_deny_policy_provider,
 )
 from aegis_praetorium.lictor import (
     HookContext,
@@ -77,6 +87,15 @@ __all__ = [
     "get_config",
     "load_from_env",
     "set_config",
+    # Denylist
+    "DEFAULT_DENY_RULES",
+    "DenyPolicy",
+    "DenyPolicyProvider",
+    "DenyRule",
+    "DenyVerdict",
+    "StaticDenyPolicyProvider",
+    "get_deny_policy_provider",
+    "set_deny_policy_provider",
     # Scope
     "ScopeResolver",
     "AllowAllResolver",

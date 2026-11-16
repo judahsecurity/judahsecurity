@@ -54,6 +54,10 @@ def start_run(*, session_id: str, organization_id: int, user_id: int,
     return run_id
 
 
+# Receipts that record a decision not to run the tool (dedupe reuse, denylist).
+_NOT_RUN = ("skipped", "blocked")
+
+
 def append_action(run_id: str | None, action_id: str, event: str, tool_name: str,
                   *, target: str = "", phase: str = "", detail: str = "",
                   evidence_ids: list[str] | None = None,
@@ -229,7 +233,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
     for item in actions.values():
         counts[item["status"]] = counts.get(item["status"], 0) + 1
         fingerprint = fingerprints.get(item["id"])
-        if fingerprint and item["status"] != "skipped":
+        if fingerprint and item["status"] not in _NOT_RUN:
             exact[fingerprint] = exact.get(fingerprint, 0) + 1
         tool = item["tool_name"]
         if item["status"] in ("failed", "interrupted"):
@@ -237,7 +241,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
             failure_key = (tool, item["status"], reason)
             failures[failure_key] = failures.get(failure_key, 0) + 1
         # A skipped duplicate records the reuse decision, not another tool run.
-        if item["status"] != "skipped" and tool != "http_exchange" and not tool.startswith("agent_"):
+        if item["status"] not in _NOT_RUN and tool != "http_exchange" and not tool.startswith("agent_"):
             key = (tool, item["target"])
             repeated[key] = repeated.get(key, 0) + 1
         if tool == "http_exchange":
@@ -285,7 +289,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                      "model_calls": sum(1 for item in actions.values()
                                         if item["tool_name"].startswith("agent_")),
                      "test_actions": sum(1 for item in actions.values()
-                                         if item["status"] != "skipped"
+                                         if item["status"] not in _NOT_RUN
                                          and item["tool_name"] in (
                                              "compare_requests", "test_authorization_boundary",
                                              "replay_http_request", "independent_verify",

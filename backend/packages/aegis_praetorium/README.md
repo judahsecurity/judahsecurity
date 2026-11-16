@@ -47,6 +47,7 @@ set_config(PraetoriumConfig(
 # AEGIS_LICTOR_ENABLED=true AEGIS_CENSOR_ENABLED=true AEGIS_AUGUR_ENABLED=true
 # AEGIS_ENFORCE_SCOPE=false AEGIS_RATE_CAPACITY=30 AEGIS_RATE_PER_MINUTE=30
 # AEGIS_TOOL_OUTPUT_MAX_CHARS=20000 AEGIS_AUGUR_VERBOSE=false
+# AEGIS_DENYLIST_ENABLED=true AEGIS_DENYLIST_DRY_RUN=false
 ```
 
 ## Scope resolution (pluggable)
@@ -64,6 +65,30 @@ class DbScopeResolver(ScopeResolver):
         # query Asset table for org_id, return True/False
         ...
 set_scope_resolver(DbScopeResolver())
+```
+
+## Never-touch denylist
+
+`denylist.py` refuses any tool call whose argument text names a never-touch
+host or pattern. It runs as the Lictor pre-hook `block_denylisted_targets`,
+independent of scope enforcement.
+
+- Built-in defaults block government and military suffixes (`.gov`, `.mil`,
+  `gov.uk`, `gc.ca`, ...). A host can lift a default only by listing it
+  explicitly in `DenyPolicy.allow_hosts`; a bare suffix such as `gov` is ignored.
+- Org rules (`DenyRule(kind="host" | "regex")`) come from a pluggable
+  `DenyPolicyProvider`. The platform reads RoE `scope_out` and `deny_patterns`.
+- Every hostname and IPv4 literal in the argument text is checked, not only
+  flag values. Pass structured argument values in `metadata["argument_text"]`.
+- `AEGIS_DENYLIST_DRY_RUN=true` logs "would block" for every rule.
+  `DenyPolicy.dry_run` does the same for org rules only, never for defaults.
+
+```python
+from aegis_praetorium import DenyPolicy, DenyRule, StaticDenyPolicyProvider, set_deny_policy_provider
+
+set_deny_policy_provider(StaticDenyPolicyProvider(DenyPolicy(
+    rules=(DenyRule(kind="host", pattern="payments.example.com"),),
+)))
 ```
 
 ## Typical wiring

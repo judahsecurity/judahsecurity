@@ -201,6 +201,11 @@ class Settings(BaseSettings):
     # Restrict tool targets to assets in the calling org. Off by default to keep
     # ad-hoc recon usable; flip on for production multi-tenant deployments.
     AGENT_ENFORCE_ORG_SCOPE: bool = False
+    # Never-touch denylist (gov/mil defaults + RoE scope_out + RoE deny_patterns).
+    # Enforced on every agent tool call, independent of scope enforcement.
+    AGENT_DENYLIST_ENABLED: bool = True
+    # Log "would block" instead of blocking, for every rule (rollout aid).
+    AGENT_DENYLIST_DRY_RUN: bool = False
     # Per-(org, tool) token-bucket rate limit.
     AGENT_TOOL_RATE_CAPACITY: int = 30      # burst size
     AGENT_TOOL_RATE_PER_MINUTE: int = 30    # sustained refill
