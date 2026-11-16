@@ -1,0 +1,12 @@
+# Installed in the backend image (go install tomnomnom/assetfinder).
+name: execute_assetfinder
+binary: assetfinder
+description: >-
+  Passive subdomain discovery from public sources (certificate transparency,
+  archives, DNS datasets). Sends no traffic to the target itself.
+example: execute_assetfinder(args="--subs-only example.com")
+timeout_seconds: 180
+help_args: [-h]
+success_exit_codes: [0]
+auto_approve: true
+shareable: true

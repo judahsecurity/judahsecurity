@@ -1,0 +1,13 @@
+# Installed in the backend image (dnsutils).
+name: execute_dig
+binary: dig
+description: >-
+  DNS record lookup. TXT (SPF/DMARC/verification tokens name SaaS vendors),
+  MX, NS, CNAME (dangling targets suggest takeover), and SOA records show where
+  an application really runs and who operates it.
+example: execute_dig(args="example.com TXT +short")
+timeout_seconds: 30
+safe_defaults: [+time=5, +tries=2]
+success_exit_codes: [0]
+auto_approve: true
+shareable: true

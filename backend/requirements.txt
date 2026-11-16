@@ -18,6 +18,9 @@ pydantic>=2.7.4
 pydantic-settings>=2.1.0
 email-validator==2.1.0
 
+# YAML tool recipes (app/services/tool_recipes) and nuclei template parsing
+PyYAML>=6.0.1
+
 # Security
 python-dotenv==1.0.0
 

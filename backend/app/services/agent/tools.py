@@ -785,6 +785,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         tools["search_vulnx"] = self.search_vulnx       # single CVE deep-dive by ID
         tools["vulnx_query"] = self.vulnx_query         # search CVEs by technology/query
         tools.update({name: getattr(self, name) for name in CAPABILITY_TOOLS})
+        # YAML tool recipes (app/services/tool_recipes/recipes); built-ins win.
+        from app.services.tool_recipes import get_recipes
+
+        for recipe in get_recipes().values():
+            if recipe.name in tools or (recipe.help_name and recipe.help_name in tools):
+                continue
+            tools[recipe.name] = self.execute_mcp_tool
+            if recipe.help_name:
+                tools[recipe.help_name] = self.execute_mcp_tool
         return tools
 
     def get_tool(self, name: str) -> Optional[callable]:
@@ -2703,7 +2712,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     if len(self._nonretryable_failures) > 128:
                         self._nonretryable_failures.pop(next(iter(self._nonretryable_failures)))
                 return result
-        if not run_id or verification_run.get() or tool_name not in SHAREABLE_TOOLS:
+        from app.services.tool_recipes import is_shareable
+
+        if (not run_id or verification_run.get()
+                or (tool_name not in SHAREABLE_TOOLS and not is_shareable(tool_name))):
             return await self._execute_recorded(tool_name, tool_args)
 
         args_dict = tool_args if isinstance(tool_args, dict) else {}

@@ -33,7 +33,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from aegis_praetorium.config import get_config
@@ -158,6 +158,23 @@ _SAFE_DEFAULTS: Dict[str, List[str]] = {
     "commix": ["--batch"],
     "hydra": ["-f"],
 }
+
+
+def register_tool_policy(
+    tool_name: str,
+    destructive_flags: Iterable[str] = (),
+    safe_defaults: Iterable[str] = (),
+) -> None:
+    """Add destructive flags / safe defaults for a tool defined outside this package
+    (e.g. a platform YAML recipe). Merges with any built-in entries; idempotent."""
+    key = _canonical_tool(tool_name)
+    for table, extra in ((_DESTRUCTIVE_FLAGS, destructive_flags), (_SAFE_DEFAULTS, safe_defaults)):
+        merged = list(table.get(key, []))
+        for item in extra:
+            if item not in merged:
+                merged.append(item)
+        if merged:
+            table[key] = merged
 
 
 def _canonical_tool(tool_name: str) -> str:
@@ -517,4 +534,5 @@ __all__ = [
     "PostHookContext",
     "PostHookResult",
     "get_lictor",
+    "register_tool_policy",
 ]

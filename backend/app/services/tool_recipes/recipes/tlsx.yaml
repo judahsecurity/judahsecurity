@@ -1,0 +1,13 @@
+# Installed in the backend image (ProjectDiscovery tlsx).
+name: execute_tlsx
+binary: tlsx
+description: >-
+  TLS certificate grab with ProjectDiscovery tlsx. Subject alternative names and
+  common names often reveal sibling hosts, internal names, and staging
+  environments to pivot to (add them as assets before testing).
+example: execute_tlsx(args="-u app.example.com -san -cn -resp-only")
+timeout_seconds: 120
+fixed_args: [-silent, -no-color]
+success_exit_codes: [0]
+auto_approve: true
+shareable: true

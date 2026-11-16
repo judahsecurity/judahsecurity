@@ -1669,6 +1669,63 @@ class MCPServer:
             phase="recon",
             handler=self._garak_help,
         ))
+        self._register_recipe_tools()
+
+    def _register_recipe_tools(self) -> None:
+        """Register YAML-defined CLI tools (app/services/tool_recipes/recipes)."""
+        try:
+            from aegis_praetorium.lictor import register_tool_policy
+            from app.services.tool_recipes import get_recipes
+        except Exception as e:
+            logger.error("tool recipes unavailable: %s", e)
+            return
+        binaries = dict(self._HANDLER_BINARY)
+        for recipe in get_recipes().values():
+            if self.registry.get(recipe.name) or (
+                    recipe.help_name and self.registry.get(recipe.help_name)):
+                logger.warning("tool recipe %s skipped: a built-in tool has that name", recipe.name)
+                continue
+            self.registry.register(MCPTool(
+                name=recipe.name,
+                description=recipe.description,
+                tool_type=ToolType.SCAN,
+                parameters={"args": {"type": "string",
+                                     "description": f"{recipe.binary} CLI arguments"}},
+                required_params=["args"],
+                phase="informational",
+                handler=self._recipe_handler(recipe),
+            ))
+            if recipe.help_name:
+                self.registry.register(MCPTool(
+                    name=recipe.help_name,
+                    description=f"Get {recipe.binary} command usage.",
+                    tool_type=ToolType.QUERY,
+                    parameters={},
+                    required_params=[],
+                    phase="informational",
+                    handler=self._recipe_help_handler(recipe),
+                ))
+            binaries[recipe.name] = recipe.binary
+            register_tool_policy(recipe.name, recipe.deny_flags, recipe.safe_defaults)
+        self._HANDLER_BINARY = binaries
+
+    def _recipe_handler(self, recipe):
+        async def handler(args: str = "") -> Dict[str, Any]:
+            cmd = [recipe.binary, *recipe.fixed_args, *self._parse_args(args)]
+            return await self._run_command(
+                cmd, timeout=recipe.timeout_seconds,
+                success_exit_codes=set(recipe.success_exit_codes),
+            )
+        return handler
+
+    def _recipe_help_handler(self, recipe):
+        async def handler() -> Dict[str, Any]:
+            # Many CLIs exit non-zero after printing usage.
+            return await self._run_command(
+                [recipe.binary, *(recipe.help_args or ())], timeout=MCP_HELP_TIMEOUT,
+                success_exit_codes={0, 1, 2},
+            )
+        return handler
 
     @staticmethod
     def _parse_args(args: str) -> List[str]:

@@ -662,7 +662,10 @@ Do not put credentials or bearer tokens in tool arguments. Use the service's art
     
     if phase == "post_exploitation" and post_expl_enabled:
         tools += post_exploitation_tools
-    
+
+    from app.services.tool_recipes import prompt_section
+
+    tools += prompt_section(phase, reserved=set(_BUILTIN_TOOL_NAMES))
     return tools
 
 
@@ -921,6 +924,19 @@ TOOL_PHASE_MAP = {
     "run_port_scan": ["informational", "exploitation", "post_exploitation"],
     "check_http_status": ["informational", "exploitation", "post_exploitation"],
 }
+
+_BUILTIN_TOOL_NAMES = frozenset(TOOL_PHASE_MAP)
+
+
+def _merge_recipe_phases() -> None:
+    """Add YAML recipe tools; a built-in entry with the same name wins."""
+    from app.services.tool_recipes import phase_map
+
+    for name, phases in phase_map().items():
+        TOOL_PHASE_MAP.setdefault(name, phases)
+
+
+_merge_recipe_phases()
 
 
 def is_tool_allowed_in_phase(tool_name: str, phase: str) -> bool:

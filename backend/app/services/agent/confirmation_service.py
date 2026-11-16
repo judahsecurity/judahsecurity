@@ -400,7 +400,10 @@ async def gate(
     # Light recon must not block assessment kickoff behind approve dialogs.
     # Explicit "deny" still wins; everything else becomes auto for SAFE_RECON_TOOLS.
     # Bounded informational Nuclei (tech/exposure/panel) is the same class as httpx.
-    if (tool_name in SAFE_RECON_TOOLS or nuclei_recon) and decision != "deny" and not login_crawl:
+    from app.services.tool_recipes import is_auto_approved
+
+    safe_recon = tool_name in SAFE_RECON_TOOLS or is_auto_approved(tool_name)
+    if (safe_recon or nuclei_recon) and decision != "deny" and not login_crawl:
         decision = "auto"
 
     # RoE escalates "auto" -> "confirm" for non-readonly tools when enabled,
@@ -410,7 +413,7 @@ async def gate(
         decision == "auto"
         and _roe_requires_confirmation(organization_id)
         and tool_name not in READONLY_TOOLS
-        and tool_name not in SAFE_RECON_TOOLS
+        and not safe_recon
         and not nuclei_recon
     ):
         decision = "confirm"
