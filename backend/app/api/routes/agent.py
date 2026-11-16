@@ -106,6 +106,12 @@ class OwnerOnlyResource(BaseModel):
 class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
+    # Operator-approved state-changing actions for the race and CSRF proofs.
+    # Each needs a matching cleanup path that accepts the __PROWL_NONCE__ canary.
+    race_action_paths: list[str] = Field(default_factory=list, max_length=8)
+    race_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
+    csrf_action_paths: list[str] = Field(default_factory=list, max_length=8)
+    csrf_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
     owner_only_resources: list[OwnerOnlyResource] = Field(default_factory=list, max_length=8)
     auth_login_path: Optional[str] = None
     # Explicit operator grants for lanes that are off by default. These arrive
@@ -127,7 +133,9 @@ class AgentAssessmentPolicy(BaseModel):
             raise ValueError("Authenticated login path must be an exact same-origin path")
         return path
 
-    @field_validator("body_replay_paths", "stored_xss_cleanup_paths")
+    @field_validator("body_replay_paths", "stored_xss_cleanup_paths",
+                     "race_action_paths", "race_cleanup_paths",
+                     "csrf_action_paths", "csrf_cleanup_paths")
     @classmethod
     def validate_body_paths(cls, paths: list[str]) -> list[str]:
         for path in paths:

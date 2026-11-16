@@ -35,9 +35,13 @@ PROOFS_BY_CLASS = {
     "dom_open_redirect": frozenset({"scoped_browser_client"}),
     "client_template_injection": frozenset({"scoped_browser_client"}),
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
-    "command_injection": frozenset(),
-    "path_traversal": frozenset(),
-    "csrf": frozenset(),
+    "ssti": frozenset({"scoped_ssti_eval"}),
+    "command_injection": frozenset({"scoped_cmdi_eval"}),
+    "path_traversal": frozenset({"scoped_traversal_read"}),
+    "csrf": frozenset({"scoped_csrf_state_change"}),
+    # A version inside a published range is a lead. A CVE whose behavior is
+    # proven is filed under that behavior's class (traversal, SSTI, ...);
+    # version-only claims are capped at low by finding_gate.
     "known_cve": frozenset(),
     "account_enumeration": frozenset(),
 }
@@ -69,6 +73,7 @@ _CLAIM_PATTERNS = (
      r"\bconcurrenc(?:y|e) (?:bug|flaw|abuse)\b|\blimit overrun\b"),
     ("client_template_injection", r"\bclient[ -]?side template injection\b|\bCSTI\b"),
     ("client_prototype_pollution", r"\bclient[ -]?side prototype pollution\b"),
+    ("ssti", r"\bSSTI\b|server[ -]?side template injection|\btemplate injection\b"),
     ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
     ("xxe", r"\bXXE\b|XML external entity"),
     ("command_injection", r"\b(?:OS|shell|command) injection\b|\bRCE\b|remote code execution"),
@@ -133,6 +138,54 @@ def _object_field(data: dict, path: str):
     return value
 
 
+_SERVER_INJECTION_KINDS = {
+    "scoped_ssti_eval": "ssti",
+    "scoped_cmdi_eval": "command_injection",
+    "scoped_traversal_read": "path_traversal",
+}
+
+
+def _validate_hunter_verifier_pair(store, candidate, proof: dict,
+                                   evidence_ids: list[str], kind: str) -> tuple[bool, str]:
+    """Distinct, ordered hunter and fresh verifier receipts for one input."""
+    hunter_id = proof.get("hunter_artifact_id")
+    verifier_id = proof.get("artifact_id")
+    hunter = (store.records.get(hunter_id)
+              if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
+    verifier = store.records.get(verifier_id) if verifier_id in evidence_ids else None
+    expected = "scoped_csrf_probe" if kind == "scoped_csrf_state_change" else "scoped_injection_probe"
+    if (not hunter or not verifier or hunter["id"] == verifier["id"]
+            or hunter["kind"] != expected or verifier["kind"] != expected
+            or hunter["created_at"] >= verifier["created_at"]):
+        return False, "Distinct ordered hunter and verifier execution evidence is required"
+    if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
+        return False, "Both actors must prove the same candidate target"
+    if hunter["identity"] != verifier["identity"]:
+        return False, "Hunter and verifier must use the same test identity"
+    first, second = hunter["payload"], verifier["payload"]
+    if kind == "scoped_csrf_state_change":
+        from app.services.agent.scoped_assessment.csrf_probe import csrf_proof_valid
+
+        if (candidate.vulnerability_class != "csrf"
+                or not csrf_proof_valid(first) or not csrf_proof_valid(second)
+                or first.get("field") != second.get("field")
+                or first.get("path") != second.get("path")
+                or first.get("readback_url") != second.get("readback_url")):
+            return False, "Independent cross-site canary write with readback and cleanup is required"
+        return True, ""
+    from app.services.agent.scoped_assessment.injection_probe import injection_proof_valid
+
+    claim = _SERVER_INJECTION_KINDS[kind]
+    if (candidate.vulnerability_class != claim
+            or not injection_proof_valid(first) or not injection_proof_valid(second)
+            or first.get("test_type") != claim or second.get("test_type") != claim
+            or first.get("parameter") != second.get("parameter")
+            or first.get("request_context") != second.get("request_context")
+            or first.get("recipe") != second.get("recipe")):
+        return False, f"Independent matching {claim} proof on the same input and recipe is required"
+    return True, ""
+
+
 def validate_proof(
     store, candidate, proof: dict, evidence_ids: list[str]
 ) -> tuple[bool, str]:
@@ -147,6 +200,16 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
+    if kind in _SERVER_INJECTION_KINDS or kind == "scoped_csrf_state_change":
+        ok, why = _validate_hunter_verifier_pair(store, candidate, proof, evidence_ids, kind)
+        if not ok:
+            return False, why
+        from app.services.agent.proof_discipline import check_discipline
+
+        hunter = store.records[proof["hunter_artifact_id"]]["payload"]
+        verifier = store.records[proof["artifact_id"]]["payload"]
+        disciplined, why = check_discipline(kind, hunter, verifier)
+        return (True, "") if disciplined else (False, why)
     if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")

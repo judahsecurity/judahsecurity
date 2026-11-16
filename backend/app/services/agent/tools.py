@@ -508,6 +508,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_stored_xss_cleanup_paths = SessionValue(set)
     _scoped_race_action_paths = SessionValue(set)
     _scoped_race_cleanup_paths = SessionValue(set)
+    _scoped_csrf_action_paths = SessionValue(set)
+    _scoped_csrf_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_auth_login_path = SessionValue(lambda: "")
     _scoped_assessment_started = SessionValue(lambda: False)
@@ -740,6 +742,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
             "scoped_cors_probe_assigned": self.scoped_cors_probe_assigned,
             "scoped_race_assigned": self.scoped_race_assigned,
+            "scoped_injection_probe_assigned": self.scoped_injection_probe_assigned,
+            "scoped_csrf_assigned": self.scoped_csrf_assigned,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -1976,6 +1980,206 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                  ("control", "probe", "cleanup_confirmed", "requests_sent")},
                 "funnel": parameter_test_funnel(brain)}
 
+    async def scoped_injection_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Test one observed GET input for SSTI, command injection, or traversal.
+
+        Computed-output (SSTI/command injection) or known-file (traversal)
+        proofs only. The model chooses the leased cell; payloads, factors, and
+        URLs are fixed here.
+        """
+        import asyncio
+        import secrets
+        import time
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.injection_probe import (
+            TEST_TYPES, new_factors, probe_injection, recipes_for,
+        )
+        from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
+                or cell.get("test_type") not in TEST_TYPES
+                or cell.get("method") != "GET" or location != "query"
+                or not separator or not parameter
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        from urllib.parse import urlsplit
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        url = scoped_origin + cell["path"]
+        identity = str(cell.get("identity") or "anonymous")
+        test_type = cell["test_type"]
+        nonce = secrets.token_hex(8)
+        factors = new_factors() if test_type != "path_traversal" else (0, 0)
+        try:
+            urls, context = self._injection_probe_urls(
+                url, parameter, test_type, nonce, factors, identity,
+                capture_id=str(cell.get("capture_id") or ""),
+            )
+            self._scoped_claim_gets(min(9, len(urls)))
+            proof = await asyncio.to_thread(
+                probe_injection, urls, test_type=test_type, allowed_origin=scoped_origin,
+                state=self._scoped_state(identity, url), nonce=nonce, factors=factors,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        summary = {"test_type": test_type, "parameter": parameter, "path": cell["path"],
+                   "request_context": context, "nonce": nonce,
+                   "recipes_available": list(recipes_for(test_type)), **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_injection_probe", summary, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type=test_type,
+            capture_id=str(cell.get("capture_id") or ""),
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_injection_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Server-side injection signal requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("test_type", "recipe", "control", "probes", "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
+
+    def _injection_probe_urls(
+        self, url: str, parameter: str, test_type: str, nonce: str,
+        factors: tuple, identity: str, capture_id: str = "",
+    ) -> tuple[dict, str]:
+        """Build control and fixed probe URLs from one observed GET baseline."""
+        from app.services.agent.scoped_assessment.injection_probe import (
+            control_value, probe_value, recipes_for,
+        )
+
+        a, b = factors
+        control_url, context = self._observed_get_query_template(
+            url, parameter, control_value(test_type, nonce), identity, capture_id=capture_id,
+        )
+        if context == "single_parameter":
+            raise ValueError("observed_query_baseline_missing")
+        urls = {"control": control_url}
+        for recipe in recipes_for(test_type):
+            probe_url, probe_context = self._observed_get_query_template(
+                url, parameter, probe_value(test_type, recipe, a, b), identity,
+                capture_id=capture_id,
+            )
+            if probe_context != context:
+                raise ValueError("observed_query_baseline_missing")
+            self._scoped_origin(probe_url)
+            urls[recipe] = probe_url
+        self._scoped_origin(control_url)
+        return urls, context
+
+    async def scoped_csrf_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        field: str, readback_url: str, cleanup_url_template: str,
+    ) -> Dict[str, Any]:
+        """Prove a cross-site, token-less form POST changes the victim's state."""
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.csrf_probe import probe_csrf
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "surface_applicability"
+                or cell.get("test_type") != "csrf"
+                or str(cell.get("method") or "POST").upper() != "POST"
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        action_path = str(cell.get("path") or "/")
+        if action_path not in (getattr(self, "_scoped_csrf_action_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "CSRF action path is not in csrf_action_paths"}
+        if "__PROWL_NONCE__" not in str(cleanup_url_template or ""):
+            return {"success": False, "error": "cleanup_template_missing_nonce"}
+        cleanup_path = urlsplit(cleanup_url_template.replace("__PROWL_NONCE__", "x")).path or "/"
+        if cleanup_path not in (getattr(self, "_scoped_csrf_cleanup_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "cleanup path is not in csrf_cleanup_paths"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        observed = set(cmap.get("pages_visited") or []) | {
+            row.get("url") for row in (cmap.get("discovered_links") or [])
+            if isinstance(row, dict)}
+        if readback_url not in observed or _origin(readback_url) != scoped_origin:
+            return {"success": False, "error": "observed_readback_page_missing"}
+        identity = str(cell.get("identity") or "anonymous")
+        if identity in {"", "anonymous", "unspecified"}:
+            return {"success": False, "error": "authenticated_identity_required"}
+        action_url = scoped_origin + action_path
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(action_url)
+            self._scoped_claim_posts(2)
+            self._scoped_claim_gets(3)
+            proof = await probe_csrf(
+                action_url, readback_url, cleanup_url_template, field=str(field or ""),
+                allowed_origin=scoped_origin, state=self._scoped_state(identity, action_url),
+                nonce=nonce,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        summary = {"nonce": nonce, "path": action_path, "readback_url": readback_url,
+                   "cleanup_template": cleanup_url_template, **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_csrf_probe", summary, target=action_url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="csrf",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_csrf_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Cross-site state change requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("control", "probe", "cross_site_cookie_eligible",
+                                  "cleanup_confirmed", "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
+
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
         technique: str = "parser_control",
@@ -2967,10 +3171,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 spec["allowed_methods"] = ["GET", "HEAD"]
                 spec["approved_post_paths"] = sorted(
                     self._scoped_body_replay_paths | self._scoped_race_action_paths
+                    | self._scoped_csrf_action_paths
                     | ({self._scoped_auth_login_path} if self._scoped_auth_login_path else set())
                 )
                 spec["approved_delete_paths"] = sorted(
                     self._scoped_stored_xss_cleanup_paths | self._scoped_race_cleanup_paths
+                    | self._scoped_csrf_cleanup_paths
                 )
                 tool_args["args"] = json.dumps(spec)
             except (ValueError, TypeError) as exc:
@@ -4860,6 +5066,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if not org_id:
             return "Error: No organization context. create_finding requires an active session."
 
+        # A version-only CVE claim is a lead: cap it at low instead of letting
+        # it reach (and fail) the medium+ proof gate.
+        from app.services.agent.finding_gate import cap_version_only_cve_severity
+
+        severity, cve_capped = cap_version_only_cve_severity(
+            f"{title or ''} {cve_id or ''}".strip(), description, severity)
+        if cve_capped and not not_demonstrated:
+            not_demonstrated = ("Vulnerable behavior not demonstrated; severity capped "
+                                "at low for a version-range match.")
+
         # Independent verify (fireteam/candidates) or legacy Solomon SUBMIT gate
         ok, gate_msg = finding_publish_allowed(
             self,
@@ -5822,8 +6038,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.vulnerability_catalog import parameter_test_classes
 
-        if specialist not in {"all", "xss", "sqli", "injection"}:
-            return json.dumps({"error": "specialist must be all, xss, sqli, or injection"})
+        if specialist not in {"all", "xss", "sqli", "injection", "server_injection"}:
+            return json.dumps({"error": "specialist must be all, xss, sqli, injection, or server_injection"})
         cmap = getattr(self, "_capability_map", None) or {}
         if not isinstance(cmap, dict):
             cmap = {}

@@ -35,9 +35,29 @@ observation, test attempts, evidence, cost, and incomplete runs. A class passes
 only when its positive finding is verified, its negative has an evidenced
 rejection, neither run has an extra finding, and both runs used equal budgets.
 
-The included local lab exposes nine classes in positive and negative modes:
-SQLi, base64 encoded SQLi, reflected XSS, DOM XSS, SSRF, IDOR, GraphQL authorization,
-unsafe upload, and CSRF. It binds
+The included local lab exposes fifteen classes in positive and negative modes:
+SQLi (`sqli`), base64 encoded SQLi (`sqli_encoded`), blind JSON POST SQLi
+(`sqli_post_blind`), reflected XSS (`xss`), DOM XSS (`xss_dom`), XHR POST XSS
+(`xss_post_xhr`), SSRF, IDOR, GraphQL authorization (`graphql_authz`), unsafe
+upload (`unsafe_file_upload`), CSRF, SSTI (`ssti`, `/greeting?message=`),
+OS command injection (`command_injection`, `/tools/ping?host=`), path traversal
+(`path_traversal`, `/download?file=`), and JWT `alg: none` acceptance (`jwt`,
+`/api/token` then `/api/documents/{id}`). Each negative is a safe twin of the
+same surface: it escapes, validates, normalizes, or verifies instead.
+SSTI, command injection, and path traversal target Prowl's
+`scoped_injection_probe_assigned` proofs; their parameter names are chosen so
+the vulnerability catalog creates the matching GET-query coverage cells. Command
+execution is simulated in pure Python (no shell or subprocess), and path
+traversal resolves against an in-memory filesystem whose `/etc/passwd` holds
+`root:x:0:0:root:/root:/bin/bash` (the real filesystem is never read). The CSRF
+positive supports `scoped_csrf_state_change`: log in with `POST /login`
+(`username=A&password=lab-pass`) for a `lab_session` cookie, replay a
+cross-site `application/x-www-form-urlencoded` `POST /profile` with no token,
+read back via `GET /profile`, confirm anonymous replay gets 401, and reset with
+`DELETE /profile`. `jwt` is marked `known_gap` in the manifest (Prowl has no
+deterministic JWT validator yet, so verified recall is expected to be 0); the
+report shows that note per class, and known-gap classes do not affect the
+scorer's exit code. The lab binds
 only to `127.0.0.1`. The SSRF positive fixture makes a DNS lookup only for a
 host beneath an explicitly supplied controlled OAST suffix. Start one case at
 a time, using a dedicated assessment database and the **same model, budget,

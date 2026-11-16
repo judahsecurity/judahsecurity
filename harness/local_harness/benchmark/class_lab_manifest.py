@@ -19,6 +19,24 @@ CASES = {
     "graphql_authz": ("idor", "/graphql", "graphql_api"),
     "unsafe_file_upload": ("file_upload", "/api/uploads/{id}", "file_upload"),
     "csrf": ("csrf", "/profile", "auth_logic"),
+    "ssti": ("ssti", "/greeting", "server_injection"),
+    "command_injection": ("rce", "/tools/ping", "server_injection"),
+    "path_traversal": ("lfi", "/download", "server_injection"),
+    "jwt": ("auth", "/api/documents/{id}", "auth_logic"),
+}
+
+ACCEPTED_CATEGORIES = {
+    "graphql_authz": ["authz"],
+    "unsafe_file_upload": ["xss"],
+    # A forged-token read of A's document may be titled as broken access control.
+    "jwt": ["authz", "idor"],
+}
+
+# Classes Prowl cannot yet confirm through a deterministic validator. They are
+# still run and scored, but the report marks them so a 0 verified recall reads
+# as a tracked gap rather than a regression.
+KNOWN_GAPS = {
+    "jwt": "No deterministic Prowl JWT validator yet; expected verified recall is 0.",
 }
 
 
@@ -34,9 +52,9 @@ def build_manifest(target: str) -> dict:
                 "expected_findings": [{
                     "id": name, "category": category, "endpoint": endpoint,
                     "description": f"Lab {bug_class} impact at {endpoint}",
-                    "accepted_categories": ["authz"] if bug_class == "graphql_authz" else
-                                           ["xss"] if bug_class == "unsafe_file_upload" else [],
+                    "accepted_categories": ACCEPTED_CATEGORIES.get(bug_class, []),
                 }] if polarity == "positive" else [],
+                **({"known_gap": KNOWN_GAPS[bug_class]} if bug_class in KNOWN_GAPS else {}),
             })
     return {"cases": cases}
 

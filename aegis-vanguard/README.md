@@ -176,7 +176,9 @@ writes machine-readable `findings.jsonl` for judging. Details:
 | `agent/` | ReACT agents, OWASP hunters, guardrails, parallel fireteam |
 | `run_pentest.py` | Main ReACT pentest entrypoint |
 | `CLAUDE.md` | Claude Code runbook (skills front door) |
-| `.claude/skills/` | Thin playbook skills (`/aegis`, `/threat-model`, `/code-scan`, `/pentest`, `/triage`) |
+| `.claude/skills/` | Thin playbook skills (`/aegis`, `/recon`, `/threat-model`, `/code-scan`, `/pentest`, `/triage`, `/chain`) |
+| `prowl_client.py` | CLI to drive Prowl (platform agent) runs, verification and recon tools |
+| `data/vuln_classes.json` | Class -> proof-kind map synced from Prowl (`scripts/sync_vuln_classes.py`) |
 | `docs/vanguard-system-card.md` | ReAct CLI agent system card |
 | `validate_finding.py` | On-demand single-finding validator |
 | `Dockerfile` | Container image with all scanning tools pre-installed |

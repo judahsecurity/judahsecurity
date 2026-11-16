@@ -1580,6 +1580,8 @@ class AgentOrchestrator:
                 "tool_name": forced["tool_name"],
             })
         elif forced_complete:
+            from app.services.agent.tester_loop import SYSTEM_CVE_COMPLETE_REASON
+
             decision = LLMDecision(
                 thought=(
                     "Named CVE applicability is answered. Completing without a full pentest."
@@ -1588,7 +1590,7 @@ class AgentOrchestrator:
                     "Applicability-only question — homepage version check is the whole job."
                 ),
                 action="complete",
-                completion_reason="CVE applicability answered; defer methodologies",
+                completion_reason=SYSTEM_CVE_COMPLETE_REASON,
             )
             step_usage = {}
             logger.info("[%s] Forced CVE-applicability complete", user_id)
@@ -1900,14 +1902,15 @@ class AgentOrchestrator:
         
         # Handle actions
         if decision.action == "complete":
-            reason = (decision.completion_reason or "").lower()
-            force_complete = (
-                "force complete" in reason
-                or "defer methodologies" in reason
-                or "defer remaining" in reason
-                or "non-browser" in reason
+            from app.services.agent.tester_loop import (
+                complete_blocked_reason,
+                completion_override_allowed,
             )
-            from app.services.agent.tester_loop import complete_blocked_reason
+            # Model-written completion text cannot skip coverage gates; only an
+            # operator instruction or the system CVE-applicability path can.
+            force_complete = completion_override_allowed(
+                state, decision.completion_reason or ""
+            )
             tester_block = None if force_complete else complete_blocked_reason(
                 state, completion_reason=decision.completion_reason or ""
             )

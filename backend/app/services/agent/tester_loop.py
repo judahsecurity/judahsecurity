@@ -1099,6 +1099,41 @@ def format_tester_loop_for_prompt(progress: Dict[str, Any], state: Optional[Dict
     return "\n".join(lines)
 
 
+_OVERRIDE_TOKENS = ("force complete", "defer methodologies", "defer remaining")
+SYSTEM_CVE_COMPLETE_REASON = "CVE applicability answered; defer methodologies"
+
+
+def completion_override_allowed(
+    state: Optional[Dict[str, Any]], completion_reason: str = "",
+) -> bool:
+    """Only an operator or a system-forced path may skip the tester loop.
+
+    The model's own ``completion_reason`` text is not authority: a phrase like
+    "force complete" written by the model used to bypass every coverage gate.
+    Overrides now require operator-supplied text (the objective or an operator
+    steer) or the system's named-CVE applicability shortcut.
+    """
+    state = state or {}
+    operator_text = " ".join(
+        [str(state.get("objective") or ""), str(state.get("original_objective") or "")]
+        + [str(item) for item in (state.get("operator_steers") or [])]
+    ).lower()
+    if any(token in operator_text for token in _OVERRIDE_TOKENS):
+        return True
+    if (completion_reason or "").strip() == SYSTEM_CVE_COMPLETE_REASON:
+        try:
+            from app.services.agent.cve_applicability import is_cve_applicability_question
+
+            return bool(is_cve_applicability_question(state))
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "CVE applicability check failed; completion stays gated")
+            return False
+    return False
+
+
 def complete_blocked_reason(
     state: Optional[Dict[str, Any]] = None,
     *,
@@ -1109,11 +1144,7 @@ def complete_blocked_reason(
         # The full tester loop requires crawlers, directory brute force and
         # fireteam tools that the bounded pilot deliberately cannot run.
         return None
-    reason = (completion_reason or "").lower()
-    if any(
-        token in reason
-        for token in ("force complete", "defer methodologies", "defer remaining", "non-browser")
-    ):
+    if completion_override_allowed(state, completion_reason):
         return None
     progress = tester_loop_progress(state)
     if progress.get("is_web") and not progress.get("ready_to_complete"):

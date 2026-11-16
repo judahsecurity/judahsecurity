@@ -8,21 +8,156 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
+import hmac
 from email import policy
 from email.parser import BytesParser
 import html
 import json
+import posixpath
+import re
 import secrets
 import socket
 import sqlite3
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CLASSES = ("sqli", "sqli_encoded", "sqli_post_blind", "xss", "xss_dom", "xss_post_xhr", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf")
+CLASSES = ("sqli", "sqli_encoded", "sqli_post_blind", "xss", "xss_dom", "xss_post_xhr", "ssrf", "idor",
+           "graphql_authz", "unsafe_file_upload", "csrf", "ssti", "command_injection", "path_traversal", "jwt")
+
+# --- SSTI: a toy template engine. Only small integer products are evaluated. ---
+_TEMPLATE_EXPRESSIONS = (
+    re.compile(r"\{\{\s*(\d{1,9})\s*\*\s*(\d{1,9})\s*\}\}"),   # Jinja2 / Twig
+    re.compile(r"\$\{\s*(\d{1,9})\s*\*\s*(\d{1,9})\s*\}"),      # FreeMarker / EL
+    re.compile(r"#\{\s*(\d{1,9})\s*\*\s*(\d{1,9})\s*\}"),        # Ruby / Pug
+    re.compile(r"<%=\s*(\d{1,9})\s*\*\s*(\d{1,9})\s*%>"),         # ERB
+)
+
+
+def render_toy_template(value: str) -> str:
+    """Evaluate ``{{a*b}}``-style arithmetic the way a vulnerable engine would."""
+    for pattern in _TEMPLATE_EXPRESSIONS:
+        value = pattern.sub(lambda m: str(int(m.group(1)) * int(m.group(2))), value)
+    return value
+
+
+# --- Command injection: shell semantics simulated in pure Python. ---
+# Nothing here ever reaches a real shell, subprocess, or the network.
+_SUBSTITUTION = re.compile(r"\$\((?!\()((?:[^()]|\(\([^()]*\)\))*)\)|`([^`]*)`")
+_SEPARATOR = re.compile(r"\|\||&&|[;|&\n]")
+_EXPR = re.compile(r"""expr\s+(\d{1,9})\s*(\\\*|'\*'|"\*"|\*|\+|-)\s*(\d{1,9})""")
+_ARITH = re.compile(r"\$\(\(\s*(\d{1,9})\s*([*+-])\s*(\d{1,9})\s*\)\)")
+_SAFE_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}")
+
+
+def _arith(a: str, op: str, b: str) -> str:
+    left, right = int(a), int(b)
+    return str(left * right if "*" in op else left + right if op == "+" else left - right)
+
+
+def _simulate_command(command: str) -> str:
+    command = _ARITH.sub(lambda m: _arith(*m.groups()), command.strip())
+    if not command:
+        return ""
+    match = _EXPR.fullmatch(command)
+    if match:
+        return _arith(*match.groups())
+    if command == "echo" or command.startswith("echo "):
+        return command[5:].strip().strip("'\"")
+    if command in {"id", "whoami"}:
+        return "uid=33(www-data) gid=33(www-data) groups=33(www-data)" if command == "id" else "www-data"
+    return f"sh: 1: {command.split()[0]}: not found"
+
+
+def _ping_output(host: str) -> str:
+    return (f"PING {host} ({host}): 56 data bytes\n"
+            f"icmp_seq=0 ttl=64 time=0.042 ms\n--- {host} ping statistics ---\n"
+            "packets transmitted: one, received: one, packet loss: none\n")
+
+
+def simulate_ping_shell(host: str) -> str:
+    """Model ``sh -c "ping -c 1 " + host`` without running anything."""
+    host = _SUBSTITUTION.sub(lambda m: _simulate_command(m.group(1) or m.group(2) or ""), host)
+    host = _ARITH.sub(lambda m: _arith(*m.groups()), host)
+    first, *rest = _SEPARATOR.split(host)
+    output = [_ping_output(first.strip()) if first.strip() else "ping: usage error: Destination address required\n"]
+    output.extend(_simulate_command(command) + "\n" for command in rest if command.strip())
+    return "".join(output)
+
+
+# --- Path traversal: an in-memory filesystem. The real filesystem is never read. ---
+LAB_FILES_ROOT = "/var/www/lab/files"
+FAKE_FILESYSTEM = {
+    LAB_FILES_ROOT + "/report.txt": "Quarterly report: public summary\n",
+    LAB_FILES_ROOT + "/readme.txt": "Public lab downloads\n",
+    "/etc/passwd": ("root:x:0:0:root:/root:/bin/bash\n"
+                    "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+                    "www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n"),
+    "/etc/hostname": "aegis-class-lab\n",
+}
+
+
+def resolve_lab_file(value: str, vulnerable: bool) -> str | None:
+    """Return fake file content, or ``None`` when missing or refused."""
+    if "\x00" in value:
+        return None
+    if vulnerable:
+        resolved = posixpath.normpath(posixpath.join(LAB_FILES_ROOT, value.replace("\\", "/")))
+    else:
+        if value.startswith("/") or "\\" in value or ".." in value.split("/"):
+            return None
+        resolved = posixpath.normpath(posixpath.join(LAB_FILES_ROOT, value))
+        if not resolved.startswith(LAB_FILES_ROOT + "/"):
+            return None
+    return FAKE_FILESYSTEM.get(resolved)
+
+
+# --- JWT: HS256 tokens; the positive also accepts unsigned ``alg: none``. ---
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _b64url_decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def issue_lab_jwt(subject: str, key: bytes) -> str:
+    signing_input = (_b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()) + "."
+                     + _b64url(json.dumps({"sub": subject}).encode()))
+    signature = hmac.new(key, signing_input.encode(), hashlib.sha256).digest()
+    return signing_input + "." + _b64url(signature)
+
+
+def verify_lab_jwt(token: str, key: bytes, vulnerable: bool) -> str | None:
+    """Return the subject of an accepted token, else ``None``."""
+    try:
+        header_b64, payload_b64, signature_b64 = token.split(".")
+        header = json.loads(_b64url_decode(header_b64))
+        payload = json.loads(_b64url_decode(payload_b64))
+        if not isinstance(header, dict) or not isinstance(payload, dict):
+            return None
+        algorithm = str(header.get("alg") or "")
+        if algorithm.lower() == "none":
+            if not vulnerable:
+                return None
+        elif algorithm == "HS256":
+            expected = hmac.new(key, f"{header_b64}.{payload_b64}".encode(), hashlib.sha256).digest()
+            if not hmac.compare_digest(expected, _b64url_decode(signature_b64)):
+                return None
+        else:
+            return None
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError):
+        return None
+    subject = payload.get("sub")
+    return subject if isinstance(subject, str) else None
+
+
+JWT_DOCUMENTS = {"1": ("A", "aegis-lab-private-record"), "2": ("B", "peer document")}
 
 
 def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
-    state = {"profile": "initial", "uploads": {}, "csrf_tokens": set()}
+    state = {"profile": "initial", "uploads": {}, "csrf_tokens": set(),
+             "jwt_key": secrets.token_bytes(32)}
 
     class LabHandler(BaseHTTPRequestHandler):
         def _send(self, status, body, content_type="application/json", headers=None):
@@ -81,6 +216,12 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
                     "graphql_authz": '<a href="/graphql">GraphQL API</a><p>POST JSON query node(id: "1") { ownerId secret }</p>',
                     "unsafe_file_upload": '<form action="/api/uploads" method="post" enctype="multipart/form-data"><input type="file" name="file"><button>Upload</button></form><p>JSON API accepts filename, content_type, content. GET/DELETE /api/uploads/{id}</p>',
                     "csrf": '<form action="/login" method="post"><input name="username"><input type="password" name="password"></form><form action="/profile" method="post"><input name="display_name"><button>Save</button></form>',
+                    "ssti": '<a href="/greeting?message=Hello">Greeting preview</a>',
+                    "command_injection": '<form action="/tools/ping"><input name="host" value="127.0.0.1"><button>Ping</button></form>'
+                                         '<a href="/tools/ping?host=127.0.0.1">Ping localhost</a>',
+                    "path_traversal": '<a href="/download?file=report.txt">Download report</a>',
+                    "jwt": '<a href="/api/token">Issue API token</a> <a href="/api/documents/1">Document 1</a>'
+                           '<p>Send Authorization: Bearer &lt;token&gt;. Document 1 belongs to A.</p>',
                 }
                 self._send(200, f"<h1>Aegis class lab</h1>{links[bug_class]}", "text/html")
                 return
@@ -160,6 +301,49 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
                 return
             if bug_class == "csrf" and path == "/profile":
                 self._json(200, {"principal_id": self._identity(), "display_name": state["profile"]})
+                return
+            if bug_class == "ssti" and path == "/greeting":
+                value = query.get("message", ["Hello"])[0][:500]
+                rendered = render_toy_template(value) if vulnerable else value
+                self._send(200, f"<h1>Greeting</h1><p>{html.escape(rendered, quote=True)}</p>", "text/html")
+                return
+            if bug_class == "command_injection" and path == "/tools/ping":
+                host = query.get("host", [""])[0][:300]
+                if vulnerable:
+                    self._send(200, simulate_ping_shell(host), "text/plain")
+                elif _SAFE_HOST.fullmatch(host):
+                    self._send(200, _ping_output(host), "text/plain")
+                else:
+                    self._json(400, {"error": "invalid host", "host": host})
+                return
+            if bug_class == "path_traversal" and path == "/download":
+                name = query.get("file", [""])[0][:500]
+                content = resolve_lab_file(name, vulnerable)
+                if content is None:
+                    self._json(404, {"error": "file not found", "file": name})
+                else:
+                    self._send(200, content, "text/plain")
+                return
+            if bug_class == "jwt" and path == "/api/token":
+                identity = self._identity()
+                if identity == "anonymous":
+                    self._json(401, {"error": "login required"})
+                else:
+                    self._json(200, {"token": issue_lab_jwt(identity, state["jwt_key"])})
+                return
+            if bug_class == "jwt" and path.startswith("/api/documents/"):
+                document = JWT_DOCUMENTS.get(path.rsplit("/", 1)[-1])
+                authorization = self.headers.get("Authorization", "")
+                subject = (verify_lab_jwt(authorization[7:].strip(), state["jwt_key"], vulnerable)
+                           if authorization.lower().startswith("bearer ") else None)
+                if document is None:
+                    self._json(404, {"error": "missing"})
+                elif subject is None:
+                    self._json(401, {"error": "valid bearer token required"})
+                elif subject != document[0]:
+                    self._json(403, {"error": "not owner"})
+                else:
+                    self._json(200, {"owner_id": document[0], "secret": document[1]})
                 return
             if bug_class == "csrf" and path == "/login":
                 self._send(200, '<form method="post"><input name="username"><input type="password" name="password"></form>', "text/html")

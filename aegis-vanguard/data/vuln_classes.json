@@ -1,0 +1,288 @@
+{
+  "source": "backend/app/services/agent/proof_policy.py:PROOFS_BY_CLASS + vulnerability_catalog.py",
+  "generated_by": "scripts/sync_vuln_classes.py",
+  "rules": {
+    "medium_plus_requires_proof_kind": true,
+    "unproven_severity_cap": "low",
+    "note": "A class with no proof kind cannot be confirmed; report it as a lead at low/info."
+  },
+  "pending_upstream": {},
+  "classes": {
+    "account_enumeration": {
+      "proof_kinds": [],
+      "confirmable": false,
+      "severity_cap": null,
+      "coverage_classes": []
+    },
+    "authorization": {
+      "proof_kinds": [
+        "authorization",
+        "owner_only",
+        "state_change",
+        "workflow"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "authz"
+      ]
+    },
+    "client_prototype_pollution": {
+      "proof_kinds": [
+        "scoped_browser_client"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "client_prototype_pollution"
+      ]
+    },
+    "client_template_injection": {
+      "proof_kinds": [
+        "scoped_browser_client"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "client_template_injection"
+      ]
+    },
+    "command_injection": {
+      "proof_kinds": [
+        "scoped_cmdi_eval"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "command_injection"
+      ]
+    },
+    "cors": {
+      "proof_kinds": [
+        "scoped_cors_credentialed"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "cors"
+      ]
+    },
+    "crlf": {
+      "proof_kinds": [
+        "scoped_response_crlf"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "crlf"
+      ]
+    },
+    "csrf": {
+      "proof_kinds": [
+        "scoped_csrf_state_change"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "csrf"
+      ]
+    },
+    "dom_open_redirect": {
+      "proof_kinds": [
+        "scoped_browser_client"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "dom_open_redirect"
+      ]
+    },
+    "exposure": {
+      "proof_kinds": [
+        "public_directory_index",
+        "response_match"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": []
+    },
+    "known_cve": {
+      "proof_kinds": [],
+      "confirmable": false,
+      "severity_cap": "low",
+      "coverage_classes": [
+        "js_dependency_review"
+      ]
+    },
+    "open_redirect": {
+      "proof_kinds": [
+        "scoped_response_redirect"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "open_redirect"
+      ]
+    },
+    "path_traversal": {
+      "proof_kinds": [
+        "scoped_traversal_read"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "path_traversal"
+      ]
+    },
+    "race_condition": {
+      "proof_kinds": [
+        "scoped_race_overrun"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "race_condition"
+      ]
+    },
+    "sql_injection": {
+      "proof_kinds": [
+        "numeric_boolean_sqli",
+        "oob_callback",
+        "post_boolean_sqli",
+        "post_error_sqli",
+        "string_boolean_sqli",
+        "string_error_sqli",
+        "string_time_sqli",
+        "string_union_sqli"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "sqli"
+      ]
+    },
+    "ssrf": {
+      "proof_kinds": [
+        "oob_callback"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "ssrf"
+      ]
+    },
+    "ssti": {
+      "proof_kinds": [
+        "scoped_ssti_eval"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "ssti"
+      ]
+    },
+    "xss": {
+      "proof_kinds": [
+        "browser_xss",
+        "scoped_browser_form_xss",
+        "scoped_browser_stored_xss",
+        "scoped_browser_xhr_xss",
+        "scoped_browser_xss",
+        "upload_xss"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "stored_xss",
+        "xss"
+      ]
+    },
+    "xxe": {
+      "proof_kinds": [
+        "oob_callback"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "xxe"
+      ]
+    }
+  },
+  "coverage_to_class": {
+    "authz": "authorization",
+    "business_logic": null,
+    "client_prototype_pollution": "client_prototype_pollution",
+    "client_template_injection": "client_template_injection",
+    "command_injection": "command_injection",
+    "cors": "cors",
+    "crlf": "crlf",
+    "csrf": "csrf",
+    "dom_data_manipulation": null,
+    "dom_link_manipulation": null,
+    "dom_open_redirect": "dom_open_redirect",
+    "file_upload": null,
+    "graphql": null,
+    "js_dependency_review": "known_cve",
+    "llm_ai": null,
+    "nosql": null,
+    "oauth": null,
+    "open_redirect": "open_redirect",
+    "path_traversal": "path_traversal",
+    "prototype_pollution": null,
+    "race_condition": "race_condition",
+    "request_url_override": null,
+    "saml_sso": null,
+    "sqli": "sql_injection",
+    "ssrf": "ssrf",
+    "ssti": "ssti",
+    "stored_xss": "xss",
+    "xss": "xss",
+    "xxe": "xxe"
+  },
+  "vanguard_aliases": {
+    "access_control": "authorization",
+    "account_enumeration": "account_enumeration",
+    "auth_bypass": "authorization",
+    "authz": "authorization",
+    "bfla": "authorization",
+    "blind_sqli": "sql_injection",
+    "bola": "authorization",
+    "broken_access_control": "authorization",
+    "cmdi": "command_injection",
+    "cors": "cors",
+    "crlf": "crlf",
+    "csrf": "csrf",
+    "cve": "known_cve",
+    "directory_listing": "exposure",
+    "directory_traversal": "path_traversal",
+    "dom-xss": "xss",
+    "dom_xss": "xss",
+    "exposure": "exposure",
+    "header_injection": "crlf",
+    "idor": "authorization",
+    "info_disclosure": "exposure",
+    "information_disclosure": "exposure",
+    "known_cve": "known_cve",
+    "lfi": "path_traversal",
+    "mass_assignment": "authorization",
+    "open_redirect": "open_redirect",
+    "os_command_injection": "command_injection",
+    "outdated_component": "known_cve",
+    "privilege_escalation": "authorization",
+    "race": "race_condition",
+    "race_condition": "race_condition",
+    "rce": "command_injection",
+    "redirect": "open_redirect",
+    "reflected_xss": "xss",
+    "secret_exposure": "exposure",
+    "sql": "sql_injection",
+    "sqli": "sql_injection",
+    "ssrf": "ssrf",
+    "ssti": "ssti",
+    "stored_xss": "xss",
+    "template_injection": "ssti",
+    "user_enumeration": "account_enumeration",
+    "xss": "xss",
+    "xxe": "xxe"
+  }
+}

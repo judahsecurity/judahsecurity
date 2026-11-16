@@ -155,6 +155,28 @@ def cap_source_verified_severity(
     return normalized, False
 
 
+def cap_version_only_cve_severity(
+    title: Optional[str], description: Optional[str], severity: Optional[str]
+) -> Tuple[str, bool]:
+    """Cap a CVE claim proven only by a version match at ``low``.
+
+    A version inside a published range is a lead. When the vulnerable behavior
+    is demonstrated, the claim belongs to that behavior's class (path
+    traversal, SSTI, XSS ...) and is gated by that class's proof instead.
+    Returns ``(effective_severity, was_capped)``.
+    """
+    from types import SimpleNamespace
+
+    from app.services.agent.proof_policy import inferred_vulnerability_class
+
+    normalized = (severity or "info").strip().lower()
+    claim = inferred_vulnerability_class(
+        SimpleNamespace(title=title or "", description=description or ""))
+    if claim == "known_cve" and normalized in _GATE_SEVERITIES:
+        return "low", True
+    return normalized, False
+
+
 def record_submit_receipt(
     store: Dict[str, Dict[str, Any]],
     *,

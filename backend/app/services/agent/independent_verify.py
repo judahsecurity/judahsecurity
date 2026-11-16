@@ -45,6 +45,10 @@ class FindingCandidate:
     vulnerability_class: str = ""
     coverage_cell_id: str = ""
     capture_id: str = ""
+    # Class + normalized endpoint + parameter. Reworded titles for the same
+    # bug merge into one candidate instead of spawning duplicates.
+    root_cause: str = ""
+    duplicate_titles: List[str] = field(default_factory=list)
     evidence_ids: List[str] = field(default_factory=list)
     proof_run_id: str = ""
     proof_escalation_id: str = ""
@@ -267,6 +271,44 @@ def candidate_id(title: str, target: str = "", coverage_cell_id: str = "") -> st
     if coverage_cell_id:
         blob += "|" + coverage_cell_id.strip()
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
+_ID_SEGMENT = re.compile(
+    r"^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
+    r"[0-9a-f]{16,}|[A-Za-z0-9_-]{22,})$",
+    re.I,
+)
+
+
+def normalized_endpoint(target: str) -> str:
+    """host + path with object identifiers collapsed; no scheme, query, or fragment."""
+    from urllib.parse import urlsplit
+
+    raw = str(target or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw if "://" in raw else "//" + raw)
+    except ValueError:
+        return raw.lower()
+    host = (parts.hostname or "").lower()
+    if parts.port and parts.port not in (80, 443):
+        host += f":{parts.port}"
+    segments = [("{id}" if _ID_SEGMENT.match(seg) else seg.lower())
+                for seg in (parts.path or "/").split("/") if seg]
+    return host + "/" + "/".join(segments)
+
+
+def root_cause_key(vulnerability_class: str, target: str, parameter: str = "") -> str:
+    """Cluster key for one bug: class, normalized endpoint, and parameter/sink."""
+    klass = str(vulnerability_class or "").strip().lower()
+    endpoint = normalized_endpoint(target)
+    if not klass or not endpoint:
+        return ""
+    sink = str(parameter or "").strip().lower()
+    if ":" in sink:
+        sink = sink.split(":", 1)[1]
+    return f"{klass}|{endpoint}|{sink}"
 
 
 def new_nonce() -> str:
@@ -722,6 +764,12 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_injection_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
+                replayed = await _verify_scoped_csrf_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 report = await _run_specialist(
                     profile, mission, [cand.target], llm, tools_manager,
                 )
@@ -1010,6 +1058,192 @@ async def _verify_scoped_cors_candidate(
         except Exception:
             logging.getLogger(__name__).exception("CORS verifier replay failed")
             failure = "CORS verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+def _confirm_or_explain(tools_manager: Any, store: Any, cand: FindingCandidate, run: Any,
+                        proof: dict, artifact_id: str, evidence: str) -> tuple[bool, str]:
+    """Validate a fresh verifier receipt and apply a confirmed verdict."""
+    from app.services.agent.proof_policy import validate_proof
+
+    valid, why = validate_proof(store, cand, proof, [artifact_id])
+    fresh, fresh_why = store.validate(
+        [artifact_id], candidate_id=cand.id, revision=cand.revision,
+        run_id=run.id, target=cand.target,
+    )
+    if valid and fresh:
+        verified = apply_verdict(
+            tools_manager, candidate_id=cand.id, verdict="confirmed",
+            evidence=evidence, evidence_ids=[artifact_id], proof=proof,
+        )
+        if verified and verified.status == "confirmed":
+            return True, ""
+    return False, why or fresh_why or "Proof policy rejected the replay"
+
+
+_INJECTION_PROOF_KINDS = {
+    "ssti": "scoped_ssti_eval",
+    "command_injection": "scoped_cmdi_eval",
+    "path_traversal": "scoped_traversal_read",
+}
+
+
+async def _verify_scoped_injection_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the hunter's SSTI/command/traversal recipe with fresh values."""
+    import asyncio
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.scoped_assessment.injection_probe import (
+        new_factors, probe_injection,
+    )
+
+    claim = cand.vulnerability_class
+    if claim not in _INJECTION_PROOF_KINDS:
+        return None
+    store = evidence_store(tools_manager)
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == claim
+                 and row.get("source") == "parameter_inventory"
+                 and row.get("method") == "GET"
+                 and row.get("path") == (urlsplit(cand.target).path or "/")), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_injection_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("test_type") == claim
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "An observed-input server-side injection receipt is required"
+    if cell and hunter:
+        hunter_id, receipt = hunter
+        payload = receipt.get("payload", {})
+        location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+        recipe = str(payload.get("recipe") or "")
+        if location == "query" and separator and parameter and recipe:
+            target = urlsplit(cand.target)
+            scoped_origin = f"{target.scheme}://{target.netloc}"
+            nonce = secrets.token_hex(8)
+            factors = new_factors() if claim != "path_traversal" else (0, 0)
+            try:
+                urls, context = tools_manager._injection_probe_urls(
+                    cand.target, parameter, claim, nonce, factors, identity,
+                    capture_id=str(cell.get("capture_id") or ""),
+                )
+                if context != payload.get("request_context") or recipe not in urls:
+                    raise ValueError("Observed injection baseline changed")
+                urls = {"control": urls["control"], recipe: urls[recipe]}
+                tools_manager._scoped_claim_gets(2)
+                replay = await asyncio.to_thread(
+                    probe_injection, urls, test_type=claim, allowed_origin=scoped_origin,
+                    state=tools_manager._scoped_state(identity, cand.target),
+                    nonce=nonce, factors=factors,
+                )
+                summary = {"test_type": claim, "parameter": parameter, "path": cell["path"],
+                           "request_context": context, "nonce": nonce, **replay}
+                artifact_id = store.record(
+                    "scoped_injection_probe", summary, target=cand.target,
+                    identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                    test_type=claim, success=replay["proof_confirmed"],
+                )
+                if replay.get("proof_confirmed") is True:
+                    proof = {"kind": _INJECTION_PROOF_KINDS[claim],
+                             "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                    confirmed, failure = _confirm_or_explain(
+                        tools_manager, store, cand, run, proof, artifact_id,
+                        f"Fresh {claim} recipe reproduced the server-side signal.",
+                    )
+                    if confirmed:
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary":
+                                f"Fresh {claim} probe matched the hunter receipt",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                else:
+                    failure = f"Fresh {claim} probe did not reproduce the signal"
+            except Exception:
+                logging.getLogger(__name__).exception("Injection verifier replay failed")
+                failure = "Injection verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_csrf_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the cross-site canary write with a fresh nonce."""
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.scoped_assessment.csrf_probe import probe_csrf
+
+    if cand.vulnerability_class != "csrf":
+        return None
+    store = evidence_store(tools_manager)
+    identity = str(cand.identity or "")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_csrf_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "A cross-site canary write receipt is required"
+    if hunter and identity not in {"", "anonymous", "unspecified"}:
+        hunter_id, receipt = hunter
+        payload = receipt.get("payload", {})
+        target = urlsplit(cand.target)
+        scoped_origin = f"{target.scheme}://{target.netloc}"
+        try:
+            path = target.path or "/"
+            if path not in (getattr(tools_manager, "_scoped_csrf_action_paths", None) or set()):
+                raise ValueError("CSRF action path is no longer operator approved")
+            tools_manager._scoped_origin(cand.target)
+            tools_manager._scoped_claim_posts(2)
+            tools_manager._scoped_claim_gets(3)
+            nonce = secrets.token_hex(8)
+            replay = await probe_csrf(
+                cand.target, str(payload.get("readback_url") or ""),
+                str(payload.get("cleanup_template") or ""),
+                field=str(payload.get("field") or ""), allowed_origin=scoped_origin,
+                state=tools_manager._scoped_state(identity, cand.target), nonce=nonce,
+            )
+            summary = {"nonce": nonce, "path": payload.get("path"),
+                       "readback_url": payload.get("readback_url"),
+                       "cleanup_template": payload.get("cleanup_template"), **replay}
+            artifact_id = store.record(
+                "scoped_csrf_probe", summary, target=cand.target, identity=identity,
+                coverage_cell_id=cand.coverage_cell_id, test_type="csrf",
+                success=replay["proof_confirmed"],
+            )
+            if replay.get("proof_confirmed") is True:
+                proof = {"kind": "scoped_csrf_state_change",
+                         "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                confirmed, failure = _confirm_or_explain(
+                    tools_manager, store, cand, run, proof, artifact_id,
+                    "Fresh cross-site canary write reproduced the state change.",
+                )
+                if confirmed:
+                    return {"candidate_id": cand.id, "title": cand.title,
+                            "status": "confirmed", "verifier_summary":
+                            "Fresh CSRF probe matched the hunter receipt",
+                            "key_findings": [], "tool_calls": 1, "error": None}
+            else:
+                failure = "Fresh cross-site request did not reproduce the state change"
+        except Exception:
+            logging.getLogger(__name__).exception("CSRF verifier replay failed")
+            failure = "CSRF verifier replay failed"
     apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
                   evidence=failure, summary=failure)
     return {"candidate_id": cand.id, "title": cand.title,
@@ -1987,6 +2221,34 @@ def submit_candidate(
             "",
         )
     cid = candidate_id(title, target, coverage_cell_id)
+    from types import SimpleNamespace
+
+    from app.services.agent.proof_policy import inferred_vulnerability_class
+
+    claim_class = vulnerability_class or inferred_vulnerability_class(
+        SimpleNamespace(title=title, description=description))
+    root_cause = root_cause_key(claim_class, target, parameter)
+    if root_cause:
+        known_ids = set()
+        twin = None
+        for raw in getattr(brain, "candidates", None) or []:
+            other = raw if isinstance(raw, FindingCandidate) else candidate_from_dict(raw)
+            if not other:
+                continue
+            known_ids.add(other.id)
+            if twin is None and other.root_cause == root_cause:
+                twin = other
+        if cid not in known_ids and twin is not None:
+            # Same class, endpoint, and sink under a reworded title: merge.
+            if title and title != twin.title and title not in twin.duplicate_titles:
+                twin.duplicate_titles = [*twin.duplicate_titles, title[:300]][-10:]
+                brain.candidates = [twin.to_dict() if (r.get("id") if isinstance(r, dict) else r.id) == twin.id
+                                    else (r if isinstance(r, dict) else r.to_dict())
+                                    for r in brain.candidates]
+            cid = twin.id
+            title, target = twin.title, twin.target
+            # Keep the original candidate's cell binding; only evidence merges.
+            coverage_cell_id = capture_id = proof_escalation_id = ""
     existing = []
     for raw in getattr(brain, "candidates", None) or []:
         c = raw if isinstance(raw, FindingCandidate) else candidate_from_dict(raw)
@@ -2064,6 +2326,7 @@ def submit_candidate(
         vulnerability_class=vulnerability_class,
         coverage_cell_id=coverage_cell_id,
         capture_id=capture_id,
+        root_cause=root_cause,
         evidence_ids=list(dict.fromkeys(evidence_ids or [])),
         proof_run_id=proof_run_id,
         proof_escalation_id=proof_escalation_id,

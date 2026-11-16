@@ -356,6 +356,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "test_saml_sso",
             "execute_jwt",
             "scoped_race_assigned",
+            "scoped_csrf_assigned",
             "compare_requests",
             "list_captured_requests",
             "mutate_captured_request",
@@ -565,6 +566,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scoped_xml_entity_assigned",
             "scoped_response_probe_assigned",
             "scoped_cors_probe_assigned",
+            "scoped_injection_probe_assigned",
             "compare_requests",
             "mutate_list",
             "list_captured_requests",
@@ -590,6 +592,39 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "Run execute_ffuf with -of json so discovered paths auto-seed in-scope coverage cells; "
             "an execute_sqlmap or execute_ffuf hit is a lead that seeds a cell, not a finding — "
             "confirm it with the scoped probes and independent verifier before submitting a candidate."
+        ),
+    ),
+    SpecialistProfile(
+        name="server_injection",
+        role=(
+            "Server-side injection specialist for SSTI, OS command injection, path "
+            "traversal, and NoSQL operator injection on observed inputs. Prove with "
+            "computed output or a known-file signature, never with errors or reflection."
+        ),
+        allowed_tools=[
+            "get_parameter_inventory",
+            "scoped_injection_probe_assigned",
+            "scoped_response_probe_assigned",
+            "execute_commix",
+            "compare_requests",
+            "list_captured_requests",
+            "mutate_captured_request",
+            "generate_injection_payloads",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+        ],
+        max_iterations=10,
+        system_prompt_suffix=(
+            "For each leased ssti, command_injection, or path_traversal cell call "
+            "scoped_injection_probe_assigned first; it is the only way to a medium+ "
+            "proof. Submit a candidate only from a positive receipt, with the exact "
+            "vulnerability_class and evidence_id. Never send destructive commands, "
+            "write files, open shells, or read secrets; arithmetic and world-readable "
+            "file signatures are the whole proof. NoSQL stays a lead unless an "
+            "authorization proof with distinct identities shows impact."
         ),
     ),
     SpecialistProfile(
