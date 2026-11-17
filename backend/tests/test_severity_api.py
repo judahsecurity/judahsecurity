@@ -17,6 +17,7 @@ from app.db.database import Base, get_db  # noqa: E402
 import app.models  # noqa: E402,F401
 from app.models.asset import Asset, AssetType  # noqa: E402
 from app.models.business_application import BusinessApplication  # noqa: E402
+from app.models.exposure_evidence import FindingSourceEvidence  # noqa: E402
 from app.models.netblock import Netblock  # noqa: E402
 from app.models.organization import Organization  # noqa: E402
 from app.models.screenshot import Screenshot  # noqa: E402
@@ -29,7 +30,7 @@ def client(monkeypatch):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine, tables=[
         Organization.__table__, Netblock.__table__, BusinessApplication.__table__, Asset.__table__,
-        Vulnerability.__table__, Screenshot.__table__,
+        Vulnerability.__table__, FindingSourceEvidence.__table__, Screenshot.__table__,
     ])
     Session = sessionmaker(bind=engine)
     import app.db.database as database
