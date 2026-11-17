@@ -32,6 +32,8 @@ PANTHEON: Dict[str, tuple[str, str]] = {
     "host_tenant": ("Judah", "Tribe identity — Host/tenant isolation differentials"),
     "business_logic": ("Joseph", "Steward of the storehouse — workflow / logic abuse"),
     "injection": ("David", "Sling against the giant — SQLi / XSS / command injection (legacy combined lane)"),
+    "server_injection": ("Ehud", "The hidden blade — SSTI / command injection / path traversal"),
+    "http_protocol": ("Habakkuk", "Watchman on the rampart — request smuggling / cache poisoning"),
     "xss": ("Jonathan", "Arrow of the bow — reflected / stored / DOM XSS"),
     "sqli": ("Joab", "Captain of the host — SQL / template / command injection"),
     "ssrf": ("Asher", "Bread of the king — SSRF / URL-fetch / webhook"),

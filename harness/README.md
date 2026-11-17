@@ -35,9 +35,37 @@ observation, test attempts, evidence, cost, and incomplete runs. A class passes
 only when its positive finding is verified, its negative has an evidenced
 rejection, neither run has an extra finding, and both runs used equal budgets.
 
-The included local lab exposes nine classes in positive and negative modes:
-SQLi, base64 encoded SQLi, reflected XSS, DOM XSS, SSRF, IDOR, GraphQL authorization,
-unsafe upload, and CSRF. It binds
+The included local lab exposes fifteen classes in positive and negative modes:
+SQLi (`sqli`), base64 encoded SQLi (`sqli_encoded`), blind JSON POST SQLi
+(`sqli_post_blind`), reflected XSS (`xss`), DOM XSS (`xss_dom`), XHR POST XSS
+(`xss_post_xhr`), SSRF, IDOR, GraphQL authorization (`graphql_authz`), unsafe
+upload (`unsafe_file_upload`), CSRF, SSTI (`ssti`, `/greeting?message=`),
+OS command injection (`command_injection`, `/tools/ping?host=`), path traversal
+(`path_traversal`, `/download?file=`), and JWT `alg: none` acceptance (`jwt`,
+`/api/token` then `/api/documents/{id}`). Each negative is a safe twin of the
+same surface: it escapes, validates, normalizes, or verifies instead.
+SSTI, command injection, and path traversal target Prowl's
+`scoped_injection_probe_assigned` proofs; their parameter names are chosen so
+the vulnerability catalog creates the matching GET-query coverage cells. Command
+execution is simulated in pure Python (no shell or subprocess), and path
+traversal resolves against an in-memory filesystem whose `/etc/passwd` holds
+`root:x:0:0:root:/root:/bin/bash` (the real filesystem is never read). The CSRF
+positive supports `scoped_csrf_state_change`: log in with `POST /login`
+(`username=A&password=lab-pass`) for a `lab_session` cookie, replay a
+cross-site `application/x-www-form-urlencoded` `POST /profile` with no token,
+read back via `GET /profile`, confirm anonymous replay gets 401, and reset with
+`DELETE /profile`. The JWT positive supports `scoped_jwt_probe`: the lab signs
+HS256 tokens with a fixed loopback-only key (`LAB_JWT_KEY`), so the manifest
+generator mints each identity's token up front and writes
+`class_lab_jwt_identities.json`, whose identities carry
+`Authorization: Bearer <jwt>` (the jwt manifest cases name that file in their
+`identities` field; pass it as `--identities` for those two runs only). The
+crawler finds `/api/documents/1` linked from `/`; it returns 401 with no token or
+a malformed token, 200 with A's token, and in the positive also 200 with the
+same body for an `alg: none` token carrying an extra claim. The safe twin
+verifies every signature and returns 401. Classes listed in `KNOWN_GAPS` (none
+at present) are marked `known_gap`; the report shows that note per class, and
+known-gap classes do not affect the scorer's exit code. The lab binds
 only to `127.0.0.1`. The SSRF positive fixture makes a DNS lookup only for a
 host beneath an explicitly supplied controlled OAST suffix. Start one case at
 a time, using a dedicated assessment database and the **same model, budget,
@@ -57,7 +85,8 @@ python -m local_harness.product_class_benchmark runs/class_lab/corpus.json \
 ```
 
 Repeat the lab server and agent command for each manifest case, changing
-`--class`, `--polarity`, and the sink directory. For the SSRF positive, add
+`--class`, `--polarity`, and the sink directory. For `jwt-positive` and
+`jwt-negative`, use `--identities runs/class_lab/class_lab_jwt_identities.json`. For the SSRF positive, add
 `--callback-suffix YOUR_CONTROLLED_OAST_SUFFIX` and `--require-oast` to the agent
 command. Use a fresh sink path for every run; the adapter refuses an existing
 findings file. The scorer exits `0` only when all classes pass, `2` for measured

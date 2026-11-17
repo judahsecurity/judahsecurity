@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Literal, List
 from urllib.parse import urlsplit
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Response
 from pydantic import BaseModel, field_validator, model_validator, Field
 
 from sqlalchemy.orm import Session
@@ -106,6 +106,12 @@ class OwnerOnlyResource(BaseModel):
 class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
+    # Operator-approved state-changing actions for the race and CSRF proofs.
+    # Each needs a matching cleanup path that accepts the __PROWL_NONCE__ canary.
+    race_action_paths: list[str] = Field(default_factory=list, max_length=8)
+    race_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
+    csrf_action_paths: list[str] = Field(default_factory=list, max_length=8)
+    csrf_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
     owner_only_resources: list[OwnerOnlyResource] = Field(default_factory=list, max_length=8)
     auth_login_path: Optional[str] = None
     # Explicit operator grants for lanes that are off by default. These arrive
@@ -127,7 +133,9 @@ class AgentAssessmentPolicy(BaseModel):
             raise ValueError("Authenticated login path must be an exact same-origin path")
         return path
 
-    @field_validator("body_replay_paths", "stored_xss_cleanup_paths")
+    @field_validator("body_replay_paths", "stored_xss_cleanup_paths",
+                     "race_action_paths", "race_cleanup_paths",
+                     "csrf_action_paths", "csrf_cleanup_paths")
     @classmethod
     def validate_body_paths(cls, paths: list[str]) -> list[str]:
         for path in paths:
@@ -845,6 +853,97 @@ async def load_prior_hunt(
         raise HTTPException(status_code=404, detail="Prior session not found")
     queue_load_brief(session_id, brief)
     return {"ok": True, "session_id": session_id, "source_session_id": request.source_session_id}
+
+
+# =============================================================================
+# PROOF CLASSES + EXTERNAL CANDIDATE INTAKE (Aegis Vanguard -> Prowl verifier)
+# =============================================================================
+
+class ExternalCandidateRequest(BaseModel):
+    """An operator-supplied lead. Every field is untrusted text, never evidence."""
+
+    title: str = Field(min_length=4, max_length=200)
+    target: str = Field(min_length=8, max_length=2048)
+    vulnerability_class: str = Field(min_length=2, max_length=64)
+    description: str = Field(default="", max_length=2000)
+    claimed_request: str = Field(default="", max_length=2000)
+    severity: Literal["info", "low", "medium", "high", "critical"] = "medium"
+    parameter: Optional[str] = Field(default=None, max_length=128)
+    evidence_note: Optional[str] = Field(default=None, max_length=1000)
+
+
+def _owned_conversation(db: Session, session_id: str, current_user: User) -> tuple:
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    conv = db.query(AgentConversation).filter(AgentConversation.session_id == session_id).first()
+    if conv is None or conv.user_id != current_user.id or conv.organization_id != org_id:
+        # Same answer for "missing" and "someone else's" so ids cannot be probed.
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv, org_id
+
+
+@router.get("/proof-classes")
+async def get_proof_classes(current_user: User = Depends(get_current_user)):
+    """PROOFS_BY_CLASS, coverage classes and severity caps (read-only)."""
+    from app.services.agent.external_candidates import proof_class_catalog
+
+    return proof_class_catalog()
+
+
+@router.post("/sessions/{session_id}/candidates", status_code=201)
+async def submit_session_candidate(
+    session_id: str,
+    request: ExternalCandidateRequest,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Add an external candidate as *pending* to a session's engagement brain.
+
+    Idle session: written to the durable snapshot (201); resume the session
+    (POST /query, same session_id) so its own independent verifier re-derives
+    the proof in-session. Running session: validated the same way, then queued
+    in the session's candidate inbox (202, ``queued: true``); the orchestrator
+    merges it into the live brain where it drains operator steers. Never
+    confirms anything.
+    """
+    conv, org_id = _owned_conversation(db, session_id, current_user)
+    if conv.mode != "agent":
+        raise HTTPException(status_code=409, detail="Candidate intake requires an agent-mode session")
+    from app.services.agent.external_candidates import IntakeError, submit_external_candidate
+
+    try:
+        # Synchronous: running-task check and snapshot write share one event-loop slice.
+        result = submit_external_candidate(
+            org_id, session_id,
+            title=request.title, target=request.target,
+            vulnerability_class=request.vulnerability_class,
+            description=request.description, claimed_request=request.claimed_request,
+            severity=request.severity, parameter=request.parameter or "",
+            evidence_note=request.evidence_note or "",
+        )
+    except IntakeError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from None
+    if result.get("queued"):
+        response.status_code = 202
+    logger.info("External candidate intake user=%s session=%s accepted=%s queued=%s",
+                current_user.id, session_id, result.get("accepted"), bool(result.get("queued")))
+    return {"session_id": session_id, **result}
+
+
+@router.get("/sessions/{session_id}/candidates")
+async def list_session_candidates(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Candidate status from the durable snapshot plus undrained inbox items (status "queued")."""
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    from app.services.agent.external_candidates import list_candidates
+    from app.services.agent.run_control import has_running_task
+
+    return {**list_candidates(org_id, session_id), "run_in_progress": has_running_task(session_id)}
 
 
 @router.get("/playbooks")

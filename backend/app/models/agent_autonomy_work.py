@@ -2,7 +2,9 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import (
+    Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint,
+)
 
 from app.db.database import Base
 
@@ -45,3 +47,32 @@ class AgentRunSnapshot(Base):
     organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     payload = Column(JSON, nullable=False)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AgentCandidateInbox(Base):
+    """Durable external-candidate inbox for runs that may span several hosts.
+
+    One row per queued Vanguard candidate for a running session (see
+    ``app.services.agent.run_control``). ``payload`` holds the validated,
+    wrapped candidate with its free-text claim fields redacted at rest.
+    ``claimed_at``/``claim_token`` mark a think turn that is merging the row;
+    the row is deleted only once the run snapshot accounts for it, and a claim
+    older than the stale window may be taken over by another worker.
+    """
+
+    __tablename__ = "agent_candidate_inbox"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "session_id", "candidate_id",
+                         name="uq_agent_candidate_inbox_candidate"),
+        Index("ix_agent_candidate_inbox_session", "organization_id", "session_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    session_id = Column(String(128), nullable=False)
+    candidate_id = Column(String(128), nullable=False)
+    root_cause = Column(Text, nullable=False, default="")
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    claimed_at = Column(DateTime, nullable=True)
+    claim_token = Column(String(64), nullable=True)

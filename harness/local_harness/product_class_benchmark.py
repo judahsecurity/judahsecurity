@@ -80,6 +80,7 @@ def score_case(case: dict, root: Path) -> dict:
         "id": case["id"],
         "bug_class": case["bug_class"],
         "polarity": case["polarity"],
+        "known_gap": case.get("known_gap"),
         "complete": completed,
         "final_run_status": final_run_status,
         "eligible_surface_observed": observed,
@@ -125,7 +126,8 @@ def score_corpus(corpus_path: Path) -> dict:
         except (OSError, ValueError, TypeError, KeyError) as exc:
             cases.append({
                 "id": case["id"], "bug_class": case["bug_class"],
-                "polarity": case["polarity"], "status": "artifact_error",
+                "polarity": case["polarity"], "known_gap": case.get("known_gap"),
+                "status": "artifact_error",
                 "error": str(exc),
             })
     classes: dict[str, list[dict]] = defaultdict(list)
@@ -146,7 +148,9 @@ def score_corpus(corpus_path: Path) -> dict:
             len({tuple(r["model_routes"][task]) for r in rows}) == 1
             for task in common_tasks
         )
+        known_gaps = sorted({str(r["known_gap"]) for r in rows if r.get("known_gap")})
         by_class[name] = {
+            "known_gap": known_gaps[0] if len(known_gaps) == 1 else "; ".join(known_gaps) or None,
             "cases": len(rows),
             "passed": sum(r["status"] == "pass" for r in rows),
             "incomplete_or_error": sum(r["status"] in {"incomplete", "artifact_error"} for r in rows),
@@ -188,7 +192,9 @@ def main(argv: list[str] | None = None) -> int:
     print(rendered)
     if any(c["status"] in {"incomplete", "artifact_error"} for c in report["cases"]):
         return 3
-    return 0 if report["by_class"] and all(c["pass"] for c in report["by_class"].values()) else 2
+    # Known-gap classes are reported (and may pass) but do not gate the exit code.
+    gating = [c for c in report["by_class"].values() if not c.get("known_gap")]
+    return 0 if report["by_class"] and all(c["pass"] for c in gating) else 2
 
 
 if __name__ == "__main__":

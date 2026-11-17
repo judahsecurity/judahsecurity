@@ -56,7 +56,11 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("Invalid JSON number")
 
 
-def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
+_KEEP = object()
+
+
+def _mutate_json(data: bytes, pointer: str, payload: str = "'", *, replace: bool = False,
+                 value_override: object = _KEEP) -> bytes:
     if not pointer.startswith("/") or len(pointer) > 300:
         raise ValueError("A bounded JSON pointer is required")
     try:
@@ -91,7 +95,10 @@ def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
         raise ValueError("JSON pointer does not identify an observed field")
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError("Body probe requires a string or numeric field")
-    setter(str(value) + payload)
+    if value_override is not _KEEP:
+        setter(value_override)
+    else:
+        setter(payload if replace else str(value) + payload)
     changed = json.dumps(document, ensure_ascii=False, separators=(",", ":"),
                          allow_nan=False).encode()
     if len(changed) > MAX_REPLAY_BODY:
@@ -99,7 +106,7 @@ def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
     return changed
 
 
-def _mutate_form(data: bytes, parameter: str, payload: str = "'") -> bytes:
+def _mutate_form(data: bytes, parameter: str, payload: str = "'", *, replace: bool = False) -> bytes:
     try:
         raw = data.decode("ascii")
     except UnicodeDecodeError as exc:
@@ -117,7 +124,10 @@ def _mutate_form(data: bytes, parameter: str, payload: str = "'") -> bytes:
     name, separator, value = fields[index].partition("=")
     from urllib.parse import quote
 
-    fields[index] = name + "=" + value + quote(payload, safe="") if separator else name + "=" + quote(payload, safe="")
+    if replace:
+        fields[index] = name + "=" + quote(payload, safe="")
+    else:
+        fields[index] = name + "=" + value + quote(payload, safe="") if separator else name + "=" + quote(payload, safe="")
     changed = "&".join(fields).encode("ascii")
     if len(changed) > MAX_REPLAY_BODY:
         raise ValueError("Mutated body exceeds replay limit")
@@ -297,7 +307,8 @@ def captured_volatile_post_fields(body: bytes, mime: str) -> list[str]:
 
 
 def plan_observed_body(private_exchange: bytes, *, parameter: str,
-                       allowed_origins: list[str], payload: str = "'") -> tuple[str, str, bytes, bytes]:
+                       allowed_origins: list[str], payload: str = "'",
+                       replace: bool = False) -> tuple[str, str, bytes, bytes]:
     """Validate a captured POST and change one JSON or form field."""
     try:
         captured = json.loads(private_exchange)
@@ -326,9 +337,45 @@ def plan_observed_body(private_exchange: bytes, *, parameter: str,
         raise ValueError("Captured body is empty or exceeds replay limit")
     if not isinstance(payload, str) or not 0 < len(payload) <= 300:
         raise ValueError("A bounded body probe payload is required")
-    changed = (_mutate_json(body, parameter, payload)
-               if json_body else _mutate_form(body, parameter, payload))
+    changed = (_mutate_json(body, parameter, payload, replace=replace)
+               if json_body else _mutate_form(body, parameter, payload, replace=replace))
     return url, mime, body, changed
+
+
+def plan_json_value_body(private_exchange: bytes, *, parameter: str,
+                         allowed_origins: list[str], value: object) -> tuple[str, str, bytes]:
+    """Set one observed JSON field to a fixed (possibly non-string) value."""
+    url, mime, body, _changed = plan_observed_body(
+        private_exchange, parameter=parameter, allowed_origins=allowed_origins, payload="x",
+    )
+    if mime != "application/json" and not mime.endswith("+json"):
+        raise ValueError("Typed JSON values require a captured JSON body")
+    return url, mime, _mutate_json(body, parameter, value_override=value)
+
+
+def plan_form_operator_body(private_exchange: bytes, *, parameter: str,
+                            allowed_origins: list[str], operator: str,
+                            value: str) -> tuple[str, str, bytes]:
+    """Rename one observed form field to ``name[$op]`` (qs/PHP bracket syntax)."""
+    from urllib.parse import quote
+
+    url, mime, body, _changed = plan_observed_body(
+        private_exchange, parameter=parameter, allowed_origins=allowed_origins, payload="x",
+    )
+    if mime != "application/x-www-form-urlencoded":
+        raise ValueError("Operator field names require a captured form body")
+    if operator not in {"", "$ne", "$eq"}:
+        raise ValueError("Unsupported operator")
+    fields = body.decode("ascii").split("&")
+    matches = [i for i, f in enumerate(fields) if f and unquote_plus(f.split("=", 1)[0]) == parameter]
+    if len(matches) != 1:
+        raise ValueError("Form field must occur exactly once")
+    name = parameter + (f"[{operator}]" if operator else "")
+    fields[matches[0]] = quote(name, safe="") + "=" + quote(value, safe="")
+    changed = "&".join(fields).encode("ascii")
+    if len(changed) > MAX_REPLAY_BODY:
+        raise ValueError("Mutated body exceeds replay limit")
+    return url, mime, changed
 
 
 def plan_sql_error_body(private_exchange: bytes, *, parameter: str,

@@ -421,7 +421,7 @@ def inventory_with_operations(cmap: dict, operations: list[dict]) -> dict:
 
 def parameters_for_specialist(cmap: dict, specialist: str) -> list[dict]:
     rows = [row for row in collect_parameter_inventory(cmap) if row["testable"]]
-    if specialist not in {"xss", "sqli", "injection"}:
+    if specialist not in {"xss", "sqli", "injection", "server_injection"}:
         return rows
 
     def rank(row: dict) -> tuple:

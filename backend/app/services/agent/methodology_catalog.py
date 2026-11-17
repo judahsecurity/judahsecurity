@@ -375,8 +375,10 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             priority="high",
             assumption="Cookie-authenticated state changes lack effective anti-CSRF controls",
             test=(
-                "Replay password/email/admin/state-changing requests without CSRF token; "
-                "confirm real state change via compare_requests"
+                "For a leased csrf cell with operator-approved csrf_action_paths, call "
+                "scoped_csrf_assigned (token-less cross-site form POST, canary readback, "
+                "anonymous control, cleanup). Otherwise replay without the token and keep "
+                "the result a lead"
             ),
             pass_criteria="Authenticated state changed without a valid anti-CSRF token",
             kill_criteria="Token required and bound; SameSite adequately blocks with no alternate vector",
@@ -2205,6 +2207,36 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A03:2021 Injection",
             evidence=pages[0],
             why="Browsable UI with limited signals",
+        ))
+
+    # HTTP protocol layer: request smuggling and web cache poisoning. These have
+    # no automated proof because a positive test can affect other users (a
+    # poisoned cache entry, a desynced connection), so they are low-priority
+    # leads for the http_protocol lane to record for operator follow-up.
+    if pages or apis:
+        add(Methodology(
+            id="http_protocol_review",
+            title="Request smuggling and web cache poisoning leads",
+            hunt="http_protocol",
+            specialist="http_protocol",
+            priority="low",
+            assumption=(
+                "A front-end proxy/CDN and the origin disagree on request framing, or a "
+                "cache keys on fewer inputs than the origin reflects"
+            ),
+            test=(
+                "test_request_smuggling in detection (timing) mode only; "
+                "test_cache_poisoning with a unique cache-buster on every request. "
+                "Never send a poisoning request without a unique cache-buster and never "
+                "chain a desync into another user's request"
+            ),
+            pass_criteria="Repeatable timing or unkeyed-input reflection, recorded as a lead",
+            kill_criteria="No framing discrepancy and no unkeyed reflection",
+            cwe_ids=["CWE-444", "CWE-349"],
+            capec_ids=["CAPEC-33", "CAPEC-141"],
+            owasp="A05:2021 Security Misconfiguration",
+            evidence=str(pages[0] if pages else target),
+            why="Web surface behind HTTP infrastructure",
         ))
 
     return _rank(out)

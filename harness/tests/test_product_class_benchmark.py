@@ -1,6 +1,6 @@
 import json
 
-from local_harness.product_class_benchmark import score_corpus
+from local_harness.product_class_benchmark import main, score_corpus
 
 
 def _run(root, name, *, target, specialist, state, attempts, finding=None, complete=True):
@@ -102,3 +102,43 @@ def test_partial_ledger_cannot_pass_even_if_response_claims_completion(tmp_path)
     report = score_corpus(path)
     assert report["cases"][0]["status"] == "incomplete"
     assert report["cases"][0]["final_run_status"] == "partial"
+
+
+def test_known_gap_class_is_reported_but_does_not_gate_exit(tmp_path):
+    expected = [{"id": "owner-read", "category": "idor", "endpoint": "/private/1"}]
+    finding = {
+        "type": "vulnerability", "title": "IDOR in private object",
+        "url": "https://positive.test/private/1", "confidence": "confirmed",
+        "raw_data": {"poc": {"confirmed": True, "endpoint": "https://positive.test/private/1",
+                             "response_snippet": "verified owner record"}},
+    }
+    _run(tmp_path, "positive", target="https://positive.test", specialist="api_authz",
+         state="proven_with_evidence", attempts=1, finding=finding)
+    _run(tmp_path, "negative", target="https://negative.test", specialist="api_authz",
+         state="negative_with_evidence", attempts=1)
+    _run(tmp_path, "gap-positive", target="https://gap-positive.test", specialist="auth_logic",
+         state="candidate", attempts=1)
+    _run(tmp_path, "gap-negative", target="https://gap-negative.test", specialist="auth_logic",
+         state="negative_with_evidence", attempts=1)
+    gap = "no deterministic validator"
+    cases = [_case("positive", "positive", expected=expected), _case("negative", "negative", expected=[])]
+    for name, polarity in (("gap-positive", "positive"), ("gap-negative", "negative")):
+        cases.append({
+            "id": name, "bug_class": "jwt", "polarity": polarity, "run_dir": name,
+            "target": f"https://{name}.test", "specialist": "auth_logic", "known_gap": gap,
+            "expected_findings": [{"id": "jwt", "category": "auth", "endpoint": "/api/documents/{id}"}]
+            if polarity == "positive" else [],
+        })
+    path = tmp_path / "corpus.json"
+    path.write_text(json.dumps({"cases": cases}))
+
+    report = score_corpus(path)
+    assert report["by_class"]["jwt"]["known_gap"] == gap
+    assert report["by_class"]["jwt"]["verified_recall"] == 0.0
+    assert report["by_class"]["jwt"]["pass"] is False
+    assert report["by_class"]["idor"]["known_gap"] is None
+    assert main([str(path)]) == 0
+    cases[-1].pop("known_gap")
+    cases[-2].pop("known_gap")
+    path.write_text(json.dumps({"cases": cases}))
+    assert main([str(path)]) == 2

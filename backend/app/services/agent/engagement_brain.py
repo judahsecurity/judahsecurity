@@ -3708,8 +3708,8 @@ def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
         lines.append("All high-priority methodology cards resolved — safe to complete after coverage/report.")
     else:
         lines.append(
-            "Do NOT complete yet. Prove/kill blocking cards (or completion_reason must include "
-            "'defer methodologies' / 'force complete')."
+            "Do NOT complete yet. Prove/kill blocking cards. Only the operator can "
+            "defer methodologies or force completion."
         )
     return "\n".join(lines)
 

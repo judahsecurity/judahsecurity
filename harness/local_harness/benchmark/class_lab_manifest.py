@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
+from local_harness.benchmark.class_lab import issue_lab_jwt
+
 
 CASES = {
     "sqli": ("sqli", "/search", "sqli"),
@@ -19,7 +21,28 @@ CASES = {
     "graphql_authz": ("idor", "/graphql", "graphql_api"),
     "unsafe_file_upload": ("file_upload", "/api/uploads/{id}", "file_upload"),
     "csrf": ("csrf", "/profile", "auth_logic"),
+    "ssti": ("ssti", "/greeting", "server_injection"),
+    "command_injection": ("rce", "/tools/ping", "server_injection"),
+    "path_traversal": ("lfi", "/download", "server_injection"),
+    "jwt": ("auth", "/api/documents/{id}", "auth_logic"),
 }
+
+ACCEPTED_CATEGORIES = {
+    "graphql_authz": ["authz"],
+    "unsafe_file_upload": ["xss"],
+    # A forged-token read of A's document may be titled as broken access control.
+    "jwt": ["authz", "idor"],
+}
+
+# Classes Prowl cannot yet confirm through a deterministic validator. They are
+# still run and scored, but the report marks them so a 0 verified recall reads
+# as a tracked gap rather than a regression.
+KNOWN_GAPS: dict[str, str] = {}
+
+# Classes whose run needs a class-specific identities file (written next to the
+# shared one). The jwt identities carry each account's lab-issued bearer token
+# so Prowl's scoped_jwt_probe can locate and forge it.
+CLASS_IDENTITIES = {"jwt": "class_lab_jwt_identities.json"}
 
 
 def build_manifest(target: str) -> dict:
@@ -34,18 +57,26 @@ def build_manifest(target: str) -> dict:
                 "expected_findings": [{
                     "id": name, "category": category, "endpoint": endpoint,
                     "description": f"Lab {bug_class} impact at {endpoint}",
-                    "accepted_categories": ["authz"] if bug_class == "graphql_authz" else
-                                           ["xss"] if bug_class == "unsafe_file_upload" else [],
+                    "accepted_categories": ACCEPTED_CATEGORIES.get(bug_class, []),
                 }] if polarity == "positive" else [],
+                **({"known_gap": KNOWN_GAPS[bug_class]} if bug_class in KNOWN_GAPS else {}),
+                **({"identities": CLASS_IDENTITIES[bug_class]}
+                   if bug_class in CLASS_IDENTITIES else {}),
             })
     return {"cases": cases}
 
 
-def build_identities(target: str) -> list[dict]:
+def build_identities(target: str, bug_class: str | None = None) -> list[dict]:
+    """Return lab test identities; ``bug_class="jwt"`` adds a bearer JWT header."""
+    def headers(name: str) -> dict:
+        if bug_class == "jwt":
+            return {"X-Lab-Identity": name, "Authorization": "Bearer " + issue_lab_jwt(name)}
+        return {"X-Lab-Identity": name}
+
     return [
         {
             "name": name, "target": target,
-            "headers": {"X-Lab-Identity": name},
+            "headers": headers(name),
             "cookies": {"lab_session": name},
             "role": "owner" if name == "A" else "peer",
             "check": {"url": target + "/whoami", "field": "principal_id", "expected": name},
@@ -66,6 +97,10 @@ def main(argv=None):
     identities.write_text(json.dumps(build_identities(target), indent=2) + "\n")
     print(args.out)
     print(identities)
+    for bug_class, filename in CLASS_IDENTITIES.items():
+        path = args.out.with_name(filename)
+        path.write_text(json.dumps(build_identities(target, bug_class), indent=2) + "\n")
+        print(path)
 
 
 if __name__ == "__main__":

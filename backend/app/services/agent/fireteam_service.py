@@ -356,6 +356,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "test_saml_sso",
             "execute_jwt",
             "scoped_race_assigned",
+            "scoped_csrf_assigned",
+            "scoped_jwt_probe",
+            "scoped_jwt_key_url_probe",
+            "scoped_jwt_key_url_probe",
             "compare_requests",
             "list_captured_requests",
             "mutate_captured_request",
@@ -436,6 +440,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_astf",
             "discover_parameters",
             "execute_arjun",
+            "scoped_jwt_probe",
             "compare_requests",
             "mutate_captured_request",
             "list_captured_requests",
@@ -565,6 +570,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scoped_xml_entity_assigned",
             "scoped_response_probe_assigned",
             "scoped_cors_probe_assigned",
+            "scoped_injection_probe_assigned",
             "compare_requests",
             "mutate_list",
             "list_captured_requests",
@@ -590,6 +596,68 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "Run execute_ffuf with -of json so discovered paths auto-seed in-scope coverage cells; "
             "an execute_sqlmap or execute_ffuf hit is a lead that seeds a cell, not a finding — "
             "confirm it with the scoped probes and independent verifier before submitting a candidate."
+        ),
+    ),
+    SpecialistProfile(
+        name="server_injection",
+        role=(
+            "Server-side injection specialist for SSTI, OS command injection, path "
+            "traversal, and NoSQL operator injection on observed inputs. Prove with "
+            "computed output or a known-file signature, never with errors or reflection."
+        ),
+        allowed_tools=[
+            "get_parameter_inventory",
+            "scoped_injection_probe_assigned",
+            "scoped_response_probe_assigned",
+            "execute_interactsh",
+            "execute_commix",
+            "compare_requests",
+            "list_captured_requests",
+            "mutate_captured_request",
+            "generate_injection_payloads",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+        ],
+        max_iterations=10,
+        system_prompt_suffix=(
+            "For each leased ssti, command_injection, or path_traversal cell call "
+            "scoped_injection_probe_assigned first; it is the only way to a medium+ "
+            "proof. Submit a candidate only from a positive receipt, with the exact "
+            "vulnerability_class and evidence_id. Never send destructive commands, "
+            "write files, open shells, or read secrets; arithmetic and world-readable "
+            "file signatures are the whole proof. NoSQL GET inputs use the operator "
+            "differential in the same tool. For blind command injection with OOB "
+            "authorized, call run_oob_callback_workflow with cmdi_shell set "
+            "(posix_subshell|posix_separator|windows_separator) and field=<parameter>."
+        ),
+    ),
+    SpecialistProfile(
+        name="http_protocol",
+        role=(
+            "HTTP protocol specialist for request smuggling and web cache poisoning. "
+            "Records leads for operator follow-up; these classes have no automated proof "
+            "because a positive test can affect other users."
+        ),
+        allowed_tools=[
+            "test_request_smuggling",
+            "test_cache_poisoning",
+            "compare_requests",
+            "list_captured_requests",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "save_note",
+        ],
+        max_iterations=6,
+        system_prompt_suffix=(
+            "Use test_request_smuggling in timing-detection mode only and "
+            "test_cache_poisoning (it adds a unique cache-buster to every probe). "
+            "Never send a poisoning request on a shared cache key and never chain a "
+            "desync into another user's request. Record results as leads with "
+            "save_note and update_hypothesis; do not submit finding candidates."
         ),
     ),
     SpecialistProfile(

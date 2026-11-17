@@ -19,6 +19,10 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 from urllib.parse import urlparse
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 _CRAWL_TOOLS = {
     "execute_interceptor",
     "execute_deep_crawl",
@@ -369,13 +373,22 @@ def _observed_input_batch_step(
     }
 
 
+# Classes whose independent verifier is a scripted replay of a hunter receipt
+# (no LLM), so a pending candidate can be verified as a forced step.
+DETERMINISTIC_REPLAY_CLASSES = frozenset({
+    "sql_injection", "xss", "crlf", "open_redirect", "cors", "race_condition",
+    "dom_open_redirect", "client_template_injection", "client_prototype_pollution",
+    "ssti", "command_injection", "path_traversal", "nosql", "csrf", "jwt",
+})
+
+
 def _pending_candidate_verify_step(
     state: Dict[str, Any], trace: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     for candidate in ((state.get("engagement_brain") or {}).get("candidates") or []):
         if not isinstance(candidate, dict) or candidate.get("status") != "pending":
             continue
-        if (candidate.get("vulnerability_class") not in {"sql_injection", "xss"}
+        if (candidate.get("vulnerability_class") not in DETERMINISTIC_REPLAY_CLASSES
                 and candidate.get("specialist") not in {"sqli", "xss"}):
             continue
         candidate_id = str(candidate.get("id") or "")
@@ -829,7 +842,8 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
         registry_only = is_registry_primary(state)
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     pipeline = web and not registry_only
     handoff_failures = (_failed_first_pass_handoffs(state, primary_web_target(state))
                         if pipeline else [])
@@ -884,7 +898,8 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
                 ),
             }
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     if state.get("assessment_resume") and pipeline:
         pending = _pending_first_pass_count(state)
         missing = ([{
@@ -1010,13 +1025,15 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
         missing.extend(registry_missing_probes(state))
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     try:
         from app.services.agent.wordpress_surface import wordpress_missing_probes
 
         missing.extend(wordpress_missing_probes(state))
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
 
     next_action = missing[0]["next"] if missing else ""
     return {
@@ -1099,6 +1116,41 @@ def format_tester_loop_for_prompt(progress: Dict[str, Any], state: Optional[Dict
     return "\n".join(lines)
 
 
+_OVERRIDE_TOKENS = ("force complete", "defer methodologies", "defer remaining")
+SYSTEM_CVE_COMPLETE_REASON = "CVE applicability answered; defer methodologies"
+
+
+def completion_override_allowed(
+    state: Optional[Dict[str, Any]], completion_reason: str = "",
+) -> bool:
+    """Only an operator or a system-forced path may skip the tester loop.
+
+    The model's own ``completion_reason`` text is not authority: a phrase like
+    "force complete" written by the model used to bypass every coverage gate.
+    Overrides now require operator-supplied text (the objective or an operator
+    steer) or the system's named-CVE applicability shortcut.
+    """
+    state = state or {}
+    operator_text = " ".join(
+        [str(state.get("objective") or ""), str(state.get("original_objective") or "")]
+        + [str(item) for item in (state.get("operator_steers") or [])]
+    ).lower()
+    if any(token in operator_text for token in _OVERRIDE_TOKENS):
+        return True
+    if (completion_reason or "").strip() == SYSTEM_CVE_COMPLETE_REASON:
+        try:
+            from app.services.agent.cve_applicability import is_cve_applicability_question
+
+            return bool(is_cve_applicability_question(state))
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "CVE applicability check failed; completion stays gated")
+            return False
+    return False
+
+
 def complete_blocked_reason(
     state: Optional[Dict[str, Any]] = None,
     *,
@@ -1109,11 +1161,7 @@ def complete_blocked_reason(
         # The full tester loop requires crawlers, directory brute force and
         # fireteam tools that the bounded pilot deliberately cannot run.
         return None
-    reason = (completion_reason or "").lower()
-    if any(
-        token in reason
-        for token in ("force complete", "defer methodologies", "defer remaining", "non-browser")
-    ):
+    if completion_override_allowed(state, completion_reason):
         return None
     progress = tester_loop_progress(state)
     if progress.get("is_web") and not progress.get("ready_to_complete"):
@@ -1309,7 +1357,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             # Registry hosts are not websites — do not Interceptor-crawl /v2/.
             return None
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     if not is_web_target(state):
         return None
     try:
@@ -1328,7 +1377,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         if is_cve_applicability_question(state):
             return None
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     target = primary_web_target(state)
     if not target:
         return None
@@ -1483,7 +1533,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         if wp_step and wordpress_step_due(state):
             return wp_step
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
 
     if not dir_done and waits < 2:
         return {
@@ -1570,7 +1621,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         if wp_step and wordpress_step_due(state):
             return wp_step
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     try:
         from app.services.agent.model_led import registry_step_due
         from app.services.agent.registry_surface import registry_forced_step
@@ -1579,5 +1631,6 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         if reg_step and registry_step_due(state):
             return reg_step
     except Exception:
-        pass
+        # A failing import or helper used to silently drop this gate.
+        logger.exception("Tester-loop gate check failed")
     return None

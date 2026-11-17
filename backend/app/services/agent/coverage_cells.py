@@ -169,7 +169,9 @@ def _specialist_for(test_type: str, hypothesis_id: str, brain: Any) -> str:
         return "sqli"
     if "ssrf" in kind or "url_fetch" in kind:
         return "ssrf"
-    if "path" in kind or "command" in kind or kind in {"cmdi", "input_boundary"}:
+    if "path" in kind or "command" in kind or kind == "cmdi":
+        return "server_injection"
+    if kind == "input_boundary":
         return "injection"
     return "app_mapper"
 

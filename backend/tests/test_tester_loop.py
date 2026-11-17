@@ -1101,12 +1101,15 @@ def test_loop_complete_after_crawl_ferox_params_fireteam():
     assert complete_blocked_reason(state) is None
 
 
-def test_force_complete_bypass():
+def test_force_complete_requires_operator_not_model_text():
     state = {
         "original_objective": "https://app.example.com",
         "execution_trace": [],
     }
-    assert complete_blocked_reason(state, completion_reason="force complete") is None
+    # Model-written completion text no longer skips the tester loop.
+    assert complete_blocked_reason(state, completion_reason="force complete")
+    operator = {**state, "operator_steers": ["force complete"]}
+    assert complete_blocked_reason(operator, completion_reason="done") is None
 
 
 def test_no_directory_constraint_still_runs_observed_input_first_pass():

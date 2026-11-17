@@ -92,6 +92,7 @@ def assert_method_allowed(manager, url: str, method: str) -> None:
     if method == "POST" and path in (
         (getattr(manager, "_scoped_body_replay_paths", None) or set())
         | (getattr(manager, "_scoped_race_action_paths", None) or set())
+        | (getattr(manager, "_scoped_csrf_action_paths", None) or set())
         | ({getattr(manager, "_scoped_auth_login_path", "")}
            if getattr(manager, "_scoped_auth_login_path", "") else set())
     ):
@@ -99,6 +100,7 @@ def assert_method_allowed(manager, url: str, method: str) -> None:
     if method == "DELETE" and path in (
         (getattr(manager, "_scoped_stored_xss_cleanup_paths", None) or set())
         | (getattr(manager, "_scoped_race_cleanup_paths", None) or set())
+        | (getattr(manager, "_scoped_csrf_cleanup_paths", None) or set())
     ):
         return
     raise ValueError(f"{method} {path} requires an exact operator-approved path")

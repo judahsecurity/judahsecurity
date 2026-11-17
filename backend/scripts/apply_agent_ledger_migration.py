@@ -8,7 +8,11 @@ from app.db.database import engine
 from app.models.organization import Organization  # noqa: F401 - referenced metadata
 from app.models.user import User  # noqa: F401 - referenced metadata
 from app.models.scan_schedule import ScanSchedule  # noqa: F401 - referenced metadata
-from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot
+from app.models.agent_autonomy_work import (
+    AgentAutonomyWork,
+    AgentCandidateInbox,
+    AgentRunSnapshot,
+)
 from app.models.agent_run_ledger import (
     AgentActionReceipt,
     AgentHypothesisCoverage,
@@ -23,6 +27,7 @@ def apply() -> None:
         AgentHypothesisCoverage.__table__,
         AgentAutonomyWork.__table__,
         AgentRunSnapshot.__table__,
+        AgentCandidateInbox.__table__,
     ]
     with engine.begin() as connection:
         AgentRunLedger.metadata.create_all(bind=connection, tables=tables, checkfirst=True)

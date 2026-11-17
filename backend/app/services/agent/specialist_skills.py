@@ -28,6 +28,19 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- fingerprint_api on captured samples (Judah traffic, not Caido). If blocked/no-data, crawl first.\n"
         "- Do not spray Nuclei; hand off to attack specialists."
     ),
+    "http_protocol": (
+        "SKILL PACK — HTTP protocol (request smuggling / web cache poisoning):\n"
+        "- These are lead-only classes: a positive automated test can poison a shared cache "
+        "or desync another user's connection, so there is no automated proof.\n"
+        "- test_request_smuggling: timing-detection mode only (CL.TE / TE.CL / TE.TE). "
+        "Never send a follow-up request designed to capture or prefix another user's request.\n"
+        "- test_cache_poisoning: every probe already carries a unique prowlcb cache-buster; "
+        "do not remove it or replay the poisoning header on the real cache key.\n"
+        "- Discipline: a timing difference needs repeated interleaved samples; an unkeyed "
+        "header reflected only in the poisoning response is not served-from-cache proof.\n"
+        "- Record results with save_note and update_hypothesis for operator follow-up; "
+        "do not submit finding candidates."
+    ),
     "auth_logic": (
         "SKILL PACK — authentication testing (Ezra):\n"
         "- Enumerate login/session/password-reset from the map.\n"
@@ -343,7 +356,8 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "mutate_captured_request(location='body_json'|query, field=url, value=payload_url), "
         "then poll. Do not use Canarytokens. Prove with run_custom_probe if you need a 10-line PoC. Never metadata/localhost.\n"
         "- Report with payload + response evidence; no status-only findings. "
-        "Homepage plugin/core versions in a published CVE range ARE findings."
+        "Homepage plugin/core versions in a published CVE range are low-severity leads; "
+        "medium+ needs the behavior proven with a class-specific scoped probe."
     ),
     "ssrf": (
         "SKILL PACK — SSRF / URL-fetch:\n"
@@ -538,6 +552,12 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
 }
 
 
+def _log_skill_failure(part: str) -> None:
+    import logging
+
+    logging.getLogger(__name__).exception("Skill pack assembly failed: %s", part)
+
+
 def skill_pack_for(specialist: str) -> str:
     """Return the skill-pack body for a specialist, or empty string.
 
@@ -555,7 +575,7 @@ def skill_pack_for(specialist: str) -> str:
             parts.append(FINDING_WRITEUP_GUIDANCE.strip())
             parts.append(FINDING_REVIEW_GUIDANCE.strip())
         except Exception:
-            pass
+            _log_skill_failure("finding guidance")
     try:
         from app.services.agent.auth_header_bypass import (
             HUNTER_RULES as AUTH_HEADER_HUNTER,
@@ -588,7 +608,7 @@ def skill_pack_for(specialist: str) -> str:
             VERIFIER_ADDENDUM,
         )
 
-        if specialist in ("ssrf", "injection", "sqli", "js_secrets"):
+        if specialist in ("ssrf", "injection", "server_injection", "sqli", "js_secrets"):
             parts.append(INTERACTSH_HUNTER)
         if specialist in ("api_authz", "auth_logic"):
             parts.append(HUNTER_RULES)
@@ -613,13 +633,17 @@ def skill_pack_for(specialist: str) -> str:
             parts.append(ML_REVIEW)
             parts.append(INTERACTSH_REVIEW)
     except Exception:
-        pass
+        # A failing import silently removed hunter/verifier rules before.
+        _log_skill_failure("scenario rules")
     extra = {
         "js_secrets": ("lazy_chunk_downloader", "js_analysis", "jshero"),
         "spa_client": ("lazy_chunk_downloader", "js_analysis", "interceptor", "jshero"),
         "content_api": ("js_analysis", "interceptor", "api_fingerprint", "jshero"),
         "app_mapper": ("interceptor", "api_fingerprint"),
         "injection": ("wordpress",),
+        "server_injection": ("ssti", "command_injection", "path_traversal", "nosql"),
+        "auth_logic": ("csrf", "jwt"),
+        "api_authz": ("idor", "jwt"),
         "xss": ("xss",),
         "sqli": ("sqli", "wordpress"),
         "ssrf": ("ssrf",),
@@ -634,5 +658,5 @@ def skill_pack_for(specialist: str) -> str:
                 if body:
                     parts.append(body)
         except Exception:
-            pass
+            _log_skill_failure("SKILL.md packs")
     return "\n\n".join(p for p in parts if p)

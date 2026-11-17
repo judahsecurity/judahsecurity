@@ -508,6 +508,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_stored_xss_cleanup_paths = SessionValue(set)
     _scoped_race_action_paths = SessionValue(set)
     _scoped_race_cleanup_paths = SessionValue(set)
+    _scoped_csrf_action_paths = SessionValue(set)
+    _scoped_csrf_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_auth_login_path = SessionValue(lambda: "")
     _scoped_assessment_started = SessionValue(lambda: False)
@@ -740,6 +742,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
             "scoped_cors_probe_assigned": self.scoped_cors_probe_assigned,
             "scoped_race_assigned": self.scoped_race_assigned,
+            "scoped_injection_probe_assigned": self.scoped_injection_probe_assigned,
+            "scoped_csrf_assigned": self.scoped_csrf_assigned,
+            "scoped_jwt_probe": self.scoped_jwt_probe,
+            "scoped_jwt_key_url_probe": self.scoped_jwt_key_url_probe,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -1978,6 +1984,458 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                  ("control", "probe", "cleanup_confirmed", "requests_sent")},
                 "funnel": parameter_test_funnel(brain)}
 
+    async def scoped_injection_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Test one observed input for SSTI, command injection, traversal, or NoSQL.
+
+        Computed-output (SSTI/command injection), known-file (traversal), or
+        operator-differential (NoSQL) proofs only. Observed GET query inputs and
+        operator-approved, browser-captured POST bodies (form or JSON) are
+        supported. The model chooses the leased cell; payloads, factors, and
+        requests are fixed here.
+        """
+        import secrets
+        import time
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.injection_probe import (
+            TEST_TYPES, new_factors, recipes_for,
+        )
+        from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        method = str((cell or {}).get("method") or "").upper()
+        get_input = method == "GET" and location == "query"
+        post_input = (method == "POST" and location in {"body_form", "body_json"}
+                      and bool((cell or {}).get("capture_id"))
+                      and (cell or {}).get("observation_source") == "browser_traffic"
+                      and location in {"body_form", "body_json"})
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
+                or cell.get("test_type") not in TEST_TYPES
+                or not (get_input or post_input)
+                or not separator or not parameter
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        if post_input and str(cell.get("path") or "/") not in (
+                getattr(self, "_scoped_body_replay_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "POST path is not in body_replay_paths"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        from urllib.parse import urlsplit
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        url = scoped_origin + cell["path"]
+        identity = str(cell.get("identity") or "anonymous")
+        test_type = cell["test_type"]
+        nonce = secrets.token_hex(8)
+        factors = new_factors() if test_type != "path_traversal" else (0, 0)
+        try:
+            proof, context = await self._run_injection_probe(
+                cell, url, parameter, test_type, nonce, factors, identity,
+                scoped_origin=scoped_origin, recipe="",
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        summary = {"test_type": test_type, "parameter": parameter, "location": location,
+                   "path": cell["path"], "request_context": context, "nonce": nonce,
+                   "recipes_available": list(recipes_for(test_type)), **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_injection_probe", summary, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type=test_type,
+            capture_id=str(cell.get("capture_id") or ""),
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_injection_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Server-side injection signal requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof.get(k) for k in
+                                 ("test_type", "recipe", "control", "probes", "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
+
+    async def _run_injection_probe(
+        self, cell: Dict[str, Any], url: str, parameter: str, test_type: str,
+        nonce: str, factors: tuple, identity: str, *, scoped_origin: str,
+        recipe: str = "",
+    ) -> tuple[dict, str]:
+        """Build and send one injection proof for a GET query or captured POST body.
+
+        ``recipe`` restricts a verifier replay to the hunter's recipe.
+        """
+        import asyncio
+
+        from app.services.agent.scoped_assessment import injection_probe
+
+        location = str(cell.get("parameter") or "").partition(":")[0]
+        state = self._scoped_state(identity, url)
+        if location in {"body_form", "body_json"}:
+            requests, context, fetch = self._injection_probe_bodies(
+                cell, parameter, test_type, nonce, factors, identity, scoped_origin)
+            if test_type == "nosql":
+                self._scoped_claim_posts(len(requests))
+                proof = await asyncio.to_thread(
+                    injection_probe.probe_nosql, requests, allowed_origin=scoped_origin,
+                    state=state, nonce=nonce, fetch=fetch,
+                )
+                return proof, context
+            if recipe:
+                if recipe not in requests:
+                    raise ValueError("Observed injection baseline changed")
+                requests = {"control": requests["control"], recipe: requests[recipe]}
+            self._scoped_claim_posts(len(requests))
+            proof = await asyncio.to_thread(
+                injection_probe.probe_injection, requests, test_type=test_type,
+                allowed_origin=scoped_origin, state=state, nonce=nonce,
+                factors=factors, fetch=fetch,
+            )
+            return proof, context
+        urls, context = self._injection_probe_urls(
+            url, parameter, test_type, nonce, factors, identity,
+            capture_id=str(cell.get("capture_id") or ""),
+        )
+        if test_type == "nosql":
+            self._scoped_claim_gets(len(urls))
+            proof = await asyncio.to_thread(
+                injection_probe.probe_nosql, urls, allowed_origin=scoped_origin,
+                state=state, nonce=nonce,
+            )
+            return proof, context
+        if recipe:
+            if recipe not in urls:
+                raise ValueError("Observed injection baseline changed")
+            urls = {"control": urls["control"], recipe: urls[recipe]}
+        self._scoped_claim_gets(min(9, len(urls)))
+        proof = await asyncio.to_thread(
+            injection_probe.probe_injection, urls, test_type=test_type,
+            allowed_origin=scoped_origin, state=state, nonce=nonce, factors=factors,
+        )
+        return proof, context
+
+    def _injection_probe_bodies(
+        self, cell: Dict[str, Any], parameter: str, test_type: str, nonce: str,
+        factors: tuple, identity: str, scoped_origin: str,
+    ):
+        """Control and fixed probe bodies from one approved, captured POST."""
+        from urllib.parse import urlsplit
+
+        from app.services.agent.scoped_assessment import body_probe
+        from app.services.agent.scoped_assessment.injection_probe import (
+            control_value, probe_value, recipes_for,
+        )
+
+        private = self._scoped_exchange(str(cell["capture_id"]), identity)
+        captured = json.loads(private)
+        url = str(captured.get("url") or "")
+        allowed = self._scoped_origin(url)
+        if (allowed != scoped_origin or captured.get("method") != "POST"
+                or captured.get("resource_type") not in {"xhr", "fetch"}
+                or (urlsplit(url).path or "/") != cell.get("path")):
+            raise ValueError("captured_post_shape_mismatch")
+        if cell.get("path") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+            raise ValueError("operator_approval_required")
+        a, b = factors
+        replace = test_type == "path_traversal"
+
+        def plan(value: str) -> tuple[str, bytes]:
+            _url, mime, _baseline, changed = body_probe.plan_observed_body(
+                private, parameter=parameter, allowed_origins=[allowed],
+                payload=value, replace=replace,
+            )
+            return mime, changed
+
+        if test_type == "nosql":
+            from app.services.agent.scoped_assessment.injection_probe import NOSQL_SEQUENCE
+
+            literal = control_value(test_type, nonce)
+            location = str(cell.get("parameter") or "").partition(":")[0]
+            values = {"control": literal, "true": {"$ne": literal}, "false": {"$eq": literal}}
+            operators = {"control": "", "true": "$ne", "false": "$eq"}
+            requests = {}
+            for step in NOSQL_SEQUENCE:
+                kind = step.split("_", 1)[0]
+                if location == "body_form":
+                    _url, mime, requests[step] = body_probe.plan_form_operator_body(
+                        private, parameter=parameter, allowed_origins=[allowed],
+                        operator=operators[kind], value=literal,
+                    )
+                else:
+                    _url, mime, requests[step] = body_probe.plan_json_value_body(
+                        private, parameter=parameter, allowed_origins=[allowed],
+                        value=values[kind],
+                    )
+        else:
+            mime, control = plan(control_value(test_type, nonce))
+            requests = {"control": control}
+            for name in recipes_for(test_type):
+                requests[name] = plan(probe_value(test_type, name, a, b))[1]
+        headers = body_probe.safe_replay_headers(private)
+        state = self._scoped_state(identity, url)
+
+        def fetch(body: bytes, **_ignored) -> tuple[int, bytes]:
+            result = body_probe._observe_post(url, mime, body, [allowed], state,
+                                              replay_headers=headers, capture_body=True)
+            return int(result.get("status") or 0), bytes(result.get("_private_body") or b"")
+
+        return requests, f"captured_post:{mime}", fetch
+
+    def _injection_probe_urls(
+        self, url: str, parameter: str, test_type: str, nonce: str,
+        factors: tuple, identity: str, capture_id: str = "",
+    ) -> tuple[dict, str]:
+        """Build control and fixed probe URLs from one observed GET baseline."""
+        from app.services.agent.scoped_assessment.injection_probe import (
+            control_value, probe_value, recipes_for,
+        )
+
+        a, b = factors
+        control_url, context = self._observed_get_query_template(
+            url, parameter, control_value(test_type, nonce), identity, capture_id=capture_id,
+        )
+        if context == "single_parameter":
+            raise ValueError("observed_query_baseline_missing")
+        self._scoped_origin(control_url)
+        if test_type == "nosql":
+            from app.services.agent.scoped_assessment.injection_probe import (
+                NOSQL_SEQUENCE, nosql_field_name, rename_query_field,
+            )
+
+            urls = {step: rename_query_field(control_url, parameter,
+                                             nosql_field_name(parameter, step))
+                    for step in NOSQL_SEQUENCE}
+            return urls, context
+        urls = {"control": control_url}
+        for recipe in recipes_for(test_type):
+            probe_url, probe_context = self._observed_get_query_template(
+                url, parameter, probe_value(test_type, recipe, a, b), identity,
+                capture_id=capture_id,
+            )
+            if probe_context != context:
+                raise ValueError("observed_query_baseline_missing")
+            self._scoped_origin(probe_url)
+            urls[recipe] = probe_url
+        return urls, context
+
+    async def scoped_jwt_probe(self, target_url: str, identity: str,
+                               jwks_url: str = "") -> Dict[str, Any]:
+        """Check whether an observed endpoint verifies the identity's JWT signature.
+
+        Uses the registered identity's own token, adds a nonce claim, and sends it
+        unsigned (alg none) or with a non-matching signature. The model supplies
+        only the observed URL and identity name.
+        """
+        import asyncio
+        import secrets
+
+        from app.services.agent.assessment_sessions import identity_registry
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment import jwt_probe
+
+        identity = str(identity or "")
+        if identity in {"", "anonymous", "unspecified", "legacy"}:
+            return {"success": False, "error": "registered_identity_required"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        observed = set(cmap.get("pages_visited") or []) | {
+            row.get("url") for row in (cmap.get("discovered_links") or []) if isinstance(row, dict)
+        } | {row.get("url") for row in (cmap.get("api_samples") or []) if isinstance(row, dict)}
+        if (not scoped_origin or target_url not in observed
+                or _origin(str(target_url)) != scoped_origin):
+            return {"success": False, "error": "observed_endpoint_required"}
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(target_url)
+            session = identity_registry(self).resolve(identity, target_url)
+            public_pem = None
+            if jwks_url:
+                if _origin(str(jwks_url)) != scoped_origin:
+                    raise ValueError("jwks_url must be on the assessed origin")
+                self._scoped_origin(jwks_url)
+                self._scoped_claim_gets(1)
+                jwks = await asyncio.to_thread(
+                    jwt_probe.fetch_jwks, jwks_url, allowed_origin=scoped_origin)
+                _, _, _, header, _ = jwt_probe._decode(jwt_probe.locate_token(session)[2])
+                public_pem = jwt_probe.jwk_to_pem(jwks, header.get("kid"))
+            self._scoped_claim_gets(8)
+            proof = await asyncio.to_thread(
+                jwt_probe.probe_jwt, target_url, allowed_origin=scoped_origin,
+                session=session, nonce=nonce, public_pem=public_pem,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        summary = {"nonce": nonce, "jwks_url": str(jwks_url or ""), **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_jwt_probe", summary, target=target_url, identity=identity,
+            test_type="jwt", success=proof["proof_confirmed"],
+        )
+        return {"success": True, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("auth_enforced", "recipe", "probes", "requests_sent")}}
+
+    async def scoped_jwt_key_url_probe(self, target_url: str, identity: str,
+                                       header: str = "jku") -> Dict[str, Any]:
+        """Check whether an observed endpoint fetches a jku/x5u URL from the token.
+
+        Needs out-of-band callbacks authorized for the run. Registers a fresh
+        collaborator, puts its URL in the identity's token header, and confirms
+        only on an HTTP fetch of that registration.
+        """
+        import asyncio
+        import secrets
+
+        from app.services import interactsh_service
+        from app.services.agent.assessment_sessions import identity_registry
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment import jwt_probe
+
+        if not getattr(self, "_oob_callbacks_allowed", False):
+            return {"success": False, "error": "oob_not_authorized"}
+        if header not in jwt_probe.KEY_URL_HEADERS:
+            return {"success": False, "error": "header must be jku or x5u"}
+        identity = str(identity or "")
+        if identity in {"", "anonymous", "unspecified", "legacy"}:
+            return {"success": False, "error": "registered_identity_required"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        observed = set(cmap.get("pages_visited") or []) | {
+            row.get("url") for row in (cmap.get("discovered_links") or []) if isinstance(row, dict)
+        } | {row.get("url") for row in (cmap.get("api_samples") or []) if isinstance(row, dict)}
+        if (not scoped_origin or target_url not in observed
+                or _origin(str(target_url)) != scoped_origin):
+            return {"success": False, "error": "observed_endpoint_required"}
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(target_url)
+            session = identity_registry(self).resolve(identity, target_url)
+            self._scoped_claim_gets(2)
+            proof = await asyncio.to_thread(
+                jwt_probe.probe_jwt_key_url, target_url, allowed_origin=scoped_origin,
+                session=session, nonce=nonce, header_name=header,
+                register=interactsh_service.register, poll=interactsh_service.poll,
+                stop=interactsh_service.stop,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        artifact_id = evidence_store(self).record(
+            "scoped_jwt_probe", {"nonce": nonce, **proof}, target=target_url,
+            identity=identity, test_type="jwt", success=proof["proof_confirmed"],
+        )
+        return {"success": True, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof.get(k) for k in
+                                 ("auth_enforced", "recipe", "interactions", "requests_sent")}}
+
+    async def scoped_csrf_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        field: str, readback_url: str, cleanup_url_template: str,
+    ) -> Dict[str, Any]:
+        """Prove a cross-site, token-less form POST changes the victim's state."""
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.csrf_probe import probe_csrf
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "surface_applicability"
+                or cell.get("test_type") != "csrf"
+                or str(cell.get("method") or "POST").upper() != "POST"
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        action_path = str(cell.get("path") or "/")
+        if action_path not in (getattr(self, "_scoped_csrf_action_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "CSRF action path is not in csrf_action_paths"}
+        if "__PROWL_NONCE__" not in str(cleanup_url_template or ""):
+            return {"success": False, "error": "cleanup_template_missing_nonce"}
+        cleanup_path = urlsplit(cleanup_url_template.replace("__PROWL_NONCE__", "x")).path or "/"
+        if cleanup_path not in (getattr(self, "_scoped_csrf_cleanup_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "cleanup path is not in csrf_cleanup_paths"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        observed = set(cmap.get("pages_visited") or []) | {
+            row.get("url") for row in (cmap.get("discovered_links") or [])
+            if isinstance(row, dict)}
+        if readback_url not in observed or _origin(readback_url) != scoped_origin:
+            return {"success": False, "error": "observed_readback_page_missing"}
+        identity = str(cell.get("identity") or "anonymous")
+        if identity in {"", "anonymous", "unspecified"}:
+            return {"success": False, "error": "authenticated_identity_required"}
+        action_url = scoped_origin + action_path
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(action_url)
+            self._scoped_claim_posts(2)
+            self._scoped_claim_gets(3)
+            proof = await probe_csrf(
+                action_url, readback_url, cleanup_url_template, field=str(field or ""),
+                allowed_origin=scoped_origin, state=self._scoped_state(identity, action_url),
+                nonce=nonce,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        summary = {"nonce": nonce, "path": action_path, "readback_url": readback_url,
+                   "cleanup_template": cleanup_url_template, **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_csrf_probe", summary, target=action_url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="csrf",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_csrf_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Cross-site state change requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("control", "probe", "cross_site_cookie_eligible",
+                                  "cleanup_confirmed", "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
+
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
         technique: str = "parser_control",
@@ -2969,10 +3427,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 spec["allowed_methods"] = ["GET", "HEAD"]
                 spec["approved_post_paths"] = sorted(
                     self._scoped_body_replay_paths | self._scoped_race_action_paths
+                    | self._scoped_csrf_action_paths
                     | ({self._scoped_auth_login_path} if self._scoped_auth_login_path else set())
                 )
                 spec["approved_delete_paths"] = sorted(
                     self._scoped_stored_xss_cleanup_paths | self._scoped_race_cleanup_paths
+                    | self._scoped_csrf_cleanup_paths
                 )
                 tool_args["args"] = json.dumps(spec)
             except (ValueError, TypeError) as exc:
@@ -4966,6 +5426,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if not org_id:
             return "Error: No organization context. create_finding requires an active session."
 
+        # A version-only CVE claim is a lead: cap it at low instead of letting
+        # it reach (and fail) the medium+ proof gate.
+        from app.services.agent.finding_gate import cap_version_only_cve_severity
+
+        severity, cve_capped = cap_version_only_cve_severity(
+            f"{title or ''} {cve_id or ''}".strip(), description, severity)
+        if cve_capped and not not_demonstrated:
+            not_demonstrated = ("Vulnerable behavior not demonstrated; severity capped "
+                                "at low for a version-range match.")
+
         # Independent verify (fireteam/candidates) or legacy Solomon SUBMIT gate
         ok, gate_msg = finding_publish_allowed(
             self,
@@ -5928,8 +6398,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.vulnerability_catalog import parameter_test_classes
 
-        if specialist not in {"all", "xss", "sqli", "injection"}:
-            return json.dumps({"error": "specialist must be all, xss, sqli, or injection"})
+        if specialist not in {"all", "xss", "sqli", "injection", "server_injection"}:
+            return json.dumps({"error": "specialist must be all, xss, sqli, injection, or server_injection"})
         cmap = getattr(self, "_capability_map", None) or {}
         if not isinstance(cmap, dict):
             cmap = {}
@@ -8614,19 +9084,30 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         results: List[Dict[str, Any]] = []
 
+        def busted(base: str) -> str:
+            # Every probe uses its own cache key. Without a unique cache-buster a
+            # positive probe would poison the live entry served to real users.
+            from urllib.parse import urlencode, urlsplit, urlunsplit
+
+            parts = urlsplit(base)
+            extra = urlencode({"prowlcb": _uuid.uuid4().hex[:16]})
+            query = f"{parts.query}&{extra}" if parts.query else extra
+            return urlunsplit(parts._replace(query=query))
+
         async def probe_header(header_name: str) -> Dict[str, Any]:
             canary_value = f"{canary}.attacker.example.com" if "host" in header_name.lower() else canary
             probe_hdrs = {header_name: canary_value, "Cache-Control": "no-cache", "Pragma": "no-cache"}
+            probe_url = busted(url)
             try:
-                async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
-                    # Poison probe
-                    r1 = await client.get(url, headers={**probe_hdrs, "User-Agent": "Mozilla/5.0 (Security Assessment)"})
+                async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=False) as client:
+                    # Poison probe on a unique cache key
+                    r1 = await client.get(probe_url, headers={**probe_hdrs, "User-Agent": "Mozilla/5.0 (Security Assessment)"})
                     body1 = r1.text[:4000]
                     reflected_in_poison = canary in body1 or canary_value in body1
                     cache_status_poison = r1.headers.get("X-Cache", r1.headers.get("CF-Cache-Status", "unknown"))
 
-                    # Re-fetch without the probe header (would hit cache)
-                    r2 = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (Victim Simulation)"})
+                    # Re-fetch the same unique key without the probe header
+                    r2 = await client.get(probe_url, headers={"User-Agent": "Mozilla/5.0 (Victim Simulation)"})
                     body2 = r2.text[:4000]
                     reflected_in_clean = canary in body2 or canary_value in body2
                     cache_status_clean = r2.headers.get("X-Cache", r2.headers.get("CF-Cache-Status", "unknown"))
@@ -8657,8 +9138,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # Fat GET probe: inject query param into body for GET request
         fat_get_result = None
         try:
-            async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
-                r = await client.request("GET", url, content=f"utm_content={canary}",
+            async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=False) as client:
+                r = await client.request("GET", busted(url), content=f"utm_content={canary}",
                                          headers={"Content-Length": str(len(f"utm_content={canary}")),
                                                   "Content-Type": "application/x-www-form-urlencoded"})
                 fat_get_result = {"reflected": canary in r.text, "status": r.status_code}
@@ -8679,7 +9160,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "candidates": candidates,
             "all_results": results,
             "verdict": (
-                "CONFIRMED CACHE POISONING" if confirmed else
+                "UNKEYED INPUT SERVED FROM CACHE (lead: verify independently)" if confirmed else
                 "UNKEYED HEADERS FOUND — manual confirmation needed" if candidates else
                 "No cache poisoning indicators detected"
             ),
@@ -9112,6 +9593,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         keep_session: bool = False,
         summary_only: bool = False,
         sql_family: str = "",
+        cmdi_shell: str = "",
     ) -> str:
         """Run a correlated custom OAST probe using a fresh Interactsh session.
 
@@ -9124,9 +9606,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         server builds a bounded, server-owned out-of-band SQLi payload for the
         observed ``field`` and injects it via ``query_template`` — the model
         never supplies the SQL bytes.
+
+        When ``cmdi_shell`` is set (posix_subshell/posix_separator/
+        windows_separator), the server builds a bounded ``nslookup`` payload for
+        blind OS command injection on the observed ``field``. Only a DNS lookup
+        is sent.
         """
         from app.services.agent.oob_callback_workflow import run_callback_workflow
 
+        if sql_family and cmdi_shell:
+            return json.dumps({"success": False, "error": "choose sql_family or cmdi_shell"})
+        if cmdi_shell:
+            from app.services.agent.scoped_assessment.cmdi_oob import plan_oob_cmdi
+
+            field, body = plan_oob_cmdi(url, parameter=field, shell=cmdi_shell)
+            location, method = "query_template", "GET"
         if sql_family:
             from app.services.agent.scoped_assessment.sqli_oob import plan_oob_sqli
 

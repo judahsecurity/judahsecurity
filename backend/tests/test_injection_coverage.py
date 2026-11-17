@@ -43,7 +43,7 @@ def test_observed_inputs_create_class_specific_work():
     profiles = {name: SimpleNamespace(role=name + " specialist.",
                                       allowed_tools=["mutate_captured_request", "compare_requests"],
                                       max_iterations=4)
-                for name in ("xss", "sqli", "injection")}
+                for name in ("xss", "sqli", "injection", "server_injection")}
     leases = claim_coverage_cell_leases(brain, profiles)
     directives = directives_from_hypotheses(
         brain=brain, profiles_by_name=profiles, specialists=profiles,
@@ -51,7 +51,8 @@ def test_observed_inputs_create_class_specific_work():
     )
     assert directives["xss"].parameter_work["name"] == "searchTerm"
     assert directives["sqli"].parameter_work["name"] == "category"
-    assert directives["injection"].parameter_work["test_type"] == "command_injection"
+    # Server-side injection classes have their own lane and proof recipes.
+    assert directives["server_injection"].parameter_work["test_type"] == "command_injection"
 
 
 def test_dom_work_requires_both_browser_source_and_sink():

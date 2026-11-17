@@ -226,6 +226,32 @@ class OperationDirective:
                     "reflected known origin is not this bug. Submit a positive candidate "
                     "with vulnerability_class=cors and its evidence_id for independent replay."
                 )
+            elif kind in {"ssti", "command_injection", "path_traversal"}:
+                proof_kind = {"ssti": "scoped_ssti_eval",
+                              "command_injection": "scoped_cmdi_eval",
+                              "path_traversal": "scoped_traversal_read"}[kind]
+                block += (
+                    " Call scoped_injection_probe_assigned on this exact cell and lease. "
+                    "It sends a nonce-bound inert control, then fixed recipes: computed "
+                    "arithmetic over fresh random factors (SSTI/command injection) or a "
+                    "known world-readable file signature (traversal). Only the product or "
+                    "file signature, absent from the control and with a different body, is "
+                    "proof; errors, reflection, and status changes are leads. Submit a "
+                    f"positive receipt with vulnerability_class={kind} and its evidence_id "
+                    f"for independent replay ({proof_kind})."
+                )
+            elif kind == "csrf":
+                block += (
+                    " This needs an authenticated identity, an operator-approved "
+                    "csrf_action_paths entry, an observed readback URL showing the "
+                    "written value, and a csrf_cleanup_paths template with __PROWL_NONCE__. "
+                    "Call scoped_csrf_assigned with this cell and lease, the form field, "
+                    "the readback URL, and the cleanup template. It replays a token-less, "
+                    "form-encoded, cross-site request; an anonymous control must not write, "
+                    "the session cookie must be SameSite=None, and the canary must appear "
+                    "in the readback before cleanup. Submit a positive candidate with "
+                    "vulnerability_class=csrf. Without approvals, leave the proof inconclusive."
+                )
             elif kind == "race_condition":
                 block += (
                     " This needs an operator-approved race_action_paths entry, an observed "
