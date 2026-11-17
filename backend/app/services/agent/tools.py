@@ -11193,9 +11193,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ingest_capability_map_operations(brain, cmap.to_dict())
             self._engagement_brain = brain.to_dict()
 
-        # This entry point can be called without sync_engagement_brain. Review
-        # fresh observed inputs before choosing specialists and claiming cells.
-        hypothesis_planning = await self._plan_brain_hypotheses(brain)
+        # This entry point can be called without sync_engagement_brain. The
+        # hypothesis planner is an LLM call (<=45s) that only refines the claim
+        # ORDER of already-eligible cells (llm_priority_rank); it never changes
+        # which cells are eligible and it skips any cell once it is leased.
+        # Immediate dispatch: defer it off the claim/first-request path. The
+        # main wave below runs it concurrently on a post-claim brain copy (so it
+        # scopes to still-unclaimed work and cannot race the live brain) and
+        # merges its ordering hints back for the next assignment. Paths that
+        # dispatch no wave run it inline before returning.
+        hypothesis_planning: dict[str, Any] = {
+            "reviewed": 0, "hypotheses": 0, "status": "deferred",
+        }
 
         # Resolve specialists: "auto" → open hypotheses, else capability-map selection
         auto = False
@@ -11405,6 +11414,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         ]
         profiles = {name: profiles[name] for name in chosen if name in profiles}
         if not chosen:
+            # No wave to dispatch; run the deferred planner inline so the next
+            # turn still gets fresh ordering hints (no first-request to delay).
+            hypothesis_planning = await self._plan_brain_hypotheses(brain)
             persist_graph(brain, graph)
             self._engagement_brain = brain.to_dict()
             _checkpoint_task_graph()
@@ -11655,20 +11667,53 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             150.0 if bounded_first_pass else 420.0,
             max(1.0, _remaining_dispatch_time() - reserve),
         )
-        result = await run_fireteam(
-            mission=mission,
-            targets=target_list,
-            specialists=first_wave_profiles,
-            llm=llm,
-            tools_manager=self,
-            max_parallel=max_parallel,
-            directives=directives,
-            llm_for_specialist=_llm_for_profile,
-            progress_callback=_fireteam_progress,
-            report_callback=_verify_completed_hunter,
-            member_timeout_sec=max(1.0, first_wave_timeout - 10.0),
-            wave_timeout_sec=first_wave_timeout,
+        # Overlap the deferred hypothesis planner with the specialist wave so the
+        # first specialist request does not wait on the planner LLM call. The
+        # planner runs on a copy of the post-claim brain: cells leased by this
+        # wave are already skipped by the planner, so it cannot race
+        # run_fireteam's live-brain mutations, and it scopes its proposals to the
+        # still-unclaimed cells that the next assignment will order.
+        # (_plan_brain_hypotheses is exception-safe and returns a status dict, so
+        # a run_fireteam failure still propagates cleanly from gather.)
+        _planner_brain = engagement_brain_from_dict(
+            getattr(self, "_engagement_brain", None)
         )
+        result, hypothesis_planning = await asyncio.gather(
+            run_fireteam(
+                mission=mission,
+                targets=target_list,
+                specialists=first_wave_profiles,
+                llm=llm,
+                tools_manager=self,
+                max_parallel=max_parallel,
+                directives=directives,
+                llm_for_specialist=_llm_for_profile,
+                progress_callback=_fireteam_progress,
+                report_callback=_verify_completed_hunter,
+                member_timeout_sec=max(1.0, first_wave_timeout - 10.0),
+                wave_timeout_sec=first_wave_timeout,
+            ),
+            self._plan_brain_hypotheses(_planner_brain),
+        )
+        # Carry the advisory LLM ordering hints (llm_hypothesis / priority rank /
+        # review digest) back onto the live brain for the next wave, without
+        # disturbing the status/lease fields run_fireteam just updated.
+        _planned_cells = {
+            str(cell.get("id")): cell
+            for cell in (getattr(_planner_brain, "coverage_cells", None) or [])
+            if isinstance(cell, dict) and cell.get("id")
+        }
+        for _cell in (getattr(brain, "coverage_cells", None) or []):
+            _source = _planned_cells.get(str(_cell.get("id"))) if isinstance(_cell, dict) else None
+            if not _source:
+                continue
+            if "llm_review_digest" in _source:
+                _cell["llm_review_digest"] = _source["llm_review_digest"]
+            for _hint in ("llm_hypothesis", "llm_priority_rank"):
+                if _hint in _source:
+                    _cell[_hint] = _source[_hint]
+                else:
+                    _cell.pop(_hint, None)
 
         from app.services.agent.auto_prompter import (
             apply_rewrite_to_directive,

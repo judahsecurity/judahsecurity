@@ -43,6 +43,84 @@ def _sort_key(event: dict) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _parse_at(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _median_seconds(deltas: list[float]) -> float | None:
+    if not deltas:
+        return None
+    from statistics import median
+
+    return round(median(deltas), 1)
+
+
+def latency_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Derive pipeline delays from the timeline's own timestamps.
+
+    Measures the ``observation -> proposed intent -> first request -> verdict``
+    path so the effect of immediate dispatch (planner off the first-request
+    path) is visible without raw logs. Purely derived from event ``at`` values;
+    no new data is stored. Every stat is ``None`` until its inputs exist.
+    """
+    observation_at: dict[str, datetime] = {}
+    hypothesis_at: dict[str, datetime] = {}
+    request_times: list[datetime] = []
+    obs_to_hypothesis: list[float] = []
+    hypothesis_to_verified: list[float] = []
+    verified_by_hypothesis: list[tuple[str, datetime]] = []
+
+    for event in events:
+        kind = event.get("kind")
+        at = _parse_at(event.get("at"))
+        if kind == "observation" and at and event.get("id"):
+            observation_at[str(event["id"])] = at
+        elif kind == "hypothesis" and at and event.get("id"):
+            hypothesis_at[str(event["id"])] = at
+        elif kind == "tool_attempt" and at:
+            request_times.append(at)
+        elif kind == "candidate" and at and event.get("verdict") == "verified" and event.get("hypothesis_id"):
+            verified_by_hypothesis.append((str(event["hypothesis_id"]), at))
+
+    for event in events:
+        if event.get("kind") != "hypothesis":
+            continue
+        at = _parse_at(event.get("at"))
+        obs_id = event.get("observation_id")
+        if at and obs_id and str(obs_id) in observation_at:
+            delta = (at - observation_at[str(obs_id)]).total_seconds()
+            if delta >= 0:
+                obs_to_hypothesis.append(delta)
+
+    for hid, verified_at in verified_by_hypothesis:
+        created = hypothesis_at.get(hid)
+        if created:
+            delta = (verified_at - created).total_seconds()
+            if delta >= 0:
+                hypothesis_to_verified.append(delta)
+
+    first_observation = min(observation_at.values(), default=None)
+    first_request = min(request_times, default=None)
+    time_to_first_request = (
+        round((first_request - first_observation).total_seconds(), 1)
+        if first_observation and first_request
+        and first_request >= first_observation
+        else None
+    )
+
+    return {
+        "time_to_first_request_seconds": time_to_first_request,
+        "observation_to_hypothesis_seconds": _median_seconds(obs_to_hypothesis),
+        "observation_to_hypothesis_count": len(obs_to_hypothesis),
+        "hypothesis_to_verified_seconds": _median_seconds(hypothesis_to_verified),
+        "hypothesis_to_verified_count": len(hypothesis_to_verified),
+    }
+
+
 def build_timeline(
     work: Any, snapshot: dict, runs: Iterable[Any], actions: Iterable[Any],
     coverage: Iterable[Any],
@@ -126,5 +204,7 @@ def build_timeline(
         "work_id": work.id, "status": work.status,
         "lead_count": len(observations),
         "verified_count": sum(verified_candidate(row, receipts) for row in candidates),
-        "cost_usd": work.spent_usd, "events": events,
+        "cost_usd": work.spent_usd,
+        "latency": latency_summary(events),
+        "events": events,
     }

@@ -104,6 +104,16 @@ lead packet. A high-priority proposal can move an eligible cell earlier in its
 specialist's claim order. It cannot mark a cell tested, create a candidate, or
 publish a finding.
 
+**Immediate dispatch.** Because the planner only reorders already-eligible
+cells, `fireteam_dispatch` does not block the first specialist request on it.
+A dispatch claims its wave in deterministic ledger order, then runs the planner
+concurrently with the specialist wave on a copy of the post-claim brain — so the
+planner reviews only the cells still unclaimed and its ordering hints apply to
+the next assignment, not the wave already in flight. The claim is synchronous
+and completes before the wave starts, so the concurrent planner never races the
+leases. A dispatch that selects no wave runs the planner inline before
+returning.
+
 Each cell records a digest of the observation revision reviewed by the model.
 Repeated Brain syncs do not repeat the call; a new capture or first-pass
 evidence causes a new review. If the model is unavailable or returns malformed
