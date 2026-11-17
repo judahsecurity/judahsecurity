@@ -12,6 +12,7 @@ from app.services.agent.playbooks import get_playbook, list_playbooks
 from app.services.agent.skills_service import get_skill, parse_skill_prefix
 from app.services.agent.threat_model import (
     apply_threat_patch,
+    bootstrap_from_capability_map,
     bootstrap_from_code,
     bootstrap_from_url,
     format_threat_model_for_prompt,
@@ -90,6 +91,21 @@ def test_bare_url_bootstrap_before_crawl():
     assert model.mode == "url"
     assert any(t.id == "T-auth-boundary" for t in model.threats)
     assert "next" in " ".join(model.frameworks).lower() or model.open_questions
+
+
+def test_threat_model_reports_known_input_surfaces_omitted_by_its_cap():
+    cmap = {
+        "target": "https://app.test",
+        "pages_visited": ["https://app.test/"],
+        "api_endpoints": [
+            {"method": "GET", "path": f"/search/{n}", "host": "app.test"}
+            for n in range(251)
+        ],
+    }
+    model = bootstrap_from_capability_map(cmap)
+    assert len(model.surfaces) == 250
+    assert model.provenance["surface_inventory_total"] == 252
+    assert model.provenance["surface_inventory_omitted_input_count"] == 1
 
 
 def test_code_bootstrap_inventories_checkout(tmp_path: Path):
