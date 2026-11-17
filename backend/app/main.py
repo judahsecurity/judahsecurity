@@ -32,6 +32,7 @@ from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: 
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
 from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, scan_profiles, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations
+from app.api.routes import host_checks as host_checks_router
 from app.api.routes import business_apps as business_apps_router
 from app.api.routes import scoring as scoring_router
 from app.api.routes import posture as posture_router
@@ -198,6 +199,7 @@ app.include_router(sni_discovery.router, prefix=settings.API_PREFIX)
 app.include_router(scan_config.router, prefix=settings.API_PREFIX)
 app.include_router(acquisitions.router, prefix=settings.API_PREFIX)
 app.include_router(oracle.router, prefix=settings.API_PREFIX)
+app.include_router(host_checks_router.router, prefix=settings.API_PREFIX)
 app.include_router(agent.router, prefix=settings.API_PREFIX)
 app.include_router(integrations.router, prefix=settings.API_PREFIX)
 app.include_router(scoring_router.router, prefix=settings.API_PREFIX)

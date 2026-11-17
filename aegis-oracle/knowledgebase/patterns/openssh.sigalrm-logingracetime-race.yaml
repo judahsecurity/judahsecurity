@@ -1,0 +1,68 @@
+pattern_id: openssh.sigalrm-logingracetime-race
+cwe_ids:
+  - CWE-364
+ecosystem: linux
+framework: ""
+library: openssh
+pattern_name: OpenSSH sshd SIGALRM handler race at LoginGraceTime expiry
+summary: >
+  sshd's SIGALRM handler, which fires when an unauthenticated client
+  reaches LoginGraceTime, calls functions that are not async-signal-safe
+  (syslog → malloc/free in glibc). A remote, unauthenticated attacker who
+  times connections to expire mid-allocation can corrupt the heap and get
+  code execution as root. The race only exists while the grace-period
+  timer is armed: LoginGraceTime 0 removes it.
+
+# The two gating facts are host-internal: externally you see only a
+# banner, which distro backports make unreliable for the fixed build.
+exploit_preconditions:
+  - id: sshd-running
+    description: "The OpenSSH server (sshd) is running on the host."
+    verification_signal: host.process.sshd.running
+    match_kind: equals
+    match_value: "true"
+    verification_method: "Read-only host probe: process list (ps -eo comm=)."
+    severity: blocker
+
+  - id: logingracetime-nonzero
+    description: "sshd's effective LoginGraceTime is non-zero, so the SIGALRM handler can fire."
+    verification_signal: host.sshd.logingracetime
+    match_kind: regex
+    match_value: "^[1-9][0-9]*$"
+    verification_method: "Read-only host probe: sudo -n sshd -T | grep -i '^logingracetime'."
+    severity: blocker
+
+config_indicators:
+  - "LoginGraceTime"
+
+runtime_indicators:
+  - "sshd"
+
+attacker_capability: unauthenticated_network
+remote_triggerability: "conditional"
+
+vulnerable_example: |
+  # /etc/ssh/sshd_config — default
+  # LoginGraceTime 120   (sshd -T prints: logingracetime 120)
+
+secure_example: |
+  # Interim mitigation until the package is patched
+  LoginGraceTime 0
+  # Note: 0 lets unauthenticated connections hold MaxStartups slots
+  # (DoS risk); tighten MaxStartups / per-source limits alongside it.
+
+remediation_summary: >
+  Upgrade OpenSSH to a build that fixes CVE-2024-6387 (upstream 9.8p1 or
+  the distribution's patched package). Where an upgrade must wait, set
+  LoginGraceTime 0 and verify with sshd -T; the finding then drops to
+  not exploitable via the documented path, with proof attached.
+
+references:
+  - "https://www.qualys.com/2024/07/01/cve-2024-6387/regresshion.txt"
+  - "https://www.openssh.com/txt/release-9.8"
+
+related_cves:
+  - CVE-2024-6387
+
+curator: aegis-oracle-bootstrap
+reviewed_at: 2026-11-17T00:00:00Z

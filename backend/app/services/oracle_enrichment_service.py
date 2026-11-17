@@ -528,7 +528,19 @@ def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
             record(f"tech_stack.{tech['name']}.version", version, "asm_technology_detection")
         components.append(component)
 
+    # Host facts from the credentialed collector (sshd config, packages,
+    # processes). Lets Oracle settle preconditions external scans can't see.
+    from app.services.host_evidence_service import host_signals_for_oracle
+
+    host, runtime_flags, host_evidence = host_signals_for_oracle(asset, asset_id)
+    for path, observations in host_evidence.items():
+        signal_evidence.setdefault(path, []).extend(observations)
+
     signals: Dict[str, Any] = {}
+    if host:
+        signals["host"] = host
+    if runtime_flags:
+        signals["runtime_flags"] = runtime_flags
     if network:
         signals["network"] = network
     if http:

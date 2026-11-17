@@ -14,6 +14,7 @@ package contextual
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,18 +75,26 @@ func Assess(intrinsic *schema.IntrinsicAnalysis, asset *schema.Asset, assessedAt
 func evaluateOne(p schema.Precondition, asset *schema.Asset, assessedAt time.Time) schema.PreconditionEval {
 	signalVal, evidence, present := asset.Signals.LookupWithEvidence(p.VerificationSignal)
 	if !present {
+		reason := "asset signal `" + p.VerificationSignal + "` not populated"
+		if failure := checkFailure(evidence); failure != "" {
+			reason = "could not check `" + p.VerificationSignal + "` on this asset: " + failure
+		}
 		return schema.PreconditionEval{
 			Precondition: p,
 			Status:       schema.PreconditionUnknown,
-			Reason:       "asset signal `" + p.VerificationSignal + "` not populated",
+			Reason:       reason,
 			Evidence:     evidence,
 		}
 	}
 	if !hasFreshEvidence(evidence, assessedAt, asset.ID, signalVal) {
+		reason := "signal is present but lacks fresh, attributable evidence"
+		if failure := checkFailure(evidence); failure != "" {
+			reason = "could not check `" + p.VerificationSignal + "` on this asset: " + failure
+		}
 		return schema.PreconditionEval{
 			Precondition: p,
 			Status:       schema.PreconditionUnknown,
-			Reason:       "signal is present but lacks fresh, attributable evidence",
+			Reason:       reason,
 			SignalValue:  signalVal,
 			Evidence:     evidence,
 		}
@@ -128,9 +137,9 @@ func matches(p schema.Precondition, value string) (bool, bool, string) {
 			return false, false, "invalid regex: " + err.Error()
 		}
 		if re.MatchString(value) {
-			return true, true, "matched regex /" + p.MatchValue + "/"
+			return true, true, "value " + strconv.Quote(value) + " matched regex /" + p.MatchValue + "/"
 		}
-		return false, true, "did not match regex /" + p.MatchValue + "/"
+		return false, true, "value " + strconv.Quote(value) + " did not match regex /" + p.MatchValue + "/"
 	case "equals":
 		if strings.EqualFold(value, p.MatchValue) {
 			return true, true, "equal to " + p.MatchValue
@@ -138,9 +147,9 @@ func matches(p schema.Precondition, value string) (bool, bool, string) {
 		return false, true, "value " + value + " != " + p.MatchValue
 	case "contains":
 		if strings.Contains(strings.ToLower(value), strings.ToLower(p.MatchValue)) {
-			return true, true, "contains " + p.MatchValue
+			return true, true, "value " + strconv.Quote(value) + " contains " + p.MatchValue
 		}
-		return false, true, "does not contain " + p.MatchValue
+		return false, true, "value " + strconv.Quote(value) + " does not contain " + p.MatchValue
 	case "present":
 		if value != "" {
 			return true, true, "signal present"
@@ -154,6 +163,24 @@ func matches(p schema.Precondition, value string) (bool, bool, string) {
 	default:
 		return false, false, "unsupported match_kind: " + p.MatchKind
 	}
+}
+
+// checkFailure explains why a collector could not establish a signal, so an
+// unknown reads "could not check" rather than silently "not populated".
+func checkFailure(evidence []schema.EvidenceObservation) string {
+	for _, observation := range evidence {
+		if observation.Freshness == schema.EvidenceError || observation.Error != "" {
+			msg := observation.Error
+			if msg == "" {
+				msg = "collector reported an error"
+			}
+			if observation.Source != "" {
+				msg += " (" + observation.Source + ")"
+			}
+			return msg
+		}
+	}
+	return ""
 }
 
 func hasFreshEvidence(evidence []schema.EvidenceObservation, assessedAt time.Time, scope, value string) bool {

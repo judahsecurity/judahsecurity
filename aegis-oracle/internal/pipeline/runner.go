@@ -198,11 +198,8 @@ func buildFinding(
 		if e.Status != schema.PreconditionUnknown {
 			continue
 		}
-		kind := "manual"
 		sig := e.Precondition.VerificationSignal
-		if strings.HasPrefix(sig, "runtime_flags.") || strings.HasPrefix(sig, "container.") {
-			kind = "container_inspect"
-		}
+		kind := schema.VerificationTaskKind(sig)
 		f.VerificationTasks = append(f.VerificationTasks, schema.VerificationTask{
 			ID:                    "ver-" + f.ID[:8] + "-" + e.Precondition.ID,
 			PreconditionID:        e.Precondition.ID,

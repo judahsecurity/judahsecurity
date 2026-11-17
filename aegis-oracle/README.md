@@ -195,13 +195,50 @@ The `asset_table` config key points Aegis Oracle at your existing asset inventor
 | **C** — Asset criticality | 0.15 | Blast radius if compromised |
 | **T** — Time pressure | 0.10 | Days since disclosure + patch availability |
 
-**Overrides** (deterministic, not weighted):
-- Any blocker precondition **unsatisfied** → score 0, P4 "Not Exploitable"
-- Asset **isolated** → score 0, P4 "Not Reachable"
-- CVE in **KEV** → floor at 8.5, P0 "Actively Exploited"
-- Any blocker precondition **unknown** → cap at 5.5 (P3-territory) until verified
+**Overrides and verdicts** (deterministic, not weighted):
+- CVE in **KEV** (X ≥ 9.0) → floor at 8.5, "Actively Exploited"
+- Any blocker precondition **unsatisfied** → `contextual_assessment.state = documented_path_blocked`. OPES itself is not zeroed (alternate paths aren't ruled out); the ASM risk model reads the blocked blocker and sets exploit realism to **blocked** (likelihood 0) with the observed value as evidence.
+- Asset **isolated** → reachability R = 0
+- Any blocker precondition **unknown** → confidence drops to low and a dampener note is added; the score is *not* lowered for missing evidence, and nothing is ever called safe because a check couldn't run.
 
 Weights, thresholds, and bucketing are all configurable per deployment in `config.yaml → opes`.
+
+## Host checks (resolving preconditions from inside the server)
+
+Many blockers live inside the host — regreSSHion (CVE-2024-6387) needs sshd
+running **and** a non-zero `LoginGraceTime`; a banner can't show either.
+Phase A writes those preconditions against `host.*` signals:
+
+| Signal | Meaning |
+|---|---|
+| `host.os.id`, `host.os.version_id`, `host.kernel.release` | OS and kernel |
+| `host.package.<name>` / `.installed` | installed package version / presence |
+| `host.process.<name>.running` / `.args` | running process / its command line |
+| `host.sshd.<keyword>` | effective sshd config (`sshd -T`) |
+| `host.sysctl.<key>`, `host.listening.tcp` | kernel settings, listening ports |
+
+The ASM backend collects them with a read-only SSH login and a fixed probe
+catalog (`backend/app/services/host_evidence_service.py`), or accepts them
+pushed from osquery/EDR, and sends them inline as `signals.host`. Evidence is
+recorded per probe (`signal_evidence["host.sshd.*"]`) and must be fresh and
+scoped to the asset. A probe or login that fails is recorded as an error, and
+Phase B reports `could not check <signal>: <why>`, never "not exploitable".
+Unknown host preconditions produce `host_probe` verification tasks, which the
+backend's `/host-checks` routes resolve and re-score without a person.
+
+Worked example — one CVE, three servers:
+
+```bash
+for h in 12 07 03; do
+  ./bin/aegis-oracle-cli analyze --intrinsic examples/cve-2024-6387/intrinsic.json \
+    --asset examples/cve-2024-6387/asset-lnx-web-$h.json --cve examples/cve-2024-6387/cve.json \
+    --exploitation examples/cve-2024-6387/exploitation.json --human
+done
+```
+
+- `lnx-web-12`: sshd running, `logingracetime 120` → every condition met
+- `lnx-web-07`: `logingracetime 0` → `value "0" did not match` → documented path blocked
+- `lnx-web-03`: SSH login rejected → both conditions unknown, "could not check … authentication rejected"
 
 ## Knowledge base
 
@@ -232,4 +269,5 @@ Add new patterns via PR. The loader validates required fields at startup and in 
 | CLI | ✅ analyze + kb commands |
 | CVE ingest pipeline (cvelistV5, NVD, EPSS, KEV) | 🔜 Phase 2 |
 | Asset fingerprinting (Tier 2+) | 🔜 Phase 2 |
-| Verification loop (Linear/Jira/Slack) | 🔜 Phase 2 |
+| Verification loop — host checks (`host_probe` tasks) | ✅ Backend `/host-checks` |
+| Verification loop — ticketing (Linear/Jira/Slack) | 🔜 Phase 2 |

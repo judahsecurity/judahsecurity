@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -70,6 +71,7 @@ class Precond:
     description: str
     blocker: bool
     status: str  # satisfied | unsatisfied | unknown | "" (not evaluated)
+    reason: str = ""  # Oracle's explanation, e.g. "could not check host.sshd.logingracetime ..."
 
 
 @dataclass
@@ -194,20 +196,32 @@ def vulnerability_severity(ctx: FindingContext) -> Factor:
     return _f(2, "Medium", "No CVSS or scanner severity; assumed medium", "assumed")
 
 
+def _observed(reason: str) -> str:
+    """Append the observed value from Oracle's reason ("value \"0\" did not
+    match ...") so the verdict carries its evidence."""
+    m = re.search(r'value ("[^"]*"|\S+)', reason or "")
+    return f" (observed {m.group(1)})" if m else ""
+
+
 def exploit_realism(ctx: FindingContext) -> Dict[str, Any]:
     """Can the known exploit realistically work against this asset?"""
     blocked: List[str] = []
     conditional: List[str] = []
     verified: List[str] = []
+    unchecked: List[str] = []  # required conditions a collector tried and failed to check
 
     for p in ctx.preconditions:
         if not p.blocker:
             continue
         desc = p.description or p.id
         if p.status == "unsatisfied":
-            blocked.append(f"required condition not met: {desc}")
+            blocked.append(f"required condition not met: {desc}" + _observed(p.reason))
         elif p.status == "satisfied":
-            verified.append(f"required condition met: {desc}")
+            verified.append(f"required condition met: {desc}" + _observed(p.reason))
+        elif p.status == "unknown" and p.reason.startswith("could not check"):
+            why = p.reason.split(": ", 1)[1] if ": " in p.reason else p.reason
+            what = desc.rstrip(".")
+            unchecked.append(f"could not check on this asset whether {what[:1].lower() + what[1:]} ({why}); not treated as safe")
     if ctx.exposure == "isolated":
         blocked.append("asset is isolated / air-gapped")
 
@@ -246,10 +260,14 @@ def exploit_realism(ctx: FindingContext) -> Dict[str, Any]:
         return {"score": 0, "tier": "blocked",
                 "reasons": blocked + ["documented exploit paths do not work here today; not a guarantee against other paths"]}
     if conditional:
-        return {"score": 2, "tier": "conditional", "reasons": conditional}
+        return {"score": 2, "tier": "conditional", "reasons": conditional + unchecked}
+    if unchecked and ctx.detection_confidence != "endpoint_confirmed":
+        # A collector tried and failed to check a required condition: report
+        # what was confirmed, but don't call it likely until every one is.
+        return {"score": 3, "tier": "unverified", "reasons": verified + unchecked}
     if ctx.detection_confidence == "endpoint_confirmed" or verified:
         reasons = (["vulnerable feature confirmed live on this asset"] if ctx.detection_confidence == "endpoint_confirmed" else []) + verified
-        return {"score": 4, "tier": "likely", "reasons": reasons}
+        return {"score": 4, "tier": "likely", "reasons": reasons + unchecked}
     if float(ctx.exploitation.get("misconfig_breach_risk") or 0) > 0 and not ctx.cve_id:
         return {"score": 4, "tier": "likely", "reasons": ["exposure observed directly on this asset"]}
     if ctx.detected_by in EXTERNAL_AUTOMATED and not ctx.cve_id:
@@ -481,6 +499,7 @@ def _preconditions(oracle: Dict[str, Any]) -> List[Precond]:
             description=str(p.get("description") or ""),
             blocker=p.get("severity") == "blocker",
             status=str(e.get("status") or ""),
+            reason=str(e.get("reason") or ""),
         ))
     if out:
         return out

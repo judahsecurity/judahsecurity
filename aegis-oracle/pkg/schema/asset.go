@@ -66,6 +66,15 @@ type AssetSignals struct {
 	SignalEvidence map[string][]EvidenceObservation `json:"signal_evidence,omitempty"`
 
 	Extra map[string]string `json:"extra,omitempty"`
+
+	// Host holds facts read from inside the host by a credentialed,
+	// read-only collector (effective sshd config, installed packages,
+	// running processes, kernel, sysctls). Keys are dotted and lowercase,
+	// e.g. "sshd.logingracetime", "package.openssh-server",
+	// "process.sshd.running". Provenance lives in SignalEvidence under the
+	// probe prefix ("host.sshd.*") so one probe run attests every key it
+	// produced, and a failed probe records why the check could not run.
+	Host map[string]string `json:"host,omitempty"`
 }
 
 type NetworkSignals struct {
@@ -148,6 +157,7 @@ type NetworkPositionSignals struct {
 //	container.startup_args | container.image
 //	tenant.runs_user_code | tenant.sandbox_kind
 //	fs.writable_paths
+//	host.<key>  (see HostSignalPaths)
 //	extra.<key>
 //
 // New signals: extend the switch below alongside the corresponding struct
@@ -303,18 +313,75 @@ func (s AssetSignals) Lookup(path string) (string, bool) {
 		if v, ok := s.Extra[tail]; ok {
 			return v, true
 		}
+	case "host":
+		return s.lookupHost(strings.ToLower(tail))
 	}
 	return "", false
+}
+
+// HostSignalPaths documents the host.* keys the credentialed collector
+// produces. Keep in sync with prompts/v1.go and the backend collector
+// (backend/app/services/host_evidence_service.py).
+var HostSignalPaths = []string{
+	"host.os.id", "host.os.version_id", "host.kernel.release",
+	"host.package.<name>", "host.package.<name>.installed",
+	"host.process.<name>.running", "host.process.<name>.args",
+	"host.sshd.<keyword>", "host.sysctl.<key>", "host.listening.tcp",
+}
+
+// hostListCompleteKey marks that a probe returned the full list for a
+// family, so a missing entry means absent rather than unknown.
+func hostListCompleteKey(family string) string { return family + "._complete" }
+
+func (s AssetSignals) lookupHost(key string) (string, bool) {
+	if s.Host == nil {
+		return "", false
+	}
+	if v, ok := s.Host[key]; ok {
+		return v, true
+	}
+	// Derived absence: only when the probe enumerated the whole family.
+	// "package.foo.installed" / "process.foo.running" → "false".
+	for _, family := range []struct{ prefix, suffix string }{
+		{"package.", ".installed"},
+		{"process.", ".running"},
+	} {
+		if strings.HasPrefix(key, family.prefix) && strings.HasSuffix(key, family.suffix) &&
+			len(key) > len(family.prefix)+len(family.suffix) {
+			if s.Host[hostListCompleteKey(strings.TrimSuffix(family.prefix, "."))] == "true" {
+				return "false", true
+			}
+		}
+	}
+	return "", false
+}
+
+// hostEvidence returns the probe-level observations that cover a host.*
+// path, most specific prefix first: "host.sshd.logingracetime" is covered
+// by "host.sshd.*", then "host.*".
+func (s AssetSignals) hostEvidence(path string) []EvidenceObservation {
+	parts := strings.Split(path, ".")
+	for i := len(parts) - 1; i >= 1; i-- {
+		key := strings.Join(parts[:i], ".") + ".*"
+		if obs := s.SignalEvidence[key]; len(obs) > 0 {
+			return obs
+		}
+	}
+	return nil
 }
 
 // LookupWithEvidence returns the signal value together with observations that
 // establish its provenance and freshness.
 func (s AssetSignals) LookupWithEvidence(path string) (string, []EvidenceObservation, bool) {
 	value, ok := s.Lookup(path)
-	if !ok {
-		return "", s.SignalEvidence[path], false
+	direct := s.SignalEvidence[path]
+	if len(direct) == 0 && strings.HasPrefix(path, "host.") {
+		direct = s.hostEvidence(path)
 	}
-	evidence := append([]EvidenceObservation(nil), s.SignalEvidence[path]...)
+	if !ok {
+		return "", direct, false
+	}
+	evidence := append([]EvidenceObservation(nil), direct...)
 	if strings.HasPrefix(path, "components.") {
 		parts := strings.Split(path, ".")
 		if len(parts) >= 3 {

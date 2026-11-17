@@ -1,5 +1,7 @@
 package schema
 
+import "strings"
+
 type PreconditionSeverity string
 
 const (
@@ -75,4 +77,18 @@ func (s PreconditionEvalSet) BlockerCount() int {
 		}
 	}
 	return c
+}
+
+// VerificationTaskKind says who can resolve an unknown precondition:
+// "host_probe" — the credentialed host collector, with no person involved;
+// "container_inspect" — someone with access to the runtime or container;
+// "manual" — an analyst.
+func VerificationTaskKind(signal string) string {
+	switch {
+	case strings.HasPrefix(signal, "host."):
+		return "host_probe"
+	case strings.HasPrefix(signal, "runtime_flags.") || strings.HasPrefix(signal, "container."):
+		return "container_inspect"
+	}
+	return "manual"
 }

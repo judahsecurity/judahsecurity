@@ -14,7 +14,9 @@ package prompts
 // V1Version is the prompt version recorded on outputs produced with V1.
 // Bumped to intrinsic.v6 — adds practical workflow, explicit alternate exploit
 // paths, and access-versus-capability transitions for contextual evaluation.
-const V1Version = "intrinsic.v6"
+// Bumped to intrinsic.v7 — adds host.* signals so preconditions on host
+// configuration can be checked by the credentialed collector.
+const V1Version = "intrinsic.v7"
 
 // V1 is the production prompt for Phase A intrinsic analysis.
 //
@@ -76,6 +78,33 @@ other path will be permanently "unknown".
   components.<name>.used       components.<name>.idle_on_demand
   components.<name>.executing  components.<name>.attacker_reachable
   extra.<key>
+
+Host signals, read from inside the server by a credentialed read-only
+collector. Use them whenever a precondition depends on host configuration,
+installed packages or running processes; they are the only way such a
+condition can be confirmed or ruled out:
+
+  host.os.id                      e.g. "ubuntu", "rhel"
+  host.os.version_id              e.g. "22.04"
+  host.kernel.release             output of uname -r
+  host.package.<name>             installed version, distro format (e.g.
+                                  host.package.openssh-server = "1:8.9p1-3ubuntu0.6")
+  host.package.<name>.installed   "true" | "false"
+  host.process.<name>.running     "true" | "false" (process command name)
+  host.process.<name>.args        full command line of the running process
+  host.sshd.<keyword>             effective sshd config as printed by
+                                  "sshd -T": lowercase keyword, value as
+                                  printed (e.g. host.sshd.logingracetime = "120",
+                                  in seconds; "0" disables the timeout)
+  host.sysctl.<key>               e.g. host.sysctl.kernel.unprivileged_userns_clone
+  host.listening.tcp              comma-separated listening TCP ports
+
+Write host preconditions so the match is decisive in both directions. For
+"LoginGraceTime must be non-zero" use match_kind "regex" with match_value
+"^[1-9][0-9]*$" on host.sshd.logingracetime — a value of "0" then rules the
+precondition out. Go regexp syntax only (no lookahead). Distro packages
+backport fixes, so do not use version_lte on host.package.<name> unless the
+fixed distro build is known; prefer a configuration or process signal.
 
 If a precondition genuinely needs a signal not on this list, prefer
 extra.<key> with a clearly named key, and note it in rationale so the

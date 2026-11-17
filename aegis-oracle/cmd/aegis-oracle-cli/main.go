@@ -215,10 +215,7 @@ func buildVerificationTasks(assetID string, set schema.PreconditionEvalSet) []sc
 		if e.Status != schema.PreconditionUnknown {
 			continue
 		}
-		kind := "manual"
-		if strings.HasPrefix(e.Precondition.VerificationSignal, "container.") || strings.HasPrefix(e.Precondition.VerificationSignal, "runtime_flags.") {
-			kind = "container_inspect"
-		}
+		kind := schema.VerificationTaskKind(e.Precondition.VerificationSignal)
 		tasks = append(tasks, schema.VerificationTask{
 			ID:                    "ver-" + assetID + "-" + e.Precondition.ID,
 			PreconditionID:        e.Precondition.ID,
