@@ -475,6 +475,8 @@ export interface CrowdStrikeIntegration {
   import_external_assets: boolean;
   import_hosts: boolean;
   import_spotlight: boolean;
+  collect_host_evidence?: boolean;
+  host_evidence_rtr?: boolean;
   is_active: boolean;
   continuous_sync_enabled: boolean;
   sync_interval_minutes: number;
@@ -3312,6 +3314,8 @@ class ApiClient {
     import_external_assets: boolean;
     import_hosts: boolean;
     import_spotlight: boolean;
+    collect_host_evidence?: boolean;
+    host_evidence_rtr?: boolean;
     continuous_sync_enabled: boolean;
     sync_interval_minutes: number;
   }): Promise<CrowdStrikeIntegration> {
@@ -3327,6 +3331,8 @@ class ApiClient {
     import_external_assets: boolean;
     import_hosts: boolean;
     import_spotlight: boolean;
+    collect_host_evidence: boolean;
+    host_evidence_rtr: boolean;
     is_active: boolean;
     continuous_sync_enabled: boolean;
     sync_interval_minutes: number;

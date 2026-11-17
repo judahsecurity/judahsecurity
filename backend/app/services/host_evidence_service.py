@@ -640,9 +640,22 @@ def reassess_asset(db: Any, asset: Any, *, only_pending: bool = False) -> List[D
     return results
 
 
-def check_asset(db: Any, asset: Any, cred: HostCredential, **kw: Any) -> Dict[str, Any]:
-    """Collect → store → reassess one asset."""
-    record = collect_host_facts(asset, cred, **kw)
+def check_asset(
+    db: Any,
+    asset: Any,
+    cred: Optional[HostCredential] = None,
+    *,
+    collector: Optional[Callable[[Any], Dict[str, Any]]] = None,
+    **kw: Any,
+) -> Dict[str, Any]:
+    """Collect → store → reassess one asset, with ``collector`` (e.g. Falcon)
+    when given, else the SSH credential."""
+    if collector is not None:
+        record = collector(asset)
+    elif cred is not None:
+        record = collect_host_facts(asset, cred, **kw)
+    else:
+        return {"asset_id": asset.id, "skipped": "no host-check collector configured for this asset"}
     if record.get("error") == "asset is not in the host-check target scope":
         return {"asset_id": asset.id, "skipped": record["error"]}
     store_host_facts(asset, record)
@@ -650,6 +663,7 @@ def check_asset(db: Any, asset: Any, cred: HostCredential, **kw: Any) -> Dict[st
     db.commit()
     return {
         "asset_id": asset.id,
+        "collector": record.get("collector"),
         "target": record.get("target"),
         "error": record.get("error"),
         "probes": {k: {kk: vv for kk, vv in v.items() if kk != "command"} for k, v in record.get("probes", {}).items()},
@@ -681,14 +695,35 @@ def assets_needing_host_checks(db: Any, organization_id: int, limit: int = 200) 
     return out
 
 
+def collector_for_asset(
+    db: Any, asset: Any, cred: Optional[HostCredential], **kw: Any
+) -> Tuple[str, Optional[Callable[[Any], Dict[str, Any]]]]:
+    """Pick how to check an asset: Falcon sensor when the asset is a Falcon
+    host with host evidence enabled (no inbound login), else SSH when the
+    asset is in the credential's target scope."""
+    from app.services import falcon_host_evidence as falcon
+
+    link = falcon.falcon_link_for(db, asset)
+    if link is not None:
+        integration, aid = link
+        return "falcon", falcon.collector_for(integration, aid, client_factory=kw.get("falcon_client_factory"))
+    if cred is not None and in_target_scope(asset, cred.targets):
+        factory = kw.get("runner_factory")
+        return "ssh", (lambda a: collect_host_facts(a, cred, runner_factory=factory))
+    return "", None
+
+
 def run_pending_host_checks(db: Any, organization_id: int, *, limit: int = 200, **kw: Any) -> Dict[str, Any]:
     cred = load_credential(db, organization_id)
-    if cred is None:
-        return {"error": f"no active '{HOST_SSH_SERVICE}' credential configured for this organization", "assets": []}
     assets = assets_needing_host_checks(db, organization_id, limit=limit)
     summary: Dict[str, Any] = {"assets": [], "checked": 0, "skipped": 0, "failed": 0}
     for asset in assets:
-        result = check_asset(db, asset, cred, **kw)
+        kind, collector = collector_for_asset(db, asset, cred, **kw)
+        if collector is None:
+            result = {"asset_id": asset.id, "skipped": "no host-check collector: not a Falcon host with host "
+                                                         "evidence enabled, and not in the SSH target scope"}
+        else:
+            result = check_asset(db, asset, collector=collector)
         summary["assets"].append(result)
         if result.get("skipped"):
             summary["skipped"] += 1
@@ -696,6 +731,8 @@ def run_pending_host_checks(db: Any, organization_id: int, *, limit: int = 200, 
             summary["failed"] += 1
         else:
             summary["checked"] += 1
+    if not assets:
+        summary["message"] = "no open findings are waiting on host evidence"
     return summary
 
 
@@ -704,6 +741,6 @@ __all__ = [
     "parse_os_release", "parse_uname", "parse_processes", "parse_sshd_t", "parse_packages",
     "parse_sysctl", "parse_listening", "run_probes", "collect_host_facts", "store_host_facts",
     "ingest_host_facts", "host_signals_for_oracle", "pending_host_checks", "reassess_asset",
-    "check_asset", "assets_needing_host_checks", "run_pending_host_checks", "in_target_scope",
+    "check_asset", "collector_for_asset", "assets_needing_host_checks", "run_pending_host_checks", "in_target_scope",
     "load_credential",
 ]

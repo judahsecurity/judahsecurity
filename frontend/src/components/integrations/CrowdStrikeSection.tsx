@@ -21,13 +21,29 @@ type CrowdStrikeForm = {
   import_external_assets: boolean;
   import_hosts: boolean;
   import_spotlight: boolean;
+  collect_host_evidence: boolean;
+  host_evidence_rtr: boolean;
   continuous_sync_enabled: boolean;
   sync_interval_minutes: number;
 };
 
+type ModuleKey = 'import_external_assets' | 'import_hosts' | 'import_spotlight' | 'collect_host_evidence' | 'host_evidence_rtr' | 'continuous_sync_enabled';
+
+// Keep module dependencies consistent: Spotlight and host evidence need
+// Hosts; RTR needs host evidence.
+function toggleModule(form: CrowdStrikeForm, key: ModuleKey, on: boolean): CrowdStrikeForm {
+  const next = { ...form, [key]: on };
+  if (key === 'import_hosts' && !on) Object.assign(next, { import_spotlight: false, collect_host_evidence: false, host_evidence_rtr: false });
+  if (key === 'collect_host_evidence' && !on) next.host_evidence_rtr = false;
+  if ((key === 'import_spotlight' || key === 'collect_host_evidence') && on) next.import_hosts = true;
+  if (key === 'host_evidence_rtr' && on) Object.assign(next, { collect_host_evidence: true, import_hosts: true });
+  return next;
+}
+
 const DEFAULT_FORM: CrowdStrikeForm = {
   connection_name: '', cloud_region: 'us-1', client_id: '', client_secret: '',
   import_external_assets: true, import_hosts: true, import_spotlight: true,
+  collect_host_evidence: false, host_evidence_rtr: false,
   continuous_sync_enabled: true, sync_interval_minutes: 1440,
 };
 
@@ -57,6 +73,7 @@ export function CrowdStrikeSection() {
       connection_name: item.connection_name, cloud_region: item.cloud_region,
       client_id: '', client_secret: '', import_external_assets: item.import_external_assets,
       import_hosts: item.import_hosts, import_spotlight: item.import_spotlight,
+      collect_host_evidence: Boolean(item.collect_host_evidence), host_evidence_rtr: Boolean(item.host_evidence_rtr),
       continuous_sync_enabled: item.continuous_sync_enabled, sync_interval_minutes: item.sync_interval_minutes,
     } : DEFAULT_FORM);
     setOpen(true);
@@ -133,7 +150,8 @@ export function CrowdStrikeSection() {
               {item.last_test_ok === false && <Badge variant="outline" className="text-red-400"><AlertCircle className="h-3 w-3 mr-1" />Access issue</Badge>}
             </div>
             <p className="text-xs text-muted-foreground">
-              {[item.import_external_assets && 'External assets', item.import_hosts && 'Hosts', item.import_spotlight && 'Spotlight'].filter(Boolean).join(' · ')}
+              {[item.import_external_assets && 'External assets', item.import_hosts && 'Hosts', item.import_spotlight && 'Spotlight',
+                item.collect_host_evidence && (item.host_evidence_rtr ? 'Host evidence + RTR' : 'Host evidence')].filter(Boolean).join(' · ')}
               {item.last_sync_at && ` · Last sync ${new Date(item.last_sync_at).toLocaleString()}`}
             </p>
             {item.last_sync_ok && item.last_sync_stats && <p className="text-xs text-muted-foreground">{item.last_sync_stats.assets_created || 0} new assets · {item.last_sync_stats.vulns_created || 0} new CVEs</p>}
@@ -173,11 +191,17 @@ export function CrowdStrikeSection() {
               ['import_external_assets', 'External assets and services'],
               ['import_hosts', 'Falcon managed hosts'],
               ['import_spotlight', 'Spotlight vulnerability findings'],
+              ['collect_host_evidence', 'Host evidence for exploitability checks (OS and installed software)'],
+              ['host_evidence_rtr', 'Read sshd configuration with read-only Real Time Response'],
               ['continuous_sync_enabled', 'Automatically re-sync'],
             ] as const).map(([key, label]) => (
-              <div key={key} className="flex items-center gap-3">
-                <Checkbox id={`cs-${key}`} checked={form[key]} onCheckedChange={(checked) => setForm({ ...form, [key]: Boolean(checked), ...(key === 'import_hosts' && !checked ? { import_spotlight: false } : {}), ...(key === 'import_spotlight' && checked ? { import_hosts: true } : {}) })} />
-                <label htmlFor={`cs-${key}`} className="text-sm cursor-pointer">{label}</label>
+              <div key={key} className="flex items-start gap-3">
+                <Checkbox id={`cs-${key}`} className="mt-0.5" checked={form[key]} onCheckedChange={(checked) => setForm(toggleModule(form, key, Boolean(checked)))} />
+                <div>
+                  <label htmlFor={`cs-${key}`} className="text-sm cursor-pointer">{label}</label>
+                  {key === 'collect_host_evidence' && <p className="text-xs text-muted-foreground">Runs only when a host check is requested, never on sync. Needs the Assets: read scope.</p>}
+                  {key === 'host_evidence_rtr' && <p className="text-xs text-muted-foreground">Opens an RTR session on the host and runs only <code>cat</code> and <code>ls</code> under the sshd config directory. Needs the Real time response: read scope.</p>}
+                </div>
               </div>
             ))}
             {form.continuous_sync_enabled && <Select value={String(form.sync_interval_minutes)} onValueChange={(value) => setForm({ ...form, sync_interval_minutes: Number(value) })}>

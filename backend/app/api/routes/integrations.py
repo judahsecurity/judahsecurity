@@ -1139,6 +1139,7 @@ def _crowdstrike_modules(integration: CrowdStrikeIntegration) -> dict[str, bool]
         "external": integration.import_external_assets,
         "hosts": integration.import_hosts,
         "spotlight": integration.import_spotlight,
+        "applications": bool(integration.collect_host_evidence),
     }
 
 
@@ -1160,6 +1161,7 @@ async def create_crowdstrike_integration(
     result = await crowdstrike_service.test_connection(
         payload.cloud_region, payload.client_id, payload.client_secret,
         external=payload.import_external_assets, hosts=payload.import_hosts, spotlight=payload.import_spotlight,
+        applications=payload.collect_host_evidence,
     )
     if not result["ok"]:
         raise HTTPException(status_code=400, detail=result["message"])
@@ -1167,6 +1169,7 @@ async def create_crowdstrike_integration(
         organization_id=org_id, connection_name=payload.connection_name, cloud_region=payload.cloud_region,
         import_external_assets=payload.import_external_assets, import_hosts=payload.import_hosts,
         import_spotlight=payload.import_spotlight, continuous_sync_enabled=payload.continuous_sync_enabled,
+        collect_host_evidence=payload.collect_host_evidence, host_evidence_rtr=payload.host_evidence_rtr,
         sync_interval_minutes=payload.sync_interval_minutes, is_active=True,
         last_tested_at=datetime.utcnow(), last_test_ok=True,
     )
@@ -1193,9 +1196,13 @@ async def update_crowdstrike_integration(
         integration.set_client_id(client_id)
     if client_secret:
         integration.set_client_secret(client_secret)
-    if not any(_crowdstrike_modules(integration).values()) or (integration.import_spotlight and not integration.import_hosts):
+    modules = _crowdstrike_modules(integration)
+    if not (modules["external"] or modules["hosts"] or modules["spotlight"]) or (integration.import_spotlight and not integration.import_hosts):
         db.rollback()
         raise HTTPException(status_code=400, detail="Enable at least one module; Spotlight requires Hosts.")
+    if (integration.collect_host_evidence and not integration.import_hosts) or (integration.host_evidence_rtr and not integration.collect_host_evidence):
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Host evidence requires Hosts; RTR requires host evidence.")
     result = await crowdstrike_service.test_connection(
         integration.cloud_region, integration.get_client_id(), integration.get_client_secret(), **_crowdstrike_modules(integration),
     )

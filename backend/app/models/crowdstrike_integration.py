@@ -22,6 +22,10 @@ class CrowdStrikeIntegration(Base):
     import_external_assets = Column(Boolean, nullable=False, default=True)
     import_hosts = Column(Boolean, nullable=False, default=True)
     import_spotlight = Column(Boolean, nullable=False, default=True)
+    # Host evidence for Oracle preconditions (app/services/falcon_host_evidence.py).
+    # Off by default; runs only when a host check is requested, never on sync.
+    collect_host_evidence = Column(Boolean, nullable=False, default=False)  # device + Discover applications
+    host_evidence_rtr = Column(Boolean, nullable=False, default=False)      # RTR read-only cat/ls of sshd config
     is_active = Column(Boolean, nullable=False, default=True)
     continuous_sync_enabled = Column(Boolean, nullable=False, default=True)
     sync_interval_minutes = Column(Integer, nullable=False, default=1440)

@@ -677,6 +677,8 @@ def apply_oracle_migrations():
         "CREATE INDEX IF NOT EXISTS ix_assets_business_app ON assets (business_app_id)",
 
         # ── Jira integration schema migrations ────────────────────────────────
+        "ALTER TABLE crowdstrike_integrations ADD COLUMN IF NOT EXISTS collect_host_evidence BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE crowdstrike_integrations ADD COLUMN IF NOT EXISTS host_evidence_rtr     BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE jira_integrations ADD COLUMN IF NOT EXISTS auto_create_enabled       BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE jira_integrations ADD COLUMN IF NOT EXISTS auto_create_min_severity  VARCHAR(20) DEFAULT 'high'",
         "ALTER TABLE jira_integrations ADD COLUMN IF NOT EXISTS open_to_close_transitions JSONB DEFAULT '[]'",

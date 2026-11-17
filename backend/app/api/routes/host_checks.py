@@ -12,9 +12,11 @@ affected findings:
   POST /host-checks/assets/{asset_id}/facts         push facts from another collector
   GET  /host-checks/assets/{asset_id}/facts         the facts on record
 
-SSH access uses the organization's ``host_ssh`` API config (see
-app/services/host_evidence_service.py) and only ever runs the fixed,
-read-only probe catalog against assets matching its ``targets``.
+Collectors, in order of preference:
+  falcon  the asset is a Falcon host and its CrowdStrike integration has
+          ``collect_host_evidence`` on (app/services/falcon_host_evidence.py)
+  ssh     the asset matches the org's ``host_ssh`` credential ``targets``
+          (fixed read-only probe catalog; app/services/host_evidence_service.py)
 """
 
 import logging
@@ -94,12 +96,14 @@ def pending(
         if not tasks:
             continue
         last = (v.asset.metadata_ or {}).get("host_facts") if isinstance(v.asset.metadata_, dict) else None
+        collector, _ = hes.collector_for_asset(db, v.asset, cred)
         items.append({
             "vulnerability_id": v.id,
             "cve_id": v.cve_id,
             "asset_id": v.asset_id,
             "asset": v.asset.value,
             "signals": [t.get("expected_signal_path") for t in tasks],
+            "collector": collector or None,  # falcon | ssh | None (nothing can check it)
             "in_target_scope": bool(cred and hes.in_target_scope(v.asset, cred.targets)),
             "last_check": {"observed_at": last.get("observed_at"), "error": last.get("error")} if last else None,
         })
@@ -132,8 +136,6 @@ def run(
     """Check every in-scope asset that has findings waiting on host evidence,
     then re-score those findings. Runs in the background."""
     _check_org(current_user, organization_id)
-    if hes.load_credential(db, organization_id) is None:
-        raise HTTPException(status_code=400, detail=f"configure a '{hes.HOST_SSH_SERVICE}' credential first")
     assets = hes.assets_needing_host_checks(db, organization_id)
     background.add_task(_run_in_background, organization_id)
     return {"queued": True, "assets": len(assets)}
@@ -148,12 +150,12 @@ def collect(
     """Check one asset now and return the probe results and the before/after
     verdict for each open CVE finding on it."""
     asset = _asset_or_404(db, asset_id, current_user)
-    cred = hes.load_credential(db, asset.organization_id)
-    if cred is None:
-        raise HTTPException(status_code=400, detail=f"configure a '{hes.HOST_SSH_SERVICE}' credential first")
-    if not hes.in_target_scope(asset, cred.targets):
-        raise HTTPException(status_code=400, detail="asset is not in the host-check target scope")
-    return hes.check_asset(db, asset, cred)
+    kind, collector = hes.collector_for_asset(db, asset, hes.load_credential(db, asset.organization_id))
+    if collector is None:
+        raise HTTPException(status_code=400, detail=(
+            "nothing can check this asset: enable host evidence on its CrowdStrike integration, or add it to the "
+            f"'{hes.HOST_SSH_SERVICE}' credential's targets"))
+    return hes.check_asset(db, asset, collector=collector)
 
 
 class HostFactsIn(BaseModel):

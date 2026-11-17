@@ -217,9 +217,12 @@ Phase A writes those preconditions against `host.*` signals:
 | `host.sshd.<keyword>` | effective sshd config (`sshd -T`) |
 | `host.sysctl.<key>`, `host.listening.tcp` | kernel settings, listening ports |
 
-The ASM backend collects them with a read-only SSH login and a fixed probe
-catalog (`backend/app/services/host_evidence_service.py`), or accepts them
-pushed from osquery/EDR, and sends them inline as `signals.host`. Evidence is
+The ASM backend collects them through the CrowdStrike Falcon sensor when an
+integration has host evidence enabled (`backend/app/services/falcon_host_evidence.py`:
+device record, Discover applications, read-only RTR `cat`/`ls` of the sshd
+config), otherwise with a read-only SSH login and a fixed probe catalog
+(`backend/app/services/host_evidence_service.py`), or accepts them pushed from
+osquery/EDR, and sends them inline as `signals.host`. Evidence is
 recorded per probe (`signal_evidence["host.sshd.*"]`) and must be fresh and
 scoped to the asset. A probe or login that fails is recorded as an error, and
 Phase B reports `could not check <signal>: <why>`, never "not exploitable".

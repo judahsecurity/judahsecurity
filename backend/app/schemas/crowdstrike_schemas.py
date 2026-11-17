@@ -14,6 +14,8 @@ class CrowdStrikeIntegrationCreate(BaseModel):
     import_external_assets: bool = True
     import_hosts: bool = True
     import_spotlight: bool = True
+    collect_host_evidence: bool = False
+    host_evidence_rtr: bool = False
     continuous_sync_enabled: bool = True
     sync_interval_minutes: int = Field(1440, ge=15, le=10080)
 
@@ -23,6 +25,10 @@ class CrowdStrikeIntegrationCreate(BaseModel):
             raise ValueError("Enable at least one CrowdStrike module")
         if self.import_spotlight and not self.import_hosts:
             raise ValueError("Spotlight requires Hosts for asset correlation")
+        if self.collect_host_evidence and not self.import_hosts:
+            raise ValueError("Host evidence requires Hosts for asset correlation")
+        if self.host_evidence_rtr and not self.collect_host_evidence:
+            raise ValueError("RTR host evidence requires host evidence collection")
         return self
 
 
@@ -34,6 +40,8 @@ class CrowdStrikeIntegrationUpdate(BaseModel):
     import_external_assets: bool | None = None
     import_hosts: bool | None = None
     import_spotlight: bool | None = None
+    collect_host_evidence: bool | None = None
+    host_evidence_rtr: bool | None = None
     is_active: bool | None = None
     continuous_sync_enabled: bool | None = None
     sync_interval_minutes: int | None = Field(None, ge=15, le=10080)
@@ -54,6 +62,8 @@ class CrowdStrikeIntegrationResponse(BaseModel):
     import_external_assets: bool
     import_hosts: bool
     import_spotlight: bool
+    collect_host_evidence: bool = False
+    host_evidence_rtr: bool = False
     is_active: bool
     continuous_sync_enabled: bool
     sync_interval_minutes: int

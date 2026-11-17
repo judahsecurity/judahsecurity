@@ -157,7 +157,7 @@ def _client_for(integration: CrowdStrikeIntegration) -> CrowdStrikeClient:
     return CrowdStrikeClient(integration.cloud_region, integration.get_client_id(), integration.get_client_secret())
 
 
-async def test_connection(region: str, client_id: str, client_secret: str, *, external: bool, hosts: bool, spotlight: bool) -> dict[str, Any]:
+async def test_connection(region: str, client_id: str, client_secret: str, *, external: bool, hosts: bool, spotlight: bool, applications: bool = False) -> dict[str, Any]:
     try:
         async with CrowdStrikeClient(region, client_id, client_secret) as client:
             if external:
@@ -166,6 +166,11 @@ async def test_connection(region: str, client_id: str, client_secret: str, *, ex
                 await client._request("GET", "/devices/combined/devices/v1", params={"limit": 1})
             if spotlight:
                 await client._request("GET", "/spotlight/combined/vulnerabilities/v1", params={"limit": 1})
+            if applications:
+                # Host evidence: Discover applications (Assets: read). RTR read
+                # scope can only be checked against a live host, so it isn't
+                # exercised here.
+                await client._request("GET", "/discover/queries/applications/v1", params={"limit": 1})
         return {"ok": True, "message": "CrowdStrike credentials and selected read scopes were verified."}
     except CrowdStrikeError as exc:
         return {"ok": False, "message": str(exc)}
