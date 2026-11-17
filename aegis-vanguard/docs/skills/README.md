@@ -115,8 +115,18 @@ severity, parameter?, evidence_note?}`:
   re-delivered item merges as a duplicate (never inserted twice). A backend
   restart before the drain keeps the item; the next think turn of the resumed
   run (same `session_id`) drains it. A run ending without a drain also keeps it.
-  The file lock covers one host; `sched-` sessions are checked against their DB
-  snapshot but their inbox is still the file on the host that ran them.
+  Two inbox stores sit behind the same `run_control` API, chosen by
+  `AEGIS_CANDIDATE_INBOX_BACKEND`: `file` (the flock-locked JSON-lines file,
+  safe on one host), `db` (one `agent_candidate_inbox` row per item, safe
+  across hosts; use it for multi-host deployments), or unset/`auto` (default:
+  `db` for `sched-` sessions, whose snapshot is already in the DB, `file`
+  otherwise). The DB store redacts the same claim fields at rest, counts rows
+  for the 25 cap, claims rows with a token (`FOR UPDATE SKIP LOCKED` on
+  Postgres) so two workers never merge the same row, deletes only claimed rows
+  on settle, and re-delivers a claim older than
+  `AEGIS_CANDIDATE_INBOX_CLAIM_STALE_SECONDS` (default 600). The table is
+  created by `python -m scripts.apply_agent_ledger_migration` (and by
+  `create_all` at API start).
 - Nothing is confirmed by intake. Resuming an idle session (`POST /agent/query`,
   same `session_id`), or the live run after the inbox drains, lets Prowl verify it: the tester loop forces
   `independent_verify` for pending `sql_injection`/`xss`; for other classes the
@@ -139,9 +149,11 @@ classes with their proof class and lane, `severity_caps` and
    `PROWL_INGEST_KEY` service key and paired hunter/verifier observations with
    run/candidate/verification IDs produced by the scoped executor. Vanguard
    must not fabricate those. Use candidate intake instead.
-2. **Candidate inbox is single-host.** Intake into a running session is queued
-   (202) in a file-locked inbox beside the run snapshot and survives restarts,
-   but backends on several hosts do not share it (no DB inbox table yet).
+2. **Candidate inbox is single-host unless the DB store is on.** Intake into a
+   running session is queued (202) and survives restarts. With the default
+   `file` store (non-`sched-` sessions) backends on several hosts do not share
+   it; set `AEGIS_CANDIDATE_INBOX_BACKEND=db` there. A crashed claimer's items
+   wait out the stale-claim window before re-delivery.
    Without a live session `verify` uses the `finding_validation` playbook; with
    `playbook_id` the backend keeps only the text after `Operator note:`
    (<=4000 chars), so that packet is trimmed and redacted.

@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.models.organization import Organization  # noqa: F401 - FK metadata
 from app.models.user import User  # noqa: F401 - FK metadata
+from app.models.agent_autonomy_work import AgentCandidateInbox
 from app.models.agent_conversation import AgentConversation
 from app.services.agent import run_snapshot
 from app.services.agent.proof_policy import PROOFS_BY_CLASS
@@ -26,7 +27,11 @@ def env(monkeypatch, tmp_path):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
                            poolclass=StaticPool)
     AgentConversation.__table__.create(engine)
+    AgentCandidateInbox.__table__.create(engine)
     factory = sessionmaker(bind=engine)
+    from app.services.agent import run_control
+
+    monkeypatch.setattr(run_control, "_inbox_db_factory", factory)
     with factory() as db:
         db.add(AgentConversation(session_id="s1", user_id=7, organization_id=12,
                                  messages=[], mode="agent"))
@@ -58,7 +63,8 @@ def env(monkeypatch, tmp_path):
 
     app.dependency_overrides[get_db] = test_db
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=7, organization_id=12)
-    return SimpleNamespace(app=app, client=TestClient(app), get_current_user=get_current_user)
+    return SimpleNamespace(app=app, client=TestClient(app), get_current_user=get_current_user,
+                           factory=factory)
 
 
 BODY = {
@@ -452,3 +458,252 @@ def test_inbox_without_organization_stays_in_memory(tmp_path, monkeypatch):
     assert [p["candidate_id"] for p in run_control.drain_candidate_inbox("mem-only")] == ["c001"]
     assert run_control.peek_candidate_inbox("mem-only") == []
     assert not (tmp_path / "sessions").exists()
+
+
+# ------------------------------------------------------- database-backed inbox
+
+
+def _inbox_rows(factory, session_id="s1"):
+    with factory() as db:
+        return (db.query(AgentCandidateInbox)
+                .filter(AgentCandidateInbox.session_id == session_id)
+                .order_by(AgentCandidateInbox.id).all())
+
+
+@pytest.fixture
+def db_inbox(tmp_path, monkeypatch):
+    """File-backed SQLite (real separate connections) with the db inbox backend on."""
+    from app.services.agent import run_control
+
+    monkeypatch.setattr(run_snapshot, "_DIR", tmp_path / "sessions")
+    monkeypatch.setenv("AEGIS_CANDIDATE_INBOX_BACKEND", "db")
+    engine = create_engine(f"sqlite:///{tmp_path / 'inbox.db'}",
+                           connect_args={"check_same_thread": False, "timeout": 30})
+    AgentCandidateInbox.__table__.create(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(run_control, "_inbox_db_factory", factory)
+    _simulate_restart(run_control)
+    yield SimpleNamespace(rc=run_control, factory=factory, engine=engine, path=tmp_path / "inbox.db")
+    _simulate_restart(run_control)
+    engine.dispose()
+
+
+def _ids(items):
+    return [p["candidate_id"] for p in items]
+
+
+def test_db_inbox_queue_claim_ack(db_inbox):
+    rc = db_inbox.rc
+    assert rc.queue_candidate("s1", _payload(1), 12)
+    assert _ids(rc.peek_candidate_inbox("s1", 12)) == ["c001"]
+    assert _ids(rc.claim_candidate_inbox("s1", 12)) == ["c001"]
+    # Claimed rows are still pending (listing, dedup, cap) but not re-claimable.
+    assert _ids(rc.peek_candidate_inbox("s1", 12)) == ["c001"]
+    assert rc.claim_candidate_inbox("s1", 12) == []
+    assert rc.queue_candidate("s1", _payload(2), 12)
+    # Ack removes only claimed rows: c002 was queued after the claim.
+    assert rc.ack_candidate_inbox("s1", ["c001", "c002"], 12) == 1
+    assert _ids(rc.peek_candidate_inbox("s1", 12)) == ["c002"]
+    assert _ids(rc.drain_candidate_inbox("s1", 12)) == ["c002"]
+    assert rc.peek_candidate_inbox("s1", 12) == []
+    assert _inbox_rows(db_inbox.factory) == []
+    assert not (run_snapshot._DIR).exists()  # nothing written to the file store
+
+
+def test_db_inbox_survives_restart_with_fresh_sessions(db_inbox, monkeypatch):
+    rc = db_inbox.rc
+    assert rc.queue_candidate("s1", _payload(1), 12)
+    assert rc.queue_candidate("s1", _payload(2), 12)
+    _simulate_restart(rc)
+    db_inbox.engine.dispose()
+    other_host = create_engine(f"sqlite:///{db_inbox.path}",
+                               connect_args={"check_same_thread": False})
+    monkeypatch.setattr(rc, "_inbox_db_factory", sessionmaker(bind=other_host))
+    assert _ids(rc.claim_candidate_inbox("s1", 12)) == ["c001", "c002"]
+    assert rc.ack_candidate_inbox("s1", ["c001", "c002"], 12) == 2
+    assert rc.peek_candidate_inbox("s1", 12) == []
+    other_host.dispose()
+
+
+def test_db_inbox_stale_claim_is_reclaimable(db_inbox, monkeypatch):
+    from datetime import datetime, timedelta
+
+    rc = db_inbox.rc
+    assert rc.queue_candidate("s1", _payload(1), 12)
+    assert _ids(rc.claim_candidate_inbox("s1", 12)) == ["c001"]
+    # Claimer crashed before ack: nothing re-delivered inside the stale window...
+    _simulate_restart(rc)
+    assert rc.claim_candidate_inbox("s1", 12) == []
+    with db_inbox.factory() as db:
+        row = db.query(AgentCandidateInbox).one()
+        first_token = row.claim_token
+        row.claimed_at = datetime.utcnow() - timedelta(seconds=601)
+        db.commit()
+    # ...and re-delivered (with a new token) once the claim is stale.
+    assert _ids(rc.claim_candidate_inbox("s1", 12)) == ["c001"]
+    assert _inbox_rows(db_inbox.factory)[0].claim_token != first_token
+    monkeypatch.setenv("AEGIS_CANDIDATE_INBOX_CLAIM_STALE_SECONDS", "0")
+    assert _ids(rc.claim_candidate_inbox("s1", 12)) == ["c001"]
+
+
+def test_db_inbox_concurrent_claimers_never_share_a_row(db_inbox):
+    import threading
+
+    rc = db_inbox.rc
+    for round_no in range(5):
+        for n in range(20):
+            assert rc.queue_candidate("s1", _payload(round_no * 100 + n), 12)
+        barrier, got, errors = threading.Barrier(2), [[], []], []
+
+        def claimer(slot):
+            try:
+                barrier.wait(10)
+                got[slot].extend(_ids(rc._db_claim(12, "s1")))
+            except Exception as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=claimer, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        assert not errors
+        assert not set(got[0]) & set(got[1])
+        assert sorted(got[0] + got[1]) == sorted(
+            f"c{round_no * 100 + n:03d}" for n in range(20))
+        assert rc.ack_candidate_inbox("s1", got[0] + got[1], 12) == 20
+    assert rc.peek_candidate_inbox("s1", 12) == []
+
+
+def test_db_inbox_cap_counts_rows(db_inbox):
+    rc = db_inbox.rc
+    for n in range(rc._MAX_INBOX):
+        assert rc.queue_candidate("s1", _payload(n), 12)
+    _simulate_restart(rc)
+    assert len(rc.peek_candidate_inbox("s1", 12)) == rc._MAX_INBOX
+    assert rc.queue_candidate("s1", _payload(99), 12) is False
+    assert len(_inbox_rows(db_inbox.factory)) == rc._MAX_INBOX
+    # Another session has its own cap.
+    assert rc.queue_candidate("s2", _payload(99), 12)
+
+
+def test_db_inbox_redacts_at_rest(db_inbox):
+    rc = db_inbox.rc
+    raw = {**_payload(1), "claimed_request": "GET /x\nCookie: sid=abc123",
+           "description": "token Cookie: sid=abc123"}
+    assert rc.queue_candidate("s1", raw, 12)
+    (row,) = _inbox_rows(db_inbox.factory)
+    assert "abc123" not in str(row.payload)
+    assert row.candidate_id == "c001" and row.root_cause == raw["root_cause"]
+    # This process keeps the raw copy; after a restart the redacted copy is served.
+    assert rc.peek_candidate_inbox("s1", 12)[0]["claimed_request"] == raw["claimed_request"]
+    _simulate_restart(rc)
+    assert "abc123" not in str(rc.peek_candidate_inbox("s1", 12))
+
+
+def test_db_inbox_duplicate_id_is_idempotent_and_clear_deletes(db_inbox):
+    rc = db_inbox.rc
+    assert rc.queue_candidate("s1", _payload(1), 12)
+    _simulate_restart(rc)
+    assert rc.queue_candidate("s1", _payload(1), 12)
+    assert len(_inbox_rows(db_inbox.factory)) == 1
+    rc.clear_session_controls("s1", 12)
+    assert _inbox_rows(db_inbox.factory) == []
+
+
+def test_db_inbox_write_failure_raises_oserror(tmp_path, monkeypatch):
+    from app.services.agent import run_control
+
+    monkeypatch.setenv("AEGIS_CANDIDATE_INBOX_BACKEND", "db")
+    engine = create_engine("sqlite://", poolclass=StaticPool)  # no inbox table
+    monkeypatch.setattr(run_control, "_inbox_db_factory", sessionmaker(bind=engine))
+    _simulate_restart(run_control)
+    with pytest.raises(OSError):
+        run_control.queue_candidate("s1", _payload(1), 12)
+    assert run_control.claim_candidate_inbox("s1", 12) == []
+
+
+def test_inbox_backend_selection(env, monkeypatch):
+    from app.services.agent import run_control
+
+    monkeypatch.delenv("AEGIS_CANDIDATE_INBOX_BACKEND", raising=False)
+    _simulate_restart(run_control)
+    assert run_control._inbox_backend("s1") == "file"
+    assert run_control._inbox_backend("sched-12-w1") == "db"
+    assert run_control.queue_candidate("s1", _payload(1), 12)
+    assert run_control.queue_candidate("sched-12-w1", _payload(2), 12)
+    assert [f.name for f in run_snapshot._DIR.glob("*.inbox.jsonl")] == ["12_s1.inbox.jsonl"]
+    assert [r.candidate_id for r in _inbox_rows(env.factory, "sched-12-w1")] == ["c002"]
+    assert _inbox_rows(env.factory, "s1") == []
+    monkeypatch.setenv("AEGIS_CANDIDATE_INBOX_BACKEND", "file")
+    assert run_control._inbox_backend("sched-12-w1") == "file"
+    monkeypatch.setenv("AEGIS_CANDIDATE_INBOX_BACKEND", "db")
+    assert run_control._inbox_backend("s1") == "db"
+    run_control.clear_candidate_inbox("sched-12-w1", 12)
+    monkeypatch.delenv("AEGIS_CANDIDATE_INBOX_BACKEND")
+    run_control.clear_candidate_inbox("s1", 12)
+
+
+def test_db_inbox_route_and_think_node_end_to_end(env, running, monkeypatch):
+    """Running-session intake -> DB row -> restart -> resumed think turn drains + settles."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.services.agent import recon_workers, tester_loop
+    from app.services.agent.orchestrator import AgentOrchestrator
+
+    monkeypatch.setenv("AEGIS_CANDIDATE_INBOX_BACKEND", "db")
+    out = env.client.post("/agent/sessions/s1/candidates",
+                          json={**BODY, "claimed_request": "GET /x\nCookie: sid=abc123"})
+    assert out.status_code == 202, out.text
+    cid = out.json()["candidate"]["id"]
+    (row,) = _inbox_rows(env.factory)
+    assert row.candidate_id == cid and "abc123" not in str(row.payload)
+    assert not list(run_snapshot._DIR.glob("*.inbox.jsonl"))
+
+    _simulate_restart(running)
+    monkeypatch.setattr(running, "has_running_task", lambda sid: False)
+    listing = env.client.get("/agent/sessions/s1/candidates").json()
+    assert {c["id"]: c["status"] for c in listing["candidates"]}[cid] == "queued"
+
+    monkeypatch.setattr(recon_workers, "drain_completed", AsyncMock(return_value=[]))
+    monkeypatch.setattr(tester_loop, "forced_next_step",
+                        lambda state: {"tool_name": "get_engagement_brain", "tool_args": {},
+                                       "thought": "look"})
+    orch = AgentOrchestrator()
+    orch._emit_status = AsyncMock()
+    orch._resolve_llm = lambda *_args: pytest.fail("no model call expected")
+    snap = run_snapshot.load_run_snapshot(12, "s1")
+    result = asyncio.run(orch._think_node({
+        "user_id": "7", "session_id": "s1", "organization_id": 12, "mode": "agent",
+        "current_iteration": 1, "current_phase": "exploitation", "execution_trace": [],
+        "engagement_brain": snap["engagement_brain"],
+        "capability_map": snap["capability_map"], "original_objective": snap["original_objective"],
+        "target_info": {"primary_target": "https://app.example.com"},
+    }))
+    ext = {c["id"]: c for c in result["engagement_brain"]["candidates"]}[cid]
+    assert ext["status"] == "pending"
+    stored = run_snapshot.load_run_snapshot(12, "s1")["engagement_brain"]["candidates"]
+    assert any(c["id"] == cid for c in stored)
+    assert _inbox_rows(env.factory) == []
+
+
+def test_ledger_migration_creates_candidate_inbox(monkeypatch):
+    from sqlalchemy import inspect
+
+    from scripts import apply_agent_ledger_migration
+
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    Organization.metadata.create_all(bind=engine, tables=[Organization.__table__, User.__table__])
+    monkeypatch.setattr(apply_agent_ledger_migration, "engine", engine)
+    apply_agent_ledger_migration.apply()
+    apply_agent_ledger_migration.apply()
+    inspector = inspect(engine)
+    assert inspector.has_table("agent_candidate_inbox")
+    assert {"organization_id", "session_id", "candidate_id", "root_cause", "payload",
+            "created_at", "claimed_at", "claim_token"} <= {
+        c["name"] for c in inspector.get_columns("agent_candidate_inbox")}
+    assert any(set(u["column_names"]) == {"organization_id", "session_id", "candidate_id"}
+               for u in inspector.get_unique_constraints("agent_candidate_inbox"))
+    assert any(i["column_names"] == ["organization_id", "session_id"]
+               for i in inspector.get_indexes("agent_candidate_inbox"))

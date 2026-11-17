@@ -12,19 +12,23 @@ Steers, compact flags, load briefs and price limits are in-memory only. The
 external candidate inbox is durable (see "Durable candidate inbox" below)
 because an accepted intake (202) is a promise to the operator that the lead
 reaches the brain even if the backend restarts before the next think turn.
+It has two stores behind one API (file on one host, database across hosts);
+see ``_inbox_backend``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import threading
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 try:  # POSIX only; on other platforms the thread lock is the only guard.
     import fcntl
@@ -44,6 +48,7 @@ _inbox_orgs: dict[str, int] = {}
 _inbox_lock = threading.RLock()
 _MAX_INBOX = 25
 _MAX_INBOX_FILE_BYTES = 1_000_000
+_DEFAULT_CLAIM_STALE_SECONDS = 600
 
 
 def register_run(session_id: str, task: Optional[asyncio.Task]) -> None:
@@ -113,7 +118,9 @@ def drain_steers(session_id: Optional[str]) -> List[str]:
 
 # ------------------------------------------------------- durable candidate inbox
 #
-# Storage: one JSON-lines file per session next to the run snapshot,
+# Two stores share one API (``_inbox_backend`` picks per session):
+#
+# File store: one JSON-lines file per session next to the run snapshot,
 # ``<run_snapshot._DIR>/{org}_{sid}.inbox.jsonl`` (0600, dir 0700), rewritten
 # atomically (tmp + fsync + os.replace) under an exclusive ``fcntl.flock`` on a
 # sibling ``.lock`` file plus a process-wide RLock. That makes queue/peek/ack
@@ -124,8 +131,9 @@ def drain_steers(session_id: Optional[str]) -> List[str]:
 # runs spread over several workers would need an inbox table instead.
 #
 # Lifecycle (at-least-once):
-#   queue_candidate     write-through: durable file first, then the in-memory copy.
-#   claim_candidate_inbox  read pending items WITHOUT removing them.
+#   queue_candidate     write-through: durable store first, then the in-memory copy.
+#   claim_candidate_inbox  read pending items WITHOUT removing them (file: all of
+#                       them; database: the unclaimed or stale ones, now claimed).
 #   ack_candidate_inbox    remove items by candidate_id once the caller has merged
 #                       them into the brain AND the run snapshot holds them.
 # A crash between merge and ack re-delivers the item on the next think turn;
@@ -133,13 +141,13 @@ def drain_steers(session_id: Optional[str]) -> List[str]:
 # duplicate and acked, never inserted twice.
 #
 # In-memory fast path: the raw payload stays cached in ``_candidate_inbox``.
-# The file holds a copy whose free-text claim fields are passed through the
-# snapshot redactor (same at-rest policy as run_snapshot). When the file is
+# The durable store holds a copy whose free-text claim fields are passed through the
+# snapshot redactor (same at-rest policy as run_snapshot). When the store is
 # readable it is authoritative for *membership*; the cached raw copy is used
 # for any item this process queued itself. Without an organization id (no
 # snapshot path) the inbox is memory-only, as before.
 #
-# Run end does not clear the inbox: undrained items stay on disk and are
+# Run end does not clear the inbox: undrained items stay durable and are
 # drained by the next think turn of a resumed run (``_initialize_node``
 # restores the brain from the snapshot; the think node then drains with the
 # state's organization_id). ``clear_session_controls`` deletes them, since it
@@ -255,10 +263,182 @@ def _merged_view(session_id: str, durable: List[Dict[str, Any]]) -> List[Dict[st
     return view
 
 
+# ------------------------------------------------------------ backend selection
+
+
+def _inbox_backend(session_id: str) -> str:
+    """``"db"`` or ``"file"`` for this session's durable inbox.
+
+    ``AEGIS_CANDIDATE_INBOX_BACKEND``: ``db`` (every session; use for
+    multi-host deployments), ``file`` (every session; single host), or unset /
+    ``auto`` (default): ``db`` for ``sched-`` sessions, whose run snapshot
+    already lives in the database and whose turns may run on any worker, and
+    ``file`` for everything else (unchanged behaviour).
+    """
+    mode = (os.environ.get("AEGIS_CANDIDATE_INBOX_BACKEND") or "auto").strip().lower()
+    if mode in ("db", "database"):
+        return "db"
+    if mode == "file":
+        return "file"
+    return "db" if str(session_id).startswith("sched-") else "file"
+
+
+def _claim_stale_after() -> timedelta:
+    try:
+        seconds = int(os.environ.get("AEGIS_CANDIDATE_INBOX_CLAIM_STALE_SECONDS")
+                      or _DEFAULT_CLAIM_STALE_SECONDS)
+    except ValueError:
+        seconds = _DEFAULT_CLAIM_STALE_SECONDS
+    return timedelta(seconds=max(0, seconds))
+
+
+class InboxStoreError(OSError):
+    """The durable inbox store could not be written (the intake must refuse)."""
+
+
+# Tests (and callers with their own engine) may replace this with a sessionmaker.
+_inbox_db_factory: Any = None
+
+
+def _db_session():
+    factory = _inbox_db_factory
+    if factory is None:
+        from app.db.database import SessionLocal
+
+        factory = SessionLocal
+    return factory()
+
+
+def _db_model():
+    from app.models.agent_autonomy_work import AgentCandidateInbox
+
+    return AgentCandidateInbox
+
+
+def _db_lock_session(db: Any, org: int, session_id: str) -> None:
+    """Serialize queue (cap check + insert) per session across hosts on Postgres."""
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    digest = hashlib.sha256(f"agent_candidate_inbox:{org}:{session_id}".encode()).digest()
+    key = int.from_bytes(digest[:8], "big", signed=True)
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
+def _db_rows(db: Any, org: int, session_id: str) -> List[Any]:
+    model = _db_model()
+    return (db.query(model)
+            .filter(model.organization_id == org, model.session_id == session_id)
+            .order_by(model.id).all())
+
+
+def _row_payload(row: Any) -> Dict[str, Any]:
+    payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
+    payload.setdefault("candidate_id", row.candidate_id)
+    return payload
+
+
+def _db_queue(org: int, session_id: str, item: Dict[str, Any]) -> bool:
+    from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+
+    model = _db_model()
+    cid = _key(item)
+    if not cid:
+        return False
+    try:
+        with _db_session() as db:
+            _db_lock_session(db, org, session_id)
+            count = (db.query(model)
+                     .filter(model.organization_id == org, model.session_id == session_id)
+                     .count())
+            if count >= _MAX_INBOX:
+                return False
+            db.add(model(
+                organization_id=org, session_id=session_id, candidate_id=cid[:128],
+                root_cause=str(item.get("root_cause") or ""), payload=_at_rest(item),
+                created_at=datetime.utcnow(),
+            ))
+            try:
+                db.commit()
+            except IntegrityError:
+                # Same candidate id already queued (another worker won the race):
+                # it is durable, which is all the caller needs.
+                db.rollback()
+            return True
+    except SQLAlchemyError as exc:
+        raise InboxStoreError(f"candidate inbox database write failed: {exc.__class__.__name__}") from exc
+
+
+def _db_peek(org: int, session_id: str) -> List[Dict[str, Any]]:
+    with _db_session() as db:
+        return [_row_payload(r) for r in _db_rows(db, org, session_id)]
+
+
+def _db_claim(org: int, session_id: str) -> List[Dict[str, Any]]:
+    """Stamp unclaimed or stale rows with a fresh token and return them."""
+    from sqlalchemy import or_
+
+    model = _db_model()
+    now = datetime.utcnow()
+    cutoff = now - _claim_stale_after()
+    token = uuid.uuid4().hex
+    eligible = or_(model.claimed_at.is_(None), model.claimed_at < cutoff)
+    with _db_session() as db:
+        query = (db.query(model.id)
+                 .filter(model.organization_id == org, model.session_id == session_id, eligible)
+                 .order_by(model.id))
+        if db.get_bind().dialect.name == "postgresql":
+            query = query.with_for_update(skip_locked=True)
+        ids = [row_id for (row_id,) in query.all()]
+        if not ids:
+            db.rollback()
+            return []
+        # Re-check eligibility in the UPDATE itself: on SQLite (no row locks) a
+        # concurrent claimer that committed first leaves these rows ineligible.
+        (db.query(model)
+         .filter(model.id.in_(ids), eligible)
+         .update({model.claimed_at: now, model.claim_token: token}, synchronize_session=False))
+        rows = (db.query(model).filter(model.claim_token == token).order_by(model.id).all())
+        payloads = [_row_payload(r) for r in rows]
+        db.commit()
+        return payloads
+
+
+def _db_ack(org: int, session_id: str, ids: set) -> Tuple[int, List[Dict[str, Any]]]:
+    model = _db_model()
+    with _db_session() as db:
+        removed = (db.query(model)
+                   .filter(model.organization_id == org, model.session_id == session_id,
+                           model.candidate_id.in_(sorted(ids)), model.claimed_at.isnot(None))
+                   .delete(synchronize_session=False))
+        db.commit()
+        remaining = [_row_payload(r) for r in _db_rows(db, org, session_id)]
+    return int(removed or 0), remaining
+
+
+def _db_clear(org: int, session_id: str) -> None:
+    model = _db_model()
+    with _db_session() as db:
+        (db.query(model)
+         .filter(model.organization_id == org, model.session_id == session_id)
+         .delete(synchronize_session=False))
+        db.commit()
+
+
 def _durable_items(session_id: str, org: Optional[int]) -> Optional[List[Dict[str, Any]]]:
     """Pending items (merged view), or None when there is no durable store to read."""
     if not org:
         return None
+    if _inbox_backend(session_id) == "db":
+        try:
+            durable = _db_peek(org, session_id)
+        except Exception:
+            logger.warning("candidate inbox database read failed; using in-memory copy",
+                           exc_info=True)
+            return None
+        with _inbox_lock:
+            return _merged_view(session_id, durable)
     try:
         path = _inbox_path(org, session_id)
         with _locked(path):
@@ -275,11 +455,12 @@ def queue_candidate(
 ) -> bool:
     """Queue a validated, wrapped external candidate for the next think node.
 
-    Write-through: with an organization id the item is appended to the durable
-    inbox file before the in-memory cache, so a restart before the next think
-    turn does not lose it. Returns False when the inbox (durable items
-    included) is full. Raises OSError when the durable write fails so the
-    caller can refuse the intake instead of promising delivery.
+    Write-through: with an organization id the item is written to the durable
+    inbox (file or database row, see ``_inbox_backend``) before the in-memory
+    cache, so a restart before the next think turn does not lose it. Returns
+    False when the inbox (durable items included) is full. Raises OSError when
+    the durable write fails so the caller can refuse the intake instead of
+    promising delivery.
     """
     if not session_id or not isinstance(payload, dict):
         return False
@@ -293,6 +474,12 @@ def queue_candidate(
             box.append(item)
             return True
         _inbox_orgs[session_id] = org
+        if _inbox_backend(session_id) == "db":
+            if not _db_queue(org, session_id, item):
+                return False
+            cached = [p for p in _candidate_inbox.get(session_id, []) if _key(p) != _key(item)]
+            _candidate_inbox[session_id] = cached + [item]
+            return True
         path = _inbox_path(org, session_id)
         with _locked(path):
             durable = _read_items(path)
@@ -326,16 +513,28 @@ def claim_candidate_inbox(
 ) -> List[Dict[str, Any]]:
     """Items to merge this think turn.
 
-    Durable inbox: nothing is removed until ``ack_candidate_inbox``. Without a
+    Durable inbox: nothing is removed until ``ack_candidate_inbox``. The
+    database store hands each row to one claimer at a time (until the claim
+    goes stale); the file store returns every pending item. Without a
     resolvable organization there is no durable copy to protect, so the
     memory-only queue is popped here (the pre-durable behaviour).
     """
     if not session_id:
         return []
     with _inbox_lock:
-        if not _resolve_org(session_id, organization_id):
+        org = _resolve_org(session_id, organization_id)
+        if not org:
             return [p for p in _candidate_inbox.pop(session_id, []) if p]
-        return [p for p in peek_candidate_inbox(session_id, organization_id) if p]
+        if _inbox_backend(session_id) != "db":
+            return [p for p in peek_candidate_inbox(session_id, organization_id) if p]
+    try:
+        claimed = _db_claim(org, session_id)
+    except Exception:
+        logger.warning("candidate inbox database claim failed; retried next turn", exc_info=True)
+        return []
+    with _inbox_lock:
+        cached = {_key(p): p for p in _candidate_inbox.get(session_id, []) if _key(p)}
+        return [dict(cached.get(_key(row)) or row) for row in claimed if row]
 
 
 def ack_candidate_inbox(
@@ -345,7 +544,8 @@ def ack_candidate_inbox(
 ) -> int:
     """Remove merged items (by candidate_id) from the durable inbox and the cache.
 
-    Items queued after the caller's claim are kept. Returns how many were removed.
+    Items queued after the caller's claim are kept (the database store deletes
+    only claimed rows). Returns how many were removed.
     """
     ids = {str(c) for c in candidate_ids if c}
     if not session_id or not ids:
@@ -353,6 +553,20 @@ def ack_candidate_inbox(
     with _inbox_lock:
         org = _resolve_org(session_id, organization_id)
         removed = 0
+        if org and _inbox_backend(session_id) == "db":
+            try:
+                removed, keep = _db_ack(org, session_id, ids)
+            except Exception:
+                logger.warning("candidate inbox database ack failed; item re-delivered",
+                               exc_info=True)
+                return 0
+            _candidate_inbox[session_id] = [
+                p for p in _candidate_inbox.get(session_id, []) if _key(p) not in ids
+            ]
+            _merged_view(session_id, keep)
+            if not keep:
+                _inbox_orgs.pop(session_id, None)
+            return removed
         if org:
             path = _inbox_path(org, session_id)
             with _locked(path):
@@ -406,10 +620,13 @@ def clear_candidate_inbox(session_id: str, organization_id: Optional[int] = None
         if not org:
             return
         try:
+            if _inbox_backend(session_id) == "db":
+                _db_clear(org, session_id)
+                return
             path = _inbox_path(org, session_id)
             with _locked(path):
                 _write_items(path, [])
-        except OSError:
+        except Exception:
             logger.warning("candidate inbox clear failed", exc_info=True)
 
 
