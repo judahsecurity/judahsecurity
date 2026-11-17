@@ -68,6 +68,31 @@ async def test_cursor_pagination_uses_next_and_rejects_repeats():
     await client.http.aclose()
 
 
+
+@pytest.mark.asyncio
+async def test_external_asset_query_uses_supported_page_limit_and_after_cursor():
+    client = CrowdStrikeClient("us-1", "client", "secret")
+    client._request = AsyncMock(side_effect=[
+        {"resources": ["asset-1"], "meta": {"pagination": {"after": "next-page"}}},
+        {"resources": [{"id": "asset-1"}]},
+        {"resources": ["asset-2"], "meta": {"pagination": {}}},
+        {"resources": [{"id": "asset-2"}]},
+    ])
+    try:
+        batches = [batch async for batch in client.external_assets()]
+        assert [[asset["id"] for asset in batch] for batch in batches] == [["asset-1"], ["asset-2"]]
+        query_calls = [
+            call for call in client._request.await_args_list
+            if call.args[1] == "/fem/queries/external-assets/v2"
+        ]
+        assert [call.kwargs["params"] for call in query_calls] == [
+            {"limit": 100},
+            {"limit": 100, "after": "next-page"},
+        ]
+    finally:
+        await client.http.aclose()
+
+
 def test_external_import_is_tenant_scoped_and_idempotent(db):
     first = _integration(db, "first")
     second = _integration(db, "second")
