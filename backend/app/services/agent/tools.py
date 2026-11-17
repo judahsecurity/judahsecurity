@@ -10142,6 +10142,25 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             notes=notes,
         )
         self._engagement_brain = brain.to_dict()
+        # Durable, value-free signal that creds exist for these hosts, so an
+        # authenticated follow-up survives restarts and reaches the planner even
+        # if the model does not queue one. The secret is never written here.
+        try:
+            from app.services.agent.fact_events import append_fact_event
+
+            _user_id, _org_id = get_tenant_context()
+            if _org_id:
+                append_fact_event(
+                    organization_id=int(_org_id),
+                    session_id=str(current_session_id.get() or ""),
+                    kind="credential",
+                    target=(valid_on or [""])[0] if valid_on else "",
+                    dedupe_parts=[username, secret_type, *(valid_on or [])],
+                    scope_hosts=valid_on or [],
+                    payload={"username": username, "secret_type": secret_type, "source": source},
+                )
+        except Exception:
+            logger.debug("credential fact event skipped", exc_info=True)
         return json.dumps(
             {
                 "stored": rec.redacted(),

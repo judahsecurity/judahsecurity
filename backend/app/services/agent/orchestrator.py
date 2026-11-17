@@ -1068,6 +1068,33 @@ class AgentOrchestrator:
                         out["engagement_brain"] = brain.to_dict()
         except Exception:
             logger.debug("pre-registered identity hydration skipped", exc_info=True)
+        # Drain durable worker-recorded facts (captures, credentials, verified
+        # findings) into the brain's observation surface so the next planner pass
+        # turns them into hypotheses — reliably across turns and restarts, not
+        # only when the model called queue_finding_followups. Idempotent and
+        # scope-checked; each fact is consumed once.
+        try:
+            from app.services.agent.autonomy_limits import current_autonomy_limits
+
+            if current_autonomy_limits.get() and org_id and session_id:
+                from app.services.agent.assessment_scope import observation_scope_hosts
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+                from app.services.agent.fact_events import drain_fact_events_into_brain
+
+                scope_hosts = observation_scope_hosts(self.tool_manager) or list(
+                    getattr(current_autonomy_limits.get(), "allowed_hosts", ()) or ()
+                )
+                brain = engagement_brain_from_dict(out.get("engagement_brain"))
+                if drain_fact_events_into_brain(
+                    brain, organization_id=int(org_id), session_id=session_id,
+                    scope_hosts=scope_hosts,
+                ):
+                    from app.services.agent.penetration_task_graph import sync_graph_from_brain
+
+                    sync_graph_from_brain(brain)
+                    out["engagement_brain"] = brain.to_dict()
+        except Exception:
+            logger.debug("fact event drain skipped", exc_info=True)
         # Hand off recent first-party takeover scanner observations to opted-in
         # scheduled hunts. They remain leads until the normal proof gate runs.
         try:

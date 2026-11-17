@@ -53,6 +53,23 @@ hunt imports recent in-scope scanner events. One observation produces one
 deduplicated specialist hypothesis. Prowl's existing proof checks still decide
 whether a candidate is verified.
 
+## Durable fact ledger
+
+Worker-recorded facts (captures, differentials, credentials, verified findings)
+are appended to `agent_fact_events` — an append-only, idempotent stream keyed by
+`(organization_id, dedupe_key)` and `event_uuid`, so a retry or restart cannot
+enqueue the same fact twice. Rows are thin and value-free (evidence bytes stay
+in the evidence store; a `credential` fact is the *signal* that creds exist for a
+host, never the secret). At the start of each autonomy turn, unconsumed facts
+for the session are drained into the brain's observation surface — scope-checked
+against the current RoE and consumed once — so the next planner pass turns them
+into hypotheses reliably across turns and restarts, not only when the model
+remembered to call `queue_finding_followups`. The worker's existing poll remains
+the transport (it reads the unconsumed watermark); event-driven wake via
+`LISTEN/NOTIFY` is a later option. A `verified_finding` fact is still a lead at
+consume time — the finding gate, not the event, authorizes a reported finding.
+Apply `db/migrations/add_agent_fact_events.sql` alongside the autonomy migration.
+
 ## Pre-registered engagement identities
 
 The restart snapshot deliberately omits live credentials and the active auth
