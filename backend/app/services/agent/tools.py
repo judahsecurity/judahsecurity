@@ -508,6 +508,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_stored_xss_cleanup_paths = SessionValue(set)
     _scoped_race_action_paths = SessionValue(set)
     _scoped_race_cleanup_paths = SessionValue(set)
+    _scoped_prompt_injection_endpoints = SessionValue(dict)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_auth_login_path = SessionValue(lambda: "")
     _scoped_assessment_started = SessionValue(lambda: False)
@@ -740,6 +741,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
             "scoped_cors_probe_assigned": self.scoped_cors_probe_assigned,
             "scoped_race_assigned": self.scoped_race_assigned,
+            "scoped_prompt_injection_assigned": self.scoped_prompt_injection_assigned,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -1977,6 +1979,48 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "probe_result": {k: proof[k] for k in
                                  ("control", "probe", "cleanup_confirmed", "requests_sent")},
                 "funnel": parameter_test_funnel(brain)}
+
+    async def scoped_prompt_injection_assigned(
+        self, endpoint_path: str, technique: str = "instruction_override",
+        identity: str = "anonymous",
+    ) -> Dict[str, Any]:
+        """Test one operator-approved chat endpoint for direct prompt injection.
+
+        Runs five control/probe trials. A trial hits when the plain control is
+        not followed and the injected probe returns its fresh canary. The result
+        is a lead receipt; only an independent verifier replay can confirm it.
+        """
+        from app.services.agent.content_shield import sanitize_for_model
+        from app.services.agent.scoped_assessment.prompt_injection_probe import TECHNIQUES
+
+        if technique not in TECHNIQUES:
+            return {"success": False, "error": "unsupported_technique",
+                    "techniques": sorted(TECHNIQUES)}
+        if endpoint_path not in (getattr(self, "_scoped_prompt_injection_endpoints", None) or {}):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "chat endpoint is not in prompt_injection_endpoints"}
+        try:
+            receipt, artifact_id = await self._scoped_prompt_injection_run(
+                endpoint_path, technique=technique, identity=identity,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__,
+                    "reason": str(exc)[:200]}
+        sample = next((trial["probe"]["reply_excerpt"] for trial in receipt["trials"]
+                       if trial["probe"].get("reply_excerpt")), "")
+        sample, _ = sanitize_for_model(sample[:600])
+        return {"success": True, "evidence_id": artifact_id,
+                "endpoint_path": endpoint_path, "technique": technique,
+                "trials": receipt["trial_count"], "hits": receipt["hits"],
+                "control_hits": receipt["control_hits"],
+                "reproduction_rate": receipt["reproduction_rate"],
+                "lead_signal": receipt["lead_signal"],
+                "sample_probe_reply_untrusted": sample,
+                "next_step": ("Submit a candidate with vulnerability_class=prompt_injection, "
+                              "target set to the endpoint URL and this evidence_id"
+                              if receipt["lead_signal"] else
+                              "No clean differential; the injected task was not followed "
+                              "or a plain control was")}
 
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -5783,6 +5827,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 for test_result in scan_result.results:
                     if test_result.get("verdict") != "fail":
                         continue
+                    if test_result.get("category") == "prompt_injection":
+                        # LLM-graded hits are leads; they go to the candidate
+                        # queue below and need a deterministic replay.
+                        continue
                     finding_data = build_finding_data(test_result, target_url)
                     asset = self._get_or_create_asset(db, org_id, target_url.strip())
                     if not asset.id or db.is_modified(asset):
@@ -5813,10 +5861,75 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 db.close()
 
         report = format_scan_report(scan_result)
+        try:
+            bridged = await self._bridge_prompt_injection_leads(scan_result.results)
+        except Exception:
+            logger.exception("Prompt-injection lead bridge failed")
+            bridged = []
+        if bridged:
+            report += "\n\nPrompt-injection leads queued for independent verification:\n" + "\n".join(
+                f"- {row['candidate_id']} {row['target']} "
+                f"(scoped trials: {row.get('scoped_trials') or 'not run: ' + row.get('scoped_reason', '')})"
+                for row in bridged)
         max_chars = _tool_output_max_chars()
         if len(report) > max_chars:
             report = report[:max_chars] + "\n\n... (truncated)"
         return report
+
+    async def _bridge_prompt_injection_leads(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Open one prompt_injection candidate per endpoint with an LLM-graded hit.
+
+        When the operator approved that endpoint, a scoped hunter run is attached
+        so the verifier can replay it. Otherwise the candidate holds only the
+        lead and the verifier closes it as inconclusive with the missing approval.
+        """
+        from urllib.parse import urlsplit
+
+        from app.services.agent.content_shield import sanitize_for_model
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.independent_verify import submit_candidate
+
+        by_endpoint: Dict[str, List[Dict[str, Any]]] = {}
+        for row in results or []:
+            if row.get("category") == "prompt_injection" and row.get("verdict") == "fail":
+                by_endpoint.setdefault(str(row.get("endpoint") or ""), []).append(row)
+        bridged = []
+        for endpoint, rows in list(by_endpoint.items())[:8]:
+            if not endpoint:
+                continue
+            lead_lines = []
+            for row in rows[:5]:
+                preview, _ = sanitize_for_model(str(row.get("response_preview") or "")[:300])
+                lead_lines.append(f"{row.get('payload_id')}: {row.get('name')} -> {preview}")
+            evidence = ("llm_red_team LLM-graded lead (not proof):\n" + "\n".join(lead_lines))[:4000]
+            evidence_ids, scoped = [], {}
+            path = urlsplit(endpoint).path or "/"
+            if path in (getattr(self, "_scoped_prompt_injection_endpoints", None) or {}):
+                try:
+                    receipt, artifact_id = await self._scoped_prompt_injection_run(
+                        path, technique="instruction_override",
+                        expected_url=endpoint.split("?", 1)[0].split("#", 1)[0])
+                    scoped = {"scoped_trials": f"{receipt['hits']}/{receipt['trial_count']} hits, "
+                                               f"{receipt['control_hits']} control hits"}
+                    if receipt["lead_signal"]:
+                        evidence_ids.append(artifact_id)
+                except (ValueError, OSError) as exc:
+                    scoped = {"scoped_reason": str(exc)[:120]}
+            else:
+                scoped = {"scoped_reason": "endpoint not in prompt_injection_endpoints"}
+            self._require_independent_verify = True
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            cand = submit_candidate(
+                brain, title=f"Prompt injection in chat endpoint {path}",
+                description="Direct prompt injection lead from llm_red_team.",
+                severity=str(rows[0].get("severity") or "medium"), target=endpoint,
+                evidence=evidence, specialist="llm_red_team", identity="anonymous",
+                test_type="prompt_injection", vulnerability_class="prompt_injection",
+                evidence_ids=evidence_ids,
+            )
+            self._engagement_brain = brain.to_dict()
+            bridged.append({"candidate_id": cand.id, "target": endpoint, **scoped})
+        return bridged
 
     async def save_note(
         self,
@@ -10526,8 +10639,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         """Queue a medium+ finding for independent verification.
 
         Set vulnerability_class to exposure, sql_injection, xss, authorization,
-        ssrf, xxe, command_injection, path_traversal, csrf, known_cve, or
-        account_enumeration. Unsupported classes remain inconclusive until a
+        ssrf, xxe, prompt_injection, command_injection, path_traversal, csrf,
+        known_cve, or account_enumeration. Unsupported classes remain inconclusive until a
         matching proof validator exists. Hunters must not create_finding.
         """
         from app.services.agent.engagement_brain import engagement_brain_from_dict

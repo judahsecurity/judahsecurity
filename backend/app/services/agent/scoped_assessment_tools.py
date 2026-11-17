@@ -61,6 +61,9 @@ VERIFIER_POST_BUDGET = 24
 # careful single-probe POST budget and bounded to a few attempts per actor.
 HUNTER_RACE_BUDGET = 3
 VERIFIER_RACE_BUDGET = 3
+# Each prompt-injection run is a bounded set of control/probe trials.
+HUNTER_PROMPT_INJECTION_BUDGET = 3
+VERIFIER_PROMPT_INJECTION_BUDGET = 3
 
 
 class ScopedAssessmentTools:
@@ -123,6 +126,7 @@ class ScopedAssessmentTools:
         cleanup_paths = policy.get("stored_xss_cleanup_paths") or []
         race_action_paths = policy.get("race_action_paths") or []
         race_cleanup_paths = policy.get("race_cleanup_paths") or []
+        injection_endpoints = policy.get("prompt_injection_endpoints") or []
         expectations = policy.get("owner_only_resources") or []
         auth_login_path = policy.get("auth_login_path") or ""
         if (auth_login_path and (not isinstance(auth_login_path, str)
@@ -135,12 +139,37 @@ class ScopedAssessmentTools:
                 or not isinstance(cleanup_paths, list) or len(cleanup_paths) > 8
                 or not isinstance(race_action_paths, list) or len(race_action_paths) > 8
                 or not isinstance(race_cleanup_paths, list) or len(race_cleanup_paths) > 8
+                or not isinstance(injection_endpoints, list) or len(injection_endpoints) > 8
                 or not isinstance(expectations, list) or len(expectations) > 8):
             raise ValueError("Invalid bounded assessment policy")
         for path in [*paths, *cleanup_paths, *race_action_paths, *race_cleanup_paths]:
             if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
                     or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Invalid approved write or cleanup path")
+        from app.services.agent.scoped_assessment.prompt_injection_probe import valid_field
+
+        chat_endpoints = {}
+        for row in injection_endpoints:
+            static_body = row.get("static_body") if isinstance(row, dict) else None
+            if (not isinstance(row, dict) or not isinstance(row.get("path"), str)
+                    or not valid_field(row.get("message_field") or "")
+                    or not valid_field(row.get("response_field") or "", allow_empty=True)
+                    or (static_body is not None and not isinstance(static_body, dict))
+                    or len(static_body or {}) > 8
+                    or any(not isinstance(key, str) or len(key) > 64
+                           or not isinstance(value, (str, int, float, bool))
+                           or (isinstance(value, str) and len(value) > 256)
+                           for key, value in (static_body or {}).items())):
+                raise ValueError("Invalid prompt-injection endpoint policy")
+            path = row["path"]
+            if (not path.startswith("/") or path.startswith("//") or path == "/"
+                    or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
+                raise ValueError("Invalid approved write or cleanup path")
+            chat_endpoints[path] = {
+                "message_field": row["message_field"],
+                "response_field": row.get("response_field") or "",
+                "static_body": dict(static_body or {}),
+            }
         approved = {}
         for row in expectations:
             if not isinstance(row, dict):
@@ -160,9 +189,11 @@ class ScopedAssessmentTools:
         self._scoped_stored_xss_cleanup_paths = set(cleanup_paths)
         self._scoped_race_action_paths = set(race_action_paths)
         self._scoped_race_cleanup_paths = set(race_cleanup_paths)
+        self._scoped_prompt_injection_endpoints = chat_endpoints
         self._scoped_owner_expectations = approved
         self._scoped_auth_login_path = auth_login_path
-        if paths or cleanup_paths or race_action_paths or race_cleanup_paths or approved:
+        if (paths or cleanup_paths or race_action_paths or race_cleanup_paths
+                or chat_endpoints or approved):
             self._scoped_assessment_started = True
 
     def _scoped_origin(self, url: str) -> str:
@@ -365,6 +396,72 @@ class ScopedAssessmentTools:
         if used + 1 > limit:
             raise ValueError("Scoped race-burst budget exhausted for this assessment session")
         setattr(self, counter, used + 1)
+
+    def _scoped_claim_prompt_injection(self) -> None:
+        """Reserve one bounded set of prompt-injection trials for the hunter or verifier."""
+        verifier = verification_run.get() is not None
+        counter = ("_scoped_verifier_prompt_injection_count" if verifier
+                   else "_scoped_prompt_injection_count")
+        limit = (VERIFIER_PROMPT_INJECTION_BUDGET if verifier
+                 else HUNTER_PROMPT_INJECTION_BUDGET)
+        used = int(getattr(self, counter, 0) or 0)
+        if used + 1 > limit:
+            raise ValueError("Scoped prompt-injection budget exhausted for this assessment session")
+        setattr(self, counter, used + 1)
+
+    async def _scoped_prompt_injection_run(
+        self, endpoint_path: str, *, technique: str, identity: str = "anonymous",
+        coverage_cell_id: str = "", expected_url: str = "",
+    ) -> tuple[dict, str]:
+        """Run controlled trials against one operator-approved chat endpoint.
+
+        The endpoint, its JSON fields and static body come from operator policy
+        only. Every request goes through ``_http_exchange``, so scope, method
+        approval and pilot pacing apply. Returns (receipt, evidence_id).
+        """
+        from app.services.agent.scoped_assessment.prompt_injection_probe import (
+            probe_prompt_injection,
+        )
+
+        config = (getattr(self, "_scoped_prompt_injection_endpoints", None) or {}).get(endpoint_path)
+        if not config:
+            raise ValueError("Chat endpoint is not in prompt_injection_endpoints")
+        cmap = getattr(self, "_capability_map", None) or {}
+        seed = str(cmap.get("target") or cmap.get("scope") or getattr(self, "_fallback_target", "") or "")
+        if not seed:
+            raise ValueError("No scoped target origin")
+        url = browser.origin(seed) + endpoint_path
+        if expected_url and expected_url != url:
+            raise ValueError("Lead endpoint is not the approved endpoint on the scoped origin")
+        self._scoped_origin(url)
+        identity = str(identity or "anonymous")
+        self._scoped_claim_prompt_injection()
+        static_body = config.get("static_body") or {}
+
+        async def send(body: str, headers: dict) -> dict:
+            return await self._http_exchange(
+                "POST", url, headers=headers, body=body, identity=identity,
+                use_auth_session=False, follow_redirects=False,
+                coverage_cell_id=coverage_cell_id, max_response_bytes=256 * 1024,
+            )
+
+        nonce = secrets.token_hex(8)
+        receipt = await probe_prompt_injection(
+            send, technique=technique, message_field=config["message_field"],
+            response_field=config.get("response_field") or "",
+            static_body=static_body, nonce=nonce,
+        )
+        receipt.update({
+            "endpoint_path": endpoint_path, "method": "POST", "identity": identity,
+            "static_body_sha256": hashlib.sha256(
+                json.dumps(static_body, sort_keys=True).encode()).hexdigest(),
+        })
+        artifact_id = evidence_store(self).record(
+            "scoped_prompt_injection_probe", receipt, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="prompt_injection",
+            success=bool(receipt["lead_signal"]),
+        )
+        return receipt, artifact_id
 
     def _scoped_capture_row(self, artifact_id: str) -> dict | None:
         row = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(artifact_id)

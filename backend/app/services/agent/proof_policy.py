@@ -32,6 +32,7 @@ PROOFS_BY_CLASS = {
     "open_redirect": frozenset({"scoped_response_redirect"}),
     "cors": frozenset({"scoped_cors_credentialed"}),
     "race_condition": frozenset({"scoped_race_overrun"}),
+    "prompt_injection": frozenset({"scoped_prompt_injection_canary"}),
     "dom_open_redirect": frozenset({"scoped_browser_client"}),
     "client_template_injection": frozenset({"scoped_browser_client"}),
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
@@ -69,6 +70,7 @@ _CLAIM_PATTERNS = (
      r"\bconcurrenc(?:y|e) (?:bug|flaw|abuse)\b|\blimit overrun\b"),
     ("client_template_injection", r"\bclient[ -]?side template injection\b|\bCSTI\b"),
     ("client_prototype_pollution", r"\bclient[ -]?side prototype pollution\b"),
+    ("prompt_injection", r"\bprompt[ -]?injection\b"),
     ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
     ("xxe", r"\bXXE\b|XML external entity"),
     ("command_injection", r"\b(?:OS|shell|command) injection\b|\bRCE\b|remote code execution"),
@@ -147,7 +149,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_prompt_injection_canary", "scoped_browser_client"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -170,6 +172,7 @@ def validate_proof(
             "scoped_response_redirect": "scoped_response_probe",
             "scoped_cors_credentialed": "scoped_response_probe",
             "scoped_race_overrun": "scoped_race_probe",
+            "scoped_prompt_injection_canary": "scoped_prompt_injection_probe",
             "scoped_browser_client": "scoped_browser_check_client",
         }[kind]
         if (not hunter or not verifier or hunter["id"] == verifier["id"]
@@ -231,6 +234,27 @@ def validate_proof(
                     # The two runs must use distinct nonce-bound canaries.
                     or first.get("probe", {}).get("canary") == second.get("probe", {}).get("canary")):
                 return False, "Independent sequential-vs-concurrent overrun proof is required"
+            return True, ""
+        if kind == "scoped_prompt_injection_canary":
+            from app.services.agent.scoped_assessment.prompt_injection_probe import (
+                CONFIRM_HITS, LEAD_HITS, TRIALS, receipt_canaries, receipt_holds,
+            )
+
+            canaries = receipt_canaries(first) + receipt_canaries(second)
+            if (candidate.vulnerability_class != "prompt_injection"
+                    or hunter["identity"] != verifier["identity"]
+                    or not first.get("nonce") or first.get("nonce") == second.get("nonce")
+                    or any(first.get(name) != second.get(name) for name in (
+                        "technique", "endpoint_path", "method", "message_field",
+                        "response_field", "static_body_sha256"))
+                    # Every trial in both runs needs its own fresh canary.
+                    or len(set(canaries)) != len(canaries)
+                    or not receipt_holds(first, min_trials=1, min_hits=LEAD_HITS)
+                    or first.get("lead_signal") is not True
+                    or not receipt_holds(second, min_trials=TRIALS, min_hits=CONFIRM_HITS)
+                    or second.get("proof_confirmed") is not True):
+                return False, ("Independent repeated prompt-injection canary proof with "
+                               "clean negative controls is required")
             return True, ""
         if kind == "scoped_browser_client":
             claim = candidate.vulnerability_class

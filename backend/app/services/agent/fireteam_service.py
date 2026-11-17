@@ -848,6 +848,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         allowed_tools=[
             "execute_llm_red_team",
             "execute_garak",
+            "scoped_prompt_injection_assigned",
             "execute_curl",
             "execute_browser",
             "execute_nuclei",
@@ -866,7 +867,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "tool names = what it can do; parameters = how to exploit. "
             "(3) Prioritize email/notify, refund/payment, query/DB tools and "
             "identity/side-effect params. (4) Broaden with other LLM categories "
-            "and optional execute_garak. Report only with prompt+response evidence."
+            "and optional execute_garak. Report only with prompt+response evidence. "
+            "Scanner and garak hits are leads: on an operator-approved endpoint run "
+            "scoped_prompt_injection_assigned and submit_finding_candidate with "
+            "vulnerability_class=prompt_injection and its evidence_id."
         ),
     ),
     SpecialistProfile(

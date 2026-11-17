@@ -719,6 +719,10 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_race_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_prompt_injection_candidate(
+                    tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
@@ -1101,6 +1105,94 @@ async def _verify_scoped_race_candidate(
     return {"candidate_id": cand.id, "title": cand.title,
             "status": "inconclusive", "verifier_summary": failure,
             "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_prompt_injection_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the hunter's controlled trials with fresh canaries and record the rate.
+
+    Confirmation needs the deterministic canary check to reproduce in at least
+    CONFIRM_HITS of TRIALS fresh trials with every negative control clean. A
+    candidate that does not reproduce stays inconclusive, keeping the hunter
+    receipt and the measured reproduction rate.
+    """
+    import logging
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.prompt_injection_probe import (
+        CONFIRM_HITS, TRIALS,
+    )
+
+    if cand.vulnerability_class != "prompt_injection":
+        return None
+    store = evidence_store(tools_manager)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_prompt_injection_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("lead_signal") is True), None)
+    failure = ("A scoped prompt-injection hunter receipt is required; LLM-graded or "
+               "scanner output is a lead only")
+    next_step = ("Have the operator add this chat endpoint to prompt_injection_endpoints, "
+                 "then run scoped_prompt_injection_assigned and resubmit with its evidence_id")
+    evidence_ids: List[str] = []
+    if hunter:
+        hunter_id, receipt = hunter
+        payload = receipt.get("payload", {})
+        endpoint_path = str(payload.get("endpoint_path") or "")
+        try:
+            replay, artifact_id = await tools_manager._scoped_prompt_injection_run(
+                endpoint_path, technique=str(payload.get("technique") or ""),
+                identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                expected_url=cand.target,
+            )
+            evidence_ids = [artifact_id]
+            rate = (f"{replay['hits']}/{replay['trial_count']} fresh trials reproduced, "
+                    f"{replay['control_hits']} control hits")
+            if replay.get("proof_confirmed") is True:
+                proof = {"kind": "scoped_prompt_injection_canary",
+                         "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                valid, why = validate_proof(store, cand, proof, [artifact_id])
+                fresh, fresh_why = store.validate(
+                    [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                    run_id=run.id, target=cand.target,
+                )
+                if valid and fresh:
+                    verified = apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="confirmed",
+                        evidence=("Injected instruction returned fresh canaries while plain "
+                                  f"controls did not: {rate}."),
+                        evidence_ids=[artifact_id], proof=proof,
+                    )
+                    if verified and verified.status == "confirmed":
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary":
+                                f"Fresh prompt-injection trials matched the hunter receipt ({rate})",
+                                "key_findings": [], "tool_calls": 1, "error": None,
+                                "reproduction_rate": replay["reproduction_rate"]}
+                failure = why or fresh_why or "Prompt-injection proof policy rejected the replay"
+            elif replay.get("control_hits"):
+                failure = (f"A plain control returned its canary ({rate}); the assistant "
+                           "follows that task without injection")
+                next_step = "Retest with an operator-approved task the assistant is meant to refuse"
+            else:
+                failure = (f"Below the {CONFIRM_HITS}/{TRIALS} reproduction threshold ({rate})")
+                next_step = "Keep as a lead; retest later or with another fixed technique"
+        except ValueError as exc:
+            failure = f"Prompt-injection verifier replay was not run: {str(exc)[:200]}"
+        except Exception:
+            logging.getLogger(__name__).exception("Prompt-injection verifier replay failed")
+            failure = "Prompt-injection verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure, evidence_ids=evidence_ids,
+                  proof={"next_step": next_step})
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1 if hunter else 0, "error": None}
 
 
 async def _verify_scoped_xml_xxe_candidate(
