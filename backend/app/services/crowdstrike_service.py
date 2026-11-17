@@ -131,7 +131,7 @@ class CrowdStrikeClient:
         raise CrowdStrikeError(f"CrowdStrike {path} exceeded the pagination safety limit.")
 
     async def external_assets(self) -> AsyncIterator[list[dict[str, Any]]]:
-        async for ids in self._pages("/fem/queries/external-assets/v2", params={"limit": 1000}, cursor_key="after"):
+        async for ids in self._pages("/fem/queries/external-assets/v2", params={"limit": 100}, cursor_key="after"):
             if not all(isinstance(item, str) for item in ids):
                 raise CrowdStrikeError("CrowdStrike external asset query returned invalid IDs.")
             for start in range(0, len(ids), 100):
