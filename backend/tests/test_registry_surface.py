@@ -20,6 +20,15 @@ from app.services.agent.registry_surface import (
 from app.services.agent.tester_loop import complete_blocked_reason, forced_next_step
 
 
+def _model_stall(state, steps=4):
+    """Model-chosen steps that ignore the stack surface (see model_led)."""
+    state["execution_trace"].extend(
+        {"tool_name": "get_coverage", "tool_args": {}, "success": True,
+         "decision_source": "model"}
+        for _ in range(steps)
+    )
+
+
 def test_harvests_azurecr_hosts_from_objective_and_trace():
     state = {
         "original_objective": "Assess https://contoso.azurecr.io",
@@ -44,6 +53,9 @@ def test_forced_probe_before_crawl_on_registry_primary():
         "target_info": {"primary_target": url},
         "execution_trace": [],
     }
+    # The model leads first; the deterministic probe is the stall fallback.
+    assert forced_next_step(state) is None
+    _model_stall(state)
     step = forced_next_step(state)
     assert step and step["tool_name"] == "probe_registry_anonymous"
     assert step["tool_args"]["host"] == "contoso.azurecr.io"
@@ -102,6 +114,7 @@ def test_wordpress_probes_still_win_after_crawl_without_org():
         {"tool_name": "fireteam_dispatch", "tool_args": {"specialists": ["cms_followup"],
                                             "mode": "cms_followup"}, "success": True},
     ])
+    _model_stall(state)
     step = forced_next_step(state)
     assert step and step["tool_name"] == "check_cve_applicability"
     assert "emulate3d.com" in (step.get("tool_args") or {}).get("url", "")
@@ -158,6 +171,7 @@ def test_kickoff_brief_does_not_count_as_probe():
         ],
     }
     assert registry_probe_status(state)["contoso.azurecr.io"] is False
+    _model_stall(state)
     step = forced_next_step(state)
     assert step and step["tool_name"] == "probe_registry_anonymous"
 

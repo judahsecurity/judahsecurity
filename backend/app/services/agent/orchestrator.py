@@ -1685,6 +1685,24 @@ class AgentOrchestrator:
                         "Platform critical-port categories: " + json.dumps(CRITICAL_PORTS)
                     )
 
+            # Model-led recon: until the model has recorded an inventory and
+            # ranked attack ideas, show it how; afterwards, a one-line reminder.
+            try:
+                from app.services.agent.recon_inventory import (
+                    RECON_REASONING_GUIDANCE,
+                    has_recon_inventory,
+                )
+                brain_now = recon_brain_update or state.get("engagement_brain") or {}
+                if has_recon_inventory(brain_now):
+                    available_tools += (
+                        "\n\nRecon inventory recorded. Call record_recon_inventory again "
+                        "when recon reveals new components, inputs, or features."
+                    )
+                else:
+                    available_tools += "\n\n" + RECON_REASONING_GUIDANCE
+            except Exception:
+                logger.debug("recon guidance skipped", exc_info=True)
+
             # Append prior session intelligence to knowledge context
             combined_knowledge = knowledge_context
             if prior_chain_context:
@@ -1931,6 +1949,7 @@ class AgentOrchestrator:
             tool_args=tool_args_for_step,
             token_usage=step_usage,
             llm_model=step_usage.get("model") if isinstance(step_usage, dict) else None,
+            decision_source="forced" if forced else "model",
         )
         
         # Update todo list
@@ -2448,6 +2467,7 @@ class AgentOrchestrator:
             "record_surface_coverage",
             "get_coverage",
             "ingest_urls_into_map",
+            "record_recon_inventory",
         ):
             if state.get("capability_map") and not tool_args.get("capability_map"):
                 if tool_name in ("fireteam_dispatch", "sync_engagement_brain", "build_threat_model"):
@@ -2706,7 +2726,29 @@ class AgentOrchestrator:
                     step_data["capability_map"] = parsed_out["capability_map"]
             except Exception:
                 pass
-        
+
+        # Model-facing view of target content: bodies stay visible, but secrets
+        # and personal data are redacted and injected instructions are fenced.
+        # Raw exchanges remain in the evidence store for verifier replay.
+        try:
+            from app.services.agent.content_shield import shield_tool_output
+
+            shielded, shield = shield_tool_output(tool_name, step_data.get("tool_output") or "")
+            if shield.injection or shield.redactions:
+                step_data["tool_output"] = shielded
+                step_data["content_shield"] = shield.to_dict()
+                if shield.injection:
+                    logger.warning(
+                        "[%s] Indirect prompt injection in %s output: %s",
+                        user_id, tool_name, shield.categories,
+                    )
+        except Exception:
+            logger.exception("content shield failed; withholding tool output")
+            step_data["tool_output"] = (
+                "Tool output withheld: content shield failed. Use read_evidence on the "
+                "evidence_id if one was returned."
+            )
+
         logger.info(f"[{user_id}] Tool result: success={step_data['success']}")
 
         await self._emit_status({

@@ -319,6 +319,8 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **check_cve_applicability**: Glasswing observe — look up a CVE (search_vulnx) and passively fingerprint the live homepage (generator meta, Yoast/plugin HTML comments, `?ver=`, Server header), then compare product+version to the affected range. Args: **cve_id** (optional when mapping all versioned plugins), **url** (required). Use FIRST when the operator asks "is CVE-X applicable to host". Version-in-range is a finding; do not require a working exploit. Example: check_cve_applicability(cve_id="CVE-2026-1293", url="https://clearpathrobotics.com")
 - **fingerprint_passive_stack**: GET the homepage only and extract CMS/plugin/server versions. Args: **url**. Prefer check_cve_applicability when a CVE ID is known.
 - **web_search** (if configured): Search the web for CVE/exploit research. Args: query (required), max_results (optional, default 5). Requires TAVILY_API_KEY in .env.
+- **lookup_component_vulns**: Known vulnerabilities for one component + version (vulnx, plus web search when configured). No target traffic. Args: **product** (e.g. "photo-gallery", "divi theme", "apache http server"), **version** (optional), limit. Results are leads: compare affected ranges and preconditions to what recon showed. Never put the target hostname in research queries; they are refused.
+- **record_recon_inventory**: Record what recon shows the app is and your ranked attack ideas. Args: **inventory** {technologies, cms, versions, logins, forms, apis, file_uploads, ai_features, notes} and **attack_ideas** [{title, vuln_class, surface, parameter?, method?, rationale, test, pass_criteria, kill_criteria, priority?}] best first. Each idea becomes an open hypothesis and an untested coverage cell. Call it after the first look at the app and again when recon reveals something new.
 **CRITICAL — execute_* tool_args must never be empty `{{}}`.** Most execute_* tools take ONE parameter: **args** (a string of CLI arguments). Correct: `"tool_args": {{"args": "-u https://www.emulate3d.com/ -json -tech-detect -status-code -title"}}`. Wrong: `"tool_args": {{}}` or `"tool_args": {{"url": "..."}}` (url-only is accepted as a fallback, but prefer `args`). **scan_js_urls_for_secrets** is an exception: it takes **urls** (string) and optional **max_urls** (integer).
 
 - **execute_httpx**: HTTP prober. Example: execute_httpx(args="-u https://target.com -json -tech-detect -status-code -title")
@@ -710,6 +712,8 @@ TOOL_PHASE_MAP = {
     "check_cve_applicability": ["informational", "exploitation", "post_exploitation"],
     "fingerprint_passive_stack": ["informational", "exploitation", "post_exploitation"],
     "web_search": ["informational", "exploitation", "post_exploitation"],
+    "lookup_component_vulns": ["informational", "exploitation", "post_exploitation"],
+    "record_recon_inventory": ["informational", "exploitation", "post_exploitation"],
     "query_graph": ["informational", "exploitation", "post_exploitation"],
     "rank_attack_surface": ["informational", "exploitation", "post_exploitation"],
     "save_note": ["informational", "exploitation", "post_exploitation"],

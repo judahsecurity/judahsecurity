@@ -95,6 +95,15 @@ def test_hypothetical_wordpress_mentions_are_not_a_fingerprint():
     assert stamp_stack_on_map(state["capability_map"], state) == state["capability_map"]
 
 
+def _model_stall(state, steps=4):
+    """Model-chosen steps that ignore the stack surface (see model_led)."""
+    state["execution_trace"].extend(
+        {"tool_name": "get_coverage", "tool_args": {}, "success": True,
+         "decision_source": "model"}
+        for _ in range(steps)
+    )
+
+
 def test_forced_wp_probes_after_crawl():
     url = "https://www.emulate3d.com"
     state = {
@@ -120,6 +129,10 @@ def test_forced_wp_probes_after_crawl():
         "tool_name": "fireteam_dispatch", "success": True,
         "tool_args": step["tool_args"],
     })
+    # Model-led: WordPress is the model's to hunt first.
+    step = forced_next_step(state)
+    assert not step or step["tool_name"] != "check_cve_applicability"
+    _model_stall(state)
     step = forced_next_step(state)
     assert step and step["tool_name"] == "check_cve_applicability"
     assert "emulate3d.com" in (step.get("tool_args") or {}).get("url", "")

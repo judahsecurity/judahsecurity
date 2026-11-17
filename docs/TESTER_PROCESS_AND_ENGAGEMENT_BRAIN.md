@@ -8,6 +8,8 @@ Related code:
 |-------|------|
 | Methodology catalog | `backend/app/services/agent/methodology_catalog.py` |
 | Engagement brain | `backend/app/services/agent/engagement_brain.py` |
+| Grounded LLM hypothesis planner | `backend/app/services/agent/brain_hypothesis_planner.py` |
+| Input/class assignment ledger | `backend/app/services/agent/coverage_cells.py` |
 | Penetration Task Graph | `backend/app/services/agent/penetration_task_graph.py` |
 | Auto-prompter | `backend/app/services/agent/auto_prompter.py` |
 | Capability map | `backend/app/services/agent/capability_map.py` |
@@ -35,7 +37,8 @@ execute_deep_crawl (+ katana/gau → ingest_urls_into_map)
 page assessment (app kind + how a human would start)
         │
         ▼
-sync_engagement_brain          ← seeds CWE/CAPEC cards + Penetration Task Graph
+sync_engagement_brain          ← seeds CWE/CAPEC cards and input/class cells;
+        │                         reasoning model proposes cell-linked hypotheses
         │
         ▼
 fireteam_dispatch(auto)        ← Joshua leases one ready hypothesis per specialist
@@ -87,6 +90,27 @@ Session-scoped memory injected into the ReAct system prompt:
 - **Credentials** — stashed after default-login hits (redacted in prompts)
 - **Approaches tried** — avoid blind retries
 - **Next steps** — derived dispatch hints
+
+### Grounded model hypotheses for observed inputs
+
+`sync_engagement_brain` and direct `fireteam_dispatch` send a bounded,
+value-free set of eligible coverage cells to the engagement's reasoning model.
+The model proposes a possible
+failure, a next check, and a priority for up to eight existing cell IDs. The
+planner accepts only IDs from that batch; method, host, identity, parameter,
+test class, specialist, and evidence references always come from the ledger.
+Accepted proposals are stored on their cells and included in the specialist's
+lead packet. A high-priority proposal can move an eligible cell earlier in its
+specialist's claim order. It cannot mark a cell tested, create a candidate, or
+publish a finding.
+
+Each cell records a digest of the observation revision reviewed by the model.
+Repeated Brain syncs do not repeat the call; a new capture or first-pass
+evidence causes a new review. If the model is unavailable or returns malformed
+JSON, the sync reports `hypothesis_planning.status=unavailable` and existing
+coverage work remains assignable. These cell-linked hypotheses do not create
+separate task graph nodes, so the same request is not assigned twice through
+two scheduling lanes.
 
 ### Agent tools
 

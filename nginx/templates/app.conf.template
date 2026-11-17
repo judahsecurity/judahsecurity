@@ -10,8 +10,9 @@
 # nginx:alpine entrypoint at container start (envsubst).
 # =============================================================================
 
-# Use Docker's internal DNS resolver so upstream hostnames are re-resolved
-# dynamically after container restarts (prevents stale-IP 502 errors).
+# Resolve Docker service names again when containers are recreated. The
+# resolver alone does not update upstream servers without `resolve` and a
+# shared memory zone for each upstream.
 resolver 127.0.0.11 valid=10s ipv6=off;
 
 # WebSocket upgrade. `$http_connection` is often "keep-alive" (or empty) even
@@ -23,18 +24,21 @@ map $http_upgrade $connection_upgrade {
 }
 
 upstream asm_backend {
-    server backend:8000;
+    zone asm_backend 64k;
+    server backend:8000 resolve;
     keepalive 32;
 }
 
 # WebSocket must not share the keepalive pool. Reusing a keep-alive connection
 # for Upgrade: websocket fails the handshake and the agent UI shows REST.
 upstream asm_backend_ws {
-    server backend:8000;
+    zone asm_backend_ws 64k;
+    server backend:8000 resolve;
 }
 
 upstream asm_frontend {
-    server frontend:3000;
+    zone asm_frontend 64k;
+    server frontend:3000 resolve;
     keepalive 32;
 }
 

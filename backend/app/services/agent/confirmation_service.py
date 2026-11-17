@@ -63,6 +63,8 @@ def autonomous_mode_enabled() -> bool:
 
 
 READONLY_TOOLS = {
+    "lookup_component_vulns",
+    "record_recon_inventory",
     "get_parameter_inventory",
     "get_api_operation_inventory",
     "scoped_assessment_status",

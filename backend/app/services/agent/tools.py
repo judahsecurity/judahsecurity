@@ -779,6 +779,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "fingerprint_api": self.fingerprint_api,
             "fingerprint_passive_stack": self.fingerprint_passive_stack,
             "check_cve_applicability": self.check_cve_applicability,
+            "lookup_component_vulns": self.lookup_component_vulns,
+            "record_recon_inventory": self.record_recon_inventory,
             "probe_registry_anonymous": self.probe_registry_anonymous,
             "compact_context": self.compact_context,
             "load_prior_hunt": self.load_prior_hunt,
@@ -4692,6 +4694,101 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         finally:
             db.close()
 
+    def _research_query_target_host(self, query: str) -> str:
+        """Return the target host if a third-party research query would disclose it."""
+        from urllib.parse import urlsplit
+
+        from app.services.agent.pilot_policy import current_pilot
+
+        hosts = set()
+        pilot = current_pilot()
+        for raw in (getattr(pilot, "target", "") if pilot else "",
+                    str(getattr(self, "_fallback_target", "") or "")):
+            host = (urlsplit(raw if "://" in raw else f"https://{raw}").hostname or "").lower()
+            if host:
+                hosts.add(host)
+                labels = host.split(".")
+                if len(labels) > 2:
+                    hosts.add(".".join(labels[-2:]))
+        lowered = str(query or "").lower()
+        for host in sorted(hosts, key=len, reverse=True):
+            if len(host) >= 4 and host in lowered:
+                return host
+        return ""
+
+    async def lookup_component_vulns(self, product: str, version: str = "", limit: int = 10) -> str:
+        """Known vulnerabilities for one component and version (no target traffic).
+
+        Use after recon reads a version (generator tag, readme "Stable tag",
+        style.css "Version", ?ver=, Server header). Results are leads: compare the
+        affected range and preconditions (auth, feature enabled) to what you saw,
+        then prove with a probe before filing.
+        """
+        product = " ".join(str(product or "").split())[:80]
+        version = " ".join(str(version or "").split())[:40]
+        if not product:
+            return json.dumps({"error": "product is required"})
+        leaked = self._research_query_target_host(f"{product} {version}")
+        if leaked:
+            return json.dumps({"error": f"Query names the assessment target ({leaked}); use the component name"})
+        limit = max(1, min(int(limit or 10), 25))
+        slug = product.lower().replace(" ", "-")
+        sections = [f"# Known vulnerabilities: {product} {version}".strip()]
+        try:
+            sections.append(await self.vulnx_query(
+                query=f"{slug} && (severity:critical || severity:high || severity:medium)",
+                limit=limit,
+            ))
+        except Exception as exc:
+            sections.append(f"(vulnx lookup failed: {exc})")
+        if getattr(settings, "TAVILY_API_KEY", None):
+            sections.append(await self.web_search(
+                f'"{product}" {version} vulnerability CVE affected versions fixed in'.strip(),
+                max_results=5,
+            ))
+        sections.append(
+            "Compare each affected range to the observed version. In range = lead; "
+            "note auth/feature preconditions; prove before create_finding."
+        )
+        return "\n\n".join(sections)[:_tool_output_max_chars()]
+
+    async def record_recon_inventory(
+        self, inventory: Optional[Dict[str, Any]] = None,
+        attack_ideas: Optional[List[Dict[str, Any]]] = None, target: str = "",
+    ) -> str:
+        """Record what recon shows the app is, plus ranked attack ideas.
+
+        Each idea becomes an open hypothesis and an untested coverage cell.
+        """
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.pilot_policy import current_pilot
+        from app.services.agent.recon_inventory import record_recon_inventory
+        from urllib.parse import urlsplit
+
+        if isinstance(inventory, str):
+            inventory = json.loads(inventory or "{}")
+        if isinstance(attack_ideas, str):
+            attack_ideas = json.loads(attack_ideas or "[]")
+        pilot = current_pilot()
+        scope = (pilot.target if pilot else "") or str(getattr(self, "_fallback_target", "") or "")
+        target = _origin(target or scope) or str(target or scope)
+        if scope and _origin(scope) and _origin(target) and (
+            urlsplit(_origin(target)).hostname != urlsplit(_origin(scope)).hostname
+        ):
+            return json.dumps({"error": "target is outside the assessment scope"})
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        if not brain.target:
+            brain.target = target
+        try:
+            result = record_recon_inventory(
+                brain, target=target, inventory=inventory or {}, attack_ideas=attack_ideas or [],
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(result, indent=2)[:_tool_output_max_chars()]
+
     async def web_search(self, query: str, max_results: int = 5) -> str:
         """
         Search the web for CVE details, exploit info, or general security research (RedAmon-style).
@@ -4707,6 +4804,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         api_key = getattr(settings, "TAVILY_API_KEY", None)
         if not api_key:
             return "Web search is not configured. Set TAVILY_API_KEY in .env to enable (get a key at tavily.com)."
+        leaked = self._research_query_target_host(query)
+        if leaked:
+            return (
+                f"Web search refused: the query names the assessment target ({leaked}). "
+                "Search by component and version only, e.g. 'Photo Gallery 1.8.31 CVE'."
+            )
         max_results = max(1, min(10, max_results))
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -4944,6 +5047,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         if not query.strip():
             return "query is required"
+        leaked = self._research_query_target_host(query)
+        if leaked:
+            return f"vulnx search refused: the query names the assessment target ({leaked})."
         if limit > 25:
             limit = 25
 
@@ -7484,6 +7590,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.passive_stack import origin_from_url
 
         target = origin_from_url(url) or url
+        from app.services.agent.pilot_policy import current_pilot
+
+        if current_pilot() is not None:
+            # Pilot traffic must use the budgeted, scope-checked exchange.
+            try:
+                exchange = await self._http_exchange(
+                    "GET", target if target.endswith("/") else target + "/",
+                    use_auth_session=False, timeout=15,
+                )
+                resp = exchange["response"]
+                html = str(exchange.get("_body_text") or resp.get("body") or resp.get("body_preview") or "")
+                headers = {str(k).lower(): str(v) for k, v in (resp.get("headers") or {}).items()}
+                return html[:250_000], headers, str(resp.get("url") or target)
+            except Exception as e:
+                return "", {}, f"{target} (fetch failed: {e})"
         try:
             async with httpx.AsyncClient(
                 verify=False,
@@ -10297,6 +10418,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         seed_js_coverage_cells(brain, cmap if isinstance(cmap, dict) else {})
         from app.services.agent.runtime_mapper import ingest_capability_map_operations
         ingest_capability_map_operations(brain, cmap if isinstance(cmap, dict) else {})
+        planning = await self._plan_brain_hypotheses(brain)
         graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
 
@@ -10315,6 +10437,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "task_graph_prompt": format_graph_for_scheduler(graph),
                 "threat_model": brain.threat_model or None,
                 "focus_areas": brain.focus_areas[:8],
+                "hypothesis_planning": planning,
                 "prompt_view": format_engagement_brain_for_prompt(self._engagement_brain),
                 "engagement_brain": self._engagement_brain,
                 "parameter_coverage": {
@@ -10342,6 +10465,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         return json.dumps({
             "phase": out["phase"], "target": out["target"],
             "suggested_specialists": out["suggested_specialists"],
+            "hypothesis_planning": out["hypothesis_planning"],
             "parameter_coverage": out["parameter_coverage"],
             "js_coverage": out["js_coverage"],
             "task_graph_prompt": out["task_graph_prompt"][:2000],
@@ -10812,6 +10936,35 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             },
             indent=2,
         )[:_tool_output_max_chars()]
+
+    async def _plan_brain_hypotheses(self, brain):
+        """Reason over new evidence before assigning eligible coverage work."""
+        from app.services.agent.brain_hypothesis_planner import (
+            pending_hypothesis_cells, plan_coverage_hypotheses,
+        )
+
+        if not pending_hypothesis_cells(brain):
+            return {"reviewed": 0, "hypotheses": 0, "status": "unchanged"}
+        try:
+            return await plan_coverage_hypotheses(brain, self._hypothesis_llm())
+        except Exception as exc:
+            logger.warning("Brain hypothesis planning unavailable: %s", type(exc).__name__)
+            return {"reviewed": 0, "hypotheses": 0,
+                    "status": "unavailable", "error_type": type(exc).__name__}
+
+    def _hypothesis_llm(self):
+        """Use the engagement's reasoning model for Brain hypothesis planning."""
+        from app.services.agent.model_router import LLMTask, get_llm_for_task
+
+        _, org_id = get_tenant_context()
+        db = SessionLocal()
+        try:
+            return get_llm_for_task(
+                db, org_id, LLMTask.REASONING,
+                temperature=0, max_tokens=2400, timeout=45, max_retries=1,
+            )
+        finally:
+            db.close()
 
     def _cheap_llm(self):
         """Resolve a specialist/verifier LLM the same provider-aware way the main
@@ -11534,6 +11687,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ingest_capability_map_operations(brain, cmap.to_dict())
             self._engagement_brain = brain.to_dict()
 
+        # This entry point can be called without sync_engagement_brain. Review
+        # fresh observed inputs before choosing specialists and claiming cells.
+        hypothesis_planning = await self._plan_brain_hypotheses(brain)
+
         # Resolve specialists: "auto" → open hypotheses, else capability-map selection
         auto = False
         if specialists is None:
@@ -12214,6 +12371,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "remaining": sum(1 for c in brain.coverage_cells if c.get("source") == "js_inventory" and c.get("status") not in {"finding", "tested_clean", "skipped"}),
             },
             "specialists_run": result.specialists_run,
+            "hypothesis_planning": hypothesis_planning,
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
             "capability_map_ready": bool(cmap and cmap.ready_for_attack),
@@ -12279,6 +12437,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 return serialized
         return json.dumps({
             "specialists_run": out["specialists_run"],
+            "hypothesis_planning": out["hypothesis_planning"],
             "selection_source": out["selection_source"],
             "task_leases": out["task_leases"],
             "coverage_leases": out["coverage_leases"],

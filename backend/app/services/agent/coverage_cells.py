@@ -47,6 +47,7 @@ def lead_packet_for_cell(cell: dict[str, Any]) -> dict[str, Any]:
         "xss_next_tests": list(xss.get("next_tests") or [])[:2],
         "xss_remaining_attempts": int(xss.get("remaining_attempts") or 0),
         "sqli_trace": sqli,
+        "llm_hypothesis": dict(cell.get("llm_hypothesis") or {}),
     }
 
 
@@ -1386,7 +1387,8 @@ def claim_coverage_cell_leases(
                 if specialist in {"sqli", "xss"} else 0,
                 int(cell.get("attempts") or 0) if first_pass_only else 0,
                 0 if cell.get("path") in focus_paths else 1,
-                int(cell.get("priority_rank", 2)),
+                min(int(cell.get("priority_rank", 2)),
+                    int(cell.get("llm_priority_rank", 2))),
                 0 if specialist in {"xss", "sqli"} and scoped_replay_eligible(cell) else 1,
                 0
                 if hypothesis_id and cell.get("hypothesis_id") == hypothesis_id

@@ -1,7 +1,9 @@
 """PROWL's bounded assessment operations inside the Aegis agent tool manager.
 
-The model receives metadata and evidence IDs. Browser exchanges with request
-values remain private to the current assessment session.
+The model receives metadata, evidence IDs, and redacted text excerpts of what
+recon fetched (see ``content_shield``). Browser exchanges with request values
+and full response bodies remain private to the current assessment session so
+verifiers can replay them.
 """
 
 from __future__ import annotations
@@ -775,12 +777,23 @@ class ScopedAssessmentTools:
         return output
 
     async def scoped_http_get(self, url: str, identity: str = "anonymous") -> str:
-        """Read one exact-origin URL without redirects or raw response content."""
+        """Read one exact-origin URL without redirects.
+
+        Text bodies (HTML, JSON, JS, CSS, readme/changelog files) come back as a
+        bounded ``body_excerpt`` with secrets/PII redacted and injected
+        instructions fenced, so the model can reason about versions, forms and
+        endpoints. Binary bodies stay hash-only.
+        """
         allowed = self._scoped_origin(url)
         self._scoped_assessment_started = True
         state = self._scoped_state(identity, url)
         self._scoped_claim_gets(1)
-        result = await asyncio.to_thread(http_observe.observe_get, url, [allowed], state)
+        result = await asyncio.to_thread(
+            http_observe.observe_get, url, [allowed], state, capture_body=True,
+        )
+        private_body = result.pop("_private_body", b"") or b""
+        result.pop("_private_location", None)
+        result.update(http_observe.model_body_excerpt(private_body, result.get("content_type", "")))
         artifact_id = evidence_store(self).record(
             "scoped_http_get", result, target=allowed + (urlsplit(url).path or "/"),
             identity=identity,

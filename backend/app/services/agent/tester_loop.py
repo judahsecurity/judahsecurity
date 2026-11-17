@@ -1348,8 +1348,10 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             registry_forced_step,
         )
 
+        from app.services.agent.model_led import registry_step_due
+
         reg_step = registry_forced_step(state)
-        if reg_step:
+        if reg_step and registry_step_due(state):
             return reg_step
         if is_registry_primary(state):
             # Registry hosts are not websites — do not Interceptor-crawl /v2/.
@@ -1522,10 +1524,13 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         )
 
     try:
+        from app.services.agent.model_led import wordpress_step_due
         from app.services.agent.wordpress_surface import wordpress_forced_step
 
+        # Model-led: the hunt note tells the model what WordPress offers; the
+        # code only takes over if the model stalls on that surface.
         wp_step = wordpress_forced_step(state)
-        if wp_step:
+        if wp_step and wordpress_step_due(state):
             return wp_step
     except Exception:
         # A failing import or helper used to silently drop this gate.
@@ -1607,19 +1612,23 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         return hypothesis_wave
 
     try:
+        from app.services.agent.model_led import wordpress_step_due
         from app.services.agent.wordpress_surface import wordpress_forced_step
 
+        # Model-led: the hunt note tells the model what WordPress offers; the
+        # code only takes over if the model stalls on that surface.
         wp_step = wordpress_forced_step(state)
-        if wp_step:
+        if wp_step and wordpress_step_due(state):
             return wp_step
     except Exception:
         # A failing import or helper used to silently drop this gate.
         logger.exception("Tester-loop gate check failed")
     try:
+        from app.services.agent.model_led import registry_step_due
         from app.services.agent.registry_surface import registry_forced_step
 
         reg_step = registry_forced_step(state)
-        if reg_step:
+        if reg_step and registry_step_due(state):
             return reg_step
     except Exception:
         # A failing import or helper used to silently drop this gate.
