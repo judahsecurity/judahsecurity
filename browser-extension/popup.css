@@ -1,0 +1,11 @@
+:root { color-scheme: light dark; --red: #b91c1c; }
+body { font: 13px/1.4 system-ui, sans-serif; width: 320px; margin: 12px; }
+h1 { font-size: 15px; margin: 0 0 8px; }
+label { display: block; margin: 8px 0; }
+input, textarea { box-sizing: border-box; width: 100%; margin-top: 2px; font: inherit; padding: 4px; }
+button { font: inherit; padding: 6px 10px; cursor: pointer; }
+button.recording { background: var(--red); color: #fff; border: none; border-radius: 4px; }
+.muted { opacity: .7; }
+.small { font-size: 11px; }
+.error { color: var(--red); }
+summary { cursor: pointer; margin: 8px 0; }

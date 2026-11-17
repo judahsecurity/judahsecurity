@@ -87,6 +87,7 @@ import {
 } from '@/components/ui/select';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
+import { FindingTraffic } from '@/components/findings/FindingTraffic';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -1379,6 +1380,8 @@ export default function FindingsPage() {
     // ── Finding validation (native detector / steps replay) ─────────────────────
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validating, setValidating] = useState(false);
+  const [retesting, setRetesting] = useState(false);
+  const [retestNotes, setRetestNotes] = useState('');
   const [askingLeo, setAskingLeo] = useState(false);
   const [detectionIssueText, setDetectionIssueText] = useState('');
   const [loggingIssue, setLoggingIssue] = useState(false);
@@ -1448,6 +1451,16 @@ export default function FindingsPage() {
       if (openFindingIdRef.current !== findingId) return;
       setValidationResult(res);
       if (res && (res.status === 'completed' || res.status === 'failed')) {
+        if (res.purpose === 'retest' && res.status === 'completed') {
+          // A retest can resolve or reopen the finding: reload its status.
+          try {
+            const fresh = await api.getVulnerability(findingId);
+            if (openFindingIdRef.current === findingId) {
+              setSelectedFinding((prev: any) => (prev && prev.id === findingId ? { ...prev, ...fresh } : prev));
+            }
+            setFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, ...fresh } : f)));
+          } catch { /* status shown on next load */ }
+        }
         return;
       }
     }
@@ -1474,6 +1487,27 @@ export default function FindingsPage() {
       });
     } finally {
       setValidating(false);
+    }
+  };
+
+  const handleRetestFinding = async () => {
+    if (!selectedFinding) return;
+    const findingId = selectedFinding.id;
+    setRetesting(true);
+    try {
+      const initial = await api.retestFinding(findingId, retestNotes);
+      setValidationResult(initial);
+      toast({
+        title: initial.purpose === 'retest' ? 'Retest queued' : 'A validation is already running',
+        description: initial.purpose === 'retest'
+          ? 'Replaying the finding against the live target to check whether the fix holds.'
+          : 'Its result will appear here; start the retest again once it finishes.',
+      });
+      await pollValidation(findingId);
+    } catch (err: any) {
+      toast({ title: 'Could not start retest', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setRetesting(false);
     }
   };
 
@@ -2946,6 +2980,11 @@ export default function FindingsPage() {
               />
               }
               validation={<>
+              {selectedFinding && (
+                <div className="pt-4 border-t border-border">
+                  <FindingTraffic findingId={selectedFinding.id} />
+                </div>
+              )}
               {/* Validate with agent */}
               <div className="space-y-3 pt-4 border-t border-border">
                 <div className="flex items-center justify-between gap-2">
@@ -2964,8 +3003,8 @@ export default function FindingsPage() {
                     }
                   >
                     {validating ||
-                    validationResult?.status === 'queued' ||
-                    validationResult?.status === 'running' ? (
+                    ((validationResult?.status === 'queued' ||
+                    validationResult?.status === 'running') && validationResult?.purpose !== 'retest') ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin mr-2" />
                         Re-validating…
@@ -2984,6 +3023,37 @@ export default function FindingsPage() {
                   Confirms whether the issue is still open and catches bad matches
                   (e.g. LDAP on port 443).
                 </p>
+
+                <div className="space-y-2 rounded-md border border-dashed border-border p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium flex items-center gap-2">
+                      <RefreshCw className="h-4 w-4" />
+                      Remediation retest
+                    </p>
+                    <Button
+                      size="sm"
+                      onClick={handleRetestFinding}
+                      disabled={retesting || validating || validationResult?.status === 'queued' || validationResult?.status === 'running'}
+                    >
+                      {(retesting || validationResult?.status === 'queued' || validationResult?.status === 'running') && validationResult?.purpose === 'retest' ? (
+                        <><Loader2 className="h-4 w-4 animate-spin mr-2" />Retesting…</>
+                      ) : (
+                        <><RefreshCw className="h-4 w-4 mr-2" />Retest fix</>
+                      )}
+                    </Button>
+                  </div>
+                  <Input
+                    value={retestNotes}
+                    onChange={(e) => setRetestNotes(e.target.value)}
+                    placeholder="Optional: fixed version, test conditions or limits"
+                    className="h-8 text-xs"
+                    maxLength={4000}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Fixed resolves the finding; still reproducible reopens a resolved one; cannot confirm leaves the
+                    status for you to decide. Accepted-risk and false-positive findings are never changed.
+                  </p>
+                </div>
 
                 {templatePattern && (
                   <Link
@@ -3026,7 +3096,7 @@ export default function FindingsPage() {
                   validationResult?.status === 'running') && (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Agent is re-testing the target…
+                    {validationResult?.purpose === 'retest' ? 'Checking whether the fix holds…' : 'Agent is re-testing the target…'}
                   </div>
                 )}
 
@@ -3053,6 +3123,21 @@ export default function FindingsPage() {
                       {validationResult.verdict === 'needs_more_evidence' && (
                         <Badge className="bg-yellow-600/20 text-yellow-400 border-yellow-600/30">
                           <AlertCircle className="h-3 w-3 mr-1" /> Needs More Evidence
+                        </Badge>
+                      )}
+                      {validationResult.purpose === 'retest' && validationResult.retest_outcome === 'fixed' && (
+                        <Badge className="bg-green-600/20 text-green-400 border-green-600/30">
+                          <CheckCircle className="h-3 w-3 mr-1" /> Retest: fixed
+                        </Badge>
+                      )}
+                      {validationResult.purpose === 'retest' && validationResult.retest_outcome === 'still_reproducible' && (
+                        <Badge className="bg-red-600/20 text-red-400 border-red-600/30">
+                          <AlertTriangle className="h-3 w-3 mr-1" /> Retest: still reproducible
+                        </Badge>
+                      )}
+                      {validationResult.purpose === 'retest' && validationResult.retest_outcome === 'cannot_confirm' && (
+                        <Badge className="bg-yellow-600/20 text-yellow-400 border-yellow-600/30">
+                          <AlertCircle className="h-3 w-3 mr-1" /> Retest: cannot confirm
                         </Badge>
                       )}
                       {validationResult.still_open === true && (

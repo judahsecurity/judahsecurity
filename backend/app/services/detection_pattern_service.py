@@ -48,6 +48,8 @@ def collect_fp_signals(db: Session, organization_id: int, template_id: str) -> d
         .filter(
             FindingValidation.organization_id == organization_id,
             FindingValidation.verdict == ValidationVerdict.FALSE_POSITIVE,
+            # A retest that no longer reproduces is a fix, not a bad detection.
+            FindingValidation.purpose != "retest",
             Vulnerability.template_id == template_id,
         )
         .distinct()
@@ -186,6 +188,8 @@ def evaluate_all(db: Session, organization_id: int, threshold: Optional[int] = N
         .filter(
             FindingValidation.organization_id == organization_id,
             FindingValidation.verdict == ValidationVerdict.FALSE_POSITIVE,
+            # A retest that no longer reproduces is a fix, not a bad detection.
+            FindingValidation.purpose != "retest",
             Vulnerability.template_id.isnot(None),
         )
         .distinct()

@@ -1055,6 +1055,58 @@ async def get_conversation_ledger(
     return result
 
 
+@router.get("/conversations/{session_id}/exploration-graph")
+async def get_conversation_exploration_graph(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Observations → hypotheses → candidates → findings for one run, anchored to assets."""
+    from app.models.asset import Asset
+    from app.models.vulnerability import Vulnerability
+    from app.services.agent.action_ledger import latest_run
+    from app.services.agent.exploration_graph import (
+        build_exploration_graph,
+        finding_ids_in_snapshot,
+        hosts_in_snapshot,
+    )
+    from app.services.agent.run_snapshot import load_run_snapshot
+
+    conv = db.query(AgentConversation).filter(
+        AgentConversation.session_id == session_id,
+        AgentConversation.user_id == current_user.id,
+    ).first()
+    org_id = conv.organization_id if conv else _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if not conv and not latest_run(db, session_id=session_id, organization_id=org_id, user_id=current_user.id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    snapshot = load_run_snapshot(org_id, session_id)
+    if not snapshot.get("engagement_brain"):
+        return {"nodes": [], "edges": [], "counts": {}, "truncated": False, "saved_at": None}
+    hosts = sorted(hosts_in_snapshot(snapshot))[:500]
+    assets = db.query(Asset.id, Asset.value).filter(
+        Asset.organization_id == org_id, Asset.value.in_(hosts),
+    ).all() if hosts else []
+    finding_ids = sorted(finding_ids_in_snapshot(snapshot))[:500]
+    findings = [
+        {"id": v.id, "title": v.title, "asset_id": v.asset_id,
+         "severity": getattr(v.severity, "value", v.severity), "status": getattr(v.status, "value", v.status)}
+        for v in db.query(Vulnerability).join(Asset, Asset.id == Vulnerability.asset_id).filter(
+            Vulnerability.id.in_(finding_ids), Asset.organization_id == org_id,
+        )
+    ] if finding_ids else []
+    # Findings may sit on assets the snapshot never named directly.
+    extra_asset_ids = {f["asset_id"] for f in findings} - {a.id for a in assets}
+    if extra_asset_ids:
+        assets += db.query(Asset.id, Asset.value).filter(
+            Asset.organization_id == org_id, Asset.id.in_(extra_asset_ids),
+        ).all()
+    return build_exploration_graph(
+        snapshot, assets=[(a.id, a.value) for a in assets], findings=findings,
+    )
+
+
 @router.delete("/conversations/{session_id}")
 async def delete_conversation(
     session_id: str,

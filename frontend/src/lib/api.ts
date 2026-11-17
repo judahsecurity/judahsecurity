@@ -1186,6 +1186,12 @@ class ApiClient {
     return response.data;
   }
 
+  // Remediation retest: is the finding still reproducible after the fix?
+  async retestFinding(vulnId: number, notes?: string) {
+    const response = await this.client.post(`/vulnerabilities/${vulnId}/retest`, { notes: notes || undefined });
+    return response.data;
+  }
+
   async askLeo(vulnId: number) {
     const response = await this.client.post(`/vulnerabilities/${vulnId}/risk-assessment/ask`);
     return response.data;
@@ -2688,6 +2694,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getExplorationGraph(sessionId: string) {
+    const response = await this.client.get(`/agent/conversations/${sessionId}/exploration-graph`);
+    return response.data as ExplorationGraph;
+  }
+
   async deleteAgentConversation(sessionId: string) {
     const response = await this.client.delete(`/agent/conversations/${sessionId}`);
     return response.data;
@@ -3731,6 +3742,34 @@ class ApiClient {
     return response.data;
   }
 
+  // Recorded traffic (agent exchanges + browser-extension captures)
+  async getTraffic(params?: {
+    q?: string; host?: string; method?: string; status_code?: number;
+    source?: string; session_id?: string; limit?: number; offset?: number;
+  }) {
+    const response = await this.client.get('/traffic', { params });
+    return response.data as { total: number; items: TrafficSummary[] };
+  }
+
+  async getTrafficExchange(id: number) {
+    const response = await this.client.get(`/traffic/${id}`);
+    return response.data as TrafficDetail;
+  }
+
+  async getFindingTraffic(vulnId: number) {
+    const response = await this.client.get(`/vulnerabilities/${vulnId}/traffic`);
+    return response.data as { items: FindingTrafficRef[] };
+  }
+
+  async bindFindingTraffic(vulnId: number, trafficId: number, note?: string) {
+    const response = await this.client.post(`/vulnerabilities/${vulnId}/traffic`, { traffic_id: trafficId, note });
+    return response.data;
+  }
+
+  async unbindFindingTraffic(vulnId: number, refId: number) {
+    await this.client.delete(`/vulnerabilities/${vulnId}/traffic/${refId}`);
+  }
+
   async deleteWorkflowScript(id: number) {
     await this.client.delete(`/workflow-scripts/${id}`);
   }
@@ -3738,6 +3777,68 @@ class ApiClient {
   getWorkflowArtifactContentUrl(artifactId: number) {
     return `${this.client.defaults.baseURL}/workflow-artifacts/${artifactId}/content`;
   }
+}
+
+export interface TrafficSummary {
+  id: number;
+  source: 'agent' | 'extension';
+  session_id?: string | null;
+  artifact_id?: string | null;
+  capture_id?: string | null;
+  identity?: string | null;
+  method: string;
+  url: string;
+  host: string;
+  status_code?: number | null;
+  response_length?: number | null;
+  elapsed_ms?: number | null;
+  created_at?: string | null;
+}
+
+export interface TrafficDetail extends TrafficSummary {
+  path?: string | null;
+  page_url?: string | null;
+  hypothesis_id?: string | null;
+  request_headers: Record<string, string>;
+  request_body?: string | null;
+  response_headers: Record<string, string>;
+  response_body?: string | null;
+  truncated: { request_body: boolean; response_body: boolean };
+}
+
+export interface FindingTrafficRef {
+  ref_id: number;
+  position: number;
+  note?: string | null;
+  bound_by: 'agent' | 'user';
+  artifact_id?: string | null;
+  exchange: TrafficSummary | null;
+  pending: boolean;
+}
+
+export type ExplorationNodeType = 'asset' | 'observation' | 'hypothesis' | 'candidate' | 'finding';
+
+export interface ExplorationCoverage {
+  observations: number; hypotheses: number; proven: number; killed: number; open: number;
+  blocked: number; running: number; candidates: number; findings: number;
+}
+
+export interface ExplorationNode {
+  id: string;
+  type: ExplorationNodeType;
+  label: string;
+  [key: string]: any;
+  coverage?: ExplorationCoverage;
+}
+
+export interface ExplorationGraph {
+  target?: string;
+  phase?: string;
+  saved_at?: number | null;
+  nodes: ExplorationNode[];
+  edges: { source: string; target: string; kind: string }[];
+  counts: Partial<Record<ExplorationNodeType, number>>;
+  truncated: boolean;
 }
 
 export const api = new ApiClient();

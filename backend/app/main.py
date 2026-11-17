@@ -59,6 +59,7 @@ from app.api.routes import detection_suppression as detection_suppression_router
 from app.api.routes import recon as recon_router
 from app.api.routes import workflows as workflows_router
 from app.api.routes import attacks as attacks_router
+from app.api.routes import traffic as traffic_router
 from app.models.agent_palace import AgentPalaceDrawer  # noqa: F401 — palace memory table
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat  # noqa: F401 — interceptor workers
 from app.models.sitemap_entry import SitemapEntry  # noqa: F401 — Praetorian-style app sitemap
@@ -226,6 +227,7 @@ app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_suppression_router.router, prefix=settings.API_PREFIX)
 app.include_router(workflows_router.router, prefix=settings.API_PREFIX)
 app.include_router(attacks_router.router, prefix=settings.API_PREFIX)
+app.include_router(traffic_router.router, prefix=settings.API_PREFIX)
 
 
 # ── Scoring pipeline lifecycle ────────────────────────────────────────────────
@@ -722,6 +724,10 @@ def apply_oracle_migrations():
         "ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS token_usage JSONB",
         "ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION",
         "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS engagement_replay JSONB DEFAULT '[]'",
+        "ALTER TABLE finding_validations ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) NOT NULL DEFAULT 'validate'",
+        "ALTER TABLE finding_validations ADD COLUMN IF NOT EXISTS retest_outcome VARCHAR(30)",
+        "ALTER TABLE finding_validations ADD COLUMN IF NOT EXISTS retest_notes TEXT",
+        "CREATE INDEX IF NOT EXISTS ix_finding_validations_purpose ON finding_validations (purpose)",
         "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS token_usage JSONB",
         "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION",
 

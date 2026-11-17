@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Prowl capture</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Prowl traffic capture</h1>
+
+  <section id="status-section">
+    <p id="status">Not recording.</p>
+    <p id="stats" class="muted"></p>
+    <p id="error" class="error"></p>
+    <button id="toggle">Start capture on this tab</button>
+  </section>
+
+  <details id="settings-section">
+    <summary>Settings</summary>
+    <label>Platform URL
+      <input id="baseUrl" type="url" placeholder="https://asm.example.com" autocomplete="off">
+    </label>
+    <label>API key (scope <code>ingest:traffic</code>)
+      <input id="apiKey" type="password" placeholder="tfasm_…" autocomplete="off">
+    </label>
+    <label>Only record these hosts (optional, one per line)
+      <textarea id="allowlist" rows="3" placeholder="app.example.com&#10;*.example.com"></textarea>
+    </label>
+    <button id="save">Save</button>
+    <p id="saved" class="muted"></p>
+  </details>
+
+  <p class="muted small">Only hosts that are in-scope assets of your organization are stored. Cookies and
+    authorization headers are stripped before upload.</p>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

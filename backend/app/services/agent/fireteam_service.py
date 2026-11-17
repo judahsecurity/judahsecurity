@@ -1269,6 +1269,11 @@ async def _run_specialist(
 ) -> SpecialistReport:
     start = datetime.utcnow()
     target_list = list(targets) if targets else []
+    # Each specialist runs in its own task, so this label is task-local: the
+    # shared run digest attributes its lines and hides them from their author.
+    from app.services.agent.run_digest import current_specialist
+
+    current_specialist.set(profile.name)
     report = SpecialistReport(
         specialist=profile.name,
         role=f"{profile.epithet}: {profile.role}",
@@ -1357,6 +1362,8 @@ async def _run_specialist(
         allowed_tools.extend(t for t in ("check_test_identity", "test_authorization_boundary", "run_assessment_workflow") if t not in allowed_tools)
     if "search_memory" not in allowed_tools:
         allowed_tools.append("search_memory")
+    if "search_run_digest" not in allowed_tools:
+        allowed_tools.append("search_run_digest")
     from app.services.agent.pilot_policy import current_pilot
 
     pilot = current_pilot()
@@ -1700,6 +1707,12 @@ async def _safe_invoke(
                     ids = list(dict.fromkeys([*ids, receipt_id]))
         if result.get("artifact_id"):
             summary = f"artifact_id={result['artifact_id']} (read_evidence for full output)\n" + summary
+        from app.services.agent.run_digest import record_tool_attempt
+
+        record_tool_attempt(
+            tools_manager, tool_name, args, success=success, evidence_ids=ids,
+            error=str(result.get("error") or "") if not success else "",
+        )
         return ToolInvocation(
             tool=tool_name,
             args=args or {},
@@ -1891,6 +1904,10 @@ async def run_fireteam(
                 f"specialist:{p.name}", target=targets_list[0] if targets_list else "",
                 detail=rep.error or rep.verdict or "",
             )
+            if not rep.error:
+                from app.services.agent.run_digest import record_specialist_outcome
+
+                record_specialist_outcome(tools_manager, rep, targets_list)
             if report_callback and not rep.error:
                 try:
                     await report_callback(rep)
