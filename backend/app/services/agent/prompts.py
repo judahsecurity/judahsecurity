@@ -405,6 +405,8 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **mutate_list**: Single-shot list builder (paths, params, xss, passwords, subdomains). Not a ReAct loop. Args: kind, observed (optional), count (default 30).
 - **fetch_lazy_chunks**: Reconstruct webpack/Vite/Next lazy-chunk filenames from a first-party bundle, then download in-scope chunks (404s expected). Dry-run first. Args: bundle_url (optional — defaults to a map js_file), base_url, dry_run (bool). Then extract_js_endpoints.
 - **extract_js_endpoints**: Pull API paths/URLs from JS and triage IDOR/SSRF/open-redirect leads. Also recovers HTTP methods (axios/XHR) and config-object params. In-scope fetch only. Args: urls (newline/comma JS URLs; defaults to map js_files). ingest_urls_into_map the in-scope hits (reseed).
+- **read_script**: Read a whole script like source code, page by page. Minified bundles are re-flowed (one statement per line, indented); line numbers refer to that view. When the script declares a same-origin or inline source map, its original sources (node_modules skipped) are added as readable files. Args: file (file id from a previous result, script URL, or original source path such as src/api/client.ts), start_line (default 1), max_lines (default 200, max 500). No args lists loaded files. Secrets are shown as [redacted:...] markers; cite the evidence_id.
+- **search_scripts**: Regex-search all loaded scripts and original sources line by line with context, like grep -n -C. Loads up to 8 not-yet-read map js_files per call first. Args: pattern, file (optional id/name/URL substring filter), context_lines (default 2), max_matches (default 40), ignore_case, literal (plain-text search). Patterns are single-line; nested quantifiers are refused. Use it to follow a sink or endpoint back to its source, then read_script around the hit.
 - **scan_js_sinks**: DOM sinks in first-party JS (eval, innerHTML, postMessage, location.assign). Not secrets. Args: urls (optional; defaults to map js_files). Listing a sink is not a finding — spa_client must prove it.
 - **fingerprint_api**: HTTP fingerprint from captured Interceptor/crawl samples (not Caido). Related-domain API host scores, coverage matrix (headers/cookies/errors/files), tech indicators. Empty traffic → blocked/no-data. Active probes are a plan only.
 - **compact_context**: Collapse older execution-trace steps (CAI /compact).
@@ -808,6 +810,8 @@ TOOL_PHASE_MAP = {
     "fetch_lazy_chunks": ["informational", "exploitation", "post_exploitation"],
     "extract_js_endpoints": ["informational", "exploitation", "post_exploitation"],
     "scan_js_sinks": ["informational", "exploitation", "post_exploitation"],
+    "read_script": ["informational", "exploitation", "post_exploitation"],
+    "search_scripts": ["informational", "exploitation", "post_exploitation"],
     "fingerprint_api": ["informational", "exploitation", "post_exploitation"],
     "compact_context": ["informational", "exploitation", "post_exploitation"],
     "load_prior_hunt": ["informational", "exploitation", "post_exploitation"],

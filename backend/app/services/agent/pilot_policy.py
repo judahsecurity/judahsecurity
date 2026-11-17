@@ -24,6 +24,8 @@ PILOT_NETWORK_TOOLS = frozenset({
     "mutate_captured_request", "run_intruder_batch", "probe_pilot_ports",
     # One homepage GET through the budgeted exchange, then a CVE lookup.
     "check_cve_applicability",
+    # Read/search whole scripts; script and same-origin source map GETs use the exchange.
+    "read_script", "search_scripts",
 })
 PILOT_LOCAL_TOOLS = frozenset({
     "list_captured_requests", "plan_intruder_mutations", "get_coverage",

@@ -593,6 +593,11 @@ class ScopedAssessmentTools:
                      "analysis": analysis, "action_ref": source.get("action_ref")},
                     target=source_url, identity=identity,
                 )
+                seed = getattr(self, "_seed_js_source", None)
+                if callable(seed):
+                    # Keep the captured bytes readable by read_script/search_scripts.
+                    seed(url=source_url, data=data, kind=source.get("kind", "external"),
+                         index=source.get("index"), evidence_id=source_id)
                 scripts.append({"url": source_url, "kind": source["kind"],
                                 "page_path": source.get("page_path", ""),
                                 "page_paths": source.get("page_paths", []),

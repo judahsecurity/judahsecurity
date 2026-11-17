@@ -219,7 +219,10 @@ def has_recon_inventory(brain_dict: Dict[str, Any] | None, target: str = "") -> 
 RECON_REASONING_GUIDANCE = """Recon reasoning (you lead this step):
 Act like a curious pentester. Read what recon captured: page source, headers, JS
 analysis, /wp-json/ or other REST indexes, readme/changelog/style.css version lines,
-robots.txt, error pages. Then call record_recon_inventory with:
+robots.txt, error pages. Read first-party JavaScript as source, not just its analysis
+summary: search_scripts for routes, API clients, auth/role checks, feature flags, and
+the sinks or endpoints JS analysis reported, then read_script around each hit (source
+maps add the original files). Then call record_recon_inventory with:
   inventory: technologies, cms, versions (component + version + where you saw it),
     logins, forms, apis, file_uploads, ai_features (chatbots/LLM endpoints), notes.
   attack_ideas (ranked, best first): {title, vuln_class, surface (path on the target),

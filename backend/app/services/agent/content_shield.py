@@ -113,7 +113,16 @@ def scan_injection(text: str) -> ShieldReport:
     return report
 
 
+def is_fenced(text: str) -> bool:
+    """Exactly one fence wraps the whole text (a tool already sanitized it)."""
+    prefix = f"{FENCE_HEADER}\n{_OPEN}\n"
+    return (isinstance(text, str) and text.startswith(prefix)
+            and text.endswith(f"\n{_CLOSE}") and text.count(_CLOSE) == 1)
+
+
 def fence(text: str) -> str:
+    if is_fenced(text):
+        return text
     safe = text.replace(_CLOSE, "<​/untrusted_data>")
     return f"{FENCE_HEADER}\n{_OPEN}\n{safe}\n{_CLOSE}"
 
@@ -247,7 +256,7 @@ TARGET_CONTENT_TOOLS = frozenset({
     "check_cve_applicability", "execute_wpscan", "execute_nuclei",
     "execute_ffuf", "execute_feroxbuster", "execute_katana", "execute_httpx",
     "execute_whatweb", "llm_red_team", "web_search", "probe_observed_input_batch",
-    "fireteam_dispatch",
+    "fireteam_dispatch", "read_script", "search_scripts",
 })
 
 

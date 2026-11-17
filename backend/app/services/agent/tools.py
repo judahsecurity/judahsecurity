@@ -487,6 +487,7 @@ from app.services.agent.session_runtime import SessionValue
 
 from app.services.agent.assessment_capabilities import AssessmentCapabilities, CAPABILITY_TOOLS
 from app.services.agent.scoped_assessment_tools import ScopedAssessmentTools
+from app.services.agent.js_source_reader import ScriptStore
 
 
 class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
@@ -514,6 +515,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_assessment_partial_reason = SessionValue(lambda: "")
     _proof_engine = SessionValue(lambda: None)
     _js_intelligence = SessionValue(lambda: None)
+    _js_source_store = SessionValue(ScriptStore)
     _secret_validation_policy = SessionValue(dict)
     _identity_captures = SessionValue(dict)
     _assessment_workflows = SessionValue(dict)
@@ -768,6 +770,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "mutate_captured_request": self.mutate_captured_request,
             "mutate_list": self.mutate_list,
             "fetch_lazy_chunks": self.fetch_lazy_chunks,
+            "read_script": self.read_script,
+            "search_scripts": self.search_scripts,
             "extract_js_endpoints": self.extract_js_endpoints,
             "scan_js_sinks": self.scan_js_sinks,
             "fingerprint_api": self.fingerprint_api,
@@ -6826,6 +6830,249 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from urllib.parse import urlparse
 
         return (urlparse(origin if "://" in origin else f"https://{origin}").hostname or "").lower()
+
+    # --- JavaScript source reading -------------------------------------------
+
+    _JS_LOADS_PER_SEARCH = 8
+    _JS_MAP_LOADS_PER_SEARCH = 4
+
+    @staticmethod
+    def _js_model_view(text: str) -> str:
+        """Redact and fence target-derived text before the model sees it."""
+        from app.services.agent.content_shield import sanitize_for_model
+
+        return sanitize_for_model(text)[0]
+
+    def _js_script_urls(self) -> List[str]:
+        """Script URLs the crawl map recorded (js_files only, not extracted endpoints)."""
+        cmap = getattr(self, "_capability_map", None) or {}
+        rows = cmap.get("js_files") if isinstance(cmap, dict) else None
+        return list(dict.fromkeys(
+            str(u).strip() for u in (rows or []) if str(u).strip().startswith(("http://", "https://"))
+        ))
+
+    def _seed_js_source(self, *, url: str, data: bytes, kind: str = "external",
+                        index: Any = None, evidence_id: str = "") -> None:
+        """Keep a PROWL-captured script readable without refetching it. Never raises."""
+        from app.services.agent import js_source_reader as jsr
+
+        try:
+            text = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data or "")
+            if kind == "inline":
+                key = f"{jsr.script_key(url)}#inline-{index if index is not None else 0}"
+                self._js_source_store.add(key=key, url=url, name=key, kind="inline", text=text,
+                                          evidence_id=evidence_id, origin="prowl_inspect_js")
+            else:
+                key = jsr.script_key(url)
+                self._js_source_store.add(key=key, url=url, name=key, kind="script", text=text,
+                                          evidence_id=evidence_id, origin="prowl_inspect_js",
+                                          source_map_ref=jsr.find_source_map_ref(text))
+        except Exception:
+            logger.debug("JS source seeding failed for %s", url, exc_info=True)
+
+    async def _load_script_file(self, url: str, identity: Optional[str] = None):
+        """GET one script through the scoped, budgeted exchange and store it."""
+        from app.services.agent import js_source_reader as jsr
+
+        store = self._js_source_store
+        key = jsr.script_key(url)
+        try:
+            exchange = await self._http_exchange(
+                "GET", url, identity=identity, timeout=30, follow_redirects=True,
+                max_response_bytes=jsr.MAX_SCRIPT_FETCH_BYTES,
+            )
+        except Exception as exc:
+            store.failed_urls[key] = str(exc)[:200]
+            return None, f"fetch refused or failed: {exc}"
+        response = exchange.get("response") or {}
+        status = int(response.get("status") or 0)
+        body = exchange.get("_body_text") or ""
+        headers = {str(k).lower(): str(v) for k, v in (response.get("headers") or {}).items()}
+        if status != 200:
+            store.failed_urls[key] = f"HTTP {status}"
+            return None, f"HTTP {status} for {url} (evidence {exchange.get('evidence_id')})"
+        if "html" in headers.get("content-type", "") or body.lstrip()[:1] == "<":
+            store.failed_urls[key] = "html response"
+            return None, (f"{url} returned HTML, not JavaScript (likely an SPA fallback); "
+                          f"evidence {exchange.get('evidence_id')}")
+        entry, note = store.add(
+            key=key, url=url, name=key, kind="script", text=body,
+            evidence_id=str(exchange.get("evidence_id") or ""), origin="fetched",
+            source_map_ref=jsr.find_source_map_ref(body, response.get("headers")),
+        )
+        if entry is None:
+            store.failed_urls[key] = note
+            return None, f"{url}: {note}"
+        store.failed_urls.pop(key, None)
+        return entry, note
+
+    async def _load_source_map(self, entry, identity: Optional[str] = None) -> str:
+        """Add original sources from the script's same-origin (or inline) source map."""
+        from app.services.agent import js_source_reader as jsr
+
+        if entry.kind != "script" or entry.source_map_state != "pending":
+            return entry.source_map_state
+        ref = entry.source_map_ref
+        evidence_id = ""
+        inline = jsr.decode_data_uri(ref)
+        if inline is not None:
+            map_url, data = jsr.script_key(entry.url) + "#inline-source-map", inline
+        elif ref.lower().startswith("data:"):
+            entry.source_map_state = "failed: undecodable inline source map"
+            return entry.source_map_state
+        else:
+            map_url = jsr.resolve_source_map_url(entry.url, ref)
+            entry.source_map_url = map_url
+            if not jsr.same_origin(map_url, entry.url):
+                entry.source_map_state = "cross_origin_skipped"
+                return entry.source_map_state
+            try:
+                exchange = await self._http_exchange(
+                    "GET", map_url, identity=identity, timeout=30, follow_redirects=False,
+                    max_response_bytes=jsr.MAX_SOURCE_MAP_BYTES,
+                )
+            except Exception as exc:
+                entry.source_map_state = f"failed: {str(exc)[:160]}"
+                return entry.source_map_state
+            evidence_id = str(exchange.get("evidence_id") or "")
+            status = int((exchange.get("response") or {}).get("status") or 0)
+            if status != 200:
+                entry.source_map_state = f"failed: HTTP {status}"
+                return entry.source_map_state
+            data = exchange.get("_body_text") or ""
+        try:
+            parsed = await asyncio.to_thread(jsr.parse_source_map, data)
+        except ValueError as exc:
+            entry.source_map_state = f"failed: {exc}"
+            return entry.source_map_state
+        entry.source_map_url = map_url
+        added = jsr.add_source_map_sources(self._js_source_store, entry, map_url, parsed,
+                                           evidence_id=evidence_id)
+        entry.source_map_state = (
+            f"loaded: {len(added)} original sources"
+            f" ({parsed.skipped_node_modules} node_modules skipped"
+            + (f", {parsed.without_content} without sourcesContent" if parsed.without_content else "")
+            + (f", {parsed.over_limit} over limit" if parsed.over_limit else "") + ")"
+        )
+        return entry.source_map_state
+
+    async def read_script(
+        self,
+        file: str = "",
+        start_line: int = 1,
+        max_lines: int = 200,
+        url: str = "",
+        identity: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Page through one whole script by line; minified code is re-flowed for reading."""
+        from app.services.agent import js_source_reader as jsr
+
+        store = self._js_source_store
+        ref = str(file or url or kwargs.get("script_id") or kwargs.get("path") or "").strip()
+        if not ref:
+            listing = store.listing()
+            listing["not_loaded_js_files"] = [
+                u for u in self._js_script_urls() if jsr.script_key(u) not in store.by_key
+            ][:40]
+            listing["usage"] = ("read_script(file=<file id | URL | source path>, start_line, max_lines); "
+                                "a new in-scope URL is fetched once and kept for this session")
+            return self._js_model_view(json.dumps(listing, indent=2, default=str))
+        entry, candidates = store.resolve(ref)
+        if entry is None and not candidates and ref.startswith(("http://", "https://")):
+            entry, candidates = store.resolve(jsr.script_key(ref))
+        if entry is None:
+            if candidates:
+                return json.dumps({"ok": False, "error": "file reference is ambiguous", "candidates": candidates})
+            if not ref.startswith(("http://", "https://")):
+                return json.dumps({"ok": False, "error": f"no loaded file matches {ref!r}; pass a script URL",
+                                   "loaded": [row["file"] + " " + row["name"] for row in store.listing(40)["files"]]})
+            entry, note = await self._load_script_file(ref, identity=identity)
+            if entry is None:
+                return json.dumps({"ok": False, "error": note})
+        if entry.kind == "script" and entry.source_map_state == "pending":
+            await self._load_source_map(entry, identity=identity)
+        budget = max(2000, min(jsr.OUTPUT_CHAR_BUDGET, _tool_output_max_chars() - 2000))
+        page = await asyncio.to_thread(jsr.render_page, entry, start_line, max_lines, budget)
+        header = [
+            f"file {entry.file_id} ({entry.kind}) {entry.name}"
+            + (f" [from source map of {entry.parent_id}]" if entry.parent_id else ""),
+            f"{page['total_lines']} lines"
+            + (" (re-flowed from minified; line numbers refer to this view)" if entry.reflowed else "")
+            + (f"; evidence {entry.evidence_id}" if entry.evidence_id else ""),
+        ]
+        if entry.redactions:
+            header.append("redacted: " + ", ".join(f"{k}x{v}" for k, v in sorted(entry.redactions.items())))
+        if entry.source_map_state:
+            line = f"source map: {entry.source_map_state}"
+            if entry.source_map_children:
+                first = store.files.get(entry.source_map_children[0])
+                line += (f"; e.g. read_script(file=\"{first.name}\")" if first else "")
+            header.append(line)
+        if page["next_start_line"]:
+            header.append(f"showing {page['start_line']}-{page['end_line']}; next: "
+                          f"read_script(file=\"{entry.file_id}\", start_line={page['next_start_line']})")
+        elif page["start_line"] > page["total_lines"]:
+            header.append(f"start_line {page['start_line']} is past the end")
+        else:
+            header.append(f"showing {page['start_line']}-{page['end_line']} (end of file)")
+        return self._js_model_view("\n".join(header) + "\n" + page["code"])
+
+    async def search_scripts(
+        self,
+        pattern: str = "",
+        file: str = "",
+        context_lines: int = 2,
+        max_matches: int = 40,
+        ignore_case: bool = False,
+        literal: bool = False,
+        load_js_files: bool = True,
+        identity: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Regex-search every loaded script and original source, with context lines."""
+        from app.services.agent import js_source_reader as jsr
+
+        pattern = str(pattern or kwargs.get("regex") or kwargs.get("query") or "")
+        try:
+            jsr.compile_search_pattern(pattern, ignore_case=bool(ignore_case), literal=bool(literal))
+        except ValueError as exc:
+            return json.dumps({"ok": False, "error": str(exc)})
+        store = self._js_source_store
+        loaded: List[str] = []
+        load_errors: List[str] = []
+        pending: List[str] = []
+        if load_js_files:
+            pending = [u for u in self._js_script_urls()
+                       if jsr.script_key(u) not in store.by_key and jsr.script_key(u) not in store.failed_urls]
+            for script_url in pending[: self._JS_LOADS_PER_SEARCH]:
+                entry, note = await self._load_script_file(script_url, identity=identity)
+                if entry is not None:
+                    loaded.append(entry.file_id)
+                else:
+                    load_errors.append(note[:160])
+            maps = [e for e in store.files.values() if e.kind == "script" and e.source_map_state == "pending"]
+            for entry in maps[: self._JS_MAP_LOADS_PER_SEARCH]:
+                await self._load_source_map(entry, identity=identity)
+        if not len(store):
+            return json.dumps({"ok": False, "error": (
+                "No scripts loaded. Call read_script(url=...) for a script URL, or "
+                "scoped_browser_assessment(operation=\"inspect_js\") to capture page scripts."
+            ), "load_errors": load_errors[:8]})
+        budget = max(2000, min(jsr.OUTPUT_CHAR_BUDGET, _tool_output_max_chars() - 2000))
+        result = await asyncio.to_thread(
+            jsr.search_store, store, pattern, file_filter=file, context_lines=context_lines,
+            max_matches=max_matches, ignore_case=bool(ignore_case), literal=bool(literal),
+            char_budget=budget,
+        )
+        result["loaded"] = loaded
+        text = jsr.render_search(result)
+        remaining = max(0, len(pending) - self._JS_LOADS_PER_SEARCH)
+        if remaining:
+            text += f"\n{remaining} more map js_files not loaded yet; search again to load the next batch."
+        if load_errors:
+            text += "\nnot loaded: " + "; ".join(load_errors[:5])
+        return self._js_model_view(text)
 
     async def fetch_lazy_chunks(
         self,

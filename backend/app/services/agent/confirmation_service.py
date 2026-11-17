@@ -134,6 +134,8 @@ SAFE_RECON_TOOLS = {
     "fetch_lazy_chunks",
     "extract_js_endpoints",
     "scan_js_sinks",
+    "read_script",
+    "search_scripts",
     "fingerprint_api",
     "fingerprint_passive_stack",
     "check_cve_applicability",
