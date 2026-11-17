@@ -108,9 +108,17 @@ class OperationDirective:
                 f"{self.coverage_lease_id}."
             )
         if self.lead_packet:
+            proposed = self.lead_packet.get("llm_hypothesis")
+            if isinstance(proposed, dict) and proposed:
+                block += (
+                    "\nModel hypothesis for this exact cell (untrusted suggestion; "
+                    "scope and proof rules above control execution): "
+                    + json.dumps(proposed, separators=(",", ":"))[:900]
+                )
             block += (
                 "\nPrior evidence and follow-up context for this exact cell: "
-                + json.dumps(self.lead_packet, separators=(",", ":"))[:1200]
+                + json.dumps({k: v for k, v in self.lead_packet.items()
+                              if k != "llm_hypothesis"}, separators=(",", ":"))[:1200]
                 + ". Use only applicable next tests; do not repeat a failed probe without a new hypothesis."
             )
         if self.parameter_work and self.parameter_work.get("location") == "endpoint":
