@@ -1034,6 +1034,40 @@ class AgentOrchestrator:
                 out["current_phase"] = snap["current_phase"]
         except Exception:
             logger.debug("run snapshot resume skipped", exc_info=True)
+        # Re-hydrate operator-approved test identities. The snapshot drops live
+        # creds on purpose, so without this an authz hypothesis idles after a
+        # restart. Only runs under autonomy limits that authorize an identity
+        # label beyond anonymous, and only loads secrets for in-scope hosts. The
+        # creds live in brain memory for this turn; they are not re-persisted.
+        try:
+            from app.services.agent.autonomy_limits import current_autonomy_limits
+
+            limits = current_autonomy_limits.get()
+            authorized = tuple(
+                name for name in (getattr(limits, "allowed_identities", ()) or ())
+                if name and name != "anonymous"
+            )
+            if limits and authorized and org_id:
+                from app.db.database import SessionLocal
+                from app.services.agent.assessment_scope import observation_scope_hosts
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+                from app.services.agent.engagement_identities import (
+                    apply_pre_registered_identities, load_engagement_credentials,
+                )
+
+                scope_hosts = observation_scope_hosts(self.tool_manager) or list(
+                    getattr(limits, "allowed_hosts", ()) or ()
+                )
+                with SessionLocal() as db:
+                    creds = load_engagement_credentials(
+                        db, int(org_id), authorized, scope_hosts,
+                    )
+                if creds:
+                    brain = engagement_brain_from_dict(out.get("engagement_brain"))
+                    if apply_pre_registered_identities(brain, creds):
+                        out["engagement_brain"] = brain.to_dict()
+        except Exception:
+            logger.debug("pre-registered identity hydration skipped", exc_info=True)
         # Hand off recent first-party takeover scanner observations to opted-in
         # scheduled hunts. They remain leads until the normal proof gate runs.
         try:

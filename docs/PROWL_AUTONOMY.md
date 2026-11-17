@@ -53,6 +53,24 @@ hunt imports recent in-scope scanner events. One observation produces one
 deduplicated specialist hypothesis. Prowl's existing proof checks still decide
 whether a candidate is verified.
 
+## Pre-registered engagement identities
+
+The restart snapshot deliberately omits live credentials and the active auth
+session, so without setup a resumed run — or any authz hypothesis — idles
+waiting for an operator to re-enter working creds. Operators can instead
+pre-register approved test identities per organization (optionally bound to a
+schedule) in `agent_engagement_identities`. Each identity has a `label` that
+must match one of the schedule's `allowed_identities`, a secret encrypted at
+rest with the shared Fernet cipher, and a `valid_on` host list.
+
+At the start of each autonomy turn, approved identities are re-hydrated into the
+in-memory engagement brain — but only when the run's limits authorize that
+`label` (never the `anonymous` pseudo-identity) and at least one `valid_on` host
+is in the current scope. The secrets live in brain memory for that turn only;
+they are never written back into the snapshot, so the "no creds in the snapshot"
+invariant holds. Apply `db/migrations/add_agent_engagement_identities.sql`
+alongside the autonomy migration before enabling authenticated schedules.
+
 The worker resumes queued turns after a restart using the Postgres snapshot.
 For an expired in-flight lease, it checks the action ledger and a newer costed
 snapshot. Only completed read-only work with a new continuation revision is
