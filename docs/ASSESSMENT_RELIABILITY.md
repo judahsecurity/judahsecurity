@@ -65,8 +65,29 @@ Candidates now carry `vulnerability_class`. Hunters can set it on `submit_findin
 | `xxe` | `oob_callback` only for an approved, browser-captured XML POST with an external entity and a fresh matching callback |
 | `cors` | `scoped_cors_credentialed` — two distinct-nonce control/probe pairs where a never-seen canary origin is echoed with `Access-Control-Allow-Credentials: true` |
 | `race_condition` | `scoped_race_overrun` — a control canary the server enforces in series (one survivor) and a fresh canary that a bounded concurrent burst lands two or more times, confirmed through an independent readback and cleaned up, reproduced by hunter and verifier |
+| `prompt_injection` | `scoped_prompt_injection_canary` — direct, multi-turn or indirect: five control/probe trials with fresh canaries; the probe canary appears while the plain control's does not, at least 1/5 for the hunter and 3/5 for the independent verifier, every control clean (indirect: every planted document deleted) |
+| `system_prompt_leak` | `scoped_system_prompt_leak` — the operator-planted `system_prompt_canary` appears in replies to fixed extraction templates and never in replies to a benign control, with the same 1/5 and 3/5 thresholds |
 
 An endpoint assigned to `race_condition` needs an operator-approved `race_action_paths` entry, an observed readback URL that lists written records, and a `race_cleanup_paths` cleanup path. `scoped_race_assigned` submits a control canary twice in series (single-use holds when exactly one survives in the readback), then fires a bounded concurrent burst with a fresh canary (an overrun when two or more survive), and cleans up both. A burst of errors or duplicate successes without a readback is not proof. The independent verifier repeats the whole sequence with a fresh canary before publication. Race bursts draw on a separate small per-actor reservation, not the single-probe POST budget.
+
+Prompt-injection endpoints are operator policy, never model input:
+
+```json
+{"prompt_injection_endpoints": [{
+  "path": "/api/chat", "message_field": "input.text", "response_field": "data.reply",
+  "static_body": {"lang": "en"},
+  "history_field": "history",
+  "system_prompt_canary": "AEGIS-CANARY-7731-PELICAN",
+  "indirect": {"seed_path": "/api/docs", "seed_field": "doc.body",
+               "seed_label_field": "doc.title", "seed_id_field": "result.id",
+               "cleanup_template": "/api/docs/__PROWL_NONCE__",
+               "trigger_template": "Summarize the document titled __PROWL_NONCE__."}}]}
+```
+
+`message_field` and `response_field` are dotted JSON paths; JSON, SSE (`data:` lines) and NDJSON replies are read, and streamed deltas are joined. Multi-turn needs `history_field` (prior turns sent as `[{role, content}]`) or `session_request_field` plus `session_response_field`. Indirect needs the seed, cleanup and trigger templates; only that seed POST and cleanup DELETE pattern are approved, and a failed cleanup voids the receipt and lists the residue labels. `system_prompt_leak` needs a 12-64 character canary the operator planted in the system prompt; it is stored in evidence so the check can be recomputed, but it is never sent in a request or shown to the model. `scoped_prompt_injection_assigned(endpoint_path, mode, technique)` runs the trials through `_http_exchange`. A candidate that does not reproduce stays inconclusive with the hunter receipt and the measured rate.
+
+llm_red_team, garak, promptfoo and PyRIT are lead sources. `execute_llm_red_team`, `scoped_llm_lead_scan` (runs garak, promptfoo or PyRIT against an approved endpoint; refused during a pilot pass; routed through the assessment proxy when configured) and `import_llm_lead_results` (existing report files) open candidates and attach a scoped hunter run where the policy allows. Outside an agent session (`create_scan(scan_type="llm_red_team")` and the LLM red-team API) prompt-injection and system-prompt-leak hits are stored as `unverified_lead` findings; when the scoped verifier later confirms the same endpoint and the finding is published, those rows become `lead_confirmed` and link to the verified finding. In the backend and scanner images garak and PyRIT live in separate venvs (`GARAK_PYTHON`, `PYRIT_PYTHON`) because their `openai` pins conflict, and promptfoo (`PROMPTFOO_BIN`) runs on its own Node 22 runtime.
+
 
 `command_injection`, `path_traversal`, `csrf`, `known_cve`, and `account_enumeration` have no confirmation recipe yet. Keep these candidates inconclusive until a dedicated validator demonstrates the claimed behavior. Version-in-range is a CVE applicability lead; the separate named-CVE applicability workflow reports that classification and must not be read as exploit verification. Assessment progress includes counts of pending, confirmed, refuted, and inconclusive candidates, plus concise inconclusive reasons.
 

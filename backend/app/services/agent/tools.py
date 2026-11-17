@@ -742,6 +742,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_cors_probe_assigned": self.scoped_cors_probe_assigned,
             "scoped_race_assigned": self.scoped_race_assigned,
             "scoped_prompt_injection_assigned": self.scoped_prompt_injection_assigned,
+            "scoped_llm_lead_scan": self.scoped_llm_lead_scan,
+            "import_llm_lead_results": self.import_llm_lead_results,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -1981,27 +1983,39 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "funnel": parameter_test_funnel(brain)}
 
     async def scoped_prompt_injection_assigned(
-        self, endpoint_path: str, technique: str = "instruction_override",
-        identity: str = "anonymous",
+        self, endpoint_path: str, technique: str = "", identity: str = "anonymous",
+        mode: str = "direct",
     ) -> Dict[str, Any]:
-        """Test one operator-approved chat endpoint for direct prompt injection.
+        """Test one operator-approved chat endpoint for prompt injection or prompt leak.
 
-        Runs five control/probe trials. A trial hits when the plain control is
-        not followed and the injected probe returns its fresh canary. The result
-        is a lead receipt; only an independent verifier replay can confirm it.
+        mode: direct | multi_turn | indirect | system_prompt_leak (the endpoint's
+        policy must support it). Runs five control/probe trials. A trial hits when
+        the plain control is not followed and the probe returns its canary. The
+        result is a lead receipt; only an independent verifier replay confirms it.
         """
         from app.services.agent.content_shield import sanitize_for_model
-        from app.services.agent.scoped_assessment.prompt_injection_probe import TECHNIQUES
+        from app.services.agent.scoped_assessment.prompt_injection_probe import (
+            MODE_CLASS, MODES, TECHNIQUES_BY_MODE, default_technique, validate_endpoint_config,
+        )
 
-        if technique not in TECHNIQUES:
+        if mode not in MODES:
+            return {"success": False, "error": "unsupported_mode", "modes": list(MODES)}
+        technique = technique or default_technique(mode)
+        if technique not in TECHNIQUES_BY_MODE[mode]:
             return {"success": False, "error": "unsupported_technique",
-                    "techniques": sorted(TECHNIQUES)}
-        if endpoint_path not in (getattr(self, "_scoped_prompt_injection_endpoints", None) or {}):
+                    "techniques": sorted(TECHNIQUES_BY_MODE[mode])}
+        config = (getattr(self, "_scoped_prompt_injection_endpoints", None) or {}).get(endpoint_path)
+        if not config:
             return {"success": False, "error": "operator_approval_required",
                     "reason": "chat endpoint is not in prompt_injection_endpoints"}
         try:
+            validate_endpoint_config(mode, config)
+        except ValueError as exc:
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": str(exc)[:200]}
+        try:
             receipt, artifact_id = await self._scoped_prompt_injection_run(
-                endpoint_path, technique=technique, identity=identity,
+                endpoint_path, mode=mode, technique=technique, identity=identity,
             )
         except (ValueError, OSError) as exc:
             return {"success": False, "error": type(exc).__name__,
@@ -2009,18 +2023,101 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         sample = next((trial["probe"]["reply_excerpt"] for trial in receipt["trials"]
                        if trial["probe"].get("reply_excerpt")), "")
         sample, _ = sanitize_for_model(sample[:600])
-        return {"success": True, "evidence_id": artifact_id,
-                "endpoint_path": endpoint_path, "technique": technique,
-                "trials": receipt["trial_count"], "hits": receipt["hits"],
-                "control_hits": receipt["control_hits"],
-                "reproduction_rate": receipt["reproduction_rate"],
-                "lead_signal": receipt["lead_signal"],
-                "sample_probe_reply_untrusted": sample,
-                "next_step": ("Submit a candidate with vulnerability_class=prompt_injection, "
-                              "target set to the endpoint URL and this evidence_id"
-                              if receipt["lead_signal"] else
-                              "No clean differential; the injected task was not followed "
-                              "or a plain control was")}
+        if mode == "system_prompt_leak":
+            # Never hand the operator's canary to the model.
+            sample = sample.replace(config.get("system_prompt_canary") or "\0", "[canary]")
+        result = {"success": True, "evidence_id": artifact_id,
+                  "endpoint_path": endpoint_path, "mode": mode, "technique": technique,
+                  "trials": receipt["trial_count"], "hits": receipt["hits"],
+                  "control_hits": receipt["control_hits"],
+                  "reproduction_rate": receipt["reproduction_rate"],
+                  "lead_signal": receipt["lead_signal"],
+                  "sample_probe_reply_untrusted": sample,
+                  "next_step": (f"Submit a candidate with vulnerability_class={MODE_CLASS[mode]}, "
+                                "target set to the endpoint URL and this evidence_id"
+                                if receipt["lead_signal"] else
+                                "No clean differential; the probe was not followed, a plain "
+                                "control was, or cleanup failed")}
+        if mode == "indirect":
+            result["cleanup_confirmed"] = receipt.get("cleanup_confirmed")
+            result["residue"] = receipt.get("residue") or []
+        return result
+
+    async def scoped_llm_lead_scan(
+        self, endpoint_path: str, tool: str, mode: str = "direct", repeat: int = 3,
+        probes: str = "promptinject",
+    ) -> Dict[str, Any]:
+        """Run garak, promptfoo or PyRIT against one operator-approved chat endpoint.
+
+        tool: garak (probes promptinject|latentinjection; modes direct, indirect),
+        promptfoo (repeatable canary tests, repeat 1-5; modes direct,
+        system_prompt_leak) or pyrit (modes direct, multi_turn,
+        system_prompt_leak). Hits become prompt_injection or system_prompt_leak
+        candidates; a scoped hunter run is attached when the policy supports the
+        mode. Tool output is a lead, never proof.
+        """
+        from app.services.agent.pilot_policy import current_pilot
+        from app.services.llm_red_team.leads import parse_lead_file
+        from app.services.llm_red_team.runners import run_lead_tool
+
+        if current_pilot() is not None:
+            return {"success": False, "error": "pilot_pass",
+                    "reason": "External lead tools bypass pilot pacing; run them after the pilot pass"}
+        try:
+            url, config = self._scoped_chat_endpoint(endpoint_path)
+            self._scoped_claim_lead_tool()
+            run = await run_lead_tool(tool, url=url, config=config, mode=mode,
+                                      repeat=repeat, probes=probes)
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:300]}
+        try:
+            leads = parse_lead_file(tool, run["report_path"], url)
+        except (OSError, ValueError) as exc:
+            from app.services.agent.content_shield import sanitize_for_model
+
+            tail, _ = sanitize_for_model(run["output_tail"][-800:])
+            return {"success": False, "error": "no_report", "reason": str(exc)[:200],
+                    "returncode": run["returncode"], "output_tail_untrusted": tail}
+        return await self._llm_lead_summary(tool, leads, extra={"returncode": run["returncode"]})
+
+    async def import_llm_lead_results(
+        self, source: str, report_path: str, endpoint_url: str = "",
+    ) -> Dict[str, Any]:
+        """Import garak report.jsonl, promptfoo eval JSON or PyRIT results as leads.
+
+        endpoint_url names the chat endpoint the report tested (garak REST
+        reports do not record it). Reports must sit under the temp directory,
+        AEGIS_LLM_REPORT_DIR or garak's data directory. Hits become verifier
+        candidates exactly like scoped_llm_lead_scan.
+        """
+        import tempfile
+
+        from app.services.llm_red_team.leads import allowed_lead_file, parse_lead_file
+
+        roots = [tempfile.gettempdir(), os.environ.get("AEGIS_LLM_REPORT_DIR", ""),
+                 os.path.expanduser("~/.local/share/garak")]
+        try:
+            if source not in ("garak", "promptfoo", "pyrit"):
+                raise ValueError("source must be garak, promptfoo or pyrit")
+            path = allowed_lead_file(report_path, roots)
+            leads = parse_lead_file(source, path, endpoint_url)
+        except (OSError, ValueError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:300]}
+        return await self._llm_lead_summary(source, leads)
+
+    async def _llm_lead_summary(self, source: str, leads: List[Dict[str, Any]],
+                                extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        from collections import Counter
+
+        try:
+            bridged = await self._bridge_llm_leads(leads)
+        except Exception:
+            logger.exception("LLM lead bridge failed")
+            bridged = []
+        return {"success": True, "source": source, "lead_count": len(leads),
+                "leads_by_mode": dict(Counter(lead["mode"] for lead in leads)),
+                "candidates": bridged, **(extra or {}),
+                "note": "Leads only; candidates confirm through the scoped verifier"}
 
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -5152,6 +5249,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             db.add(vuln)
             db.commit()
             db.refresh(vuln)
+            if verified is not None and verified.vulnerability_class in (
+                    "prompt_injection", "system_prompt_leak"):
+                try:
+                    from app.services.llm_red_team.leads import link_confirmed_leads
+
+                    link_confirmed_leads(db, organization_id=org_id, endpoint=verified.target,
+                                         lead_class=verified.vulnerability_class,
+                                         finding_id=vuln.id)
+                except Exception:
+                    db.rollback()
+                    logger.exception("Linking LLM lead findings failed")
             ra_msg = ""
             try:
                 from app.services.agent.risk_assessment import (
@@ -5788,6 +5896,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.llm_red_team.scanner import (
             run_scan, ScanConfig, ChatEndpoint, format_scan_report, build_finding_data,
         )
+        from app.services.llm_red_team.leads import LEAD_CATEGORIES, red_team_leads
         _, org_id = get_tenant_context()
 
         cat_list = None
@@ -5827,7 +5936,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 for test_result in scan_result.results:
                     if test_result.get("verdict") != "fail":
                         continue
-                    if test_result.get("category") == "prompt_injection":
+                    if test_result.get("category") in LEAD_CATEGORIES:
                         # LLM-graded hits are leads; they go to the candidate
                         # queue below and need a deterministic replay.
                         continue
@@ -5847,6 +5956,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         cwe_id=finding_data.get("cwe_id"),
                         remediation=finding_data.get("remediation", "")[:5000],
                         tags=finding_data.get("tags", []),
+                        verification_level=finding_data.get("verification_level"),
+                        detection_confidence=finding_data.get("detection_confidence", "unknown"),
                         metadata_=finding_data.get("metadata", {}),
                     )
                     db.add(vuln)
@@ -5862,12 +5973,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         report = format_scan_report(scan_result)
         try:
-            bridged = await self._bridge_prompt_injection_leads(scan_result.results)
+            bridged = await self._bridge_llm_leads(red_team_leads(scan_result.results))
         except Exception:
             logger.exception("Prompt-injection lead bridge failed")
             bridged = []
         if bridged:
-            report += "\n\nPrompt-injection leads queued for independent verification:\n" + "\n".join(
+            report += "\n\nPrompt-injection and system-prompt leads queued for independent verification:\n" + "\n".join(
                 f"- {row['candidate_id']} {row['target']} "
                 f"(scoped trials: {row.get('scoped_trials') or 'not run: ' + row.get('scoped_reason', '')})"
                 for row in bridged)
@@ -5876,59 +5987,95 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             report = report[:max_chars] + "\n\n... (truncated)"
         return report
 
-    async def _bridge_prompt_injection_leads(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Open one prompt_injection candidate per endpoint with an LLM-graded hit.
+    async def _bridge_llm_leads(self, leads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Open one candidate per (endpoint, class, mode) from scanner leads.
 
-        When the operator approved that endpoint, a scoped hunter run is attached
-        so the verifier can replay it. Otherwise the candidate holds only the
-        lead and the verifier closes it as inconclusive with the missing approval.
+        Leads come from llm_red_team, garak, promptfoo or PyRIT, normalized by
+        app.services.llm_red_team.leads. When the operator approved the endpoint
+        and its policy supports the lead's mode, a scoped hunter run is attached
+        so the verifier can replay it; a direct run is the fallback for
+        injection leads. Otherwise the candidate holds only the lead and the
+        verifier closes it as inconclusive, naming the missing approval.
+        Out-of-scope endpoints are skipped.
         """
         from urllib.parse import urlsplit
 
+        from app.services.agent.assessment_scope import assert_url_in_scope
         from app.services.agent.content_shield import sanitize_for_model
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.independent_verify import submit_candidate
+        from app.services.agent.scoped_assessment.prompt_injection_probe import (
+            MODES, default_technique, validate_endpoint_config,
+        )
+        from app.services.llm_red_team.leads import lead_class_for_mode
 
-        by_endpoint: Dict[str, List[Dict[str, Any]]] = {}
-        for row in results or []:
-            if row.get("category") == "prompt_injection" and row.get("verdict") == "fail":
-                by_endpoint.setdefault(str(row.get("endpoint") or ""), []).append(row)
+        groups: Dict[tuple, List[Dict[str, Any]]] = {}
+        for lead in leads or []:
+            endpoint = str(lead.get("endpoint") or "").split("#", 1)[0]
+            mode = str(lead.get("mode") or "")
+            if not endpoint.startswith(("http://", "https://")) or mode not in MODES:
+                continue
+            groups.setdefault((endpoint, mode), []).append(lead)
+        titles = {"direct": "Prompt injection in chat endpoint {path}",
+                  "multi_turn": "Multi-turn prompt injection in chat endpoint {path}",
+                  "indirect": "Indirect prompt injection via chat endpoint {path}",
+                  "system_prompt_leak": "System prompt leak in chat endpoint {path}"}
+        policy = getattr(self, "_scoped_prompt_injection_endpoints", None) or {}
         bridged = []
-        for endpoint, rows in list(by_endpoint.items())[:8]:
-            if not endpoint:
+        for (endpoint, mode), rows in list(groups.items())[:8]:
+            path = urlsplit(endpoint).path or "/"
+            try:
+                assert_url_in_scope(self, endpoint)
+            except ValueError:
+                bridged.append({"candidate_id": "", "target": endpoint, "mode": mode,
+                                "scoped_reason": "endpoint is out of assessment scope"})
                 continue
             lead_lines = []
             for row in rows[:5]:
-                preview, _ = sanitize_for_model(str(row.get("response_preview") or "")[:300])
-                lead_lines.append(f"{row.get('payload_id')}: {row.get('name')} -> {preview}")
-            evidence = ("llm_red_team LLM-graded lead (not proof):\n" + "\n".join(lead_lines))[:4000]
+                preview, _ = sanitize_for_model(str(row.get("response") or "")[:300])
+                lead_lines.append(f"[{row.get('source')}] {row.get('ref')}: "
+                                  f"{str(row.get('detail') or '')[:80]} -> {preview}")
+            sources = sorted({str(row.get("source")) for row in rows})
+            evidence = (f"{', '.join(sources)} lead (not proof), {len(rows)} hit(s):\n"
+                        + "\n".join(lead_lines))[:4000]
             evidence_ids, scoped = [], {}
-            path = urlsplit(endpoint).path or "/"
-            if path in (getattr(self, "_scoped_prompt_injection_endpoints", None) or {}):
+            config = policy.get(path)
+            run_mode = mode
+            if config:
+                try:
+                    validate_endpoint_config(mode, config)
+                except ValueError as exc:
+                    run_mode = "direct" if mode != "system_prompt_leak" else ""
+                    scoped["policy_note"] = str(exc)[:120]
+            if config and run_mode:
                 try:
                     receipt, artifact_id = await self._scoped_prompt_injection_run(
-                        path, technique="instruction_override",
-                        expected_url=endpoint.split("?", 1)[0].split("#", 1)[0])
-                    scoped = {"scoped_trials": f"{receipt['hits']}/{receipt['trial_count']} hits, "
-                                               f"{receipt['control_hits']} control hits"}
+                        path, mode=run_mode, technique=default_technique(run_mode),
+                        expected_url=endpoint.split("?", 1)[0])
+                    scoped["scoped_trials"] = (
+                        f"{run_mode}: {receipt['hits']}/{receipt['trial_count']} hits, "
+                        f"{receipt['control_hits']} control hits")
                     if receipt["lead_signal"]:
                         evidence_ids.append(artifact_id)
+                        mode = run_mode
                 except (ValueError, OSError) as exc:
-                    scoped = {"scoped_reason": str(exc)[:120]}
-            else:
-                scoped = {"scoped_reason": "endpoint not in prompt_injection_endpoints"}
+                    scoped["scoped_reason"] = str(exc)[:120]
+            elif not config:
+                scoped["scoped_reason"] = "endpoint not in prompt_injection_endpoints"
+            elif not run_mode:
+                scoped["scoped_reason"] = scoped.pop("policy_note", "mode not configured")
             self._require_independent_verify = True
             brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
             cand = submit_candidate(
-                brain, title=f"Prompt injection in chat endpoint {path}",
-                description="Direct prompt injection lead from llm_red_team.",
+                brain, title=titles[mode].format(path=path),
+                description=f"{mode.replace('_', ' ')} lead from {', '.join(sources)}.",
                 severity=str(rows[0].get("severity") or "medium"), target=endpoint,
-                evidence=evidence, specialist="llm_red_team", identity="anonymous",
-                test_type="prompt_injection", vulnerability_class="prompt_injection",
-                evidence_ids=evidence_ids,
+                evidence=evidence, specialist=sources[0], identity="anonymous",
+                test_type=lead_class_for_mode(mode),
+                vulnerability_class=lead_class_for_mode(mode), evidence_ids=evidence_ids,
             )
             self._engagement_brain = brain.to_dict()
-            bridged.append({"candidate_id": cand.id, "target": endpoint, **scoped})
+            bridged.append({"candidate_id": cand.id, "target": endpoint, "mode": mode, **scoped})
         return bridged
 
     async def save_note(

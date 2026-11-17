@@ -1122,10 +1122,10 @@ async def _verify_scoped_prompt_injection_candidate(
     from app.services.agent.evidence_store import evidence_store
     from app.services.agent.proof_policy import validate_proof
     from app.services.agent.scoped_assessment.prompt_injection_probe import (
-        CONFIRM_HITS, TRIALS,
+        CONFIRM_HITS, MODE_CLASS, TRIALS,
     )
 
-    if cand.vulnerability_class != "prompt_injection":
+    if cand.vulnerability_class not in ("prompt_injection", "system_prompt_leak"):
         return None
     store = evidence_store(tools_manager)
     identity = str(cand.identity or "anonymous")
@@ -1134,9 +1134,11 @@ async def _verify_scoped_prompt_injection_candidate(
                    and store.records[eid].get("kind") == "scoped_prompt_injection_probe"
                    and store.records[eid].get("target") == cand.target
                    and store.records[eid].get("identity") == identity
-                   and store.records[eid].get("payload", {}).get("lead_signal") is True), None)
+                   and store.records[eid].get("payload", {}).get("lead_signal") is True
+                   and MODE_CLASS.get(store.records[eid].get("payload", {}).get("mode") or "direct")
+                   == cand.vulnerability_class), None)
     failure = ("A scoped prompt-injection hunter receipt is required; LLM-graded or "
-               "scanner output is a lead only")
+               "scanner output (llm_red_team, garak, promptfoo, PyRIT) is a lead only")
     next_step = ("Have the operator add this chat endpoint to prompt_injection_endpoints, "
                  "then run scoped_prompt_injection_assigned and resubmit with its evidence_id")
     evidence_ids: List[str] = []
@@ -1144,9 +1146,10 @@ async def _verify_scoped_prompt_injection_candidate(
         hunter_id, receipt = hunter
         payload = receipt.get("payload", {})
         endpoint_path = str(payload.get("endpoint_path") or "")
+        mode = str(payload.get("mode") or "direct")
         try:
             replay, artifact_id = await tools_manager._scoped_prompt_injection_run(
-                endpoint_path, technique=str(payload.get("technique") or ""),
+                endpoint_path, mode=mode, technique=str(payload.get("technique") or ""),
                 identity=identity, coverage_cell_id=cand.coverage_cell_id,
                 expected_url=cand.target,
             )
@@ -1154,7 +1157,8 @@ async def _verify_scoped_prompt_injection_candidate(
             rate = (f"{replay['hits']}/{replay['trial_count']} fresh trials reproduced, "
                     f"{replay['control_hits']} control hits")
             if replay.get("proof_confirmed") is True:
-                proof = {"kind": "scoped_prompt_injection_canary",
+                proof = {"kind": ("scoped_system_prompt_leak" if mode == "system_prompt_leak"
+                                  else "scoped_prompt_injection_canary"),
                          "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
                 valid, why = validate_proof(store, cand, proof, [artifact_id])
                 fresh, fresh_why = store.validate(
@@ -1164,8 +1168,8 @@ async def _verify_scoped_prompt_injection_candidate(
                 if valid and fresh:
                     verified = apply_verdict(
                         tools_manager, candidate_id=cand.id, verdict="confirmed",
-                        evidence=("Injected instruction returned fresh canaries while plain "
-                                  f"controls did not: {rate}."),
+                        evidence=(f"{mode.replace('_', ' ')}: the probe returned its canary "
+                                  f"while the plain controls did not: {rate}."),
                         evidence_ids=[artifact_id], proof=proof,
                     )
                     if verified and verified.status == "confirmed":
@@ -1175,6 +1179,10 @@ async def _verify_scoped_prompt_injection_candidate(
                                 "key_findings": [], "tool_calls": 1, "error": None,
                                 "reproduction_rate": replay["reproduction_rate"]}
                 failure = why or fresh_why or "Prompt-injection proof policy rejected the replay"
+            elif mode == "indirect" and replay.get("cleanup_confirmed") is not True:
+                failure = (f"Planted documents were not all cleaned up ({rate}); residue "
+                           f"labels: {', '.join(replay.get('residue') or []) or 'see receipt'}")
+                next_step = "Remove the residue, then fix seed_id_field or the cleanup template"
             elif replay.get("control_hits"):
                 failure = (f"A plain control returned its canary ({rate}); the assistant "
                            "follows that task without injection")

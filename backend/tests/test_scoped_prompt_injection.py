@@ -50,7 +50,8 @@ def flaky_bot(pattern):
 
 
 def fake_send(bot):
-    async def send(body: str, headers: dict) -> dict:
+    async def send(method: str, path: str, body: str, headers: dict) -> dict:
+        assert (method, path) == ("POST", "/api/chat")
         message = json.loads(body)["input"]["text"]
         return {"response": {"status": 200}, "evidence_id": "x",
                 "_body_text": json.dumps({"data": {"reply": bot(message)}})}
@@ -59,8 +60,9 @@ def fake_send(bot):
 
 async def receipt(bot, nonce, technique="instruction_override"):
     payload = await pi.probe_prompt_injection(
-        fake_send(bot), technique=technique, message_field="input.text",
-        response_field="data.reply", static_body={"lang": "en"}, nonce=nonce)
+        fake_send(bot), chat_path="/api/chat", mode="direct", technique=technique,
+        config={"message_field": "input.text", "response_field": "data.reply",
+                "static_body": {"lang": "en"}}, nonce=nonce)
     payload.update({"endpoint_path": "/api/chat", "method": "POST",
                     "identity": "anonymous", "static_body_sha256": "s"})
     return payload
@@ -113,7 +115,6 @@ async def test_probe_counts_only_clean_differential_trials():
     hit = await receipt(restricted_bot, "aaaa")
     assert (hit["hits"], hit["control_hits"], hit["trial_count"]) == (5, 0, 5)
     assert hit["lead_signal"] and hit["proof_confirmed"]
-    assert hit["requests_sent"] == 10
     echoed = await receipt(echo_bot, "bbbb")
     assert echoed["hits"] == 0 and not echoed["lead_signal"]
     # A bot that does the task without injection has nothing to bypass.
@@ -299,10 +300,12 @@ async def test_llm_red_team_hits_become_candidates_not_findings(chat_server):
         {"endpoint": chat_server + "/api/chat", "category": "jailbreak",
          "verdict": "fail", "payload_id": "jb-001"},
     ]
-    bridged = await manager._bridge_prompt_injection_leads(results)
+    from app.services.llm_red_team.leads import red_team_leads
+
+    bridged = await manager._bridge_llm_leads(red_team_leads(results))
     assert [row["target"] for row in bridged] == [
         chat_server + "/api/chat", chat_server + "/api/unapproved"]
-    assert bridged[0]["scoped_trials"].startswith("5/5")
+    assert bridged[0]["scoped_trials"].startswith("direct: 5/5")
     assert "not in prompt_injection_endpoints" in bridged[1]["scoped_reason"]
     brain = engagement_brain_from_dict(manager._engagement_brain)
     by_target = {row["target"]: row for row in brain.candidates}

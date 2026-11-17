@@ -849,6 +849,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_llm_red_team",
             "execute_garak",
             "scoped_prompt_injection_assigned",
+            "scoped_llm_lead_scan",
+            "import_llm_lead_results",
             "execute_curl",
             "execute_browser",
             "execute_nuclei",
@@ -868,9 +870,11 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "(3) Prioritize email/notify, refund/payment, query/DB tools and "
             "identity/side-effect params. (4) Broaden with other LLM categories "
             "and optional execute_garak. Report only with prompt+response evidence. "
-            "Scanner and garak hits are leads: on an operator-approved endpoint run "
-            "scoped_prompt_injection_assigned and submit_finding_candidate with "
-            "vulnerability_class=prompt_injection and its evidence_id."
+            "Scanner, garak, promptfoo and PyRIT hits are leads: on an operator-approved "
+            "endpoint use scoped_llm_lead_scan or import_llm_lead_results, then "
+            "scoped_prompt_injection_assigned in the matching mode and "
+            "submit_finding_candidate with vulnerability_class=prompt_injection or "
+            "system_prompt_leak and its evidence_id."
         ),
     ),
     SpecialistProfile(

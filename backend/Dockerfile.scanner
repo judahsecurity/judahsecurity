@@ -231,6 +231,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
     && npm install -g retire \
     && rm -rf /var/lib/apt/lists/* || echo "Retire.js installation skipped"
 
+# LLM prompt-injection lead tools. garak and PyRIT pin conflicting openai
+# versions, so each gets its own venv; promptfoo needs Node >= 22.22, so it gets
+# its own Node runtime next to the distro Node used by retire.js. Their output
+# is a lead only; the scoped verifier confirms (see llm_red_team/runners.py).
+ENV GARAK_PYTHON=/opt/garak/bin/python \
+    PYRIT_PYTHON=/opt/pyrit/bin/python \
+    PROMPTFOO_BIN=/usr/local/bin/promptfoo
+RUN python -m venv /opt/garak && /opt/garak/bin/pip install --no-cache-dir garak==0.17.1 \
+    || echo "garak installation skipped"
+RUN python -m venv /opt/pyrit && /opt/pyrit/bin/pip install --no-cache-dir pyrit==1.2.1 \
+    || echo "PyRIT installation skipped"
+RUN apt-get update && apt-get install -y --no-install-recommends xz-utils && rm -rf /var/lib/apt/lists/* \
+    && ARCH="$(dpkg --print-architecture | sed 's/amd64/x64/')" \
+    && curl -fsSL "https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-${ARCH}.tar.xz" \
+       | tar -xJ -C /opt && mv "/opt/node-v22.22.0-linux-${ARCH}" /opt/node22 \
+    && PATH=/opt/node22/bin:$PATH /opt/node22/bin/npm install -g --no-audit --no-fund promptfoo@0.125.1 \
+    && printf '#!/bin/sh\nexec /opt/node22/bin/node /opt/node22/lib/node_modules/promptfoo/dist/src/entrypoint.js "$@"\n' \
+       > /usr/local/bin/promptfoo && chmod +x /usr/local/bin/promptfoo \
+    || echo "promptfoo installation skipped"
+
 # jwt_tool (JWT testing & exploitation - ticarpi/jwt_tool)
 RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool \
     && pip install --no-cache-dir pycryptodomex termcolor cprint requests \

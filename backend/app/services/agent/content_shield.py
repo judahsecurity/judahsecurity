@@ -247,7 +247,8 @@ TARGET_CONTENT_TOOLS = frozenset({
     "check_cve_applicability", "execute_wpscan", "execute_nuclei",
     "execute_ffuf", "execute_feroxbuster", "execute_katana", "execute_httpx",
     "execute_whatweb", "llm_red_team", "execute_llm_red_team", "execute_garak",
-    "scoped_prompt_injection_assigned", "web_search", "probe_observed_input_batch",
+    "scoped_prompt_injection_assigned", "scoped_llm_lead_scan", "import_llm_lead_results",
+    "web_search", "probe_observed_input_batch",
     "fireteam_dispatch",
 })
 

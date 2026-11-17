@@ -62,8 +62,98 @@ VERIFIER_POST_BUDGET = 24
 HUNTER_RACE_BUDGET = 3
 VERIFIER_RACE_BUDGET = 3
 # Each prompt-injection run is a bounded set of control/probe trials.
-HUNTER_PROMPT_INJECTION_BUDGET = 3
-VERIFIER_PROMPT_INJECTION_BUDGET = 3
+HUNTER_PROMPT_INJECTION_BUDGET = 8
+VERIFIER_PROMPT_INJECTION_BUDGET = 8
+# garak / promptfoo / PyRIT runs send many requests outside _http_exchange.
+HUNTER_LEAD_TOOL_BUDGET = 3
+
+
+def _approved_path(path: object) -> str:
+    if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
+            or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
+        raise ValueError("Invalid approved write or cleanup path")
+    return path
+
+
+def _scalar_body(value: object) -> dict:
+    if value is None:
+        return {}
+    if (not isinstance(value, dict) or len(value) > 8
+            or any(not isinstance(key, str) or len(key) > 64
+                   or not isinstance(item, (str, int, float, bool))
+                   or (isinstance(item, str) and len(item) > 256)
+                   for key, item in value.items())):
+        raise ValueError("Invalid prompt-injection endpoint policy")
+    return dict(value)
+
+
+def _parse_chat_endpoint_policy(row: object) -> dict:
+    """Validate one operator prompt_injection_endpoints entry; never model supplied."""
+    from app.services.agent.scoped_assessment.prompt_injection_probe import (
+        NONCE_TOKEN, valid_canary, valid_field,
+    )
+
+    if not isinstance(row, dict):
+        raise ValueError("Invalid prompt-injection endpoint policy")
+    path = _approved_path(row.get("path"))
+    optional_fields = ("history_field", "session_request_field", "session_response_field")
+    if (not valid_field(row.get("message_field") or "")
+            or not valid_field(row.get("response_field") or "", allow_empty=True)
+            or any(not valid_field(row.get(name) or "", allow_empty=True) for name in optional_fields)
+            or bool(row.get("session_request_field")) != bool(row.get("session_response_field"))):
+        raise ValueError("Invalid prompt-injection endpoint policy")
+    config = {
+        "message_field": row["message_field"],
+        "response_field": row.get("response_field") or "",
+        "static_body": _scalar_body(row.get("static_body")),
+        **{name: row[name] for name in optional_fields if row.get(name)},
+    }
+    canary = row.get("system_prompt_canary")
+    if canary is not None:
+        if not valid_canary(canary):
+            raise ValueError("system_prompt_canary must be 12-64 letters, digits, - or _")
+        config["system_prompt_canary"] = canary
+    indirect = row.get("indirect")
+    if indirect is not None:
+        if not isinstance(indirect, dict):
+            raise ValueError("Invalid indirect injection policy")
+        cleanup = indirect.get("cleanup_template")
+        trigger = indirect.get("trigger_template")
+        if (not valid_field(indirect.get("seed_field") or "")
+                or not valid_field(indirect.get("seed_label_field") or "", allow_empty=True)
+                or not valid_field(indirect.get("seed_id_field") or "", allow_empty=True)
+                or not isinstance(cleanup, str) or cleanup.count(NONCE_TOKEN) != 1
+                or not isinstance(trigger, str) or NONCE_TOKEN not in trigger
+                or len(trigger) > 500):
+            raise ValueError("Indirect injection needs seed_field, a cleanup_template and "
+                             "a trigger_template, each with __PROWL_NONCE__")
+        _approved_path(cleanup.replace(NONCE_TOKEN, "x"))
+        config["indirect"] = {
+            "seed_path": _approved_path(indirect.get("seed_path")),
+            "seed_field": indirect["seed_field"],
+            "seed_label_field": indirect.get("seed_label_field") or "",
+            "seed_id_field": indirect.get("seed_id_field") or "",
+            "seed_static_body": _scalar_body(indirect.get("seed_static_body")),
+            "cleanup_template": cleanup,
+            "trigger_template": trigger,
+        }
+    return {path: config}
+
+
+def approved_cleanup_match(manager, path: str) -> bool:
+    """True when ``path`` is an operator cleanup template filled with a bounded id."""
+    import re
+
+    from app.services.agent.scoped_assessment.prompt_injection_probe import NONCE_TOKEN
+
+    for config in (getattr(manager, "_scoped_prompt_injection_endpoints", None) or {}).values():
+        template = (config.get("indirect") or {}).get("cleanup_template") or ""
+        if not template:
+            continue
+        before, _, after = template.partition(NONCE_TOKEN)
+        if re.fullmatch(re.escape(before) + r"[A-Za-z0-9_\-]{1,64}" + re.escape(after), path):
+            return True
+    return False
 
 
 class ScopedAssessmentTools:
@@ -146,30 +236,9 @@ class ScopedAssessmentTools:
             if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
                     or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Invalid approved write or cleanup path")
-        from app.services.agent.scoped_assessment.prompt_injection_probe import valid_field
-
         chat_endpoints = {}
         for row in injection_endpoints:
-            static_body = row.get("static_body") if isinstance(row, dict) else None
-            if (not isinstance(row, dict) or not isinstance(row.get("path"), str)
-                    or not valid_field(row.get("message_field") or "")
-                    or not valid_field(row.get("response_field") or "", allow_empty=True)
-                    or (static_body is not None and not isinstance(static_body, dict))
-                    or len(static_body or {}) > 8
-                    or any(not isinstance(key, str) or len(key) > 64
-                           or not isinstance(value, (str, int, float, bool))
-                           or (isinstance(value, str) and len(value) > 256)
-                           for key, value in (static_body or {}).items())):
-                raise ValueError("Invalid prompt-injection endpoint policy")
-            path = row["path"]
-            if (not path.startswith("/") or path.startswith("//") or path == "/"
-                    or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
-                raise ValueError("Invalid approved write or cleanup path")
-            chat_endpoints[path] = {
-                "message_field": row["message_field"],
-                "response_field": row.get("response_field") or "",
-                "static_body": dict(static_body or {}),
-            }
+            chat_endpoints.update(_parse_chat_endpoint_policy(row))
         approved = {}
         for row in expectations:
             if not isinstance(row, dict):
@@ -409,20 +478,8 @@ class ScopedAssessmentTools:
             raise ValueError("Scoped prompt-injection budget exhausted for this assessment session")
         setattr(self, counter, used + 1)
 
-    async def _scoped_prompt_injection_run(
-        self, endpoint_path: str, *, technique: str, identity: str = "anonymous",
-        coverage_cell_id: str = "", expected_url: str = "",
-    ) -> tuple[dict, str]:
-        """Run controlled trials against one operator-approved chat endpoint.
-
-        The endpoint, its JSON fields and static body come from operator policy
-        only. Every request goes through ``_http_exchange``, so scope, method
-        approval and pilot pacing apply. Returns (receipt, evidence_id).
-        """
-        from app.services.agent.scoped_assessment.prompt_injection_probe import (
-            probe_prompt_injection,
-        )
-
+    def _scoped_chat_endpoint(self, endpoint_path: str) -> tuple[str, dict]:
+        """The approved chat endpoint's URL on the scoped origin and its policy."""
         config = (getattr(self, "_scoped_prompt_injection_endpoints", None) or {}).get(endpoint_path)
         if not config:
             raise ValueError("Chat endpoint is not in prompt_injection_endpoints")
@@ -431,25 +488,54 @@ class ScopedAssessmentTools:
         if not seed:
             raise ValueError("No scoped target origin")
         url = browser.origin(seed) + endpoint_path
+        self._scoped_origin(url)
+        return url, config
+
+    def _scoped_claim_lead_tool(self) -> None:
+        """Reserve one external lead-tool run (garak, promptfoo, PyRIT) for the hunter."""
+        if verification_run.get() is not None:
+            raise ValueError("External lead tools cannot run inside a verifier")
+        used = int(getattr(self, "_scoped_lead_tool_count", 0) or 0)
+        if used + 1 > HUNTER_LEAD_TOOL_BUDGET:
+            raise ValueError("External LLM lead-tool budget exhausted for this assessment session")
+        self._scoped_lead_tool_count = used + 1
+
+    async def _scoped_prompt_injection_run(
+        self, endpoint_path: str, *, technique: str, mode: str = "direct",
+        identity: str = "anonymous", coverage_cell_id: str = "", expected_url: str = "",
+    ) -> tuple[dict, str]:
+        """Run controlled trials against one operator-approved chat endpoint.
+
+        The endpoint, its JSON fields, conversation fields, indirect seed and
+        cleanup paths and the leak canary come from operator policy only. Every
+        request, including seeds and cleanups, goes through ``_http_exchange``,
+        so scope, method approval and pilot pacing apply.
+        Returns (receipt, evidence_id).
+        """
+        from app.services.agent.scoped_assessment.prompt_injection_probe import (
+            MODE_CLASS, probe_prompt_injection, validate_endpoint_config,
+        )
+
+        url, config = self._scoped_chat_endpoint(endpoint_path)
+        validate_endpoint_config(mode, config)
+        origin = browser.origin(url)
         if expected_url and expected_url != url:
             raise ValueError("Lead endpoint is not the approved endpoint on the scoped origin")
-        self._scoped_origin(url)
         identity = str(identity or "anonymous")
         self._scoped_claim_prompt_injection()
         static_body = config.get("static_body") or {}
 
-        async def send(body: str, headers: dict) -> dict:
+        async def send(method: str, path: str, body: str | None, headers: dict) -> dict:
             return await self._http_exchange(
-                "POST", url, headers=headers, body=body, identity=identity,
+                method, origin + path, headers=headers, body=body, identity=identity,
                 use_auth_session=False, follow_redirects=False,
                 coverage_cell_id=coverage_cell_id, max_response_bytes=256 * 1024,
             )
 
         nonce = secrets.token_hex(8)
         receipt = await probe_prompt_injection(
-            send, technique=technique, message_field=config["message_field"],
-            response_field=config.get("response_field") or "",
-            static_body=static_body, nonce=nonce,
+            send, chat_path=endpoint_path, config=config, mode=mode,
+            technique=technique, nonce=nonce,
         )
         receipt.update({
             "endpoint_path": endpoint_path, "method": "POST", "identity": identity,
@@ -458,7 +544,7 @@ class ScopedAssessmentTools:
         })
         artifact_id = evidence_store(self).record(
             "scoped_prompt_injection_probe", receipt, target=url, identity=identity,
-            coverage_cell_id=coverage_cell_id, test_type="prompt_injection",
+            coverage_cell_id=coverage_cell_id, test_type=MODE_CLASS[mode],
             success=bool(receipt["lead_signal"]),
         )
         return receipt, artifact_id

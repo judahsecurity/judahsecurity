@@ -93,6 +93,9 @@ def assert_method_allowed(manager, url: str, method: str) -> None:
         (getattr(manager, "_scoped_body_replay_paths", None) or set())
         | (getattr(manager, "_scoped_race_action_paths", None) or set())
         | set(getattr(manager, "_scoped_prompt_injection_endpoints", None) or {})
+        | {(config.get("indirect") or {}).get("seed_path") for config in
+           (getattr(manager, "_scoped_prompt_injection_endpoints", None) or {}).values()
+           if (config.get("indirect") or {}).get("seed_path")}
         | ({getattr(manager, "_scoped_auth_login_path", "")}
            if getattr(manager, "_scoped_auth_login_path", "") else set())
     ):
@@ -102,6 +105,11 @@ def assert_method_allowed(manager, url: str, method: str) -> None:
         | (getattr(manager, "_scoped_race_cleanup_paths", None) or set())
     ):
         return
+    if method == "DELETE":
+        from app.services.agent.scoped_assessment_tools import approved_cleanup_match
+
+        if approved_cleanup_match(manager, path):
+            return
     raise ValueError(f"{method} {path} requires an exact operator-approved path")
 
 

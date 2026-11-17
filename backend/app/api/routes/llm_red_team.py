@@ -336,10 +336,11 @@ def _create_findings_from_results(
         ).first()
         if not asset:
             asset = Asset(
+                name=hostname,
                 value=hostname,
                 asset_type=AssetType.URL if "://" in target_url else AssetType.DOMAIN,
                 organization_id=organization_id,
-                status=AssetStatus.ACTIVE,
+                status=AssetStatus.DISCOVERED,
             )
             db.add(asset)
             db.flush()
@@ -380,6 +381,8 @@ def _create_findings_from_results(
                 cwe_id=finding_data.get("cwe_id"),
                 remediation=finding_data.get("remediation", "")[:5000],
                 tags=finding_data.get("tags", []),
+                verification_level=finding_data.get("verification_level"),
+                detection_confidence=finding_data.get("detection_confidence", "unknown"),
                 metadata_=finding_data.get("metadata", {}),
             )
             db.add(vuln)

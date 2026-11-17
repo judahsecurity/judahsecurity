@@ -33,6 +33,7 @@ PROOFS_BY_CLASS = {
     "cors": frozenset({"scoped_cors_credentialed"}),
     "race_condition": frozenset({"scoped_race_overrun"}),
     "prompt_injection": frozenset({"scoped_prompt_injection_canary"}),
+    "system_prompt_leak": frozenset({"scoped_system_prompt_leak"}),
     "dom_open_redirect": frozenset({"scoped_browser_client"}),
     "client_template_injection": frozenset({"scoped_browser_client"}),
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
@@ -70,6 +71,8 @@ _CLAIM_PATTERNS = (
      r"\bconcurrenc(?:y|e) (?:bug|flaw|abuse)\b|\blimit overrun\b"),
     ("client_template_injection", r"\bclient[ -]?side template injection\b|\bCSTI\b"),
     ("client_prototype_pollution", r"\bclient[ -]?side prototype pollution\b"),
+    ("system_prompt_leak", r"\bsystem[ -]?prompt (?:leak(?:age)?|extraction|disclosure)\b|"
+     r"\bprompt (?:leak(?:age)?|extraction)\b"),
     ("prompt_injection", r"\bprompt[ -]?injection\b"),
     ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
     ("xxe", r"\bXXE\b|XML external entity"),
@@ -149,7 +152,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_prompt_injection_canary", "scoped_browser_client"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_prompt_injection_canary", "scoped_system_prompt_leak", "scoped_browser_client"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -173,6 +176,7 @@ def validate_proof(
             "scoped_cors_credentialed": "scoped_response_probe",
             "scoped_race_overrun": "scoped_race_probe",
             "scoped_prompt_injection_canary": "scoped_prompt_injection_probe",
+            "scoped_system_prompt_leak": "scoped_prompt_injection_probe",
             "scoped_browser_client": "scoped_browser_check_client",
         }[kind]
         if (not hunter or not verifier or hunter["id"] == verifier["id"]
@@ -235,18 +239,23 @@ def validate_proof(
                     or first.get("probe", {}).get("canary") == second.get("probe", {}).get("canary")):
                 return False, "Independent sequential-vs-concurrent overrun proof is required"
             return True, ""
-        if kind == "scoped_prompt_injection_canary":
+        if kind in {"scoped_prompt_injection_canary", "scoped_system_prompt_leak"}:
             from app.services.agent.scoped_assessment.prompt_injection_probe import (
-                CONFIRM_HITS, LEAD_HITS, TRIALS, receipt_canaries, receipt_holds,
+                CONFIRM_HITS, LEAD_HITS, MODE_CLASS, TRIALS, receipt_canaries, receipt_holds,
             )
 
+            mode = first.get("mode") or "direct"
+            claim = MODE_CLASS.get(mode, "")
+            expected_kind = ("scoped_system_prompt_leak" if claim == "system_prompt_leak"
+                             else "scoped_prompt_injection_canary")
             canaries = receipt_canaries(first) + receipt_canaries(second)
-            if (candidate.vulnerability_class != "prompt_injection"
+            if (candidate.vulnerability_class != claim or kind != expected_kind
                     or hunter["identity"] != verifier["identity"]
                     or not first.get("nonce") or first.get("nonce") == second.get("nonce")
                     or any(first.get(name) != second.get(name) for name in (
-                        "technique", "endpoint_path", "method", "message_field",
-                        "response_field", "static_body_sha256"))
+                        "mode", "technique", "endpoint_path", "method", "message_field",
+                        "response_field", "static_body_sha256", "conversation",
+                        "trigger_template", "seed_path", "system_prompt_canary"))
                     # Every trial in both runs needs its own fresh canary.
                     or len(set(canaries)) != len(canaries)
                     or not receipt_holds(first, min_trials=1, min_hits=LEAD_HITS)

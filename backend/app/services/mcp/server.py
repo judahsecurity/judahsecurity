@@ -1851,7 +1851,9 @@ class MCPServer:
 
     async def _execute_garak(self, args: str) -> Dict[str, Any]:
         """Execute garak LLM vulnerability scanner (NVIDIA)."""
-        cmd = ["python", "-m", "garak"] + self._parse_args(args)
+        # garak lives in its own venv in the scanner image (its openai pin
+        # conflicts with PyRIT's); fall back to the current interpreter.
+        cmd = [os.environ.get("GARAK_PYTHON") or "python", "-m", "garak"] + self._parse_args(args)
         # Garak probes can be slow; allow up to 30 min for broad sweeps.
         return await self._run_command(cmd, timeout=1800)
 
@@ -1859,11 +1861,11 @@ class MCPServer:
         """Show garak help or list probes/detectors."""
         topic = (topic or "").strip().lower()
         if topic == "probes":
-            cmd = ["python", "-m", "garak", "--list_probes"]
+            cmd = [os.environ.get("GARAK_PYTHON") or "python", "-m", "garak", "--list_probes"]
         elif topic == "detectors":
-            cmd = ["python", "-m", "garak", "--list_detectors"]
+            cmd = [os.environ.get("GARAK_PYTHON") or "python", "-m", "garak", "--list_detectors"]
         else:
-            cmd = ["python", "-m", "garak", "--help"]
+            cmd = [os.environ.get("GARAK_PYTHON") or "python", "-m", "garak", "--help"]
         return await self._run_command(cmd, timeout=MCP_HELP_TIMEOUT)
 
     async def _nuclei_help(self) -> Dict[str, Any]:

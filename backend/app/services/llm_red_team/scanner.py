@@ -549,7 +549,7 @@ def build_finding_data(
         ),
     }
 
-    return {
+    finding_data = {
         "title": title,
         "description": description,
         "severity": test_result.get("severity", "medium"),
@@ -567,6 +567,11 @@ def build_finding_data(
             "owasp_llm": cat_info.get("owasp", ""),
         },
     }
+    # Prompt-injection and system-prompt-leak hits are graded by an LLM; they
+    # are leads until the scoped verifier reproduces them.
+    from app.services.llm_red_team.leads import mark_lead_finding
+
+    return mark_lead_finding(finding_data, test_result["category"])
 
 
 def format_scan_report(scan_result: ScanResult) -> str:
