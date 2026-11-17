@@ -711,17 +711,26 @@ class AgentOrchestrator:
                     cve_only = False
                 # Sign-in submits a form. Wait for the normal tool approval gate
                 # instead of starting it in the unattended early crawl queue.
+                # Interceptor workers cannot enforce operator method and path
+                # approvals, so a scoped run must never queue an early crawl.
+                scoped_policy = bool(getattr(self.tool_manager, "_scoped_policy_applied", False))
+                skip_queue = bool(acr_seed or cve_only or auth_login or scoped_policy)
                 if acr_seed or cve_only or auth_login:
                     kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
                     queued, streams = {}, []
                 else:
-                    append_action(active_run_id.get(), queue_action_id, "started",
-                                  "queue_early_interceptor", target=seed)
-                    queue_coro = queue_early_pentester_crawl(
-                        seed,
-                        session_id=session_id,
-                        organization_id=org_id,
-                    )
+                    if scoped_policy:
+                        async def _no_queue() -> Dict[str, Any]:
+                            return {}
+                        queue_coro = _no_queue()
+                    else:
+                        append_action(active_run_id.get(), queue_action_id, "started",
+                                      "queue_early_interceptor", target=seed)
+                        queue_coro = queue_early_pentester_crawl(
+                            seed,
+                            session_id=session_id,
+                            organization_id=org_id,
+                        )
                     if no_scanners:
                         kickoff, queued = await asyncio.wait_for(
                             asyncio.gather(kickoff_coro, queue_coro, return_exceptions=True),
@@ -757,7 +766,7 @@ class AgentOrchestrator:
                 if isinstance(queued, Exception):
                     logger.warning("early interceptor queue failed: %s", queued)
                     queued = {}
-                if not acr_seed and not cve_only:
+                if not skip_queue:
                     append_action(
                         active_run_id.get(), queue_action_id,
                         "completed" if isinstance(queued, dict) and queued.get("job_id") else "failed",
