@@ -68,6 +68,39 @@ def pending_hypothesis_cells(brain: Any) -> list[tuple[dict[str, Any], dict[str,
     return pending[:_MAX_REVIEW]
 
 
+def apply_reviewed_hypotheses(brain: Any, rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Apply only unchanged, never-claimed cells from an asynchronous review."""
+    live = {
+        cell.get("id"): cell
+        for cell in getattr(brain, "coverage_cells", []) or []
+        if isinstance(cell, dict)
+    }
+    reviewed = hypotheses = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cell = live.get(row.get("id"))
+        if (not cell or cell.get("source") not in _SOURCES
+                or cell.get("status") not in CELL_OPEN or cell.get("lease_id")
+                or int(cell.get("attempts") or 0) != row.get("attempts")
+                or _digest(_packet(cell)) != row.get("digest")):
+            continue
+        cell["llm_review_digest"] = row["digest"]
+        cell.pop("llm_hypothesis", None)
+        cell.pop("llm_priority_rank", None)
+        proposal = row.get("hypothesis")
+        rank = row.get("priority_rank")
+        if (isinstance(proposal, dict)
+                and proposal.get("cell_id") == cell["id"]
+                and proposal.get("test_class") == cell.get("test_type")
+                and type(rank) is int and rank in _RANKS.values()):
+            cell["llm_hypothesis"] = dict(proposal)
+            cell["llm_priority_rank"] = rank
+            hypotheses += 1
+        reviewed += 1
+    return {"reviewed": reviewed, "hypotheses": hypotheses}
+
+
 def _response_json(content: Any) -> dict[str, Any] | None:
     if not isinstance(content, str):
         return None

@@ -535,6 +535,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     def __init__(self):
         self.tools = self._register_tools()
         self._mcp_server = None
+        from app.services.agent.async_hypothesis_review import AsyncHypothesisReviews
+
+        self._hypothesis_reviews = AsyncHypothesisReviews()
         from app.services.agent.tool_singleflight import ToolSingleFlight
 
         self._tool_singleflight = ToolSingleFlight()
@@ -9924,7 +9927,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         seed_js_coverage_cells(brain, cmap if isinstance(cmap, dict) else {})
         from app.services.agent.runtime_mapper import ingest_capability_map_operations
         ingest_capability_map_operations(brain, cmap if isinstance(cmap, dict) else {})
-        planning = await self._plan_brain_hypotheses(brain)
+        planning = self._refresh_brain_hypotheses(brain, reset=reset)
         graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
 
@@ -10443,20 +10446,23 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             indent=2,
         )[:_tool_output_max_chars()]
 
-    async def _plan_brain_hypotheses(self, brain):
-        """Reason over new evidence before assigning eligible coverage work."""
-        from app.services.agent.brain_hypothesis_planner import (
-            pending_hypothesis_cells, plan_coverage_hypotheses,
-        )
+    def _hypothesis_review_key(self, brain):
+        """Keep background model results inside one user, org, run, and target."""
+        return (current_user_id.get(), current_organization_id.get(),
+                current_session_id.get() or "", str(brain.target or ""))
 
-        if not pending_hypothesis_cells(brain):
-            return {"reviewed": 0, "hypotheses": 0, "status": "unchanged"}
-        try:
-            return await plan_coverage_hypotheses(brain, self._hypothesis_llm())
-        except Exception as exc:
-            logger.warning("Brain hypothesis planning unavailable: %s", type(exc).__name__)
-            return {"reviewed": 0, "hypotheses": 0,
-                    "status": "unavailable", "error_type": type(exc).__name__}
+    def _refresh_brain_hypotheses(self, brain, *, reset=False):
+        """Apply finished review safely, then queue fresh work without waiting."""
+        key = self._hypothesis_review_key(brain)
+        if reset:
+            self._hypothesis_reviews.cancel(key)
+        completed = self._hypothesis_reviews.collect(key, brain)
+        queued = self._hypothesis_reviews.queue(key, brain, self._hypothesis_llm)
+        if completed["status"] in {"applied", "stale", "unavailable", "cancelled"}:
+            if queued["status"] == "queued":
+                completed["next_pending"] = queued["pending"]
+            return completed
+        return queued
 
     def _hypothesis_llm(self):
         """Use the engagement's reasoning model for Brain hypothesis planning."""
@@ -11175,6 +11181,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         outer_margin = min(60.0, outer_cap * 0.1)
         dispatch_deadline = _time.monotonic() + outer_cap - outer_margin
         reserve = min(180.0, outer_cap * 0.3)
+        assignment_started = _time.monotonic()
 
         def _remaining_dispatch_time() -> float:
             return max(0.0, dispatch_deadline - _time.monotonic())
@@ -11193,9 +11200,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ingest_capability_map_operations(brain, cmap.to_dict())
             self._engagement_brain = brain.to_dict()
 
-        # This entry point can be called without sync_engagement_brain. Review
-        # fresh observed inputs before choosing specialists and claiming cells.
-        hypothesis_planning = await self._plan_brain_hypotheses(brain)
+        # Direct dispatch also queues review, but assignment never waits for it.
+        # A completed earlier review can prioritize only cells still unclaimed.
+        hypothesis_planning = self._refresh_brain_hypotheses(brain)
 
         # Resolve specialists: "auto" → open hypotheses, else capability-map selection
         auto = False
@@ -11444,6 +11451,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ),
             first_pass_only=mode == "coverage_followup",
         )
+        assignment_latency_ms = round((_time.monotonic() - assignment_started) * 1000)
         directives = directives_from_hypotheses(
             brain=brain,
             profiles_by_name=profiles,
@@ -11847,6 +11855,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 logger.warning("Fireteam verification deferred after %.0fs", verification_window)
             brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
             _checkpoint_task_graph()
+        # The model was running beside the specialists. Merge its result only
+        # into currently open, unchanged cells before saving the next snapshot.
+        completed_review = self._refresh_brain_hypotheses(brain)
+        if completed_review["status"] in {"applied", "stale", "unavailable"}:
+            hypothesis_planning = completed_review
+        if completed_review["status"] == "applied":
+            self._engagement_brain = brain.to_dict()
+            _checkpoint_task_graph()
         out = {
             "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],
@@ -11878,6 +11894,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             },
             "specialists_run": result.specialists_run,
             "hypothesis_planning": hypothesis_planning,
+            "assignment_latency_ms": assignment_latency_ms,
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
             "capability_map_ready": bool(cmap and cmap.ready_for_attack),
@@ -11944,6 +11961,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         return json.dumps({
             "specialists_run": out["specialists_run"],
             "hypothesis_planning": out["hypothesis_planning"],
+            "assignment_latency_ms": out["assignment_latency_ms"],
             "selection_source": out["selection_source"],
             "task_leases": out["task_leases"],
             "coverage_leases": out["coverage_leases"],
