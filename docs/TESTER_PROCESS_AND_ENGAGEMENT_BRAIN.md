@@ -149,9 +149,31 @@ reuse.
    request → verdict durations, plus time spent waiting on the planner, the
    model, identity approval, and a worker.
 
-Not yet wired into the live capture and dispatch paths in `tools.py`; see
-`backend/tests/test_observation_followups.py` for the acceptance case
-(`GET /orders?order_id=123`).
+**Live wiring** (`followup_runtime.py`):
+
+| Where | What happens |
+|-------|--------------|
+| Browser capture, `discover_parameters`, `sync_engagement_brain`, `fireteam_dispatch` | Inventory rows backed by a capture artifact become one capture event per request shape; the planner is queued in the background (never awaited) |
+| Next sync or dispatch | Finished model results are validated against the live brain; held proposals are released if their identities are now approved |
+| `fireteam_dispatch` | Specialists with claimable follow-ups join `auto` waves and claim them before ordinary coverage work; the directive's `allowed_identities` is narrowed to the follow-up's approved identities |
+| End of the wave | Each follow-up lease closes through `finish_followup`: with evidence it commits a `worker_result` event, without evidence it is released as inconclusive |
+| `add_engagement_credential` | Records a `credential` event (identity name only; recorded, not planned) |
+| `create_finding` | Records a `verified_finding` event for the published candidate's coverage cell |
+| Restart recovery | Events left mid-planning return to `committed` |
+
+**Approved identities** are `anonymous`, identities registered with the
+assessment identity registry, and the engagement's own sessions on the brain.
+A scheduled turn narrows them to its `allowed_identities`. **Scope** is the
+assessment's observation scope.
+
+Settings: `PROWL_FOLLOWUP_PLANNER_ENABLED` (default `true`) turns the path off
+entirely; `PROWL_FOLLOWUP_MAX_EVENTS_PER_RUN` (default `60`) caps model calls
+per run. Sync and dispatch report `followup_planning`; dispatch also reports
+`followup_leases`.
+
+Known limits: the background model call and the claim lock are per process.
+Authz cells seeded by the parameter-inventory lane do not yet require an
+approved second identity. Acceptance tests: `backend/tests/test_observation_followups.py`.
 
 ### Agent tools
 

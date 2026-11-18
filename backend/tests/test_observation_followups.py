@@ -309,3 +309,110 @@ def test_event_validation_and_snapshot_round_trip():
     assert [e["id"] for e in restored.observation_events] == [e["id"] for e in brain.observation_events]
     _, created = _capture(restored, evidence="cap-9")
     assert not created
+
+
+@pytest.mark.asyncio
+async def test_live_sync_and_dispatch_claim_each_followup_once(monkeypatch):
+    """GET /orders?order_id=123 through the real Brain sync and dispatch tools."""
+    import time as _time
+
+    from app.services.agent.assessment_scope import register_scope
+    from app.services.agent.assessment_sessions import identity_registry
+    from app.services.agent.fireteam_service import (
+        FireteamResult,
+        SpecialistReport,
+        ToolInvocation,
+    )
+    from app.services.agent.tools import ASMToolsManager
+
+    manager = ASMToolsManager()
+    register_scope(manager, "https://app.test")
+    registry = identity_registry(manager)
+    registry.register("user-a", "https://app.test", cookies={"sid": "a"})
+    registry.register("user-b", "https://app.test", cookies={"sid": "b"})
+    manager._capability_map = {
+        "target": "https://app.test", "scope": "https://app.test",
+        "api_samples": [{"method": "GET", "url": "https://app.test/orders?order_id=123",
+                         "identity": "user-a", "artifact_id": "cap-1"}],
+        "ready_for_attack": True,
+    }
+    class RoutingLLM(FakeLLM):
+        """Answers Brain hypothesis review and follow-up planning separately."""
+
+        async def ainvoke(self, messages):
+            if "follow-up planner" not in messages[0].content:
+                return SimpleNamespace(content=json.dumps({"hypotheses": []}))
+            return await super().ainvoke(messages)
+
+    llm = RoutingLLM(json.dumps({"proposals": [SQLI, AUTHZ]}))
+    monkeypatch.setattr(manager, "_hypothesis_llm", lambda: llm)
+    monkeypatch.setattr(manager, "_cheap_llm", lambda: object())
+
+    first = json.loads(await manager.sync_engagement_brain())
+    assert first["followup_planning"]["status"] == "planning"
+    assert first["followup_planning"]["new_capture_events"] == 1
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    key = manager._followup_key(brain)
+    await manager._followup_runtime.settle(key)
+    applied = json.loads(await manager.sync_engagement_brain())["followup_planning"]
+    # The inventory lane already seeded both cells; follow-ups link to them.
+    assert applied["applied"]["merged"] == 2
+    assert applied["claimable"] == 2
+    assert "new_capture_events" not in applied
+    assert llm.calls == 1
+
+    seen = {}
+
+    async def fake_fireteam(*, mission, directives, **_kwargs):
+        seen.update(directives)
+        reports = []
+        for name, directive in directives.items():
+            reports.append(SpecialistReport(
+                specialist=name, role=name, mission=mission, summary="No proof yet",
+                verdict="inconclusive",
+                coverage_cell_id=directive.coverage_cell_id,
+                coverage_lease_id=directive.coverage_lease_id,
+                tool_calls=[ToolInvocation(tool="probe", args={}, success=True, summary="",
+                                           evidence_ids=[f"probe-{name}"],
+                                           started_at=_time.time())],
+            ))
+        return FireteamResult(mission=mission, specialists_run=list(directives),
+                              reports=reports)
+
+    monkeypatch.setattr("app.services.agent.fireteam_service.run_fireteam", fake_fireteam)
+    result = json.loads(await manager.fireteam_dispatch(
+        mission="Follow up on observed order request", specialists=["sqli", "auth_logic"],
+    ))
+    assert set(result["followup_leases"]) == {"sqli", "auth_logic"}
+    assert seen["auth_logic"].allowed_identities == ["user-a", "user-b"]
+    assert seen["auth_logic"].lead_packet["followup"]["required_identities"] == ["user-a", "user-b"]
+
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    results = [e for e in brain.observation_events if e["kind"] == "worker_result"]
+    assert sorted(e["evidence_ids"][0] for e in results) == ["probe-auth_logic", "probe-sqli"]
+    report = chain_report(brain)
+    assert len(report) == 2
+    assert all(row["claim_to_first_request_ms"] is not None for row in report)
+    assert all(row["observation_to_verdict_ms"] is not None for row in report)
+
+    # Capturing the same request again assigns nothing new.
+    manager._capability_map["api_samples"].append(
+        {"method": "GET", "url": "https://app.test/orders?order_id=124",
+         "identity": "user-a", "artifact_id": "cap-2"})
+    again = json.loads(await manager.sync_engagement_brain())["followup_planning"]
+    assert "new_capture_events" not in again
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    assert len(_cells(brain, "sqli")) == len(_cells(brain, "authz")) == 1
+    await manager._followup_runtime.settle(key)
+    for job in list(manager._followup_runtime._jobs.values()):
+        await asyncio.wait_for(job.task, timeout=2)
+
+
+def test_restart_recovery_requeues_events_that_were_mid_planning():
+    from app.services.agent.run_snapshot import _recover_brain_after_restart
+
+    brain = EngagementBrain(target="https://app.test")
+    event, _ = _capture(brain)
+    event["status"] = "planning"
+    recovered = _recover_brain_after_restart(brain.to_dict())
+    assert recovered["observation_events"][0]["status"] == "committed"

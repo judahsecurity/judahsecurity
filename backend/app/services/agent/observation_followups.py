@@ -85,6 +85,7 @@ class FollowupPolicy:
     approved_identities: frozenset[str] = frozenset({"anonymous"})
     max_proposals_per_event: int = 4
     max_accepted_per_run: int = 200
+    max_planned_events_per_run: int = 60
 
 
 def _text(value: Any, limit: int = 255) -> str:
@@ -120,6 +121,13 @@ def _trim(rows: list[dict[str, Any]], limit: int, keep: Callable[[dict], bool]) 
     rows[:] = kept
 
 
+def scope_host(value: str) -> str:
+    """Host without port, for comparison with the assessment scope."""
+    from app.services.agent.assessment_scope import _host
+
+    return _host(str(value or ""))
+
+
 def _ms(start: float | None, end: float | None) -> int | None:
     if not start or not end:
         return None
@@ -141,7 +149,7 @@ def capture_facts(method: str, url: str, *, body_parameters: Iterable[tuple[str,
     params += [{"location": loc, "name": name} for loc, name in body_parameters]
     return {
         "method": _text(method, 8).upper() or "GET",
-        "host": (parsed.hostname or "").lower(),
+        "host": (parsed.netloc.rpartition("@")[2] or "").lower(),
         "path": parsed.path or "/",
         "parameters": params,
     }
@@ -211,7 +219,7 @@ def _event_facts(brain: Any, kind: str, facts: dict[str, Any]) -> dict[str, Any]
     if any(key in facts for key in ("password", "secret", "token", "cookie", "cookies", "headers")):
         raise ValueError("Credential events carry an identity name only, never secret material")
     return {
-        "host": _text(facts.get("host")).lower(),
+        "host": scope_host(_text(facts.get("host"), 512)),
         "credential_identity": _text(facts.get("credential_identity"), 80),
         "role": _text(facts.get("role"), 60),
     }
@@ -269,7 +277,9 @@ def commit_observation(
         "observed_at": now,
         "last_observed_at": now,
         "seen_count": 1,
-        "status": "committed",
+        # Credential events have no request surface for the planner to target
+        # yet; they are recorded for the chain but not sent to the model.
+        "status": "recorded" if kind == "credential" else "committed",
         "planning_attempts": 0,
     }
     events.append(event)
@@ -368,8 +378,9 @@ def _response_json(content: Any) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-async def request_proposals(brain: Any, event: dict[str, Any], policy: FollowupPolicy,
-                            llm: Any, *, timeout: float = 45) -> list[Any]:
+async def request_proposals(packet: dict[str, Any], llm: Any, *, target: str = "",
+                            timeout: float = 45) -> list[Any]:
+    """Ask the model for proposals on one prebuilt packet. Never touches the brain."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
     from app.services.agent.orchestrator import _ledger_llm_call
@@ -377,8 +388,8 @@ async def request_proposals(brain: Any, event: dict[str, Any], policy: FollowupP
     response = await _ledger_llm_call(
         llm,
         [SystemMessage(content=_SYSTEM),
-         HumanMessage(content=json.dumps(fact_packet(brain, event, policy), separators=(",", ":")))],
-        kind="agent_followup_proposals", target=str(getattr(brain, "target", "") or ""),
+         HumanMessage(content=json.dumps(packet, separators=(",", ":")))],
+        kind="agent_followup_proposals", target=target,
         phase="followup_planning", timeout=timeout,
     )
     parsed = _response_json(getattr(response, "content", None))
@@ -423,7 +434,7 @@ def validate_proposal(brain: Any, event: dict[str, Any], item: Any,
             or _text(target.get("host")).lower() != facts.get("host")
             or _text(target.get("path"), 512) != facts.get("path")):
         return _Decision("rejected", "target_not_observed")
-    if facts["host"] not in policy.scope_hosts or event["scope"] not in policy.scope_hosts:
+    if scope_host(facts["host"]) not in policy.scope_hosts:
         return _Decision("rejected", "out_of_scope")
     applicable = _applicable(event)
     if parameter not in applicable:
@@ -646,6 +657,89 @@ def release_held_proposals(brain: Any, policy: FollowupPolicy, *, now: float | N
 # ---------------------------------------------------------------------------
 
 
+def _planned_this_run(brain: Any, run_id: str) -> int:
+    return sum(1 for e in _ledger(brain, "observation_events")
+               if e.get("planning_run_id") == run_id and e.get("planning_attempts"))
+
+
+def begin_planning(brain: Any, policy: FollowupPolicy, *, limit: int = 6,
+                   now: float | None = None,
+                   exclude: frozenset[str] | set[str] = frozenset()) -> list[dict[str, Any]]:
+    """Mark up to ``limit`` committed events as planning and return their packets.
+
+    Packets are built from the live brain now, so the model call that follows
+    needs no reference to (and cannot mutate) live state.
+    """
+    now = time.time() if now is None else float(now)
+    events = _ledger(brain, "observation_events")
+    for event in events:
+        if (event.get("status") == "planning"
+                and now - float(event.get("planning_started_at") or 0) > _STALE_PLANNING_SECONDS):
+            event["status"] = "committed"  # planner died or the process restarted
+    room = max(0, policy.max_planned_events_per_run - _planned_this_run(brain, policy.run_id))
+    jobs = []
+    for event in events:
+        if len(jobs) >= min(limit, room):
+            break
+        if event.get("status") != "committed" or event["id"] in exclude:
+            continue
+        event.update(status="planning", planning_started_at=now, planning_run_id=policy.run_id)
+        event["planning_attempts"] = int(event.get("planning_attempts") or 0) + 1
+        jobs.append({"event_id": event["id"], "packet": fact_packet(brain, event, policy),
+                     "started_at": now})
+    return jobs
+
+
+async def run_planning(jobs: list[dict[str, Any]], llm_factory: Callable[[], Any], *,
+                       target: str = "", timeout: float = 45) -> list[dict[str, Any]]:
+    """Call the model for each packet. Failures are reported per event."""
+    results = []
+    llm = None
+    for job in jobs:
+        started = time.time()
+        try:
+            if llm is None:
+                # Provider routing can do synchronous DB/network checks.
+                llm = await asyncio.to_thread(llm_factory)
+            proposals = await request_proposals(job["packet"], llm, target=target, timeout=timeout)
+            results.append({"event_id": job["event_id"], "proposals": proposals,
+                            "started_at": job["started_at"],
+                            "model_ms": _ms(started, time.time())})
+        except Exception as exc:  # noqa: BLE001 - planning is optional; work stays assignable
+            results.append({"event_id": job["event_id"], "error": type(exc).__name__,
+                            "started_at": job["started_at"],
+                            "model_ms": _ms(started, time.time())})
+    return results
+
+
+def apply_planning(brain: Any, results: list[dict[str, Any]], policy: FollowupPolicy,
+                   *, now: float | None = None) -> dict[str, int]:
+    """Validate and assign model results against the live brain."""
+    summary = {"planned": 0, "unavailable": 0, "accepted": 0, "merged": 0,
+               "held": 0, "rejected": 0, "duplicate": 0}
+    by_id = {e.get("id"): e for e in _ledger(brain, "observation_events")}
+    for result in results:
+        event = by_id.get(result.get("event_id"))
+        if event is None or event.get("status") != "planning":
+            continue  # reset, replanned, or trimmed while the model ran
+        if "error" in result:
+            attempts = int(event.get("planning_attempts") or 0)
+            event["status"] = "unplanned" if attempts >= _MAX_PLANNING_ATTEMPTS else "committed"
+            event["planning_error"] = result["error"]
+            summary["unavailable"] += 1
+            continue
+        counts = apply_proposals(brain, event, result["proposals"], policy, now=now,
+                                 model_ms=result.get("model_ms"),
+                                 planning_started_at=result.get("started_at"))
+        event.update(status="planned", planned_at=time.time() if now is None else now,
+                     model_ms=result.get("model_ms"), proposal_counts=counts)
+        event.pop("planning_error", None)
+        summary["planned"] += 1
+        for key, value in counts.items():
+            summary[key] += value
+    return summary
+
+
 class FollowupPlanner:
     """In-process planner woken by committed events.
 
@@ -670,38 +764,18 @@ class FollowupPlanner:
         return True
 
     async def drain(self, brain: Any, policy: FollowupPolicy) -> dict[str, Any]:
-        """Plan every committed event once. Assignment uses the live brain."""
+        """Plan every committed event (within budget) and apply the results."""
         async with self._lock:
             self._wake.clear()
-            summary: dict[str, Any] = {"planned": 0, "unavailable": 0, "accepted": 0,
-                                       "merged": 0, "held": 0, "rejected": 0, "duplicate": 0}
-            now = time.time()
-            for event in _ledger(brain, "observation_events"):
-                if (event.get("status") == "planning"
-                        and now - float(event.get("planning_started_at") or 0) > _STALE_PLANNING_SECONDS):
-                    event["status"] = "committed"
-            pending = [e for e in _ledger(brain, "observation_events") if e.get("status") == "committed"]
-            for event in pending:
-                started = time.time()
-                event.update(status="planning", planning_started_at=started)
-                event["planning_attempts"] = int(event.get("planning_attempts") or 0) + 1
-                try:
-                    llm = await asyncio.to_thread(self._llm_factory)
-                    proposals = await request_proposals(brain, event, policy, llm, timeout=self._timeout)
-                except Exception as exc:  # noqa: BLE001 - planning is optional; work stays assignable
-                    attempts = event["planning_attempts"]
-                    event["status"] = "unplanned" if attempts >= _MAX_PLANNING_ATTEMPTS else "committed"
-                    event["planning_error"] = type(exc).__name__
-                    summary["unavailable"] += 1
-                    continue
-                model_ms = _ms(started, time.time())
-                counts = apply_proposals(brain, event, proposals, policy,
-                                         model_ms=model_ms, planning_started_at=started)
-                event.update(status="planned", planned_at=time.time(), model_ms=model_ms,
-                             proposal_counts=counts)
-                event.pop("planning_error", None)
-                summary["planned"] += 1
-                for key, value in counts.items():
+            summary = {"planned": 0, "unavailable": 0, "accepted": 0, "merged": 0,
+                       "held": 0, "rejected": 0, "duplicate": 0}
+            tried: set[str] = set()
+            while jobs := begin_planning(brain, policy, exclude=tried):
+                tried.update(job["event_id"] for job in jobs)
+                results = await run_planning(jobs, self._llm_factory,
+                                             target=str(getattr(brain, "target", "") or ""),
+                                             timeout=self._timeout)
+                for key, value in apply_planning(brain, results, policy).items():
                     summary[key] += value
             return summary
 
@@ -717,7 +791,7 @@ def _claimable_ids(brain: Any, policy: FollowupPolicy) -> frozenset[str]:
         required = (cell.get("followup") or {}).get("required_identities") or record["required_identities"]
         if not set(required) <= policy.approved_identities:
             continue  # approval was withdrawn after acceptance
-        if cell.get("host") not in policy.scope_hosts:
+        if scope_host(cell.get("host", "")) not in policy.scope_hosts:
             continue
         deps_done = True
         for dep_id in (cell.get("followup") or {}).get("depends_on") or record["depends_on"]:
@@ -796,6 +870,8 @@ def complete_followup(
     verdict: str,
     evidence_ids: Iterable[str],
     signal: str = "",
+    candidate_id: str = "",
+    reason: str = "",
     now: float | None = None,
     on_commit: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -806,7 +882,8 @@ def complete_followup(
         raise ValueError("A follow-up result must cite the evidence it produced")
     cell = _cell(brain, lease.coverage_cell_id)
     identity = (cell or {}).get("identity", "")
-    released = release_coverage_cell_lease(brain, lease, verdict=verdict, evidence_ids=evidence)
+    released = release_coverage_cell_lease(brain, lease, verdict=verdict, evidence_ids=evidence,
+                                           candidate_id=candidate_id, reason=reason)
     if released is None:
         raise ValueError("Follow-up lease is missing, expired, or belongs to another executor")
     chain = _chain(brain, lease.id)

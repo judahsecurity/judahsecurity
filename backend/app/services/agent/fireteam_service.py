@@ -1161,6 +1161,7 @@ class ToolInvocation:
     summary: str
     error: Optional[str] = None
     evidence_ids: list[str] = field(default_factory=list)
+    started_at: float = 0.0  # wall clock when the tool was sent (after budget gates)
 
 
 @dataclass
@@ -1728,6 +1729,7 @@ async def _safe_invoke(
         denied = await budget.acquire(tool_name, args)
         if denied:
             return denied_receipt(denied)
+    started_at = time.time()
     try:
         result = await tools_manager.execute(tool_name, args or {})
         success = bool(result.get("success"))
@@ -1779,6 +1781,7 @@ async def _safe_invoke(
             summary=summary,
             error=result.get("error") if not success else None,
             evidence_ids=ids,
+            started_at=started_at,
         )
     except Exception as exc:
         return ToolInvocation(
@@ -1787,6 +1790,7 @@ async def _safe_invoke(
             success=False,
             summary=f"invocation raised {type(exc).__name__}: {exc}",
             error=str(exc),
+            started_at=started_at,
         )
 
 

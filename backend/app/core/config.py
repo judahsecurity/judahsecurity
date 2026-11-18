@@ -194,6 +194,9 @@ class Settings(BaseSettings):
     # Private scoped-assessment executor. Aegis remains the agent/model runtime.
     PROWL_ASSESSMENT_URL: str = ""
     PROWL_ADMIN_TOKEN: str = ""
+    # Observation -> model-proposed follow-up work (observation_followups.py).
+    PROWL_FOLLOWUP_PLANNER_ENABLED: bool = True
+    PROWL_FOLLOWUP_MAX_EVENTS_PER_RUN: int = 60
 
     # ---- Aegis Lictor / Censor / Augur (deterministic guard layer) ----
     # Lictor pre/post tool-execution hooks. Disabling skips ALL guards (not recommended).
