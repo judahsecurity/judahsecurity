@@ -73,6 +73,7 @@ def latency_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     obs_to_hypothesis: list[float] = []
     hypothesis_to_verified: list[float] = []
     verified_by_hypothesis: list[tuple[str, datetime]] = []
+    planner_durations: list[float] = []
 
     for event in events:
         kind = event.get("kind")
@@ -83,6 +84,13 @@ def latency_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
             hypothesis_at[str(event["id"])] = at
         elif kind == "tool_attempt" and at:
             request_times.append(at)
+            # Planner-cost span: the hypothesis planner LLM call is ledgered as
+            # an agent_brain_hypotheses attempt. Its duration is what immediate
+            # dispatch takes off the first-request path.
+            if event.get("tool") == "agent_brain_hypotheses":
+                ended = _parse_at(event.get("ended_at"))
+                if ended and ended >= at:
+                    planner_durations.append((ended - at).total_seconds())
         elif kind == "candidate" and at and event.get("verdict") == "verified" and event.get("hypothesis_id"):
             verified_by_hypothesis.append((str(event["hypothesis_id"]), at))
 
@@ -118,6 +126,8 @@ def latency_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
         "observation_to_hypothesis_count": len(obs_to_hypothesis),
         "hypothesis_to_verified_seconds": _median_seconds(hypothesis_to_verified),
         "hypothesis_to_verified_count": len(hypothesis_to_verified),
+        "planner_seconds": _median_seconds(planner_durations),
+        "planner_count": len(planner_durations),
     }
 
 
@@ -167,13 +177,14 @@ def build_timeline(
             "run_id": row.run_id, "action_id": row.action_id,
             "tool": row.tool_name, "target": safe_target(row.target),
             "specialist": row.phase or (row.tool_name.split(":", 1)[1] if row.tool_name.startswith("specialist:") else ""),
-            "status": "started", "stop_reason": "", "evidence_ids": [],
+            "status": "started", "stop_reason": "", "evidence_ids": [], "ended_at": "",
         })
         if row.event != "started":
             event.update(
                 status=row.event,
                 stop_reason=redact_string(str(row.detail or ""))[:300],
                 evidence_ids=list(row.evidence_ids or [])[:16],
+                ended_at=_at(row.created_at),
             )
     events.extend(attempts.values())
     receipts = brain.get("verification_receipts") or {}

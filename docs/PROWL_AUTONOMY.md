@@ -41,9 +41,12 @@ their existing execution path.
    verdicts, stop reasons, and reported cost without raw tool logs. The timeline
    also carries a `latency` summary derived from those timestamps —
    `time_to_first_request_seconds` (observation → first specialist request),
-   median `observation_to_hypothesis_seconds`, and median
-   `hypothesis_to_verified_seconds` — so the effect of immediate dispatch on the
-   `observation → first request → verdict` path is measurable per work item.
+   median `observation_to_hypothesis_seconds`, median
+   `hypothesis_to_verified_seconds`, and `planner_seconds` (the hypothesis
+   planner LLM call's wall-clock, the cost immediate dispatch takes off the
+   first-request path) — so the effect of immediate dispatch on the
+   `observation → first request → verdict` path, and whether to trade
+   parallelism for fewer model calls, is measurable per work item.
 
 The opted-in early recon pack adds a bounded CNAME lookup. DNS, live hosts,
 technologies, API endpoints, and first-party scripts enter a shared observation

@@ -132,3 +132,29 @@ def test_timeline_latency_is_null_without_inputs():
     assert latency["observation_to_hypothesis_seconds"] is None
     assert latency["observation_to_hypothesis_count"] == 0
     assert latency["hypothesis_to_verified_seconds"] is None
+
+
+def test_timeline_reports_planner_cost_span():
+    from datetime import timedelta
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    work = SimpleNamespace(
+        id="w", status="running", turns=1, spent_usd=0.0,
+        stop_reason="", finished_at=None, updated_at=base,
+    )
+    snapshot = {"saved_at": base.timestamp(), "engagement_brain": {}}
+    # One planner LLM call ledgered as started -> completed, 3s apart.
+    started = SimpleNamespace(
+        run_id="r1", action_id="p1", event="started", created_at=base,
+        tool_name="agent_brain_hypotheses", target="", phase="hypothesis_planning",
+        detail="", evidence_ids=[],
+    )
+    completed = SimpleNamespace(
+        run_id="r1", action_id="p1", event="completed",
+        created_at=base + timedelta(seconds=3),
+        tool_name="agent_brain_hypotheses", target="", phase="hypothesis_planning",
+        detail="", evidence_ids=[],
+    )
+    latency = build_timeline(work, snapshot, [], [started, completed], [])["latency"]
+    assert latency["planner_seconds"] == 3.0
+    assert latency["planner_count"] == 1
