@@ -696,6 +696,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "replay_http_request": self.replay_http_request,
             # EvoGraph: cross-session memory lookup
             "query_prior_sessions": self.query_prior_sessions,
+            "search_prior_findings": self.search_prior_findings,
             # ProjectDiscovery Uncover: multi-engine search
             "execute_uncover": self.execute_uncover,
             # Knowledge base (RAG) search — palace-backed
@@ -6406,6 +6407,33 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             max_findings=max_findings,
             max_failures=max_failures,
         ) or ""
+
+    async def search_prior_findings(self, host: str = "", limit: int = 20) -> str:
+        """Return prior in-scope facts recorded for a host across earlier sessions.
+
+        Host-scoped complement to query_prior_sessions (which is the org-wide
+        EvoGraph chain/lessons digest). Reads the durable fact ledger for
+        credentials, differentials, and verified findings seen on an in-scope
+        host in previous runs, so a follow-up can continue an attack chain
+        without repeating recon. Read-only and value-free (no secrets); results
+        are filtered to the engagement's authorized hosts. Returns an empty JSON
+        list when there is no prior in-scope fact.
+        """
+        from app.services.agent.assessment_scope import observation_scope_hosts
+        from app.services.agent.fact_events import search_prior_facts
+
+        _user_id, org_id = get_tenant_context()
+        if not org_id:
+            return json.dumps([], indent=2)
+        scope_hosts = [host] if host else (
+            observation_scope_hosts(self) or []
+        )
+        summaries = search_prior_facts(
+            int(org_id), scope_hosts,
+            exclude_session_id=str(current_session_id.get() or ""),
+            limit=max(1, min(int(limit or 20), 50)),
+        )
+        return json.dumps(summaries, indent=2)[:_tool_output_max_chars()]
 
     async def mcp_connect(self, url: str, name: str = "burp") -> str:
         """Attach an external MCP server (Burp, Caido, custom) as agent tools.

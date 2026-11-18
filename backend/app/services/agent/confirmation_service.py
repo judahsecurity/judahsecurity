@@ -85,6 +85,7 @@ READONLY_TOOLS = {
     "search_memory",
     "search_knowledge_base",
     "query_prior_sessions",
+    "search_prior_findings",
     "get_threat_model",
     "get_coverage",
     "get_engagement_brain",

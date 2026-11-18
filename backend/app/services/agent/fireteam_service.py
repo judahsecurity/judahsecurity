@@ -1336,7 +1336,7 @@ async def _run_specialist(
             tool for tool in allowed_tools
             if tool not in {"scoped_assessment_probe_assigned", "scoped_assessment_candidate"}
         ]
-    allowed_tools.extend(t for t in ("read_evidence", "list_test_identities") if t not in allowed_tools)
+    allowed_tools.extend(t for t in ("read_evidence", "list_test_identities", "search_prior_findings") if t not in allowed_tools)
     if profile.name in ("auth_logic", "independent_verifier", "api_logic", "coverage"):
         allowed_tools.extend(
             t

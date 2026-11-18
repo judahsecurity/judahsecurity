@@ -224,3 +224,9 @@ def test_prior_fact_summaries_scope_filtered_and_deduped():
     assert out[0]["host"] == "app.example.test" and out[0]["dedupe_key"] == "k1"
     # no scope -> nothing
     assert prior_fact_summaries(rows, [], limit=20) == []
+
+
+def test_search_prior_findings_is_read_only_auto_allowed():
+    from app.services.agent.confirmation_service import READONLY_TOOLS
+
+    assert "search_prior_findings" in READONLY_TOOLS
