@@ -2989,10 +2989,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             _sess = current_session_id.get()
             gate_result = await _gate_tool(tool_name, tool_args or {}, org_id, _sess)
             if gate_result.get("decision") == "deny":
+                reason = gate_result.get("reason") or f"Tool '{tool_name}' is blocked by policy."
+                self._record_denied_action(tool_name, tool_args, reason, "policy_denied")
                 return {
                     "success": False,
-                    "output": gate_result.get("reason")
-                    or f"Tool '{tool_name}' is blocked by policy.",
+                    "output": reason,
                     "error": "policy_denied",
                 }
             if gate_result.get("decision") == "confirm":
@@ -3021,6 +3022,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     from app.services.agent.confirmation_service import get_store
                     confirmation = get_store().get(token)
                     confirmation_status = confirmation.status if confirmation else "expired"
+                    if confirmation_status == "denied":
+                        self._record_denied_action(
+                            tool_name, tool_args,
+                            (confirmation.reason if confirmation else "")
+                            or "Operator denied this action.",
+                            "operator_denied",
+                        )
                     return {
                         "success": False,
                         "output": (
@@ -6434,6 +6442,33 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             limit=max(1, min(int(limit or 20), 50)),
         )
         return json.dumps(summaries, indent=2)[:_tool_output_max_chars()]
+
+    def _record_denied_action(self, tool_name: str, tool_args: Any, reason: str, result: str) -> None:
+        """Record an operator/policy denial as a durable brain constraint.
+
+        A rejected action otherwise leaves no trace, so the model can re-propose
+        it and get denied again. Logged as an approach ("do not blindly repeat
+        failures") keyed by tool + target, deduped so repeats do not flood.
+        """
+        try:
+            from app.services.agent.engagement_brain import (
+                engagement_brain_from_dict,
+                log_approach,
+            )
+
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            target = str((tool_args or {}).get("url") or (tool_args or {}).get("target") or "")
+            for approach in brain.approaches:
+                if (approach.technique == tool_name and approach.target == target
+                        and approach.result == result):
+                    return
+            log_approach(
+                brain, technique=tool_name, target=target, result=result,
+                detail=str(reason or "")[:300],
+            )
+            self._engagement_brain = brain.to_dict()
+        except Exception:
+            logger.debug("record denied action skipped", exc_info=True)
 
     async def mcp_connect(self, url: str, name: str = "burp") -> str:
         """Attach an external MCP server (Burp, Caido, custom) as agent tools.

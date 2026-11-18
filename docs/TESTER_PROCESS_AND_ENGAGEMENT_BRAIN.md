@@ -88,7 +88,9 @@ Session-scoped memory injected into the ReAct system prompt:
 
 - **Hypotheses** — `open` / `in_progress` / `proven` / `killed` cards with assumption, test, pass/kill criteria, specialist
 - **Credentials** — stashed after default-login hits (redacted in prompts)
-- **Approaches tried** — avoid blind retries
+- **Approaches tried** — avoid blind retries; a policy or operator denial of a
+  tool is recorded here (`policy_denied` / `operator_denied`, keyed by tool +
+  target, deduped) so the planner does not re-propose a rejected action
 - **Next steps** — derived dispatch hints
 
 ### Grounded model hypotheses for observed inputs
