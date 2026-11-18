@@ -18,7 +18,7 @@ from app.schemas.vulnerability import FindingSourceEvidenceResponse
 from app.services.crowdstrike_service import (
     CrowdStrikeClient,
     CrowdStrikeError,
-    SPOTLIGHT_EXPOSED_OPEN_FILTER,
+    SPOTLIGHT_EXPOSED_FILTER,
     _stats,
     _upsert_external,
     _upsert_finding,
@@ -96,7 +96,7 @@ async def test_external_asset_query_uses_supported_page_limit_and_after_cursor()
 
 
 @pytest.mark.asyncio
-async def test_spotlight_uses_required_exposed_open_filter(monkeypatch):
+async def test_spotlight_uses_required_exposed_filter(monkeypatch):
     request = AsyncMock(return_value={"resources": [], "meta": {"pagination": {}}})
     monkeypatch.setattr(CrowdStrikeClient, "_request", request)
     result = await _test_crowdstrike_connection(
@@ -108,14 +108,14 @@ async def test_spotlight_uses_required_exposed_open_filter(monkeypatch):
         if call.args[1] == "/spotlight/combined/vulnerabilities/v1"
     )
     assert spotlight_call.kwargs["params"] == {
-        "limit": 1, "filter": SPOTLIGHT_EXPOSED_OPEN_FILTER,
+        "limit": 1, "filter": SPOTLIGHT_EXPOSED_FILTER,
     }
 
     request.reset_mock()
     client = CrowdStrikeClient("us-1", "client", "secret")
     try:
         assert [batch async for batch in client.spotlight()] == [[]]
-        assert request.await_args.kwargs["params"]["filter"] == SPOTLIGHT_EXPOSED_OPEN_FILTER
+        assert request.await_args.kwargs["params"]["filter"] == SPOTLIGHT_EXPOSED_FILTER
     finally:
         await client.http.aclose()
 
