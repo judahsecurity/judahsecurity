@@ -207,6 +207,28 @@ def consume_fact_events_into_brain(
     return ingested, consumed
 
 
+def prune_consumed_fact_events(older_than_days: int = 14) -> int:
+    """Delete consumed facts older than a cutoff. Unconsumed rows are kept.
+
+    The ledger is append-only; this bounds its growth. Evidence bytes live in the
+    evidence store, so a pruned event loses only a thin, already-consumed pointer.
+    Owns its own session. Returns the number of rows deleted.
+    """
+    from datetime import timedelta
+
+    from app.db.database import SessionLocal
+    from app.models.agent_fact_event import AgentFactEvent
+
+    cutoff = datetime.utcnow() - timedelta(days=max(1, older_than_days))
+    with SessionLocal() as db:
+        deleted = db.query(AgentFactEvent).filter(
+            AgentFactEvent.consumed_at.isnot(None),
+            AgentFactEvent.consumed_at < cutoff,
+        ).delete(synchronize_session=False)
+        db.commit()
+    return int(deleted or 0)
+
+
 def drain_fact_events_into_brain(
     brain: Any, *, organization_id: int, session_id: str,
     scope_hosts: Iterable[str], limit: int = 100,

@@ -124,6 +124,11 @@ class _FakeQuery:
                 setattr(r, getattr(col, "key", str(col)), val)
         return len(self._store.rows)
 
+    def delete(self, synchronize_session=False):
+        n = len(self._store.rows)
+        self._store.rows.clear()
+        return n
+
 
 class _FakeSession:
     def __init__(self, store):
@@ -191,3 +196,13 @@ def test_drain_ingests_then_marks_consumed(monkeypatch):
     assert drain_fact_events_into_brain(
         brain, organization_id=1, session_id="sess", scope_hosts=["app.example.test"],
     ) == 0
+
+
+def test_prune_consumed_fact_events(monkeypatch):
+    from app.services.agent.fact_events import prune_consumed_fact_events
+
+    store = _Store()
+    store.rows.append(SimpleNamespace(consumed_at="2020-01-01"))
+    monkeypatch.setattr(database_module, "SessionLocal", lambda: _FakeSession(store))
+    assert prune_consumed_fact_events(older_than_days=14) == 1
+    assert store.rows == []
