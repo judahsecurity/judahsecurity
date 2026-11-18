@@ -1082,9 +1082,13 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
     stats = _Stats()
     try:
         client = _client_for(integration)
-        findings = await client.get_vulnerability_findings()
-        stats.findings_seen = len(findings)
-        stats.findings_truncated = client.findings_truncated
+        await _sync_virtual_machines(db, integration, client, stats)
+        if integration.import_vulnerabilities:
+            findings = await client.get_vulnerability_findings()
+            stats.findings_seen = len(findings)
+            stats.findings_truncated = client.findings_truncated
+        else:
+            findings = []
         asset_cache: Dict[str, Asset] = {}
         for finding in findings:
             source = finding.get("vulnerableAsset") or {}
@@ -1113,7 +1117,6 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
                 _upsert_vulnerability(db, asset, finding, stats)
 
         db.commit()
-        await _sync_virtual_machines(db, integration, client, stats)
         await _sync_application_endpoints(db, integration, client, stats)
 
         integration.last_sync_at = datetime.utcnow()
