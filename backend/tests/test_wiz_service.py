@@ -151,6 +151,9 @@ async def test_endpoint_import_is_idempotent_and_preserves_direct_issue_links():
         class Client:
             PAGE_SIZE = 100
 
+            def __init__(self, include_ai_path=True):
+                self.include_ai_path = include_ai_path
+
             async def iter_application_endpoints(self, *, ids=None):
                 yield [endpoint]
 
@@ -160,6 +163,9 @@ async def test_endpoint_import_is_idempotent_and_preserves_direct_issue_links():
                 ]}]
 
             async def iter_ai_endpoint_paths(self):
+                if not self.include_ai_path:
+                    yield []
+                    return
                 yield [{"entities": [
                     {"id": "agent-1", "type": "AI_AGENT", "name": "Agent"},
                     {"id": "vm-1", "type": "VIRTUAL_MACHINE", "name": "VM"},
@@ -180,6 +186,10 @@ async def test_endpoint_import_is_idempotent_and_preserves_direct_issue_links():
         assert row.endpoint_data["resources"][0]["id"] == "vm-1"
         assert row.related_issues[0]["id"] == "issue-1"
         assert row.related_issue_count == 1
+        await _sync_application_endpoints(db, integration, Client(include_ai_path=False), _Stats())
+        db.refresh(row)
+        assert row.is_ai is False
+        assert row.ai_components == []
     engine.dispose()
 
 
