@@ -5204,6 +5204,28 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 f"{f', demonstrated_chain={chain_n} steps' if chain_n else ''}"
                 f"{ra_msg}"
             )
+            # Durable verified-finding fact so a chain follow-up survives restarts
+            # and reaches the planner. Still a lead at consume time; the finding
+            # gate already authorized this finding. Value-free.
+            try:
+                from app.services.agent.fact_events import append_fact_event
+
+                _user_id, _org_id = get_tenant_context()
+                if _org_id:
+                    append_fact_event(
+                        organization_id=int(_org_id),
+                        session_id=str(current_session_id.get() or ""),
+                        kind="verified_finding",
+                        target=target or target_clean,
+                        dedupe_parts=[str(vuln.id), title or ""],
+                        scope_hosts=[target_clean],
+                        payload={
+                            "severity": (severity or "info").strip().lower(),
+                            "summary": f"verified finding {vuln.id}",
+                        },
+                    )
+            except Exception:
+                logger.debug("verified_finding fact event skipped", exc_info=True)
             # CVE→CWE loop-back into engagement brain methodologies
             if vuln.cve_id:
                 try:
@@ -9804,6 +9826,28 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             str(base_ex.get("evidence_id") or ""),
             str(mut_ex.get("evidence_id") or ""),
         ]
+        # Durable differential fact for the high-signal verdicts, so an authz /
+        # tenant follow-up survives restarts and reaches the planner. Value-free.
+        if verdict in {"LIKELY_IMPACT", "MUTANT_BYPASS_CANDIDATE", "TIME_BASED_INJECTION_CANDIDATE"}:
+            try:
+                from urllib.parse import urlsplit as _urlsplit
+
+                from app.services.agent.fact_events import append_fact_event
+
+                _user_id, _org_id = get_tenant_context()
+                if _org_id:
+                    append_fact_event(
+                        organization_id=int(_org_id),
+                        session_id=str(current_session_id.get() or ""),
+                        kind="differential",
+                        target=m["url"],
+                        dedupe_parts=[verdict, m["url"], hypothesis_id or ""],
+                        evidence_ids=[e for e in evidence_ids if e],
+                        scope_hosts=[_urlsplit(m["url"]).hostname or ""],
+                        payload={"verdict": verdict, "summary": f"{verdict} differential"},
+                    )
+            except Exception:
+                logger.debug("differential fact event skipped", exc_info=True)
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.coverage_cells import record_input_first_pass_pair
         from app.services.agent.signal_escalation import queue_signal_escalation
