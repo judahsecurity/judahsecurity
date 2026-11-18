@@ -78,3 +78,32 @@ results JSON accepts a `cases` array with `id`, `candidates`,
 `spend_usd`. Use the timeline and verified count from Prowl for those results.
 Compare pilot results before enabling existing schedules or widening target
 scope.
+
+## Budget stops and provider failover
+
+Every specialist report now carries a `stop_reason`: `done` (it concluded),
+`exhausted` (a turn, tool-call, time or spend budget cut it off) or `blocked`
+(a model failure, or a timeout with a tool still in flight).
+
+- **Wrap-up.** After a turn, tool-call or time stop, the specialist gets up to
+  two more model turns and three calls limited to `submit_finding_candidate`,
+  `record_surface_coverage`, `save_note` and `store_memory`. No probing tool is
+  offered, and the per-specialist request, scope, identity and action checks
+  still apply. It records evidenced leads and a `progress` note (what was
+  tested, where it stopped, the next step). A spend stop makes no further model
+  call.
+- **Time reserve.** With `max_specialist_seconds` set, a specialist stops
+  starting new tool turns 45 seconds (or 20% of the limit, if smaller) before
+  the limit, so the wrap-up can finish before the hard timeout cancels it.
+- **Retries.** An `exhausted` retry is told to continue from its `progress`
+  note and not repeat completed tools. Exhausted and provider-error retries
+  keep their full turn budget instead of being cut to four.
+- **Dispatch output.** `fireteam_dispatch` returns a compact `wave_changes`
+  block first (per-specialist verdict, stop reason and progress; candidates
+  lifted; spawned and retried lanes). It is kept when large fields are dropped
+  for size.
+- **Shared provider breakers.** When an LLM key fails with a credit, quota or
+  auth error, every task in the process skips that key for 1 minute, then 5,
+  then 30 on repeated failures, and a success resets it. Breakers are keyed by
+  provider, model and a hash of the key, so one organization's failing key
+  does not affect another's. The orchestrator's default model is not tracked.

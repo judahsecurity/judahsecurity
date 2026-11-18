@@ -23,7 +23,9 @@ Keys are resolved separately per provider and passed only to the SDK client.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 import time
 from contextvars import ContextVar
 from typing import Any, List, Optional
@@ -347,6 +349,68 @@ def _customer_friendly_degrade_message(failed_provider: str, next_label: str) ->
     )
 
 
+class _ProviderBreakers:
+    """Process-wide circuit breakers for LLM credentials.
+
+    When one task finds a provider key out of credit or revoked, every other
+    task in this process skips that key for a cooling-off period instead of
+    rediscovering the failure on its own call. Breakers are keyed by provider,
+    model and a hash of the key, so one organization's bad key never affects
+    another organization's chain.
+    """
+
+    # Cooling-off per consecutive trip: 1 min, 5 min, then 30 min.
+    LADDER = (60.0, 300.0, 1800.0)
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._trips: dict[str, int] = {}
+        self._open_until: dict[str, float] = {}
+
+    def is_open(self, key: str) -> bool:
+        if not key:
+            return False
+        with self._lock:
+            return self._open_until.get(key, 0.0) > time.monotonic()
+
+    def trip(self, key: str) -> None:
+        if not key:
+            return
+        with self._lock:
+            trips = self._trips.get(key, 0)
+            self._trips[key] = trips + 1
+            cool = self.LADDER[min(trips, len(self.LADDER) - 1)]
+            self._open_until[key] = time.monotonic() + cool
+
+    def reset(self, key: str) -> None:
+        if not key:
+            return
+        with self._lock:
+            self._trips.pop(key, None)
+            self._open_until.pop(key, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._trips.clear()
+            self._open_until.clear()
+
+
+_PROVIDER_BREAKERS = _ProviderBreakers()
+
+
+def provider_breaker_key(label: str, api_key: Optional[str]) -> str:
+    """Breaker identity for one credential; empty (untracked) without a key."""
+    if not api_key:
+        return ""
+    digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+    return f"{label}|{digest}"
+
+
+def reset_provider_breakers() -> None:
+    """Close every breaker (tests and operator key rotation)."""
+    _PROVIDER_BREAKERS.clear()
+
+
 class ResilientFallbackChatModel(BaseChatModel):
     """Try ``primary``, then each ``fallbacks`` entry on credit/quota/auth errors.
 
@@ -361,6 +425,8 @@ class ResilientFallbackChatModel(BaseChatModel):
     fallbacks: List[Any] = Field(default_factory=list, exclude=True)
     fallback_labels: List[str] = Field(default_factory=list, exclude=True)
     primary_label: str = "cloud"
+    # One breaker key per chain member (primary first); "" = not tracked.
+    breaker_keys: List[str] = Field(default_factory=list, exclude=True)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -391,8 +457,10 @@ class ResilientFallbackChatModel(BaseChatModel):
         try:
             ollama = build_ollama_chat_model()
             label = f"ollama:{_ollama_fallback_model_name()}"
+            keys = self._breaker_keys()
             object.__setattr__(self, "fallbacks", list(self.fallbacks or []) + [ollama])
             object.__setattr__(self, "fallback_labels", labels + [label])
+            object.__setattr__(self, "breaker_keys", keys + [label])
             logger.info("Lazily attached Ollama fallback %s after cloud failure", label)
         except Exception:
             logger.warning("Failed to lazily build Ollama fallback", exc_info=True)
@@ -406,6 +474,29 @@ class ResilientFallbackChatModel(BaseChatModel):
             labels.append("fallback")
         return labels
 
+    def _breaker_keys(self) -> List[str]:
+        keys = list(self.breaker_keys or [])[: len(self._chain())]
+        while len(keys) < len(self._chain()):
+            keys.append("")
+        return keys
+
+    def _eligible(self) -> List[int]:
+        """Chain positions to try, skipping members whose breaker is open.
+
+        If every member is cooling off, try them all rather than fail without
+        a call: the provider may have recovered early.
+        """
+        keys = self._breaker_keys()
+        eligible = [i for i, key in enumerate(keys) if not _PROVIDER_BREAKERS.is_open(key)]
+        if not eligible:
+            return list(range(len(keys)))
+        if eligible[0] != 0:
+            labels = self._labels()
+            note_llm_degraded(
+                _customer_friendly_degrade_message(labels[0], labels[eligible[0]])
+            )
+        return eligible
+
     def _run_chain_sync(
         self,
         messages: List[BaseMessage],
@@ -418,17 +509,23 @@ class ResilientFallbackChatModel(BaseChatModel):
         while True:
             chain = self._chain()
             labels = self._labels()
-            for i, llm in enumerate(chain):
+            keys = self._breaker_keys()
+            order = self._eligible()
+            for pos, i in enumerate(order):
+                llm = chain[i]
                 try:
-                    return llm._generate(
+                    result = llm._generate(
                         messages, stop=stop, run_manager=run_manager, **kwargs
                     )
+                    _PROVIDER_BREAKERS.reset(keys[i])
+                    return result
                 except Exception as exc:
                     last_exc = exc
                     if not is_llm_credit_or_quota_error(exc):
                         raise
+                    _PROVIDER_BREAKERS.trip(keys[i])
                     # Last pre-built option failed — try lazy Ollama once.
-                    if i >= len(chain) - 1:
+                    if pos >= len(order) - 1:
                         if not attempted_lazy:
                             attempted_lazy = True
                             self._ensure_lazy_ollama()
@@ -440,7 +537,7 @@ class ResilientFallbackChatModel(BaseChatModel):
                                 )
                                 break  # restart while-loop with extended chain
                         raise
-                    next_label = labels[i + 1]
+                    next_label = labels[order[pos + 1]]
                     logger.warning(
                         "LLM provider %s failed (%s); continuing with %s",
                         labels[i], exc, next_label,
@@ -465,16 +562,22 @@ class ResilientFallbackChatModel(BaseChatModel):
         while True:
             chain = self._chain()
             labels = self._labels()
-            for i, llm in enumerate(chain):
+            keys = self._breaker_keys()
+            order = self._eligible()
+            for pos, i in enumerate(order):
+                llm = chain[i]
                 try:
-                    return await llm._agenerate(
+                    result = await llm._agenerate(
                         messages, stop=stop, run_manager=run_manager, **kwargs
                     )
+                    _PROVIDER_BREAKERS.reset(keys[i])
+                    return result
                 except Exception as exc:
                     last_exc = exc
                     if not is_llm_credit_or_quota_error(exc):
                         raise
-                    if i >= len(chain) - 1:
+                    _PROVIDER_BREAKERS.trip(keys[i])
+                    if pos >= len(order) - 1:
                         if not attempted_lazy:
                             attempted_lazy = True
                             self._ensure_lazy_ollama()
@@ -486,7 +589,7 @@ class ResilientFallbackChatModel(BaseChatModel):
                                 )
                                 break
                         raise
-                    next_label = labels[i + 1]
+                    next_label = labels[order[pos + 1]]
                     logger.warning(
                         "LLM provider %s failed (%s); continuing with %s",
                         labels[i], exc, next_label,
@@ -564,10 +667,14 @@ def _build_runtime_fallback_models(
     max_tokens: Optional[int],
     timeout: Optional[float],
     max_retries: int,
-) -> tuple[List[BaseChatModel], List[str]]:
-    """Build ordered alternate models: other cloud keys, then Ollama."""
+) -> tuple[List[BaseChatModel], List[str], List[str]]:
+    """Build ordered alternate models: other cloud keys, then Ollama.
+
+    Returns the models, their labels and their circuit-breaker keys.
+    """
     models: List[BaseChatModel] = []
     labels: List[str] = []
+    keys: List[str] = []
     seen = {skip_provider}
 
     for provider in _CLOUD_FALLBACK_ORDER:
@@ -589,6 +696,7 @@ def _build_runtime_fallback_models(
                 )
             )
             labels.append(f"{provider}:{model_name}")
+            keys.append(provider_breaker_key(labels[-1], api_key))
             seen.add(provider)
         except Exception:
             logger.debug("Could not build fallback model for %s", provider, exc_info=True)
@@ -603,8 +711,9 @@ def _build_runtime_fallback_models(
             )
         )
         labels.append(f"ollama:{_ollama_fallback_model_name()}")
+        keys.append(labels[-1])
 
-    return models, labels
+    return models, labels, keys
 
 
 def _attach_credit_fallback(
@@ -618,6 +727,7 @@ def _attach_credit_fallback(
     db=None,
     organization_id: Optional[int] = None,
     model: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> BaseChatModel:
     """Wrap ``primary`` so credit/auth failures cascade to other providers / Ollama.
 
@@ -629,7 +739,7 @@ def _attach_credit_fallback(
     if isinstance(primary, ResilientFallbackChatModel):
         return primary
 
-    fallbacks, labels = _build_runtime_fallback_models(
+    fallbacks, labels, keys = _build_runtime_fallback_models(
         skip_provider=provider,
         db=db,
         organization_id=organization_id,
@@ -649,6 +759,7 @@ def _attach_credit_fallback(
         fallbacks=fallbacks,
         fallback_labels=labels,
         primary_label=primary_label,
+        breaker_keys=[provider_breaker_key(primary_label, api_key), *keys],
     )
 
 
@@ -714,6 +825,7 @@ def get_llm_for_task(
         db=db,
         organization_id=organization_id,
         model=model,
+        api_key=api_key,
     )
 
 

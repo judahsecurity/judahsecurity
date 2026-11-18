@@ -11657,6 +11657,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             persist_graph,
             ready_wave,
             sync_graph_from_brain,
+            wave_changes,
         )
 
         # The orchestrator has a hard per-tool deadline. Keep the entire
@@ -12342,6 +12343,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
             _checkpoint_task_graph()
         out = {
+            # What this wave changed, first and compact, so the planner reacts
+            # to it even when the large fields below are dropped for size.
+            "wave_changes": wave_changes(
+                executor_summaries,
+                candidates_lifted=len(lifted),
+                spawned=spawned,
+                rewrites=[r.specialist for r in rewrites],
+            ),
             "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],
             "surface_signature": surface_signature[:32],
@@ -12436,6 +12445,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             if len(serialized) <= output_limit:
                 return serialized
         return json.dumps({
+            "wave_changes": out["wave_changes"],
             "specialists_run": out["specialists_run"],
             "hypothesis_planning": out["hypothesis_planning"],
             "selection_source": out["selection_source"],

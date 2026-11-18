@@ -53,6 +53,8 @@ def classify_failure(summary: ExecutorSummary, report: Any) -> Optional[str]:
         return LLM_ERROR
     if summary.soliloquy or not summary.tools_run:
         return SOLILOQUY
+    if getattr(summary, "stop_reason", "") == "exhausted":
+        return EXHAUSTED
     text = (summary.summary or "").lower()
     if "exhausted" in text or "without concluding" in text:
         return EXHAUSTED
@@ -102,8 +104,10 @@ def rewrite_note(failure: str, summary: ExecutorSummary, directive: Any = None) 
             "instead of stopping."
         ),
         EXHAUSTED: (
-            "AUTO-PROMPTER: you burned the iteration budget. Run at most two tools, "
-            "then done=true with a binary verdict. Narrow to a single hypothesis id."
+            "AUTO-PROMPTER: the previous attempt ran out of budget before it "
+            "concluded. Continue from where it stopped; do not repeat steps it "
+            "already completed. Finish with done=true and a tool-backed verdict "
+            "for the single hypothesis id."
         ),
         LLM_ERROR: (
             "AUTO-PROMPTER: prior LLM error. Shorter JSON only: one tool_calls array "
@@ -119,6 +123,12 @@ def rewrite_note(failure: str, summary: ExecutorSummary, directive: Any = None) 
             "REQUIRED this turn: compare_requests or run_custom_probe using the "
             "defense/error body — then prove or kill. Keep the full iteration budget."
         )
+    if failure == EXHAUSTED:
+        progress = (getattr(summary, "progress", "") or "").strip()
+        if progress:
+            extra.append(f"Previous progress: {progress[:600]}")
+        if summary.tools_run:
+            extra.append(f"Already run: {', '.join(summary.tools_run[:12])}.")
     if hint:
         extra.insert(0, f"Defense/error to adapt to: {hint[:600]}")
     if goal:
@@ -170,7 +180,7 @@ def apply_rewrite_to_directive(directive: Any, rewrite: Rewrite) -> Any:
         or getattr(directive, "specialist", "")
         or ""
     )
-    _maybe_shrink_iterations(directive, spec)
+    _maybe_shrink_iterations(directive, spec, rewrite.failure)
     return directive
 
 
@@ -180,13 +190,20 @@ def apply_rewrite_to_profile(profile: Any, rewrite: Rewrite) -> Any:
     if rewrite.note not in suffix:
         profile.system_prompt_suffix = (suffix + "\n\n" + rewrite.note).strip()
     spec = rewrite.specialist or getattr(profile, "name", "") or ""
-    _maybe_shrink_iterations(profile, spec)
+    _maybe_shrink_iterations(profile, spec, rewrite.failure)
     return profile
 
 
-def _maybe_shrink_iterations(obj: Any, specialist: str) -> None:
+# A run that ran out of budget needs room to continue, and a provider error
+# says nothing about the hypothesis: neither retry should get a smaller loop.
+_KEEP_ITERATION_FAILURES = frozenset({EXHAUSTED, LLM_ERROR})
+
+
+def _maybe_shrink_iterations(obj: Any, specialist: str, failure: str = "") -> None:
     """Cap retry loops except injection/auth lanes that need a custom-probe turn."""
     if not hasattr(obj, "max_iterations"):
+        return
+    if failure in _KEEP_ITERATION_FAILURES:
         return
     if (specialist or "").strip().lower() in KEEP_ITERATION_SPECIALISTS:
         return

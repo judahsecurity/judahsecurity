@@ -1184,6 +1184,12 @@ class SpecialistReport:
     lease_id: str = ""
     coverage_cell_id: str = ""
     coverage_lease_id: str = ""
+    # How the run ended: done (concluded on its own), exhausted (a turn, tool,
+    # spend or time budget cut it off) or blocked (model or execution failure).
+    stop_reason: str = ""
+    # Where an exhausted run stopped and the next step, written during wrap-up
+    # so a retry can continue instead of starting over.
+    progress: str = ""
 
 
 @dataclass
@@ -1218,6 +1224,9 @@ def _fill_summary_contract(report: SpecialistReport, payload: dict) -> None:
     hint = payload.get("rewrite_hint") or payload.get("next_attempt")
     if hint:
         report.rewrite_hint = str(hint)[:500]
+    progress = payload.get("progress")
+    if progress:
+        report.progress = str(progress)[:800]
 
 
 # ---------------------------------------------------------------------------
@@ -1324,6 +1333,115 @@ def _tool_contract(tools_manager: Any, tool_name: str) -> str:
         optional = "?" if parameter.default is not inspect.Parameter.empty else ""
         names.append(f"{parameter.name}{optional}")
     return f"  - {tool_name}({', '.join(names)})"
+
+
+# Wrap-up after a budget stop: a few model turns with only write-back tools so a
+# specialist cut off mid-hunt still records what it evidenced and where it
+# stopped. Network probing tools are never offered here.
+_WRAPUP_TOOLS = (
+    "submit_finding_candidate",
+    "record_surface_coverage",
+    "save_note",
+    "store_memory",
+)
+_WRAPUP_TURNS = 2
+_WRAPUP_MAX_TOOL_CALLS = 3
+_WRAPUP_RESERVE_SECONDS = 45.0
+
+_WRAPUP_PROMPT = """\
+BUDGET STOP ({reason}). Do not probe the target again.
+Write back only what earlier tool results already evidence. Allowed now: {tools}.
+Then respond with done=true and the usual summary contract, plus:
+  "progress": "what you tested, where you stopped, and the exact next step to try"
+Never claim a result that a tool output above does not show."""
+
+
+async def _wrap_up_specialist(
+    profile: SpecialistProfile,
+    report: SpecialistReport,
+    messages: list,
+    *,
+    llm: Any,
+    tools_manager: Any,
+    allowed_tools: list,
+    exhausted_by: str,
+    target_list: list,
+    scope_target: str,
+    budget: Optional["_SpecialistBudget"],
+    directive: Optional[OperationDirective],
+) -> None:
+    """Give a budget-stopped specialist a bounded turn to save its leads."""
+    write_back = [name for name in _WRAPUP_TOOLS if name in allowed_tools]
+    stop_summary = report.summary
+    calls_left = _WRAPUP_MAX_TOOL_CALLS
+    messages.append(HumanMessage(content=_WRAPUP_PROMPT.format(
+        reason=exhausted_by.replace("_", " "),
+        tools=", ".join(write_back) or "none (summary only)",
+    )))
+    from app.services.agent.orchestrator import _ledger_llm_call
+
+    for _turn in range(_WRAPUP_TURNS):
+        try:
+            response = await _ledger_llm_call(
+                llm, messages, kind="agent_specialist_wrapup",
+                target=target_list[0] if target_list else "",
+                phase=profile.name,
+            )
+        except Exception as exc:
+            logger.warning("fireteam %s: wrap-up LLM failure: %s", profile.name, exc)
+            break
+        if directive is not None and directive.max_spend_usd:
+            from app.services.agent.observability import estimate_cost_usd, usage_from_llm_response
+
+            usage = usage_from_llm_response(response)
+            model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
+            report.reported_spend_usd += estimate_cost_usd(
+                model, usage["input_tokens"], usage["output_tokens"],
+            )
+        text = getattr(response, "content", "") or ""
+        messages.append(AIMessage(content=text))
+        payload = _extract_json(text)
+        if not payload:
+            break
+        if payload.get("done"):
+            summary = (payload.get("summary") or "").strip()
+            if summary:
+                report.summary = f"{stop_summary} {summary}".strip()
+            kf = payload.get("key_findings") or []
+            if isinstance(kf, list):
+                report.key_findings = [str(x) for x in kf][:20]
+            _fill_summary_contract(report, payload)
+            break
+        calls = [
+            tc for tc in (payload.get("tool_calls") or [])
+            if isinstance(tc, dict) and tc.get("tool") in write_back
+        ][:calls_left]
+        if not calls:
+            messages.append(HumanMessage(
+                content="Only the write-back tools listed above are allowed. Finish with done=true.",
+            ))
+            continue
+        calls_left -= len(calls)
+        results = await asyncio.gather(*(
+            _safe_invoke(
+                tools_manager, tc.get("tool", ""), tc.get("args") or {},
+                scope_target=scope_target, budget=budget,
+            )
+            for tc in calls
+        ))
+        report.tool_calls.extend(results)
+        messages.append(HumanMessage(content=json.dumps({
+            "tool_results": [
+                {"tool": r.tool, "success": r.success, "summary": r.summary[:2000], "error": r.error}
+                for r in results
+            ],
+        })))
+    # The wrap-up may restate a verdict, but a budget stop is never "done".
+    if not report.verdict:
+        report.verdict = "inconclusive"
+    if not report.progress:
+        last = [t.tool for t in report.tool_calls[-3:]]
+        report.progress = f"Stopped by {exhausted_by.replace('_', ' ')}; last tools: {last}"
 
 
 async def _run_specialist(
@@ -1493,16 +1611,31 @@ async def _run_specialist(
         directive.target if isinstance(directive, OperationDirective) else
         target_list[0] if target_list else ""
     ) if strict_scope else ""
+    # Stop exploring early enough that the wrap-up turn finishes before the
+    # caller's hard timeout cancels this task and discards its leads.
+    soft_deadline = 0.0
+    if isinstance(directive, OperationDirective) and directive.max_seconds:
+        seconds = float(directive.max_seconds)
+        soft_deadline = time.monotonic() + seconds - min(_WRAPUP_RESERVE_SECONDS, seconds * 0.2)
+    exhausted_by = ""
     while iteration < max_iter:
         if budget and directive.max_spend_usd and report.reported_spend_usd >= directive.max_spend_usd:
             report.verdict = "inconclusive"
             report.rewrite_hint = "specialist reported spend budget exhausted"
             report.summary = "Stopped at the specialist reported spend threshold."
+            exhausted_by = "spend"
             break
         if max_tool_calls and len(report.tool_calls) >= max_tool_calls:
             report.verdict = "inconclusive"
             report.rewrite_hint = "specialist tool budget exhausted"
             report.summary = f"Stopped after {max_tool_calls} tool calls; remaining checks are open."
+            exhausted_by = "tool_budget"
+            break
+        if soft_deadline and iteration and time.monotonic() >= soft_deadline:
+            report.verdict = "inconclusive"
+            report.rewrite_hint = "specialist time budget exhausted"
+            report.summary = "Stopped near the specialist time limit; remaining checks are open."
+            exhausted_by = "time"
             break
         iteration += 1
         try:
@@ -1524,10 +1657,12 @@ async def _run_specialist(
                     report.verdict = "inconclusive"
                     report.rewrite_hint = "specialist reported spend budget exhausted"
                     report.summary = "Stopped after the model call reached the reported spend threshold."
+                    exhausted_by = "spend"
                     break
         except Exception as exc:
             logger.warning("fireteam %s: LLM failure: %s", profile.name, exc)
             report.error = f"LLM error: {exc}"
+            report.stop_reason = "blocked"
             break
 
         text = getattr(response, "content", "") or ""
@@ -1597,6 +1732,23 @@ async def _run_specialist(
             ],
         }
         messages.append(HumanMessage(content=json.dumps(feedback)))
+    else:
+        # The loop condition ended the run: the turn budget ran out.
+        exhausted_by = "iterations"
+
+    if exhausted_by:
+        report.stop_reason = "exhausted"
+        if exhausted_by != "spend":
+            # A spend stop gets no further model call; every other budget stop
+            # gets a bounded wrap-up so evidenced leads are written back.
+            await _wrap_up_specialist(
+                profile, report, messages, llm=llm, tools_manager=tools_manager,
+                allowed_tools=allowed_tools, exhausted_by=exhausted_by,
+                target_list=target_list, scope_target=scope_target, budget=budget,
+                directive=directive if isinstance(directive, OperationDirective) else None,
+            )
+    elif not report.stop_reason:
+        report.stop_reason = "done"
 
     report.duration_seconds = (datetime.utcnow() - start).total_seconds()
     if not report.summary and not report.error:
@@ -1885,6 +2037,9 @@ async def run_fireteam(
             rewrite_hint=("execution_timeout" if execution_progress["tool_inflight"]
                           else "execution_timeout_no_inflight_tool"),
             tool_calls=list(execution_progress["completed_calls"]),
+            # A cancelled in-flight tool has an unknown effect; otherwise the
+            # run simply ran out of wall-clock time.
+            stop_reason="blocked" if execution_progress["tool_inflight"] else "exhausted",
             hypothesis_ids=hypothesis_ids,
             assigned_hypothesis_id=hypothesis_ids[0] if len(hypothesis_ids) == 1 else "",
             lease_id=str(getattr(directive, "lease_id", "") or ""),

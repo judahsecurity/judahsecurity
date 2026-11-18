@@ -87,6 +87,8 @@ class ExecutorSummary:
     hypothesis_results: List[Dict[str, Any]] = field(default_factory=list)
     assigned_hypothesis_id: str = ""
     lease_id: str = ""
+    stop_reason: str = ""  # done | exhausted | blocked
+    progress: str = ""     # where an exhausted run stopped + next step
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -505,6 +507,8 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
             getattr(report, "assigned_hypothesis_id", "") or ""
         ),
         lease_id=str(getattr(report, "lease_id", "") or ""),
+        stop_reason=str(getattr(report, "stop_reason", "") or ""),
+        progress=str(getattr(report, "progress", "") or "")[:800],
     )
 
 
@@ -540,7 +544,11 @@ def apply_executor_summary(
                     node.last_failure = summary.summary[:500]
                 else:
                     node.status = NODE_RETRY
-                    node.last_failure = "No evidence-backed result for this hypothesis"
+                    node.last_failure = (
+                        f"Budget exhausted before a result; progress: {summary.progress}"[:500]
+                        if summary.stop_reason == "exhausted" and summary.progress
+                        else "No evidence-backed result for this hypothesis"
+                    )
                 _release_lease(node)
             continue
         verdict = result.get("verdict")
@@ -560,6 +568,46 @@ def apply_executor_summary(
     _recompute_readiness(graph)
     brain.task_graph = graph.to_dict()
     return list(summary.spawn or [])
+
+
+def wave_changes(
+    summaries: List[ExecutorSummary],
+    *,
+    candidates_lifted: int = 0,
+    spawned: Optional[List[str]] = None,
+    rewrites: Optional[List[str]] = None,
+    limit: int = 12,
+) -> Dict[str, Any]:
+    """One line per specialist of what this wave changed, for the planner.
+
+    The planner should react to the delta first; full reports stay available
+    in the larger fields when the tool output has room for them.
+    """
+    rows = []
+    for s in summaries[:limit]:
+        row: Dict[str, Any] = {
+            "specialist": s.specialist,
+            "verdict": s.verdict,
+            "stop_reason": s.stop_reason or "done",
+        }
+        if s.hypothesis_ids:
+            row["hypothesis_ids"] = s.hypothesis_ids[:4]
+        if s.stop_reason == "exhausted" and s.progress:
+            row["progress"] = s.progress[:300]
+        elif s.summary:
+            row["result"] = s.summary[:200]
+        rows.append(row)
+    counts: Dict[str, int] = {}
+    for s in summaries:
+        key = s.stop_reason or "done"
+        counts[key] = counts.get(key, 0) + 1
+    return {
+        "specialists": rows,
+        "stop_reasons": counts,
+        "candidates_lifted": int(candidates_lifted or 0),
+        "spawned": list(spawned or [])[:8],
+        "retried": list(rewrites or [])[:8],
+    }
 
 
 def format_graph_for_scheduler(graph: PenetrationTaskGraph, *, limit: int = 8) -> str:
