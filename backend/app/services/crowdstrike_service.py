@@ -28,6 +28,7 @@ REGION_URLS = {
 }
 SOURCE = "crowdstrike"
 MAX_PAGES = 5000
+SPOTLIGHT_EXPOSED_OPEN_FILTER = "status:'open'+host_info.internet_exposure:'Yes'"
 
 
 class CrowdStrikeError(RuntimeError):
@@ -147,7 +148,11 @@ class CrowdStrikeClient:
     async def spotlight(self) -> AsyncIterator[list[dict[str, Any]]]:
         async for batch in self._pages(
             "/spotlight/combined/vulnerabilities/v1",
-            params={"limit": 1000, "facet": ["host_info", "cve", "remediation", "evaluation_logic"]},
+            params={
+                "limit": 1000,
+                "filter": SPOTLIGHT_EXPOSED_OPEN_FILTER,
+                "facet": ["host_info", "cve", "remediation", "evaluation_logic"],
+            },
             cursor_key="after",
         ):
             yield batch
@@ -165,7 +170,10 @@ async def test_connection(region: str, client_id: str, client_secret: str, *, ex
             if hosts or spotlight:
                 await client._request("GET", "/devices/combined/devices/v1", params={"limit": 1})
             if spotlight:
-                await client._request("GET", "/spotlight/combined/vulnerabilities/v1", params={"limit": 1})
+                await client._request(
+                    "GET", "/spotlight/combined/vulnerabilities/v1",
+                    params={"limit": 1, "filter": SPOTLIGHT_EXPOSED_OPEN_FILTER},
+                )
         return {"ok": True, "message": "CrowdStrike credentials and selected read scopes were verified."}
     except CrowdStrikeError as exc:
         return {"ok": False, "message": str(exc)}
