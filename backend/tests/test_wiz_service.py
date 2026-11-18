@@ -105,6 +105,7 @@ async def test_vm_inventory_paginates_and_deduplicates_wiz_ids():
     assert vms[0]["ipAddresses"] == ["10.0.0.1"]
     assert vms[1]["hasWideInternetExposure"] is True
     assert client.virtual_machines_total_count == 2
+    assert client.graphql.await_args_list[0].args[1]["first"] == 500
     assert client.graphql.await_args_list[0].args[1]["filterBy"]["isAccessibleFromInternet"] == {"equals": True}
     assert client.graphql.await_args_list[1].args[1]["after"] == "next"
 
