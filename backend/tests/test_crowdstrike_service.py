@@ -18,10 +18,12 @@ from app.schemas.vulnerability import FindingSourceEvidenceResponse
 from app.services.crowdstrike_service import (
     CrowdStrikeClient,
     CrowdStrikeError,
+    SPOTLIGHT_EXPOSED_FILTER,
     _stats,
     _upsert_external,
     _upsert_finding,
     _upsert_host,
+    test_connection as _test_crowdstrike_connection,
 )
 from app.services.exposure_path_mapping import map_crowdstrike_path_assets, resolve_crowdstrike_asset_ref
 
@@ -89,6 +91,31 @@ async def test_external_asset_query_uses_supported_page_limit_and_after_cursor()
             {"limit": 100},
             {"limit": 100, "after": "next-page"},
         ]
+    finally:
+        await client.http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_spotlight_uses_required_exposed_filter(monkeypatch):
+    request = AsyncMock(return_value={"resources": [], "meta": {"pagination": {}}})
+    monkeypatch.setattr(CrowdStrikeClient, "_request", request)
+    result = await _test_crowdstrike_connection(
+        "us-1", "client", "secret", external=False, hosts=False, spotlight=True,
+    )
+    assert result["ok"] is True
+    spotlight_call = next(
+        call for call in request.await_args_list
+        if call.args[1] == "/spotlight/combined/vulnerabilities/v1"
+    )
+    assert spotlight_call.kwargs["params"] == {
+        "limit": 1, "filter": SPOTLIGHT_EXPOSED_FILTER,
+    }
+
+    request.reset_mock()
+    client = CrowdStrikeClient("us-1", "client", "secret")
+    try:
+        assert [batch async for batch in client.spotlight()] == [[]]
+        assert request.await_args.kwargs["params"]["filter"] == SPOTLIGHT_EXPOSED_FILTER
     finally:
         await client.http.aclose()
 

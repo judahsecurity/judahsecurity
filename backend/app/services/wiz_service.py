@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, AsyncIterator, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetStatus, AssetType
+from app.db.database import SessionLocal
+from app.models.wiz_integration import WizApplicationEndpoint
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
 from app.models.wiz_integration import WizIntegration
 
@@ -76,6 +78,102 @@ query JudahWizVulnerabilityFindings($first: Int!, $after: String) {
 }
 """
 
+APPLICATION_ENDPOINTS_QUERY = """
+query JudahWizApplicationEndpoints($first: Int!, $after: String, $filterBy: ApplicationEndpointFilters) {
+  applicationEndpoints(first: $first, after: $after, filterBy: $filterBy) {
+    totalCount
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id externalId name host port protocols exposureLevel scanSources portStatus
+      firstSeen updatedAt deletedAt cloudPlatform
+      cloudAccount { id externalId cloudProvider }
+      domain { id name }
+      owningApplicationServices { id displayName }
+      httpResults {
+        pageTitle statusCode statusText contentType authenticationMethod
+        authenticationServiceProvider screenshotUrl
+      }
+      hostedTechnologies {
+        id name cpe
+        versionDetails { version isEndOfLife latestVersion }
+        technology { id name icon categories { id name stackLayer } }
+      }
+      resources { id providerUniqueId name type }
+      issueAnalytics {
+        issueCount criticalSeverityCount highSeverityCount mediumSeverityCount
+        lowSeverityCount informationalSeverityCount
+      }
+    }
+  }
+}
+"""
+
+ENDPOINT_ISSUES_QUERY = """
+query JudahWizEndpointIssues($first: Int!, $after: String) {
+  cloudResources(first: $first, after: $after, filterBy: {type: ["ENDPOINT"]}) {
+    totalCount
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id type
+      graphEntity {
+        id type
+        relatedIssues(first: 100) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          nodes { id severity status url }
+        }
+      }
+    }
+  }
+}
+"""
+
+MORE_ENDPOINT_ISSUES_QUERY = """
+query JudahWizMoreEndpointIssues($id: ID!, $after: String) {
+  graphEntity(id: $id, type: ENDPOINT) {
+    id
+    relatedIssues(first: 100, after: $after) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes { id severity status url }
+    }
+  }
+}
+"""
+
+AI_ENDPOINT_GRAPH_QUERY = """
+query JudahWizAiEndpointPaths($query: GraphEntityQueryInput!, $first: Int!, $after: String) {
+  graphSearch(query: $query, first: $first, after: $after) {
+    totalCount
+    maxCountReached
+    pageInfo { hasNextPage endCursor }
+    nodes { entities { id type name } }
+  }
+}
+"""
+
+AI_COMPONENT_TYPES = (
+    "AI_AGENT", "AI_AGENT_REGISTRY", "AI_EXTENSION", "AI_GATEWAY", "AI_GUARDRAIL",
+    "AI_MODEL", "AI_PIPELINE", "AI_PLUGIN", "MCP_SERVER", "AI_TOOL",
+    "AI_SKILL_TEMPLATE", "AI_SKILL", "AI_SERVICE",
+)
+
+AI_ENDPOINT_GRAPH_FILTER = {
+    "type": list(AI_COMPONENT_TYPES),
+    "select": True,
+    "relationships": [{
+        "type": [{"type": "RUNS", "reverse": True}],
+        "with": {
+            "type": ["VIRTUAL_MACHINE", "CONTAINER", "CONTAINER_IMAGE", "SERVERLESS"],
+            "select": True,
+            "relationships": [{
+                "type": [{"type": "SERVES"}],
+                "with": {"type": ["ENDPOINT"], "select": True},
+            }],
+        },
+    }],
+}
+
 _SEVERITY_MAP = {
     "critical": Severity.CRITICAL,
     "high": Severity.HIGH,
@@ -104,10 +202,11 @@ def _validate_wiz_url(value: str, label: str) -> str:
 
 
 class WizClient:
-    """Minimal OAuth2 + GraphQL client for Wiz vulnerability findings."""
+    """Read-only OAuth2 + GraphQL client for Wiz findings and endpoints."""
 
     PAGE_SIZE = 100
     MAX_PAGES = 500
+    ENDPOINT_MAX_PAGES = 2000
 
     def __init__(
         self,
@@ -215,6 +314,136 @@ class WizClient:
                 break
         return findings
 
+    async def iter_application_endpoints(
+        self, *, limit: Optional[int] = None, ids: Optional[List[str]] = None
+    ) -> AsyncIterator[List[Dict[str, Any]]]:
+        """Stream complete endpoint pages; stable Wiz IDs deduplicate moving pages."""
+        cursor: Optional[str] = None
+        seen: set[str] = set()
+        for _ in range(self.ENDPOINT_MAX_PAGES):
+            remaining = limit - len(seen) if limit is not None else self.PAGE_SIZE
+            if remaining <= 0:
+                return
+            data = await self.graphql(
+                APPLICATION_ENDPOINTS_QUERY,
+                {
+                    "first": min(self.PAGE_SIZE, remaining),
+                    "after": cursor,
+                    "filterBy": {"id": {"equals": ids}} if ids is not None else {},
+                },
+            )
+            connection = data.get("applicationEndpoints") or {}
+            nodes = connection.get("nodes")
+            if not isinstance(nodes, list):
+                raise WizApiError("Wiz returned an unexpected application endpoints payload.")
+            batch = []
+            for item in nodes:
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                wiz_id = str(item["id"])
+                if wiz_id not in seen:
+                    seen.add(wiz_id)
+                    batch.append(item)
+            if batch:
+                yield batch
+            page_info = connection.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                return
+            next_cursor = page_info.get("endCursor")
+            if not next_cursor or next_cursor == cursor:
+                raise WizApiError("Wiz application endpoint pagination cursor was missing or repeated.")
+            cursor = next_cursor
+        raise WizApiError("Wiz application endpoint pagination exceeded the page limit.")
+
+    async def iter_endpoint_issues(self) -> AsyncIterator[List[Dict[str, Any]]]:
+        """Stream issue links belonging to ENDPOINT entities, including nested pages."""
+        cursor: Optional[str] = None
+        seen: set[str] = set()
+        for _ in range(self.ENDPOINT_MAX_PAGES):
+            data = await self.graphql(
+                ENDPOINT_ISSUES_QUERY, {"first": 500, "after": cursor}
+            )
+            connection = data.get("cloudResources") or {}
+            nodes = connection.get("nodes")
+            if not isinstance(nodes, list):
+                raise WizApiError("Wiz returned an unexpected endpoint issue payload.")
+            batch = []
+            for item in nodes:
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                wiz_id = str(item["id"])
+                if wiz_id in seen:
+                    continue
+                seen.add(wiz_id)
+                entity = item.get("graphEntity") or {}
+                if entity.get("id") != wiz_id or entity.get("type") != "ENDPOINT":
+                    raise WizApiError("Wiz endpoint issue entity did not match its resource.")
+                related = entity.get("relatedIssues") or {}
+                issues = list(related.get("nodes") or [])
+                reported_count = related.get("totalCount")
+                issue_cursor = (related.get("pageInfo") or {}).get("endCursor")
+                while (related.get("pageInfo") or {}).get("hasNextPage"):
+                    if not issue_cursor:
+                        raise WizApiError("Wiz endpoint issue cursor was missing.")
+                    more = await self.graphql(
+                        MORE_ENDPOINT_ISSUES_QUERY, {"id": wiz_id, "after": issue_cursor}
+                    )
+                    more_entity = more.get("graphEntity") or {}
+                    if more_entity.get("id") != wiz_id:
+                        raise WizApiError("Wiz endpoint issue page changed entity.")
+                    related = more_entity.get("relatedIssues") or {}
+                    issues.extend(related.get("nodes") or [])
+                    next_cursor = (related.get("pageInfo") or {}).get("endCursor")
+                    if next_cursor == issue_cursor:
+                        raise WizApiError("Wiz endpoint issue cursor repeated.")
+                    issue_cursor = next_cursor
+                unique = {
+                    str(issue["id"]): issue
+                    for issue in issues
+                    if isinstance(issue, dict) and issue.get("id")
+                }
+                if reported_count is not None and len(unique) != reported_count:
+                    raise WizApiError("Wiz endpoint issue pagination returned an incomplete set.")
+                batch.append({
+                    "id": wiz_id,
+                    "issues": list(unique.values()),
+                    "issue_count": reported_count,
+                })
+            if batch:
+                yield batch
+            page_info = connection.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                return
+            next_cursor = page_info.get("endCursor")
+            if not next_cursor or next_cursor == cursor:
+                raise WizApiError("Wiz endpoint graph pagination cursor was missing or repeated.")
+            cursor = next_cursor
+        raise WizApiError("Wiz endpoint graph pagination exceeded the page limit.")
+
+    async def iter_ai_endpoint_paths(self) -> AsyncIterator[List[Dict[str, Any]]]:
+        """Find ENDPOINTs served by workloads that run AI graph entities."""
+        cursor: Optional[str] = None
+        for _ in range(self.ENDPOINT_MAX_PAGES):
+            data = await self.graphql(
+                AI_ENDPOINT_GRAPH_QUERY,
+                {"query": AI_ENDPOINT_GRAPH_FILTER, "first": 500, "after": cursor},
+            )
+            connection = data.get("graphSearch") or {}
+            if connection.get("maxCountReached"):
+                raise WizApiError("Wiz AI graph search reached its result cap.")
+            nodes = connection.get("nodes")
+            if not isinstance(nodes, list):
+                raise WizApiError("Wiz returned an unexpected AI graph search payload.")
+            yield [node for node in nodes if isinstance(node, dict)]
+            page_info = connection.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                return
+            next_cursor = page_info.get("endCursor")
+            if not next_cursor or next_cursor == cursor:
+                raise WizApiError("Wiz AI graph cursor was missing or repeated.")
+            cursor = next_cursor
+        raise WizApiError("Wiz AI graph pagination exceeded the page limit.")
+
 
 def _client_for(integration: WizIntegration) -> WizClient:
     client_id = integration.get_client_id()
@@ -247,13 +476,21 @@ async def test_connection(
             audience=audience,
         )
         await client.get_vulnerability_findings(limit=1)
+        async for _ in client.iter_application_endpoints(limit=1):
+            break
+        issue_probe = await client.graphql(
+            ENDPOINT_ISSUES_QUERY, {"first": 1, "after": None}
+        )
+        if not isinstance((issue_probe.get("cloudResources") or {}).get("nodes"), list):
+            raise WizApiError("Wiz endpoint graph access returned an unexpected payload.")
         return {
             "ok": True,
-            "message": "Connected to Wiz and verified vulnerability-findings access.",
+            "message": "Connected to Wiz and verified findings, application endpoints, and endpoint issue access.",
             "findings_accessible": True,
+            "endpoints_accessible": True,
         }
     except WizApiError as exc:
-        return {"ok": False, "message": str(exc), "findings_accessible": False}
+        return {"ok": False, "message": str(exc), "findings_accessible": False, "endpoints_accessible": False}
 
 
 def _map_severity(value: Any) -> Severity:
@@ -307,6 +544,17 @@ class _Stats:
         self.vulns_updated = 0
         self.findings_seen = 0
         self.findings_filtered = 0
+        self.endpoints_seen = 0
+        self.endpoints_created = 0
+        self.endpoints_updated = 0
+        self.ai_endpoints_seen = 0
+        self.ai_graph_paths_seen = 0
+        self.ai_graph_endpoints_seen = 0
+        self.ai_graph_entities_missing = 0
+        self.endpoints_with_issues = 0
+        self.endpoint_issue_links = 0
+        self.endpoint_issue_count_mismatches = 0
+        self.endpoint_issue_entities_missing = 0
 
     def as_dict(self) -> Dict[str, int]:
         return vars(self).copy()
@@ -475,10 +723,261 @@ def _upsert_vulnerability(
     stats.vulns_created += 1
 
 
+def _endpoint_is_ai(endpoint: Dict[str, Any]) -> bool:
+    return any(
+        category.get("stackLayer") == "MACHINE_LEARNING_AND_AI"
+        for hosted in endpoint.get("hostedTechnologies") or []
+        for category in (hosted.get("technology") or {}).get("categories") or []
+    )
+
+
+def _endpoint_asset_value(endpoint: Dict[str, Any]) -> Optional[str]:
+    value = str(endpoint.get("name") or "").strip()
+    if not value:
+        host = str(endpoint.get("host") or "").strip()
+        if not host:
+            return None
+        port = endpoint.get("port")
+        value = f"{host}:{port}" if port is not None else host
+    return value[:500]
+
+
+def _upsert_endpoint_batch(
+    db: Session,
+    integration: WizIntegration,
+    batch: List[Dict[str, Any]],
+    stats: _Stats,
+    seen_at: datetime,
+) -> None:
+    ids = [str(item["id"]) for item in batch]
+    existing = {
+        row.wiz_id: row
+        for row in db.query(WizApplicationEndpoint).filter(
+            WizApplicationEndpoint.integration_id == integration.id,
+            WizApplicationEndpoint.wiz_id.in_(ids),
+        ).all()
+    }
+    asset_values = {
+        value for item in batch if (value := _endpoint_asset_value(item))
+    }
+    asset_by_value = {
+        asset.value: asset
+        for asset in db.query(Asset).filter(
+            Asset.organization_id == integration.organization_id,
+            Asset.value.in_(asset_values),
+        ).order_by(Asset.id).all()
+    } if integration.import_assets and asset_values else {}
+    linked_ids = [row.asset_id for row in existing.values() if row.asset_id]
+    linked_assets = {
+        asset.id: asset
+        for asset in db.query(Asset).filter(Asset.id.in_(linked_ids)).all()
+    } if integration.import_assets and linked_ids else {}
+    new_rows: List[WizApplicationEndpoint] = []
+    for item in batch:
+        wiz_id = str(item["id"])
+        row = existing.get(wiz_id)
+        if row is None:
+            row = WizApplicationEndpoint(
+                integration_id=integration.id,
+                organization_id=integration.organization_id,
+                wiz_id=wiz_id,
+            )
+            new_rows.append(row)
+            stats.endpoints_created += 1
+        else:
+            stats.endpoints_updated += 1
+        row.name = item.get("name")
+        row.host = str(item.get("host"))[:500] if item.get("host") else None
+        row.port = item.get("port")
+        row.exposure_level = item.get("exposureLevel")
+        row.is_ai = _endpoint_is_ai(item) or bool(row.ai_components)
+        row.is_active = True
+        row.endpoint_data = item
+        row.last_seen = seen_at
+        stats.endpoints_seen += 1
+        stats.ai_endpoints_seen += int(row.is_ai)
+
+        value = _endpoint_asset_value(item)
+        if not integration.import_assets or not value:
+            continue
+        asset = linked_assets.get(row.asset_id) if row.asset_id else None
+        if asset is None:
+            asset = asset_by_value.get(value)
+        if asset is None:
+            is_http = urlparse(value).scheme in {"http", "https"}
+            asset = Asset(
+                organization_id=integration.organization_id,
+                name=value[:255],
+                value=value,
+                asset_type=AssetType.URL if is_http else AssetType.SERVICE,
+                status=AssetStatus.DISCOVERED,
+                discovery_source=DISCOVERY_SOURCE,
+                association_reason="Application endpoint attributed to the organization by Wiz",
+                association_confidence=95,
+                tags=["source:wiz", "type:endpoint"],
+                is_public=item.get("exposureLevel") == "HIGH",
+            )
+            db.add(asset)
+            asset_by_value[value] = asset
+            stats.assets_created += 1
+        else:
+            stats.assets_updated += 1
+        if asset.discovery_source == DISCOVERY_SOURCE:
+            asset.name = value[:255]
+            asset.value = value
+        http = item.get("httpResults") or {}
+        asset.http_status = http.get("statusCode")
+        asset.http_title = str(http.get("pageTitle"))[:500] if http.get("pageTitle") else None
+        if urlparse(value).scheme in {"http", "https"}:
+            asset.live_url = value
+        asset.is_live = item.get("portStatus") == "OPEN"
+        asset.last_seen = seen_at
+        metadata = dict(asset.metadata_ or {})
+        ids_for_asset = list(metadata.get("wiz_endpoint_ids") or [])
+        if wiz_id not in ids_for_asset:
+            ids_for_asset.append(wiz_id)
+        metadata["wiz_endpoint_ids"] = ids_for_asset
+        asset.metadata_ = metadata
+        tags = list(asset.tags or [])
+        for tag in ("source:wiz", "type:endpoint"):
+            if tag not in tags:
+                tags.append(tag)
+        asset.tags = tags
+        row.asset = asset
+    db.add_all(new_rows)
+    db.flush()
+
+
+async def _sync_application_endpoints(
+    db: Session, integration: WizIntegration, client: WizClient, stats: _Stats
+) -> None:
+    started_at = datetime.utcnow()
+    async for batch in client.iter_application_endpoints():
+        _upsert_endpoint_batch(db, integration, batch, stats, started_at)
+        db.commit()
+    async for batch in client.iter_endpoint_issues():
+        ids = [item["id"] for item in batch]
+        rows = {
+            row.wiz_id: row
+            for row in db.query(WizApplicationEndpoint).filter(
+                WizApplicationEndpoint.integration_id == integration.id,
+                WizApplicationEndpoint.wiz_id.in_(ids),
+            ).all()
+        }
+        missing = [wiz_id for wiz_id in ids if wiz_id not in rows]
+        for start in range(0, len(missing), client.PAGE_SIZE):
+            async for endpoint_batch in client.iter_application_endpoints(
+                ids=missing[start:start + client.PAGE_SIZE]
+            ):
+                _upsert_endpoint_batch(db, integration, endpoint_batch, stats, started_at)
+        if missing:
+            rows.update({
+                row.wiz_id: row
+                for row in db.query(WizApplicationEndpoint).filter(
+                    WizApplicationEndpoint.integration_id == integration.id,
+                    WizApplicationEndpoint.wiz_id.in_(missing),
+                ).all()
+            })
+        for item in batch:
+            row = rows.get(item["id"])
+            if row is None:
+                stats.endpoint_issue_entities_missing += 1
+                continue
+            row.related_issues = item["issues"]
+            row.related_issue_count = item["issue_count"]
+            stats.endpoint_issue_links += len(item["issues"])
+            stats.endpoints_with_issues += int(bool(item["issues"]))
+            analytics_count = (row.endpoint_data.get("issueAnalytics") or {}).get("issueCount")
+            stats.endpoint_issue_count_mismatches += int(analytics_count != item["issue_count"])
+        db.commit()
+    await _sync_ai_endpoint_graph(db, integration, client, stats, started_at)
+    db.query(WizApplicationEndpoint).filter(
+        WizApplicationEndpoint.integration_id == integration.id,
+        WizApplicationEndpoint.last_seen < started_at,
+    ).update({WizApplicationEndpoint.is_active: False}, synchronize_session=False)
+    db.commit()
+    stats.ai_endpoints_seen = db.query(WizApplicationEndpoint).filter(
+        WizApplicationEndpoint.integration_id == integration.id,
+        WizApplicationEndpoint.is_active.is_(True),
+        WizApplicationEndpoint.is_ai.is_(True),
+    ).count()
+
+
+async def _sync_ai_endpoint_graph(
+    db: Session, integration: WizIntegration, client: WizClient,
+    stats: _Stats, started_at: datetime,
+) -> None:
+    paths_by_endpoint: Dict[str, Dict[tuple[str, str], Dict[str, Any]]] = {}
+    async for batch in client.iter_ai_endpoint_paths():
+        stats.ai_graph_paths_seen += len(batch)
+        for path in batch:
+            entities = path.get("entities") or []
+            components = [e for e in entities if e and e.get("type") in AI_COMPONENT_TYPES]
+            workloads = [e for e in entities if e and e.get("type") in {
+                "VIRTUAL_MACHINE", "CONTAINER", "CONTAINER_IMAGE", "SERVERLESS",
+            }]
+            endpoints = [e for e in entities if e and e.get("type") == "ENDPOINT"]
+            if not components or not endpoints:
+                continue
+            for endpoint in endpoints:
+                linked = paths_by_endpoint.setdefault(str(endpoint["id"]), {})
+                for component in components:
+                    for workload in workloads or [None]:
+                        workload_id = str(workload["id"]) if workload else ""
+                        linked[(str(component["id"]), workload_id)] = {
+                            "id": component["id"], "type": component["type"],
+                            "name": component.get("name"),
+                            "workload_id": workload_id or None,
+                            "workload_type": workload.get("type") if workload else None,
+                        }
+    stats.ai_graph_endpoints_seen = len(paths_by_endpoint)
+    ids = list(paths_by_endpoint)
+    for start in range(0, len(ids), client.PAGE_SIZE):
+        batch_ids = ids[start:start + client.PAGE_SIZE]
+        rows = {
+            row.wiz_id: row
+            for row in db.query(WizApplicationEndpoint).filter(
+                WizApplicationEndpoint.integration_id == integration.id,
+                WizApplicationEndpoint.wiz_id.in_(batch_ids),
+            ).all()
+        }
+        missing = [wiz_id for wiz_id in batch_ids if wiz_id not in rows]
+        if missing:
+            async for endpoint_batch in client.iter_application_endpoints(ids=missing):
+                _upsert_endpoint_batch(db, integration, endpoint_batch, stats, started_at)
+            rows.update({
+                row.wiz_id: row
+                for row in db.query(WizApplicationEndpoint).filter(
+                    WizApplicationEndpoint.integration_id == integration.id,
+                    WizApplicationEndpoint.wiz_id.in_(missing),
+                ).all()
+            })
+        for wiz_id in batch_ids:
+            row = rows.get(wiz_id)
+            if row is None:
+                stats.ai_graph_entities_missing += 1
+                continue
+            row.ai_components = list(paths_by_endpoint[wiz_id].values())
+            row.ai_graph_seen_at = started_at
+            row.is_ai = True
+        db.commit()
+    stale = db.query(WizApplicationEndpoint).filter(
+        WizApplicationEndpoint.integration_id == integration.id,
+        WizApplicationEndpoint.ai_graph_seen_at.is_not(None),
+        WizApplicationEndpoint.ai_graph_seen_at < started_at,
+    ).all()
+    for row in stale:
+        row.ai_components = []
+        row.ai_graph_seen_at = None
+        row.is_ai = _endpoint_is_ai(row.endpoint_data)
+    db.commit()
+
+
 async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str, Any]:
     stats = _Stats()
     try:
-        findings = await _client_for(integration).get_vulnerability_findings()
+        client = _client_for(integration)
+        findings = await client.get_vulnerability_findings()
         stats.findings_seen = len(findings)
         asset_cache: Dict[str, Asset] = {}
         for finding in findings:
@@ -507,6 +1006,9 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
             if integration.import_vulnerabilities:
                 _upsert_vulnerability(db, asset, finding, stats)
 
+        db.commit()
+        await _sync_application_endpoints(db, integration, client, stats)
+
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = True
         integration.last_error = None
@@ -515,7 +1017,8 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
         return {
             "ok": True,
             "message": (
-                f"Imported {stats.assets_created} new VM asset(s) and "
+                f"Imported {stats.endpoints_seen} application endpoint(s), "
+                f"{stats.assets_created} new asset(s), and "
                 f"{stats.vulns_created} new vulnerability finding(s) from Wiz."
             ),
             **stats.as_dict(),
@@ -528,3 +1031,36 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
         integration.last_error = str(exc)[:1000]
         db.commit()
         return {"ok": False, "message": f"Sync failed: {exc}", **stats.as_dict()}
+
+
+def claim_sync(db: Session, integration_id: int) -> bool:
+    """Claim a Wiz run across API and scheduler processes using a locked row."""
+    integration = db.query(WizIntegration).filter(
+        WizIntegration.id == integration_id
+    ).populate_existing().with_for_update().one()
+    if not integration.is_active:
+        db.rollback()
+        return False
+    state = integration.last_sync_stats or {}
+    if state.get("sync_in_progress"):
+        try:
+            started = datetime.fromisoformat(state.get("sync_started_at", ""))
+            if datetime.utcnow() - started < timedelta(hours=2):
+                db.rollback()
+                return False
+        except (TypeError, ValueError):
+            pass
+    integration.last_sync_stats = {
+        **state, "sync_in_progress": True,
+        "sync_started_at": datetime.utcnow().isoformat(),
+    }
+    db.commit()
+    return True
+
+
+async def sync_integration_background(integration_id: int) -> None:
+    """Run a long endpoint import after the HTTP response has been sent."""
+    with SessionLocal() as db:
+        integration = db.query(WizIntegration).filter_by(id=integration_id).first()
+        if integration is not None:
+            await sync_integration(db, integration)

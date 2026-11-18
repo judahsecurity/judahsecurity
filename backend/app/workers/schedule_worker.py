@@ -757,7 +757,7 @@ class ScheduleWorker:
             db.close()
 
     async def run_wiz_syncs(self):
-        """Run scheduled Wiz vulnerability and VM imports when due."""
+        """Run scheduled Wiz endpoint, vulnerability, and VM imports when due."""
         from app.models.wiz_integration import WizIntegration
         from app.services import wiz_service
 
@@ -776,6 +776,8 @@ class ScheduleWorker:
             logger.info(f"Wiz: {len(due)} connection(s) due for continuous sync")
             for integration in due:
                 try:
+                    if not wiz_service.claim_sync(db, integration.id):
+                        continue
                     result = await wiz_service.sync_integration(db, integration)
                     logger.info(
                         f"Wiz sync (org {integration.organization_id}, "

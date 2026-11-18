@@ -30,7 +30,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { api, getApiErrorMessage, type WizIntegration } from '@/lib/api';
+import { api, getApiErrorMessage, type WizApplicationEndpointPage, type WizIntegration } from '@/lib/api';
 
 type WizForm = {
   connection_name: string;
@@ -81,17 +81,28 @@ export function WizSection() {
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<WizIntegration | null>(null);
+  const [endpointTarget, setEndpointTarget] = useState<WizIntegration | null>(null);
+  const [endpointPage, setEndpointPage] = useState<WizApplicationEndpointPage | null>(null);
+  const [endpointLoading, setEndpointLoading] = useState(false);
+  const [aiOnly, setAiOnly] = useState(false);
+  const [exposureLevel, setExposureLevel] = useState('ALL');
 
   useEffect(() => { void load(); }, []);
 
-  async function load() {
-    setLoading(true);
+  useEffect(() => {
+    if (!integrations.some((item) => item.last_sync_stats?.sync_in_progress === true)) return;
+    const timer = window.setInterval(() => { void load(false); }, 15000);
+    return () => window.clearInterval(timer);
+  }, [integrations]);
+
+  async function load(showSpinner = true) {
+    if (showSpinner) setLoading(true);
     try {
       setIntegrations(await api.getWizIntegrations());
     } catch {
       setIntegrations([]);
     } finally {
-      setLoading(false);
+      if (showSpinner) setLoading(false);
     }
   }
 
@@ -179,7 +190,7 @@ export function WizSection() {
     try {
       const result = await api.syncWizIntegration(item.id);
       toast({
-        title: result.ok ? 'Wiz sync complete' : 'Wiz sync failed',
+        title: result.ok ? 'Wiz sync started' : 'Wiz sync failed',
         description: result.message,
         variant: result.ok ? undefined : 'destructive',
       });
@@ -206,6 +217,30 @@ export function WizSection() {
     }
   }
 
+  async function loadEndpoints(item: WizIntegration, offset = 0, ai = aiOnly, exposure = exposureLevel) {
+    setEndpointLoading(true);
+    try {
+      setEndpointPage(await api.getWizApplicationEndpoints(item.id, {
+        limit: 20,
+        offset,
+        ai_only: ai,
+        ...(exposure === 'ALL' ? {} : { exposure_level: exposure }),
+      }));
+    } catch (error) {
+      toast({ title: 'Could not load Wiz endpoints', description: getApiErrorMessage(error), variant: 'destructive' });
+    } finally {
+      setEndpointLoading(false);
+    }
+  }
+
+  function openEndpoints(item: WizIntegration) {
+    setEndpointTarget(item);
+    setEndpointPage(null);
+    setAiOnly(false);
+    setExposureLevel('ALL');
+    void loadEndpoints(item, 0, false, 'ALL');
+  }
+
   return (
     <Card className="border border-border">
       <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
@@ -215,7 +250,7 @@ export function WizSection() {
         <div className="flex-1 min-w-0">
           <CardTitle className="text-base">Wiz</CardTitle>
           <CardDescription>
-            Import internet-exposed virtual machines and their vulnerability findings from Wiz. Read-only.
+            Import Wiz application endpoints, linked issues, and internet-exposed VM findings. Read-only.
           </CardDescription>
         </div>
         {loading ? (
@@ -245,21 +280,28 @@ export function WizSection() {
                   </div>
                   <p className="text-xs text-muted-foreground truncate">{item.api_endpoint}</p>
                   <div className="flex flex-wrap gap-x-3 mt-1 text-xs text-muted-foreground">
+                    <span>All application endpoints</span>
                     <span>{item.internet_exposed_only ? 'Internet-exposed VMs only' : 'All VMs'}</span>
                     <span>{item.continuous_sync_enabled ? `Auto-sync ${intervalLabel(item.sync_interval_minutes).toLowerCase()}` : 'Auto-sync off'}</span>
                     {item.last_sync_at && <span>Last sync: {new Date(item.last_sync_at).toLocaleString()}</span>}
                   </div>
                   {item.last_sync_stats && item.last_sync_ok && (
                     <p className="text-xs text-muted-foreground mt-1">
-                      {item.last_sync_stats.assets_created || 0} new assets, {item.last_sync_stats.vulns_created || 0} new findings.
+                      {item.last_sync_stats.endpoints_seen || 0} endpoints ({item.last_sync_stats.ai_endpoints_seen || 0} AI), {item.last_sync_stats.assets_created || 0} new assets, {item.last_sync_stats.vulns_created || 0} new findings.
                     </p>
+                  )}
+                  {item.last_sync_stats?.sync_in_progress === true && (
+                    <p className="text-xs text-violet-400 mt-1 flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />Syncing Wiz endpoints and findings…</p>
                   )}
                   {item.last_error && item.last_sync_ok === false && (
                     <p className="text-xs text-red-400 mt-1">{item.last_error}</p>
                   )}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" onClick={() => sync(item)} disabled={busyId === item.id || !item.is_active}>
+                  <Button size="sm" variant="outline" onClick={() => openEndpoints(item)}>
+                    <ExternalLink className="h-4 w-4 mr-2" />View endpoints
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => sync(item)} disabled={busyId === item.id || !item.is_active || item.last_sync_stats?.sync_in_progress === true}>
                     {busyId === item.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}Sync now
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => test(item)} disabled={busyId === item.id}>
@@ -285,6 +327,110 @@ export function WizSection() {
           </div>
         )}
       </CardContent>
+
+      <Dialog open={Boolean(endpointTarget)} onOpenChange={(open) => { if (!open) setEndpointTarget(null); }}>
+        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{endpointTarget?.connection_name} application endpoints</DialogTitle>
+            <DialogDescription>
+              Wiz ENDPOINT records with HTTP response details, exposed technology, linked resources, and issues associated directly with each endpoint.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={aiOnly} onCheckedChange={(checked) => {
+                const next = Boolean(checked);
+                setAiOnly(next);
+                if (endpointTarget) void loadEndpoints(endpointTarget, 0, next, exposureLevel);
+              }} />
+              AI technologies only
+            </label>
+            <Select value={exposureLevel} onValueChange={(value) => {
+              setExposureLevel(value);
+              if (endpointTarget) void loadEndpoints(endpointTarget, 0, aiOnly, value);
+            }}>
+              <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All exposure levels</SelectItem>
+                <SelectItem value="HIGH">High exposure</SelectItem>
+                <SelectItem value="MEDIUM">Medium exposure</SelectItem>
+                <SelectItem value="LOW">Low exposure</SelectItem>
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">
+              {endpointLoading ? 'Loading…' : `${endpointPage?.total ?? 0} endpoints`}
+            </span>
+          </div>
+          <div className="space-y-3">
+            {endpointPage?.items.map((item) => {
+              const endpoint = item.endpoint;
+              const http = endpoint.httpResults || {};
+              const technologies = (endpoint.hostedTechnologies || []).map((entry) => entry.technology?.name).filter(Boolean);
+              return (
+                <div key={item.id} className="rounded-lg border border-border p-3 space-y-2 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {endpoint.name && /^https?:\/\//i.test(endpoint.name) ? (
+                      <a href={endpoint.name} target="_blank" rel="noopener noreferrer" className="font-medium text-primary break-all hover:underline">{endpoint.name}</a>
+                    ) : (
+                      <span className="font-medium break-all">{endpoint.name || endpoint.host || item.id}</span>
+                    )}
+                    {item.is_ai && <Badge variant="outline">AI</Badge>}
+                    <Badge variant="outline">{endpoint.exposureLevel || 'Unknown'} exposure</Badge>
+                    <span className="text-muted-foreground">Port {endpoint.port ?? '—'} · HTTP {http.statusCode ?? '—'}</span>
+                  </div>
+                  {http.pageTitle && <p>Page title: {http.pageTitle}</p>}
+                  <p className="text-xs text-muted-foreground">
+                    Technologies: {technologies.length ? technologies.join(', ') : 'none reported'} · Linked resources: {endpoint.resources?.length || 0}
+                  </p>
+                  {item.ai_components.length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      AI graph components: {item.ai_components.map((component) => `${component.type}: ${component.name || component.id}`).join(', ')}
+                    </p>
+                  )}
+                  {(endpoint.resources?.length || 0) > 0 && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-primary">View linked resource IDs</summary>
+                      <p className="mt-1 break-all">{endpoint.resources?.map((resource) => `${resource.type || 'RESOURCE'}: ${resource.id || 'unknown'}`).join(', ')}</p>
+                    </details>
+                  )}
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    <span>Direct Wiz issue links: {item.relatedIssueCount ?? item.relatedIssues.length}</span>
+                    {item.asset_id && <a href={`/assets/${item.asset_id}`} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Open Aegis asset</a>}
+                  </div>
+                  {item.relatedIssues.length > 0 && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-primary">View issue IDs and severity</summary>
+                      <div className="mt-2 max-h-40 overflow-y-auto flex flex-wrap gap-2">
+                        {item.relatedIssues.map((issue) => issue.url && /^https?:\/\//i.test(issue.url) ? (
+                          <a key={issue.id} href={issue.url} target="_blank" rel="noopener noreferrer" className="rounded border border-border px-2 py-1 text-primary hover:underline">
+                            {issue.id} · {issue.severity || 'unknown'} · {issue.status || 'unknown'}
+                          </a>
+                        ) : (
+                          <span key={issue.id} className="rounded border border-border px-2 py-1">{issue.id} · {issue.severity || 'unknown'}</span>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              );
+            })}
+            {!endpointLoading && endpointPage?.items.length === 0 && (
+              <p className="text-sm text-muted-foreground">No endpoints found for this filter.</p>
+            )}
+          </div>
+          <DialogFooter className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground mr-auto">
+              {endpointPage?.total ? `${endpointPage.offset + 1}–${Math.min(endpointPage.offset + endpointPage.items.length, endpointPage.total)} of ${endpointPage.total}` : ''}
+            </span>
+            <Button variant="outline" disabled={endpointLoading || !endpointPage || endpointPage.offset === 0} onClick={() => {
+              if (endpointTarget && endpointPage) void loadEndpoints(endpointTarget, Math.max(0, endpointPage.offset - endpointPage.limit));
+            }}>Previous</Button>
+            <Button variant="outline" disabled={endpointLoading || !endpointPage || endpointPage.offset + endpointPage.limit >= endpointPage.total} onClick={() => {
+              if (endpointTarget && endpointPage) void loadEndpoints(endpointTarget, endpointPage.offset + endpointPage.limit);
+            }}>Next</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={setupOpen} onOpenChange={(open) => { if (!saving) setSetupOpen(open); }}>
         <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
@@ -325,10 +471,10 @@ export function WizSection() {
             </details>
             <div className="space-y-2">
               {[
-                ['wiz-assets', 'Import virtual-machine assets', 'Creates or enriches cloud-resource assets with OS, IP, provider, subscription, region, and Wiz metadata.', 'import_assets'],
+                ['wiz-assets', 'Import assets', 'Creates or enriches VM and application endpoint assets; endpoint records are always retained in the Wiz inventory.', 'import_assets'],
                 ['wiz-vulns', 'Import vulnerability findings', 'Maps CVEs, CVSS scores, severity, affected/fixed versions, and remediation guidance.', 'import_vulnerabilities'],
                 ['wiz-exposed', 'Internet-exposed VMs only', 'Filters findings to assets marked by Wiz as having limited or wide internet exposure.', 'internet_exposed_only'],
-                ['wiz-sync', 'Automatically re-sync', 'Keeps Wiz findings current in the background.', 'continuous_sync_enabled'],
+                ['wiz-sync', 'Automatically re-sync', 'Keeps Wiz endpoints and findings current in the background.', 'continuous_sync_enabled'],
               ].map(([id, title, description, key]) => (
                 <div key={id} className="flex items-start gap-3 rounded-lg border border-border p-3">
                   <Checkbox id={id} checked={Boolean(form[key as keyof WizForm])} onCheckedChange={(checked) => setForm({ ...form, [key]: Boolean(checked) })} className="mt-0.5" />
