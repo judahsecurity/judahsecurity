@@ -250,7 +250,7 @@ export function WizSection() {
         <div className="flex-1 min-w-0">
           <CardTitle className="text-base">Wiz</CardTitle>
           <CardDescription>
-            Import Wiz application endpoints, linked issues, and internet-exposed VM findings. Read-only.
+            Import Wiz application endpoints, linked issues, and virtual machines. Read-only.
           </CardDescription>
         </div>
         {loading ? (
@@ -287,8 +287,11 @@ export function WizSection() {
                   </div>
                   {item.last_sync_stats && item.last_sync_ok && (
                     <p className="text-xs text-muted-foreground mt-1">
-                      {item.last_sync_stats.endpoints_seen || 0} endpoints ({item.last_sync_stats.ai_endpoints_seen || 0} AI), {item.last_sync_stats.assets_created || 0} new assets, {item.last_sync_stats.vulns_created || 0} new findings.
+                      {item.last_sync_stats.endpoints_seen || 0} endpoints ({item.last_sync_stats.ai_endpoints_seen || 0} AI), {item.last_sync_stats.virtual_machines_seen || 0} VMs, {item.last_sync_stats.assets_created || 0} new assets, {item.last_sync_stats.vulns_created || 0} new findings.
                     </p>
+                  )}
+                  {item.last_sync_stats?.findings_truncated === true && item.last_sync_ok && (
+                    <p className="text-xs text-amber-400 mt-1">VM assets use the full Wiz resource inventory. Finding import is limited to the first 50,000 Wiz findings.</p>
                   )}
                   {item.last_sync_stats?.sync_in_progress === true && (
                     <p className="text-xs text-violet-400 mt-1 flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />Syncing Wiz endpoints and findings…</p>
@@ -473,7 +476,7 @@ export function WizSection() {
               {[
                 ['wiz-assets', 'Import assets', 'Creates or enriches VM and application endpoint assets; endpoint records are always retained in the Wiz inventory.', 'import_assets'],
                 ['wiz-vulns', 'Import vulnerability findings', 'Maps CVEs, CVSS scores, severity, affected/fixed versions, and remediation guidance.', 'import_vulnerabilities'],
-                ['wiz-exposed', 'Internet-exposed VMs only', 'Filters findings to assets marked by Wiz as having limited or wide internet exposure.', 'internet_exposed_only'],
+                ['wiz-exposed', 'Internet-exposed VMs only', 'Imports VMs Wiz marks internet accessible and keeps matching findings.', 'internet_exposed_only'],
                 ['wiz-sync', 'Automatically re-sync', 'Keeps Wiz endpoints and findings current in the background.', 'continuous_sync_enabled'],
               ].map(([id, title, description, key]) => (
                 <div key={id} className="flex items-start gap-3 rounded-lg border border-border p-3">

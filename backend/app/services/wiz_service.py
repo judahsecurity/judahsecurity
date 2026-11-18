@@ -78,6 +78,24 @@ query JudahWizVulnerabilityFindings($first: Int!, $after: String) {
 }
 """
 
+VIRTUAL_MACHINES_QUERY = """
+query JudahWizVirtualMachines($first: Int!, $after: String, $filterBy: CloudResourceV2Filters) {
+  cloudResourcesV2(first: $first, after: $after, filterBy: $filterBy) {
+    totalCount
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id externalId providerUniqueId name type nativeType cloudPlatform region status
+      isOpenToAllInternet isAccessibleFromInternet
+      cloudAccount { id externalId name cloudProvider }
+      typeFields {
+        ... on CloudResourceV2VirtualMachine { operatingSystem ipAddresses instanceType }
+      }
+      issueAnalytics { issueCount criticalSeverityCount highSeverityCount mediumSeverityCount lowSeverityCount }
+    }
+  }
+}
+"""
+
 APPLICATION_ENDPOINTS_QUERY = """
 query JudahWizApplicationEndpoints($first: Int!, $after: String, $filterBy: ApplicationEndpointFilters) {
   applicationEndpoints(first: $first, after: $after, filterBy: $filterBy) {
@@ -224,6 +242,8 @@ class WizClient:
         self.client_secret = client_secret
         self.audience = audience or DEFAULT_AUDIENCE
         self._token: Optional[str] = None
+        self.findings_truncated = False
+        self.virtual_machines_total_count: Optional[int] = None
 
     async def authenticate(self) -> str:
         try:
@@ -294,6 +314,7 @@ class WizClient:
     async def get_vulnerability_findings(self, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         findings: List[Dict[str, Any]] = []
         cursor: Optional[str] = None
+        self.findings_truncated = False
         for _ in range(self.MAX_PAGES):
             data = await self.graphql(
                 VULNERABILITY_FINDINGS_QUERY,
@@ -306,13 +327,69 @@ class WizClient:
             findings.extend(item for item in batch if isinstance(item, dict))
             page_info = connection.get("pageInfo") or {}
             if limit and len(findings) >= limit:
+                self.findings_truncated = bool(page_info.get("hasNextPage"))
                 return findings[:limit]
             if not page_info.get("hasNextPage"):
                 break
             cursor = page_info.get("endCursor")
             if not cursor:
-                break
+                raise WizApiError("Wiz vulnerability finding pagination cursor was missing.")
+        else:
+            self.findings_truncated = True
         return findings
+
+    async def iter_virtual_machines(
+        self, *, exposed_only: bool
+    ) -> AsyncIterator[List[Dict[str, Any]]]:
+        """Stream the VM inventory independently of the much larger findings feed."""
+        cursor: Optional[str] = None
+        seen: set[str] = set()
+        filter_by: Dict[str, Any] = {"type": {"equals": ["VIRTUAL_MACHINE"]}}
+        if exposed_only:
+            filter_by["isAccessibleFromInternet"] = {"equals": True}
+        self.virtual_machines_total_count = None
+        for _ in range(self.ENDPOINT_MAX_PAGES):
+            data = await self.graphql(
+                VIRTUAL_MACHINES_QUERY,
+                {"first": self.PAGE_SIZE, "after": cursor, "filterBy": filter_by},
+            )
+            connection = data.get("cloudResourcesV2") or {}
+            if self.virtual_machines_total_count is None:
+                self.virtual_machines_total_count = connection.get("totalCount")
+            nodes = connection.get("nodes")
+            if not isinstance(nodes, list):
+                raise WizApiError("Wiz returned an unexpected virtual machine inventory payload.")
+            batch = []
+            for node in nodes:
+                if not isinstance(node, dict) or node.get("type") != "VIRTUAL_MACHINE" or not node.get("id"):
+                    continue
+                wiz_id = str(node["id"])
+                if wiz_id in seen:
+                    continue
+                seen.add(wiz_id)
+                vm = node.get("typeFields") or {}
+                account = node.get("cloudAccount") or {}
+                batch.append({
+                    **node,
+                    "operatingSystem": vm.get("operatingSystem"),
+                    "ipAddresses": vm.get("ipAddresses") or [],
+                    "instanceType": vm.get("instanceType"),
+                    "subscriptionId": account.get("id"),
+                    "subscriptionExternalId": account.get("externalId"),
+                    "subscriptionName": account.get("name"),
+                    "hasWideInternetExposure": bool(node.get("isOpenToAllInternet")),
+                    "hasLimitedInternetExposure": bool(node.get("isAccessibleFromInternet")),
+                })
+            if batch:
+                yield batch
+            page_info = connection.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                return
+            next_cursor = page_info.get("endCursor")
+            if not next_cursor or next_cursor == cursor:
+                raise WizApiError("Wiz virtual machine pagination cursor was missing or repeated.")
+            cursor = next_cursor
+        raise WizApiError("Wiz virtual machine pagination exceeded the page limit.")
 
     async def iter_application_endpoints(
         self, *, limit: Optional[int] = None, ids: Optional[List[str]] = None
@@ -476,6 +553,12 @@ async def test_connection(
             audience=audience,
         )
         await client.get_vulnerability_findings(limit=1)
+        vm_probe = await client.graphql(
+            VIRTUAL_MACHINES_QUERY,
+            {"first": 1, "after": None, "filterBy": {"type": {"equals": ["VIRTUAL_MACHINE"]}}},
+        )
+        if not isinstance((vm_probe.get("cloudResourcesV2") or {}).get("nodes"), list):
+            raise WizApiError("Wiz virtual machine inventory access returned an unexpected payload.")
         async for _ in client.iter_application_endpoints(limit=1):
             break
         issue_probe = await client.graphql(
@@ -485,7 +568,7 @@ async def test_connection(
             raise WizApiError("Wiz endpoint graph access returned an unexpected payload.")
         return {
             "ok": True,
-            "message": "Connected to Wiz and verified findings, application endpoints, and endpoint issue access.",
+            "message": "Connected to Wiz and verified findings, virtual machines, application endpoints, and endpoint issue access.",
             "findings_accessible": True,
             "endpoints_accessible": True,
         }
@@ -544,6 +627,9 @@ class _Stats:
         self.vulns_updated = 0
         self.findings_seen = 0
         self.findings_filtered = 0
+        self.findings_truncated = False
+        self.virtual_machines_total_count: Optional[int] = None
+        self.virtual_machines_seen = 0
         self.endpoints_seen = 0
         self.endpoints_created = 0
         self.endpoints_updated = 0
@@ -556,7 +642,7 @@ class _Stats:
         self.endpoint_issue_count_mismatches = 0
         self.endpoint_issue_entities_missing = 0
 
-    def as_dict(self) -> Dict[str, int]:
+    def as_dict(self) -> Dict[str, Any]:
         return vars(self).copy()
 
 
@@ -578,6 +664,8 @@ def _upsert_asset(db: Session, org_id: int, source: Dict[str, Any], stats: _Stat
         "region": source.get("region"),
         "native_type": source.get("nativeType"),
         "image_name": source.get("imageName"),
+        "instance_type": source.get("instanceType"),
+        "issue_analytics": source.get("issueAnalytics"),
         "status": source.get("status"),
         "tags": source.get("tags") or [],
         "has_wide_internet_exposure": bool(source.get("hasWideInternetExposure")),
@@ -973,12 +1061,30 @@ async def _sync_ai_endpoint_graph(
     db.commit()
 
 
+async def _sync_virtual_machines(
+    db: Session, integration: WizIntegration, client: WizClient, stats: _Stats
+) -> None:
+    if not integration.import_assets:
+        return
+    async for page in client.iter_virtual_machines(
+        exposed_only=integration.internet_exposed_only
+    ):
+        for source in page:
+            if not _asset_value(source):
+                continue
+            _upsert_asset(db, integration.organization_id, source, stats)
+            stats.virtual_machines_seen += 1
+        db.commit()
+    stats.virtual_machines_total_count = client.virtual_machines_total_count
+
+
 async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str, Any]:
     stats = _Stats()
     try:
         client = _client_for(integration)
         findings = await client.get_vulnerability_findings()
         stats.findings_seen = len(findings)
+        stats.findings_truncated = client.findings_truncated
         asset_cache: Dict[str, Asset] = {}
         for finding in findings:
             source = finding.get("vulnerableAsset") or {}
@@ -1007,6 +1113,7 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
                 _upsert_vulnerability(db, asset, finding, stats)
 
         db.commit()
+        await _sync_virtual_machines(db, integration, client, stats)
         await _sync_application_endpoints(db, integration, client, stats)
 
         integration.last_sync_at = datetime.utcnow()

@@ -412,7 +412,7 @@ export interface WizIntegration {
   last_sync_at?: string;
   last_sync_ok?: boolean;
   next_sync_at?: string;
-  last_sync_stats?: Record<string, number | boolean | string>;
+  last_sync_stats?: Record<string, number | boolean | string | null>;
   last_error?: string;
   created_at: string;
   updated_at: string;
@@ -427,6 +427,9 @@ export interface WizSyncResult {
   vulns_updated: number;
   findings_seen: number;
   findings_filtered: number;
+  findings_truncated: boolean;
+  virtual_machines_seen: number;
+  virtual_machines_total_count: number | null;
   endpoints_seen: number;
   endpoints_created: number;
   endpoints_updated: number;
