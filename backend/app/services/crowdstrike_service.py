@@ -131,7 +131,7 @@ class CrowdStrikeClient:
         raise CrowdStrikeError(f"CrowdStrike {path} exceeded the pagination safety limit.")
 
     async def external_assets(self) -> AsyncIterator[list[dict[str, Any]]]:
-        async for ids in self._pages("/fem/queries/external-assets/v2", params={"limit": 1000}, cursor_key="after"):
+        async for ids in self._pages("/fem/queries/external-assets/v2", params={"limit": 100}, cursor_key="after"):
             if not all(isinstance(item, str) for item in ids):
                 raise CrowdStrikeError("CrowdStrike external asset query returned invalid IDs.")
             for start in range(0, len(ids), 100):
@@ -218,6 +218,7 @@ def _link_asset(db: Session, integration: CrowdStrikeIntegration, kind: str, sou
         created = True
     if link is None:
         db.add(CrowdStrikeAssetLink(integration_id=integration.id, asset_id=asset.id, source_kind=kind, source_id=source_id[:255], cid=cid, last_seen=datetime.utcnow()))
+        db.flush()  # Make the link visible to later records when SessionLocal has autoflush disabled.
     else:
         link.last_seen = datetime.utcnow()
     return asset, created
@@ -295,6 +296,7 @@ def _upsert_port(db: Session, asset: Asset, source: dict[str, Any], stats: dict[
     if record is None:
         record = PortService(asset_id=asset.id, port=port, protocol=protocol, state=PortState.OPEN, discovered_by=SOURCE, verified=False)
         db.add(record)
+        db.flush()  # Repeated service observations can share a port in the same source record.
         stats["ports_created"] += 1
     else:
         stats["ports_updated"] += 1

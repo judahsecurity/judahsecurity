@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.db.database import Base
 from app.models.asset import Asset, AssetType
-from app.models.crowdstrike_integration import CrowdStrikeIntegration
+from app.models.crowdstrike_integration import CrowdStrikeAssetLink, CrowdStrikeIntegration
 from app.models.exposure_evidence import ExposurePath, ExposurePathStep, FindingSourceEvidence
 from app.models.organization import Organization
 from app.models.port_service import PortService
@@ -68,6 +68,31 @@ async def test_cursor_pagination_uses_next_and_rejects_repeats():
     await client.http.aclose()
 
 
+
+@pytest.mark.asyncio
+async def test_external_asset_query_uses_supported_page_limit_and_after_cursor():
+    client = CrowdStrikeClient("us-1", "client", "secret")
+    client._request = AsyncMock(side_effect=[
+        {"resources": ["asset-1"], "meta": {"pagination": {"after": "next-page"}}},
+        {"resources": [{"id": "asset-1"}]},
+        {"resources": ["asset-2"], "meta": {"pagination": {}}},
+        {"resources": [{"id": "asset-2"}]},
+    ])
+    try:
+        batches = [batch async for batch in client.external_assets()]
+        assert [[asset["id"] for asset in batch] for batch in batches] == [["asset-1"], ["asset-2"]]
+        query_calls = [
+            call for call in client._request.await_args_list
+            if call.args[1] == "/fem/queries/external-assets/v2"
+        ]
+        assert [call.kwargs["params"] for call in query_calls] == [
+            {"limit": 100},
+            {"limit": 100, "after": "next-page"},
+        ]
+    finally:
+        await client.http.aclose()
+
+
 def test_external_import_is_tenant_scoped_and_idempotent(db):
     first = _integration(db, "first")
     second = _integration(db, "second")
@@ -86,6 +111,31 @@ def test_external_import_is_tenant_scoped_and_idempotent(db):
     assert {asset.organization_id for asset in assets} == {first.organization_id, second.organization_id}
     assert all(asset.in_scope is False for asset in assets)
     assert db.query(PortService).count() == 4
+
+
+
+def test_repeated_falcon_records_before_flush_are_idempotent(db):
+    integration = _integration(db, "tenant")
+    external = {
+        "id": "external-1",
+        "dns_domain": {
+            "fqdn": "example.org",
+            "services": [
+                {"port": 443, "transport": "tcp"},
+                {"port": 443, "transport": "tcp"},
+            ],
+        },
+        "ip": {"services": [{"port": 443, "transport": "tcp"}]},
+    }
+    _upsert_external(db, integration, external, _stats())
+    _upsert_external(db, integration, external, _stats())
+    host = {"device_id": "aid-1", "cid": "cid-1", "hostname": "server-1"}
+    _upsert_host(db, integration, host, _stats())
+    _upsert_host(db, integration, host, _stats())
+    db.flush()
+    assert db.query(CrowdStrikeAssetLink).count() == 2
+    assert db.query(Asset).count() == 2
+    assert db.query(PortService).count() == 1
 
 
 def test_external_subdomain_retains_parent_for_graph(db):
