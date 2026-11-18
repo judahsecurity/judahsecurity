@@ -25,6 +25,7 @@ from app.services.wiz_service import (
     _parse_datetime,
     _Stats,
     _sync_application_endpoints,
+    _sync_virtual_machines,
     claim_sync,
 )
 from app.models.vulnerability import Severity
@@ -77,6 +78,72 @@ async def test_vulnerability_findings_follow_cursor_pagination():
 
     assert [item["id"] for item in findings] == ["one", "two"]
     assert client.graphql.await_args_list[1].args[1]["after"] == "cursor-1"
+
+
+@pytest.mark.asyncio
+async def test_vm_inventory_paginates_and_deduplicates_wiz_ids():
+    client = WizClient("https://api.us17.app.wiz.io/graphql", "client", "secret")
+    client.graphql = AsyncMock(side_effect=[
+        {"cloudResourcesV2": {"totalCount": 2, "nodes": [
+            {"id": "vm-1", "type": "VIRTUAL_MACHINE", "providerUniqueId": "i-1",
+             "isAccessibleFromInternet": True, "isOpenToAllInternet": False,
+             "cloudAccount": {"externalId": "account-1"},
+             "typeFields": {"operatingSystem": "LINUX", "ipAddresses": ["10.0.0.1"]}},
+        ], "pageInfo": {"hasNextPage": True, "endCursor": "next"}}},
+        {"cloudResourcesV2": {"totalCount": 2, "nodes": [
+            {"id": "vm-1", "type": "VIRTUAL_MACHINE"},
+            {"id": "vm-2", "type": "VIRTUAL_MACHINE", "providerUniqueId": "i-2",
+             "isAccessibleFromInternet": True, "isOpenToAllInternet": True,
+             "typeFields": {"ipAddresses": []}},
+        ], "pageInfo": {"hasNextPage": False}}},
+    ])
+    vms = [vm for page in [page async for page in client.iter_virtual_machines(exposed_only=True)] for vm in page]
+    assert [vm["id"] for vm in vms] == ["vm-1", "vm-2"]
+    assert vms[0]["subscriptionExternalId"] == "account-1"
+    assert vms[0]["ipAddresses"] == ["10.0.0.1"]
+    assert vms[1]["hasWideInternetExposure"] is True
+    assert client.virtual_machines_total_count == 2
+    assert client.graphql.await_args_list[0].args[1]["filterBy"]["isAccessibleFromInternet"] == {"equals": True}
+    assert client.graphql.await_args_list[1].args[1]["after"] == "next"
+
+
+@pytest.mark.asyncio
+async def test_vm_inventory_imports_assets_without_vulnerability_findings():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, autoflush=False) as db:
+        org = Organization(name="Wiz VM test")
+        db.add(org)
+        db.flush()
+        integration = WizIntegration(
+            organization_id=org.id, connection_name="Wiz", api_endpoint="https://api.us17.app.wiz.io/graphql",
+            client_id_encrypted="test", client_secret_encrypted="test",
+            import_assets=True, internet_exposed_only=True,
+        )
+        db.add(integration)
+        db.commit()
+
+        class Client:
+            virtual_machines_total_count = 2
+
+            async def iter_virtual_machines(self, *, exposed_only):
+                assert exposed_only is True
+                yield [{"id": "vm-1", "name": "VM one", "providerUniqueId": "i-1",
+                        "cloudPlatform": "AWS", "operatingSystem": "LINUX",
+                        "ipAddresses": ["10.0.0.1"], "hasLimitedInternetExposure": True}]
+                yield [{"id": "vm-2", "name": "VM two", "providerUniqueId": "i-2",
+                        "cloudPlatform": "Azure", "ipAddresses": [], "hasWideInternetExposure": True}]
+
+        stats = _Stats()
+        await _sync_virtual_machines(db, integration, Client(), stats)
+        await _sync_virtual_machines(db, integration, Client(), _Stats())
+        assets = db.query(Asset).order_by(Asset.value).all()
+        assert [asset.value for asset in assets] == ["i-1", "i-2"]
+        assert all(asset.is_public for asset in assets)
+        assert assets[0].ip_addresses == ["10.0.0.1"]
+        assert stats.virtual_machines_seen == stats.virtual_machines_total_count == 2
+        assert stats.assets_created == 2
+    engine.dispose()
 
 
 def test_wiz_vm_and_exposure_classification():
