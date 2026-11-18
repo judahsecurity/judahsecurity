@@ -30,6 +30,19 @@ func TestLookupHostSignals(t *testing.T) {
 	}
 }
 
+func TestLookupHostServicesDeriveAbsence(t *testing.T) {
+	s := AssetSignals{Host: map[string]string{"service._complete": "true", "service.spooler.running": "false"}}
+	if v, ok := s.Lookup("host.service.spooler.running"); !ok || v != "false" {
+		t.Fatalf("stopped service: got (%q,%v)", v, ok)
+	}
+	if v, ok := s.Lookup("host.service.w3svc.running"); !ok || v != "false" {
+		t.Fatalf("absent service with a complete list should be not running: got (%q,%v)", v, ok)
+	}
+	if _, ok := (AssetSignals{Host: map[string]string{}}).Lookup("host.service.w3svc.running"); ok {
+		t.Fatal("without a complete list an absent service must stay unknown")
+	}
+}
+
 func TestLookupWithEvidenceUsesProbePrefix(t *testing.T) {
 	s := AssetSignals{
 		Host: map[string]string{"sshd.logingracetime": "120"},

@@ -152,7 +152,8 @@ class ExternalService:
     PDCP = "pdcp"                  # ProjectDiscovery Cloud Platform (vulnx, Nuclei templates)
     NVD = "nvd"                    # NVD API key (raises rate limits)
     SHADOWSERVER = "shadowserver"  # Org-scoped Reports API key + HMAC secret
-    HOST_SSH = "host_ssh"          # Read-only SSH login for host exploitability checks
+    HOST_SSH = "host_ssh"          # Read-only SSH login for host exploitability checks ("host_ssh:<label>" for more)
+    HOST_WINRM = "host_winrm"      # Read-only WinRM login for Windows host checks ("host_winrm:<label>" for more)
 
     # LLM providers (bring-your-own-key). Keys are encrypted at rest and are
     # ONLY ever handed to the model SDK client at construction time — they must

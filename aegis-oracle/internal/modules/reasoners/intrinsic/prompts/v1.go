@@ -98,6 +98,23 @@ condition can be confirmed or ruled out:
                                   in seconds; "0" disables the timeout)
   host.sysctl.<key>               e.g. host.sysctl.kernel.unprivileged_userns_clone
   host.listening.tcp              comma-separated listening TCP ports
+  host.os.platform                "linux" | "windows" | "mac"
+
+Windows hosts additionally provide:
+
+  host.os.build                   CurrentBuild.UBR, e.g. "20348.2849" — the
+                                  reliable patch level; prefer version_lte on
+                                  it over hotfix presence for Windows CVEs
+  host.service.<name>.running     "true" | "false" (service name, lowercase,
+                                  e.g. host.service.spooler.running)
+  host.hotfix.<kb>.installed      "true" when listed (e.g. host.hotfix.kb5034441.installed);
+                                  absence is not evidence, superseded KBs drop out
+  host.windows.smb1_enabled       "true" | "false"
+  host.windows.rdp_enabled        "true" | "false"
+  host.windows.rdp_nla_required   "true" | "false"
+
+Process names drop ".exe" on Windows, so host.process.<name>.running uses
+the same name on every platform.
 
 Write host preconditions so the match is decisive in both directions. For
 "LoginGraceTime must be non-zero" use match_kind "regex" with match_value

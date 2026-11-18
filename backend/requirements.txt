@@ -99,3 +99,4 @@ jinja2>=3.1.0
 
 # Read-only SSH host checks (app/services/host_evidence_service.py)
 paramiko>=3.4,<4
+pywinrm>=0.4.3,<0.6

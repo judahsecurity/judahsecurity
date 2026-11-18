@@ -25,16 +25,27 @@ A probe that can't run is recorded as an error, never as a negative: Oracle
 then reports "could not check <signal>: <why>" and the finding is not
 called safe.
 
-Credential: an ``APIConfig`` row with ``service_name="host_ssh"``:
-  api_user            SSH username
-  api_key (encrypted) private key (PEM/OpenSSH) or password
-  config              {"auth": "key" | "password", "port": 22,
-                       "targets": ["10.20.0.0/16", "*.corp.example"],
-                       "known_hosts": "<known_hosts lines>",
-                       "trust_on_first_use": false, "sudo": true}
-Only assets matching ``targets`` are ever contacted. Host keys are verified
-against ``known_hosts``; unknown keys are rejected unless
-``trust_on_first_use`` is set, which pins the first key per asset.
+Credential profiles: ``APIConfig`` rows, one per profile, so different server
+groups can use different accounts:
+
+  service_name  "host_ssh" / "host_ssh:<label>"      Linux, macOS (SSH)
+                "host_winrm" / "host_winrm:<label>"  Windows (WinRM, see
+                                                      winrm_host_evidence.py)
+  api_user      username ("DOMAIN\\user" or "user@domain" for WinRM)
+  api_key       private key (SSH) or password (encrypted at rest)
+  config        {"targets": ["10.20.0.0/16", "*.corp.example"],  # required
+                 "priority": 100,                                  # lower wins
+                 # SSH:   "auth": "key"|"password", "port": 22,
+                 #        "known_hosts": "...", "trust_on_first_use": false, "sudo": true
+                 # WinRM: "transport": "ntlm"|"kerberos", "port": 5986, "https": true,
+                 #        "ca_cert": "<PEM>"}
+
+An asset is checked with the first active profile (by priority, then id)
+whose ``targets`` match it; nothing outside every profile's targets is ever
+contacted. SSH host keys are verified against ``known_hosts``; unknown keys
+are rejected unless ``trust_on_first_use`` pins the first key per asset.
+WinRM uses HTTPS with certificate validation unless the profile turns HTTPS
+off, in which case NTLM/Kerberos message encryption is forced.
 """
 
 from __future__ import annotations
@@ -71,8 +82,18 @@ _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._:+@-]*$")
 # ── Parsers (pure; unit-tested) ───────────────────────────────────────────────
 
 def parse_os_release(out: str) -> Dict[str, str]:
+    """/etc/os-release, or macOS ``sw_vers`` ("ProductName: macOS")."""
     facts: Dict[str, str] = {}
     for line in out.splitlines():
+        if ":" in line and "=" not in line:
+            k, _, v = line.partition(":")
+            k, v = k.strip(), v.strip()
+            if k == "ProductName":
+                facts["os.id"] = "macos" if "mac" in v.lower() else v.lower()
+                facts["os.platform"] = "mac"
+            elif k == "ProductVersion":
+                facts["os.version_id"] = v
+            continue
         k, sep, v = line.partition("=")
         if not sep:
             continue
@@ -167,6 +188,8 @@ def parse_listening(out: str) -> Dict[str, str]:
     for line in out.splitlines():
         for token in line.split():
             host, sep, port = token.rpartition(":")
+            if not (sep and host and port.isdigit()) and "LISTEN" in line:
+                host, sep, port = token.rpartition(".")  # macOS netstat: "*.22", "127.0.0.1.631"
             if sep and host and port.isdigit():
                 if 0 < int(port) < 65536:
                     ports.add(int(port))
@@ -186,7 +209,7 @@ class Probe:
 _PATH = 'PATH="$PATH:/usr/sbin:/sbin"'
 
 PROBES: Tuple[Probe, ...] = (
-    Probe("os", "cat /etc/os-release", parse_os_release),
+    Probe("os", "cat /etc/os-release 2>/dev/null || sw_vers", parse_os_release),
     Probe("kernel", "uname -r", parse_uname),
     Probe("process", "ps -eo comm=,args=", parse_processes, complete_list=True),
     Probe(
@@ -208,53 +231,88 @@ PROBES: Tuple[Probe, ...] = (
         optional=True,
     ),
     Probe("sysctl", f"{_PATH}; sysctl -a 2>/dev/null", parse_sysctl, optional=True),
-    Probe("listening", f"{_PATH}; ss -Hltn 2>/dev/null || netstat -ltn 2>/dev/null", parse_listening, optional=True),
+    Probe("listening", f"{_PATH}; ss -Hltn 2>/dev/null || netstat -ltn 2>/dev/null || netstat -an -p tcp | grep LISTEN",
+          parse_listening, optional=True),
 )
 
 
 # ── Credential + scope ───────────────────────────────────────────────────────
 
+HOST_WINRM_SERVICE = "host_winrm"
+
+
 @dataclass
 class HostCredential:
     username: str
     secret: str
-    auth: str = "key"  # key | password
+    auth: str = "key"  # key | password (SSH)
     port: int = 22
     targets: List[str] = field(default_factory=list)
     known_hosts: str = ""
     trust_on_first_use: bool = False
     use_sudo: bool = True
+    kind: str = "ssh"  # ssh | winrm
+    name: str = HOST_SSH_SERVICE
+    priority: int = 100
+    transport: str = "ntlm"  # WinRM: ntlm | kerberos
+    https: bool = True  # WinRM
+    ca_cert: str = ""  # WinRM: PEM to validate the listener certificate
 
     @classmethod
     def from_api_config(cls, cfg: Any) -> "HostCredential":
         conf = cfg.config or {}
+        service = str(getattr(cfg, "service_name", "") or HOST_SSH_SERVICE)
+        kind = "winrm" if service.split(":", 1)[0] == HOST_WINRM_SERVICE else "ssh"
         return cls(
             username=cfg.api_user or "",
             secret=cfg.get_api_key() or "",
             auth=str(conf.get("auth") or "key").lower(),
-            port=int(conf.get("port") or 22),
+            port=int(conf.get("port") or (5986 if kind == "winrm" and conf.get("https", True) else
+                                          5985 if kind == "winrm" else 22)),
             targets=[str(t).strip() for t in conf.get("targets") or [] if str(t).strip()],
             known_hosts=str(conf.get("known_hosts") or ""),
             trust_on_first_use=bool(conf.get("trust_on_first_use", False)),
             use_sudo=bool(conf.get("sudo", True)),
+            kind=kind,
+            name=service,
+            priority=int(conf.get("priority", 100)),
+            transport=str(conf.get("transport") or "ntlm").lower(),
+            https=bool(conf.get("https", True)),
+            ca_cert=str(conf.get("ca_cert") or ""),
         )
+
+
+def _is_profile(service_name: str) -> bool:
+    head = (service_name or "").split(":", 1)[0]
+    return head in (HOST_SSH_SERVICE, HOST_WINRM_SERVICE)
+
+
+def load_credentials(db: Any, organization_id: int) -> List[HostCredential]:
+    """Active credential profiles for the org, in match order."""
+    from app.models.api_config import APIConfig
+
+    rows = (
+        db.query(APIConfig)
+        .filter(APIConfig.organization_id == organization_id, APIConfig.is_active == True)  # noqa: E712
+        .order_by(APIConfig.id.asc())
+        .all()
+    )
+    creds = [HostCredential.from_api_config(r) for r in rows
+             if _is_profile(r.service_name) and r.api_user and r.api_key_encrypted]
+    return sorted(creds, key=lambda c: c.priority)  # stable: ties keep id order
 
 
 def load_credential(db: Any, organization_id: int) -> Optional[HostCredential]:
-    from app.models.api_config import APIConfig
+    """First profile (kept for callers that only need one)."""
+    creds = load_credentials(db, organization_id)
+    return creds[0] if creds else None
 
-    cfg = (
-        db.query(APIConfig)
-        .filter(
-            APIConfig.organization_id == organization_id,
-            APIConfig.service_name == HOST_SSH_SERVICE,
-            APIConfig.is_active == True,  # noqa: E712
-        )
-        .first()
-    )
-    if cfg is None or not cfg.api_user or not cfg.api_key_encrypted:
-        return None
-    return HostCredential.from_api_config(cfg)
+
+def credential_for_asset(creds: Iterable[HostCredential], asset: Any) -> Optional[HostCredential]:
+    for cred in creds or []:
+        if in_target_scope(asset, cred.targets):
+            return cred
+    return None
 
 
 def asset_address(asset: Any) -> str:
@@ -385,11 +443,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def run_probes(runner: CommandRunner, *, use_sudo: bool = True) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+def run_probes(
+    runner: CommandRunner, *, use_sudo: bool = True, catalog: Optional[Tuple[Probe, ...]] = None
+) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
     """Run every probe; a failing probe is recorded, the rest still run."""
     facts: Dict[str, str] = {}
     probes: Dict[str, Dict[str, Any]] = {}
-    for probe in PROBES:
+    for probe in (catalog if catalog is not None else PROBES):
         command = probe.command if use_sudo else probe.command.replace("sudo -n sshd -T 2>/dev/null || ", "")
         try:
             status, out, err = runner.run(command)
@@ -399,7 +459,12 @@ def run_probes(runner: CommandRunner, *, use_sudo: bool = True) -> Tuple[Dict[st
         if "__absent__" in out and probe.optional:
             probes[probe.prefix] = {"ok": True, "absent": True, "command": command}
             continue
-        parsed = probe.parse(out) if "__unsupported__" not in out else {}
+        try:
+            parsed = probe.parse(out) if "__unsupported__" not in out else {}
+        except Exception as e:
+            probes[probe.prefix] = {"ok": False, "error": f"could not parse output: {type(e).__name__}: {e}"[:300],
+                                    "command": command}
+            continue
         # Optional probes (sysctl, ss) can exit non-zero over a few unreadable
         # entries while still printing what we need.
         if status != 0 and not (probe.optional and parsed):
@@ -426,8 +491,12 @@ def collect_host_facts(
     the result records the failure so Oracle can say "could not check"."""
     address = asset_address(asset)
     previous = _stored(asset)
+    winrm = cred.kind == "winrm"
+    if winrm:
+        from app.services import winrm_host_evidence as win
     record: Dict[str, Any] = {
-        "collector": COLLECTOR_SSH,
+        "collector": win.COLLECTOR_WINRM if winrm else COLLECTOR_SSH,
+        "profile": cred.name,
         "observed_at": _now().isoformat(),
         "target": address,
         "facts": {},
@@ -436,11 +505,12 @@ def collect_host_facts(
     if not in_target_scope(asset, cred.targets):
         record["error"] = "asset is not in the host-check target scope"
         return record
-    factory = runner_factory or (lambda addr, c, pin: SSHRunner(addr, c, pin))
+    default = (lambda addr, c, pin: win.WinRMRunner(addr, c, pin)) if winrm else (lambda addr, c, pin: SSHRunner(addr, c, pin))
+    factory = runner_factory or default
     runner: Optional[CommandRunner] = None
     try:
-        runner = factory(address, cred, previous.get("host_key", ""))
-        facts, probes = run_probes(runner, use_sudo=cred.use_sudo)
+        runner = factory(address, cred, "" if winrm else previous.get("host_key", ""))
+        facts, probes = run_probes(runner, use_sudo=cred.use_sudo, catalog=win.WIN_PROBES if winrm else PROBES)
         record["facts"], record["probes"] = facts, probes
         if runner.host_key_fingerprint:
             record["host_key"] = runner.host_key_fingerprint
@@ -696,32 +766,35 @@ def assets_needing_host_checks(db: Any, organization_id: int, limit: int = 200) 
 
 
 def collector_for_asset(
-    db: Any, asset: Any, cred: Optional[HostCredential], **kw: Any
+    db: Any, asset: Any, creds: Any, **kw: Any
 ) -> Tuple[str, Optional[Callable[[Any], Dict[str, Any]]]]:
-    """Pick how to check an asset: Falcon sensor when the asset is a Falcon
-    host with host evidence enabled (no inbound login), else SSH when the
-    asset is in the credential's target scope."""
+    """Pick how to check an asset: the Falcon sensor when the asset is a
+    Falcon host with host evidence enabled (no login needed), else the first
+    credential profile (SSH or WinRM) whose targets match it."""
     from app.services import falcon_host_evidence as falcon
 
     link = falcon.falcon_link_for(db, asset)
     if link is not None:
         integration, aid = link
         return "falcon", falcon.collector_for(integration, aid, client_factory=kw.get("falcon_client_factory"))
-    if cred is not None and in_target_scope(asset, cred.targets):
+    if isinstance(creds, HostCredential):
+        creds = [creds]
+    cred = credential_for_asset(creds or [], asset)
+    if cred is not None:
         factory = kw.get("runner_factory")
-        return "ssh", (lambda a: collect_host_facts(a, cred, runner_factory=factory))
+        return cred.kind, (lambda a: collect_host_facts(a, cred, runner_factory=factory))
     return "", None
 
 
 def run_pending_host_checks(db: Any, organization_id: int, *, limit: int = 200, **kw: Any) -> Dict[str, Any]:
-    cred = load_credential(db, organization_id)
+    creds = load_credentials(db, organization_id)
     assets = assets_needing_host_checks(db, organization_id, limit=limit)
     summary: Dict[str, Any] = {"assets": [], "checked": 0, "skipped": 0, "failed": 0}
     for asset in assets:
-        kind, collector = collector_for_asset(db, asset, cred, **kw)
+        kind, collector = collector_for_asset(db, asset, creds, **kw)
         if collector is None:
             result = {"asset_id": asset.id, "skipped": "no host-check collector: not a Falcon host with host "
-                                                         "evidence enabled, and not in the SSH target scope"}
+                                                         "evidence enabled, and no credential profile targets it"}
         else:
             result = check_asset(db, asset, collector=collector)
         summary["assets"].append(result)
@@ -737,7 +810,7 @@ def run_pending_host_checks(db: Any, organization_id: int, *, limit: int = 200, 
 
 
 __all__ = [
-    "HOST_SSH_SERVICE", "PROBES", "HostCredential", "HostCheckError", "CommandRunner",
+    "HOST_SSH_SERVICE", "HOST_WINRM_SERVICE", "PROBES", "load_credentials", "credential_for_asset", "HostCredential", "HostCheckError", "CommandRunner",
     "parse_os_release", "parse_uname", "parse_processes", "parse_sshd_t", "parse_packages",
     "parse_sysctl", "parse_listening", "run_probes", "collect_host_facts", "store_host_facts",
     "ingest_host_facts", "host_signals_for_oracle", "pending_host_checks", "reassess_asset",

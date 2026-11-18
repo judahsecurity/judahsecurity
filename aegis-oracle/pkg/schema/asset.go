@@ -327,6 +327,9 @@ var HostSignalPaths = []string{
 	"host.package.<name>", "host.package.<name>.installed",
 	"host.process.<name>.running", "host.process.<name>.args",
 	"host.sshd.<keyword>", "host.sysctl.<key>", "host.listening.tcp",
+	"host.os.platform", "host.os.build", "host.service.<name>.running",
+	"host.hotfix.<kb>.installed", "host.windows.smb1_enabled",
+	"host.windows.rdp_enabled", "host.windows.rdp_nla_required",
 }
 
 // hostListCompleteKey marks that a probe returned the full list for a
@@ -341,10 +344,12 @@ func (s AssetSignals) lookupHost(key string) (string, bool) {
 		return v, true
 	}
 	// Derived absence: only when the probe enumerated the whole family.
-	// "package.foo.installed" / "process.foo.running" → "false".
+	// "package.foo.installed" / "process.foo.running" /
+	// "service.foo.running" → "false".
 	for _, family := range []struct{ prefix, suffix string }{
 		{"package.", ".installed"},
 		{"process.", ".running"},
+		{"service.", ".running"},
 	} {
 		if strings.HasPrefix(key, family.prefix) && strings.HasSuffix(key, family.suffix) &&
 			len(key) > len(family.prefix)+len(family.suffix) {

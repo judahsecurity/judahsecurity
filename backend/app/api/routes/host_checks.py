@@ -15,8 +15,10 @@ affected findings:
 Collectors, in order of preference:
   falcon  the asset is a Falcon host and its CrowdStrike integration has
           ``collect_host_evidence`` on (app/services/falcon_host_evidence.py)
-  ssh     the asset matches the org's ``host_ssh`` credential ``targets``
-          (fixed read-only probe catalog; app/services/host_evidence_service.py)
+  ssh     the first credential profile whose ``targets`` match the asset:
+  winrm   ``host_ssh[:label]`` (Linux/macOS) or ``host_winrm[:label]`` (Windows),
+          each running a fixed read-only probe catalog
+          (app/services/host_evidence_service.py, winrm_host_evidence.py)
 """
 
 import logging
@@ -82,7 +84,7 @@ def pending(
 ) -> Dict[str, Any]:
     """Open CVE findings with preconditions only a host check can settle."""
     _check_org(current_user, organization_id)
-    cred = hes.load_credential(db, organization_id)
+    creds = hes.load_credentials(db, organization_id)
     rows = (
         db.query(Vulnerability)
         .join(Asset, Vulnerability.asset_id == Asset.id)
@@ -96,7 +98,8 @@ def pending(
         if not tasks:
             continue
         last = (v.asset.metadata_ or {}).get("host_facts") if isinstance(v.asset.metadata_, dict) else None
-        collector, _ = hes.collector_for_asset(db, v.asset, cred)
+        collector, _ = hes.collector_for_asset(db, v.asset, creds)
+        profile = hes.credential_for_asset(creds, v.asset)
         items.append({
             "vulnerability_id": v.id,
             "cve_id": v.cve_id,
@@ -104,12 +107,13 @@ def pending(
             "asset": v.asset.value,
             "signals": [t.get("expected_signal_path") for t in tasks],
             "collector": collector or None,  # falcon | ssh | None (nothing can check it)
-            "in_target_scope": bool(cred and hes.in_target_scope(v.asset, cred.targets)),
+            "profile": profile.name if profile else None,
+            "in_target_scope": profile is not None,
             "last_check": {"observed_at": last.get("observed_at"), "error": last.get("error")} if last else None,
         })
     return {
-        "credential_configured": cred is not None,
-        "targets": cred.targets if cred else [],
+        "credential_configured": bool(creds),
+        "profiles": [{"name": c.name, "kind": c.kind, "priority": c.priority, "targets": c.targets} for c in creds],
         "pending": items,
     }
 
@@ -150,11 +154,11 @@ def collect(
     """Check one asset now and return the probe results and the before/after
     verdict for each open CVE finding on it."""
     asset = _asset_or_404(db, asset_id, current_user)
-    kind, collector = hes.collector_for_asset(db, asset, hes.load_credential(db, asset.organization_id))
+    kind, collector = hes.collector_for_asset(db, asset, hes.load_credentials(db, asset.organization_id))
     if collector is None:
         raise HTTPException(status_code=400, detail=(
             "nothing can check this asset: enable host evidence on its CrowdStrike integration, or add it to the "
-            f"'{hes.HOST_SSH_SERVICE}' credential's targets"))
+            f"targets of a '{hes.HOST_SSH_SERVICE}' or '{hes.HOST_WINRM_SERVICE}' credential profile"))
     return hes.check_asset(db, asset, collector=collector)
 
 

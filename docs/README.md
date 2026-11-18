@@ -10,6 +10,7 @@ Technical docs for the Judah Security ASM platform, AI agent, and Aegis tooling.
 | [AEGIS_ARCHITECTURE.md](./AEGIS_ARCHITECTURE.md) | Praetorian-competitive agent architecture (Joshua / fireteam / Solomon) |
 | [AEGIS_PANTHEON.md](./AEGIS_PANTHEON.md) | Judah / biblical epithets for specialists |
 | [PRAETORIAN_ARSENAL_PARITY.md](./PRAETORIAN_ARSENAL_PARITY.md) | Tool arsenal gap matrix vs Praetorian-style 118-capability slide |
+| [HOST_EVIDENCE_COLLECTION.md](./HOST_EVIDENCE_COLLECTION.md) | **Host evidence** for exploitability checks — Falcon, SSH/WinRM credential profiles, push |
 | [HARNESS.md](./HARNESS.md) | Pointer to **Aegis Harness** (batch + detection benchmarks) |
 | [../harness/README.md](../harness/README.md) | Full harness guide (install, CI gates, ground-truth tags) |
 | [../aegis-vanguard/README.md](../aegis-vanguard/README.md) | Autonomous ReACT pentester (ingest + hunters) |
