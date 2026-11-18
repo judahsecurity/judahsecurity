@@ -25,24 +25,38 @@ safe.
 
 ## Credential profiles
 
-Each profile is an API configuration on the organization (Integrations →
-API keys, or `POST /api/v1/external-discovery/configs/{organization_id}`):
+Manage them on **Integrations → Host credentials for agentless checks**
+(API: `/api/v1/host-credentials`). Each profile has:
 
-| Field | SSH (`host_ssh` or `host_ssh:<label>`) | WinRM (`host_winrm` or `host_winrm:<label>`) |
-| --- | --- | --- |
-| `api_user` | username | `CORP\svc-judah` or `svc-judah@corp.example` |
-| `api_key` | private key (unencrypted ed25519/ECDSA/RSA) or password | password |
-| `config.targets` | **required**: CIDRs and hostname globs | **required** |
-| `config.priority` | lower is tried first (default 100) | same |
-| other `config` | `auth` (`key`/`password`), `port` (22), `known_hosts`, `trust_on_first_use` (false), `sudo` (true) | `transport` (`ntlm`/`kerberos`), `port` (5986), `https` (true), `ca_cert` (PEM) |
+| Field | Notes |
+| --- | --- |
+| Name, protocol | SSH (Linux, macOS) or WinRM (Windows) |
+| Targets | **Required.** CIDRs (no broader than /8, or /32 for IPv6) and hostname patterns like `*.prod.corp.example`. Only matching servers are contacted. |
+| Priority | Lower is tried first. A server uses the first enabled profile whose targets match it. |
+| Username | `judah-probe`, `CORP\svc-judah`. May be left blank for CyberArk, which returns the account name. |
+| Secret | Stored in Judah (encrypted), **or** fetched from a password vault at check time |
+| SSH options | key or password, port, known host keys, `sudo -n sshd -T`, trust-on-first-use |
+| WinRM options | NTLM or Kerberos, port, HTTPS (default) and the listener's CA certificate |
 
-Use labels to split accounts by environment, e.g. `host_winrm:windows-prod`
-for `10.40.0.0/16` and `host_ssh:linux-dmz` for `*.dmz.corp.example`. An
-asset is checked with the first profile, by priority, whose targets match
-it. Assets outside every profile's targets are never contacted.
+Secrets are write-only: the screen and API only show whether one is set.
+**Test credential** fetches the secret; **Test login** also logs in to one
+asset in the profile's targets and logs straight out, running nothing.
 
-Secrets are encrypted at rest with Judah's API-key cipher. Rotate them by
-re-saving the profile.
+Profiles created earlier as `host_ssh` / `host_winrm` API keys keep working.
+
+## Password vaults
+
+So that Judah doesn't hold server credentials, a profile can read its secret
+from the customer's vault each time a check runs. Judah only reads; nothing
+in the vault changes. If the vault can't be reached or refuses, the check
+fails with that reason ("could not fetch the credential…") and findings stay
+"could not check".
+
+| Vault | Connection settings | Profile points at | Judah needs |
+| --- | --- | --- | --- |
+| HashiCorp Vault | `https://` address, optional namespace, KV mount and version, optional CA | secret path and field | A token, or AppRole (role ID + secret ID), with a policy that can `read` only the host-check paths |
+| AWS Secrets Manager | region, optional role ARN and external ID | secret name or ARN, optional JSON field and version stage | `secretsmanager:GetSecretValue` on those secrets. Judah uses its own AWS identity (e.g. the EC2 instance role) and assumes the customer's role if set; no access keys are stored. |
+| CyberArk Central Credential Provider | `https://` CCP URL, Application ID, optional CA and client certificate | Safe and object | An Application ID allowed to retrieve those accounts, authenticated by allowed machines and/or the client certificate (its key is stored encrypted) |
 
 ### Linux and macOS (SSH)
 

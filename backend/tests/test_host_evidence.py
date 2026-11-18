@@ -296,6 +296,7 @@ def db():
     from app.models.asset import Asset
     from app.models.business_application import BusinessApplication
     from app.models.crowdstrike_integration import CrowdStrikeAssetLink, CrowdStrikeIntegration
+    from app.models.host_credential import HostCredentialProfile, HostSecretStore
     from app.models.netblock import Netblock
     from app.models.organization import Organization
     from app.models.port_service import PortService
@@ -306,7 +307,7 @@ def db():
     Base.metadata.create_all(engine, tables=[Organization.__table__, Netblock.__table__, BusinessApplication.__table__,
                                              Asset.__table__, Vulnerability.__table__, APIConfig.__table__,
                                              PortService.__table__, Technology.__table__, asset_technologies,
-                                             CrowdStrikeIntegration.__table__, CrowdStrikeAssetLink.__table__])
+                                             CrowdStrikeIntegration.__table__, CrowdStrikeAssetLink.__table__, HostSecretStore.__table__, HostCredentialProfile.__table__])
     s = sessionmaker(bind=engine)()
     s.add(Organization(id=1, name="Acme"))
     cfg = APIConfig(organization_id=1, service_name="host_ssh", api_user="judah-probe",

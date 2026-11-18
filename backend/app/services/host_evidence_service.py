@@ -50,6 +50,7 @@ off, in which case NTLM/Kerberos message encryption is forced.
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import hashlib
 import io
@@ -257,6 +258,49 @@ class HostCredential:
     transport: str = "ntlm"  # WinRM: ntlm | kerberos
     https: bool = True  # WinRM
     ca_cert: str = ""  # WinRM: PEM to validate the listener certificate
+    profile_id: Optional[int] = None  # HostCredentialProfile row, when not a legacy APIConfig
+    # Fetches (username, secret) from a password vault at check time.
+    secret_loader: Optional[Callable[[], Tuple[str, str]]] = field(default=None, repr=False, compare=False)
+
+    def with_secret(self) -> "HostCredential":
+        """A copy with the secret filled in, fetching it from the vault if needed."""
+        if self.secret_loader is None:
+            return self
+        username, secret = self.secret_loader()
+        return dataclasses.replace(self, username=username, secret=secret, secret_loader=None)
+
+    @classmethod
+    def from_profile(cls, profile: Any, store: Any = None) -> "HostCredential":
+        from app.services.secret_stores import resolve_profile_secret
+
+        opts = dict(profile.options or {})
+        winrm = profile.kind == "winrm"
+        https = bool(opts.get("https", True))
+        cache: Dict[str, Tuple[str, str]] = {}
+
+        def load() -> Tuple[str, str]:  # once per run, however many hosts use it
+            if "v" not in cache:
+                cache["v"] = resolve_profile_secret(profile, store)
+            return cache["v"]
+
+        return cls(
+            username=profile.username or "",
+            secret="",
+            auth=str(opts.get("auth") or "key").lower(),
+            port=int(opts.get("port") or (5986 if winrm and https else 5985 if winrm else 22)),
+            targets=[str(t).strip() for t in profile.targets or [] if str(t).strip()],
+            known_hosts=str(opts.get("known_hosts") or ""),
+            trust_on_first_use=bool(opts.get("trust_on_first_use", False)),
+            use_sudo=bool(opts.get("sudo", True)),
+            kind="winrm" if winrm else "ssh",
+            name=profile.name,
+            priority=int(profile.priority if profile.priority is not None else 100),
+            transport=str(opts.get("transport") or "ntlm").lower(),
+            https=https,
+            ca_cert=str(opts.get("ca_cert") or ""),
+            profile_id=profile.id,
+            secret_loader=load,
+        )
 
     @classmethod
     def from_api_config(cls, cfg: Any) -> "HostCredential":
@@ -288,8 +332,22 @@ def _is_profile(service_name: str) -> bool:
 
 
 def load_credentials(db: Any, organization_id: int) -> List[HostCredential]:
-    """Active credential profiles for the org, in match order."""
+    """Active credential profiles for the org, in match order: profiles from
+    the credential-profile screen, then legacy ``host_ssh``/``host_winrm``
+    API configs, sorted by priority. Vault secrets are not fetched here."""
     from app.models.api_config import APIConfig
+    from app.models.host_credential import HostCredentialProfile, HostSecretStore
+
+    profiles = (
+        db.query(HostCredentialProfile)
+        .filter(HostCredentialProfile.organization_id == organization_id,
+                HostCredentialProfile.is_active == True)  # noqa: E712
+        .order_by(HostCredentialProfile.id.asc())
+        .all()
+    )
+    store_ids = {p.secret_store_id for p in profiles if p.secret_store_id}
+    stores = {s.id: s for s in db.query(HostSecretStore).filter(HostSecretStore.id.in_(store_ids)).all()} if store_ids else {}
+    from_profiles = [HostCredential.from_profile(p, stores.get(p.secret_store_id)) for p in profiles]
 
     rows = (
         db.query(APIConfig)
@@ -297,9 +355,9 @@ def load_credentials(db: Any, organization_id: int) -> List[HostCredential]:
         .order_by(APIConfig.id.asc())
         .all()
     )
-    creds = [HostCredential.from_api_config(r) for r in rows
-             if _is_profile(r.service_name) and r.api_user and r.api_key_encrypted]
-    return sorted(creds, key=lambda c: c.priority)  # stable: ties keep id order
+    legacy = [HostCredential.from_api_config(r) for r in rows
+              if _is_profile(r.service_name) and r.api_user and r.api_key_encrypted]
+    return sorted(from_profiles + legacy, key=lambda c: c.priority)  # stable: ties keep order
 
 
 def load_credential(db: Any, organization_id: int) -> Optional[HostCredential]:
@@ -504,6 +562,13 @@ def collect_host_facts(
     }
     if not in_target_scope(asset, cred.targets):
         record["error"] = "asset is not in the host-check target scope"
+        return record
+    from app.services.secret_stores import SecretStoreError
+
+    try:
+        cred = cred.with_secret()
+    except SecretStoreError as e:
+        record["error"] = f"could not fetch the credential for profile {cred.name!r}: {e}"
         return record
     default = (lambda addr, c, pin: win.WinRMRunner(addr, c, pin)) if winrm else (lambda addr, c, pin: SSHRunner(addr, c, pin))
     factory = runner_factory or default

@@ -467,6 +467,65 @@ export interface TenableSyncResult {
   ports_created: number;
 }
 
+// ── Host credential profiles (agentless host checks) ──────────────────────────
+
+export type SecretStoreProvider = 'hashicorp_vault' | 'aws_secrets_manager' | 'cyberark_ccp';
+
+export interface HostSecretStore {
+  id: number;
+  name: string;
+  provider: SecretStoreProvider;
+  config: Record<string, string>;
+  has_secret: boolean;
+  is_active: boolean;
+  in_use: number;
+  last_tested_at?: string | null;
+  last_test_ok?: boolean | null;
+  last_error?: string | null;
+}
+
+export interface HostCredentialProfile {
+  id: number;
+  name: string;
+  kind: 'ssh' | 'winrm';
+  username: string;
+  secret_source: 'stored' | 'store';
+  has_secret: boolean;
+  secret_store_id?: number | null;
+  secret_store_name?: string | null;
+  secret_store_provider?: SecretStoreProvider | null;
+  secret_ref: Record<string, string>;
+  targets: string[];
+  priority: number;
+  options: Record<string, string | number | boolean>;
+  is_active: boolean;
+  last_tested_at?: string | null;
+  last_test_ok?: boolean | null;
+  last_error?: string | null;
+}
+
+export type HostSecretStoreInput = {
+  name: string;
+  provider: SecretStoreProvider;
+  config: Record<string, string>;
+  secret?: string;
+  is_active?: boolean;
+};
+
+export type HostCredentialProfileInput = {
+  name: string;
+  kind: 'ssh' | 'winrm';
+  username: string;
+  secret_source: 'stored' | 'store';
+  secret?: string;
+  secret_store_id?: number | null;
+  secret_ref: Record<string, string>;
+  targets: string[];
+  priority: number;
+  options: Record<string, string | number | boolean>;
+  is_active: boolean;
+};
+
 export interface CrowdStrikeIntegration {
   id: number;
   organization_id: number;
@@ -3352,6 +3411,51 @@ class ApiClient {
 
   async syncCrowdStrikeIntegration(id: number): Promise<CrowdStrikeSyncResult> {
     const response = await this.client.post(`/integrations/crowdstrike/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Host credential profiles ───────────────────────────────────────────────
+
+  async getHostCredentials(): Promise<{ stores: HostSecretStore[]; profiles: HostCredentialProfile[] }> {
+    const response = await this.client.get('/host-credentials');
+    return response.data;
+  }
+
+  async createHostSecretStore(payload: HostSecretStoreInput): Promise<HostSecretStore> {
+    const response = await this.client.post('/host-credentials/stores', payload);
+    return response.data;
+  }
+
+  async updateHostSecretStore(id: number, payload: Partial<Omit<HostSecretStoreInput, 'provider'>>): Promise<HostSecretStore> {
+    const response = await this.client.put(`/host-credentials/stores/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteHostSecretStore(id: number): Promise<void> {
+    await this.client.delete(`/host-credentials/stores/${id}`);
+  }
+
+  async testHostSecretStore(id: number): Promise<{ ok: boolean; message: string }> {
+    const response = await this.client.post(`/host-credentials/stores/${id}/test`);
+    return response.data;
+  }
+
+  async createHostCredentialProfile(payload: HostCredentialProfileInput): Promise<HostCredentialProfile> {
+    const response = await this.client.post('/host-credentials/profiles', payload);
+    return response.data;
+  }
+
+  async updateHostCredentialProfile(id: number, payload: Partial<Omit<HostCredentialProfileInput, 'kind'>>): Promise<HostCredentialProfile> {
+    const response = await this.client.put(`/host-credentials/profiles/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteHostCredentialProfile(id: number): Promise<void> {
+    await this.client.delete(`/host-credentials/profiles/${id}`);
+  }
+
+  async testHostCredentialProfile(id: number, assetId?: number): Promise<{ ok: boolean; message: string }> {
+    const response = await this.client.post(`/host-credentials/profiles/${id}/test`, assetId ? { asset_id: assetId } : {});
     return response.data;
   }
 

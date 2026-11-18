@@ -62,6 +62,7 @@ import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
 import { TenableSection } from '@/components/integrations/TenableSection';
 import { CrowdStrikeSection } from '@/components/integrations/CrowdStrikeSection';
+import { HostCredentialsSection } from '@/components/integrations/HostCredentialsSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
@@ -3219,6 +3220,9 @@ export default function IntegrationsPage() {
 
         {/* Falcon external assets, hosts, and Spotlight findings */}
         <CrowdStrikeSection />
+
+        {/* Logins and password vaults for agentless host checks */}
+        <HostCredentialsSection />
 
         {/* HackerOne Bug Bounty Integration Card */}
         <HackerOneSection />
