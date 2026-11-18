@@ -364,3 +364,59 @@ async def test_response_candidate_needs_fresh_independent_control(monkeypatch):
     reports = await run_independent_verifiers([candidate], llm=None,
         tools_manager=manager, targets=[TARGET + "/catalog"])
     assert reports[0]["status"] == "confirmed", reports[0]["verifier_summary"]
+
+
+@pytest.mark.asyncio
+async def test_race_candidate_confirms_with_fresh_independent_burst(monkeypatch):
+    brain = EngagementBrain(target=TARGET)
+    seed_parameter_coverage_cells(brain, [{
+        "method": "POST", "path": "/redeem", "host": "app.example.test",
+        "name": "code", "location": "body_form", "source": "browser_form",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(
+        brain, ["auth_logic"], allowed_test_types=frozenset({"race_condition"}),
+    )["auth_logic"]
+    manager = _manager(brain)
+    manager._capability_map["pages_visited"] = [TARGET + "/coupons"]
+    manager._scoped_race_action_paths = {"/redeem"}
+    manager._scoped_race_cleanup_paths = {"/coupons/delete"}
+    calls = []
+
+    async def fake_probe_race(action_url, readback_url, cleanup_template, *,
+                              method, field, allowed_origin, state, nonce,
+                              concurrency):
+        calls.append(nonce)
+        return {
+            "operation": "scoped_race_probe", "test_type": "race_condition",
+            "field": field, "method": method, "requests_sent": 2 + concurrency,
+            "concurrency": concurrency,
+            "control": {"canary": f"seq-{nonce}", "successes": 1,
+                        "readback_count": 1, "single_use_enforced": True},
+            "probe": {"canary": f"burst-{nonce}", "successes": 3,
+                      "readback_count": 3, "overrun": True},
+            "cleanup_confirmed": True, "proof_confirmed": True, "finding": False,
+        }
+
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment.race_probe.probe_race", fake_probe_race,
+    )
+    hunter = await manager.scoped_race_assigned(
+        lease.coverage_cell_id, lease.id, "code", TARGET + "/coupons",
+        TARGET + "/coupons/delete?id=__PROWL_NONCE__",
+    )
+    assert hunter["success"] is True and hunter["proof_confirmed"] is True, hunter
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    active = engagement_brain_from_dict(manager._engagement_brain)
+    candidate = submit_candidate(
+        active, title="Coupon redemption limit overrun under concurrency",
+        target=TARGET + "/redeem", vulnerability_class="race_condition",
+        identity="anonymous", coverage_cell_id=lease.coverage_cell_id,
+        evidence_ids=[hunter["evidence_id"]],
+    )
+    manager._engagement_brain = active.to_dict()
+    reports = await run_independent_verifiers([candidate], llm=None,
+        tools_manager=manager, targets=[TARGET + "/redeem"])
+    assert reports[0]["status"] == "confirmed", reports[0]["verifier_summary"]
+    assert len(calls) == 2 and calls[0] != calls[1]
