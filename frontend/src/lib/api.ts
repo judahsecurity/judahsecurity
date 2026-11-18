@@ -412,7 +412,7 @@ export interface WizIntegration {
   last_sync_at?: string;
   last_sync_ok?: boolean;
   next_sync_at?: string;
-  last_sync_stats?: Record<string, number>;
+  last_sync_stats?: Record<string, number | boolean | string>;
   last_error?: string;
   created_at: string;
   updated_at: string;
@@ -427,6 +427,44 @@ export interface WizSyncResult {
   vulns_updated: number;
   findings_seen: number;
   findings_filtered: number;
+  endpoints_seen: number;
+  endpoints_created: number;
+  endpoints_updated: number;
+  ai_endpoints_seen: number;
+  ai_graph_paths_seen: number;
+  ai_graph_endpoints_seen: number;
+  ai_graph_entities_missing: number;
+  endpoints_with_issues: number;
+  endpoint_issue_links: number;
+  endpoint_issue_count_mismatches: number;
+  endpoint_issue_entities_missing: number;
+}
+
+export interface WizApplicationEndpoint {
+  id: string;
+  asset_id: number | null;
+  is_ai: boolean;
+  ai_components: Array<{ id: string; type: string; name?: string | null; workload_id?: string | null }>;
+  endpoint: {
+    name?: string | null;
+    host?: string | null;
+    port?: number | null;
+    exposureLevel?: string | null;
+    portStatus?: string | null;
+    httpResults?: { statusCode?: number | null; pageTitle?: string | null } | null;
+    hostedTechnologies?: Array<{ technology?: { name?: string | null } | null }> | null;
+    resources?: Array<{ id?: string; type?: string }> | null;
+  };
+  relatedIssues: Array<{ id: string; severity?: string; status?: string; url?: string }>;
+  relatedIssueCount: number | null;
+  last_seen: string;
+}
+
+export interface WizApplicationEndpointPage {
+  total: number;
+  limit: number;
+  offset: number;
+  items: WizApplicationEndpoint[];
 }
 
 export interface TenableIntegration {
@@ -3244,6 +3282,14 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  async getWizApplicationEndpoints(
+    id: number,
+    params: { limit?: number; offset?: number; ai_only?: boolean; exposure_level?: string } = {},
+  ): Promise<WizApplicationEndpointPage> {
+    const response = await this.client.get(`/integrations/wiz/${id}/endpoints`, { params });
     return response.data;
   }
 

@@ -17,7 +17,7 @@ from app.db.database import get_db
 from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
-from app.models.wiz_integration import WizIntegration
+from app.models.wiz_integration import WizApplicationEndpoint, WizIntegration
 from app.models.tenable_integration import TenableVmIntegration
 from app.models.crowdstrike_integration import CrowdStrikeAssetLink, CrowdStrikeIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
@@ -804,6 +804,48 @@ def list_wiz_integrations(
     )
 
 
+@router.get("/wiz/{integration_id}/endpoints")
+def list_wiz_application_endpoints(
+    integration_id: int,
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    ai_only: bool = False,
+    exposure_level: Optional[str] = Query(None, pattern="^(HIGH|MEDIUM|LOW)$"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    integration = _get_wiz_integration(db, _get_org_id(current_user), integration_id)
+    query = db.query(WizApplicationEndpoint).filter(
+        WizApplicationEndpoint.integration_id == integration.id,
+        WizApplicationEndpoint.organization_id == integration.organization_id,
+        WizApplicationEndpoint.is_active.is_(True),
+    )
+    if ai_only:
+        query = query.filter(WizApplicationEndpoint.is_ai.is_(True))
+    if exposure_level:
+        query = query.filter(WizApplicationEndpoint.exposure_level == exposure_level)
+    total = query.count()
+    rows = query.order_by(WizApplicationEndpoint.id).offset(offset).limit(limit).all()
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": [
+            {
+                "id": row.wiz_id,
+                "asset_id": row.asset_id,
+                "is_ai": row.is_ai,
+                "ai_components": row.ai_components,
+                "endpoint": row.endpoint_data,
+                "relatedIssues": row.related_issues,
+                "relatedIssueCount": row.related_issue_count,
+                "last_seen": row.last_seen,
+            }
+            for row in rows
+        ],
+    }
+
+
 @router.post("/wiz", response_model=WizIntegrationResponse, status_code=status.HTTP_201_CREATED)
 async def create_wiz_integration(
     payload: WizIntegrationCreate,
@@ -926,6 +968,7 @@ async def test_wiz_connection(
 @router.post("/wiz/{integration_id}/sync", response_model=WizSyncResult)
 async def sync_wiz_integration(
     integration_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst),
 ):
@@ -933,7 +976,10 @@ async def sync_wiz_integration(
     integration = _get_wiz_integration(db, org_id, integration_id)
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
-    return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
+    if not wiz_service.claim_sync(db, integration.id):
+        raise HTTPException(status_code=409, detail="A Wiz sync is already running.")
+    background_tasks.add_task(wiz_service.sync_integration_background, integration.id)
+    return WizSyncResult(ok=True, message="Wiz sync started. Endpoint and finding counts will update when it finishes.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

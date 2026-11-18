@@ -79,6 +79,7 @@ class WizTestConnectionResponse(BaseModel):
     ok: bool
     message: str
     findings_accessible: bool = False
+    endpoints_accessible: bool = False
 
 
 class WizSyncResult(BaseModel):
@@ -90,3 +91,14 @@ class WizSyncResult(BaseModel):
     vulns_updated: int = 0
     findings_seen: int = 0
     findings_filtered: int = 0
+    endpoints_seen: int = 0
+    endpoints_created: int = 0
+    endpoints_updated: int = 0
+    ai_endpoints_seen: int = 0
+    ai_graph_paths_seen: int = 0
+    ai_graph_endpoints_seen: int = 0
+    ai_graph_entities_missing: int = 0
+    endpoints_with_issues: int = 0
+    endpoint_issue_links: int = 0
+    endpoint_issue_count_mismatches: int = 0
+    endpoint_issue_entities_missing: int = 0
