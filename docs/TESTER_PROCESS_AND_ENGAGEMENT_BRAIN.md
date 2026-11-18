@@ -9,6 +9,7 @@ Related code:
 | Methodology catalog | `backend/app/services/agent/methodology_catalog.py` |
 | Engagement brain | `backend/app/services/agent/engagement_brain.py` |
 | Grounded LLM hypothesis planner | `backend/app/services/agent/brain_hypothesis_planner.py` |
+| Asynchronous hypothesis review queue | `backend/app/services/agent/async_hypothesis_review.py` |
 | Input/class assignment ledger | `backend/app/services/agent/coverage_cells.py` |
 | Penetration Task Graph | `backend/app/services/agent/penetration_task_graph.py` |
 | Auto-prompter | `backend/app/services/agent/auto_prompter.py` |
@@ -38,7 +39,7 @@ page assessment (app kind + how a human would start)
         │
         ▼
 sync_engagement_brain          ← seeds CWE/CAPEC cards and input/class cells;
-        │                         reasoning model proposes cell-linked hypotheses
+        │                         queues optional model hypothesis review
         │
         ▼
 fireteam_dispatch(auto)        ← Joshua leases one ready hypothesis per specialist
@@ -93,8 +94,9 @@ Session-scoped memory injected into the ReAct system prompt:
 
 ### Grounded model hypotheses for observed inputs
 
-`sync_engagement_brain` and direct `fireteam_dispatch` send a bounded,
-value-free set of eligible coverage cells to the engagement's reasoning model.
+`sync_engagement_brain` and direct `fireteam_dispatch` queue a bounded,
+value-free set of eligible coverage cells for the engagement's reasoning model.
+Ready specialists are leased and dispatched without waiting for that review.
 The model proposes a possible
 failure, a next check, and a priority for up to eight existing cell IDs. The
 planner accepts only IDs from that batch; method, host, identity, parameter,
@@ -105,10 +107,17 @@ specialist's claim order. It cannot mark a cell tested, create a candidate, or
 publish a finding.
 
 Each cell records a digest of the observation revision reviewed by the model.
-Repeated Brain syncs do not repeat the call; a new capture or first-pass
-evidence causes a new review. If the model is unavailable or returns malformed
-JSON, the sync reports `hypothesis_planning.status=unavailable` and existing
-coverage work remains assignable. These cell-linked hypotheses do not create
+A finished review is applied on the next Brain sync or dispatch, including the
+end of the current specialist wave if it finishes in time. It can prioritize
+only unclaimed cells with the same observation digest and attempt count;
+running or changed cells keep their assignment. Repeated Brain syncs do not
+repeat a successful review; a new capture or first-pass evidence causes a new
+one. A failed review reports `hypothesis_planning.status=unavailable`, backs
+off briefly, and leaves existing coverage work assignable. Reviews are held in
+process and can be lost on restart; coverage cells remain the durable work
+record. `fireteam_dispatch` reports `assignment_latency_ms` (entry to coverage
+lease) and completed reviews report `model_ms` and `queue_to_collect_ms` for
+timing comparisons. These cell-linked hypotheses do not create
 separate task graph nodes, so the same request is not assigned twice through
 two scheduling lanes.
 
