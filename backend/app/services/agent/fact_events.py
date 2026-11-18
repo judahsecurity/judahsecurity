@@ -207,6 +207,71 @@ def consume_fact_events_into_brain(
     return ingested, consumed
 
 
+def prior_fact_summaries(
+    rows: Iterable[Any], scope_hosts: Iterable[str], limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Value-free, in-scope summaries of prior-engagement facts (pure).
+
+    Cross-session memory: a credential or verified finding seen on an in-scope
+    host in an earlier run becomes context for this one. RoE is enforced by the
+    host-scope filter; secrets never appear (payloads are already value-free).
+    """
+    scope = [str(h) for h in (scope_hosts or ()) if h]
+    if not scope:
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        host = _host(str(getattr(row, "target", "") or ""))
+        if not host or not _allowed(host, scope):
+            continue
+        key = str(getattr(row, "dedupe_key", "") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        payload = getattr(row, "payload", None) or {}
+        out.append({
+            "kind": str(getattr(row, "kind", "") or ""),
+            "host": host,
+            "summary": str(payload.get("summary") or getattr(row, "kind", ""))[:160],
+            "dedupe_key": key,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def search_prior_facts(
+    organization_id: int,
+    scope_hosts: Iterable[str],
+    *,
+    kinds: Iterable[str] | None = None,
+    exclude_session_id: str = "",
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Cross-session fact search for an organization, filtered to in-scope hosts.
+
+    Read-only. Returns value-free summaries, newest first. This is the shared,
+    durable memory an ARTEX-style later worker reads: prior captures, credentials
+    and verified findings on hosts this engagement is already authorized for.
+    """
+    from app.db.database import SessionLocal
+    from app.models.agent_fact_event import AgentFactEvent
+
+    if not organization_id:
+        return []
+    with SessionLocal() as db:
+        query = db.query(AgentFactEvent).filter(
+            AgentFactEvent.organization_id == organization_id,
+        )
+        if exclude_session_id:
+            query = query.filter(AgentFactEvent.session_id != exclude_session_id)
+        if kinds:
+            query = query.filter(AgentFactEvent.kind.in_(list(kinds)))
+        rows = query.order_by(AgentFactEvent.id.desc()).limit(max(1, limit) * 5).all()
+    return prior_fact_summaries(rows, scope_hosts, limit=limit)
+
+
 def prune_consumed_fact_events(older_than_days: int = 14) -> int:
     """Delete consumed facts older than a cutoff. Unconsumed rows are kept.
 

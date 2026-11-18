@@ -206,3 +206,21 @@ def test_prune_consumed_fact_events(monkeypatch):
     monkeypatch.setattr(database_module, "SessionLocal", lambda: _FakeSession(store))
     assert prune_consumed_fact_events(older_than_days=14) == 1
     assert store.rows == []
+
+
+def test_prior_fact_summaries_scope_filtered_and_deduped():
+    from app.services.agent.fact_events import prior_fact_summaries
+
+    rows = [
+        SimpleNamespace(target="https://app.example.test/x", kind="verified_finding",
+                        dedupe_key="k1", payload={"summary": "verified finding 5"}),
+        SimpleNamespace(target="https://app.example.test/y", kind="verified_finding",
+                        dedupe_key="k1", payload={"summary": "dup"}),  # same key
+        SimpleNamespace(target="https://out.example.test/z", kind="credential",
+                        dedupe_key="k2", payload={}),  # out of scope
+    ]
+    out = prior_fact_summaries(rows, ["app.example.test"], limit=20)
+    assert len(out) == 1
+    assert out[0]["host"] == "app.example.test" and out[0]["dedupe_key"] == "k1"
+    # no scope -> nothing
+    assert prior_fact_summaries(rows, [], limit=20) == []
