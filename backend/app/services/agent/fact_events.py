@@ -80,6 +80,69 @@ def append_fact_event(
     return event_uuid
 
 
+# Per-kind specialist cards. A fact becomes assignable work, not just a visible
+# observation. `capture` stays observation-only (context, not its own card) to
+# avoid flooding the graph; the high-signal kinds each seed one bounded card.
+_FACT_CARDS: dict[str, dict[str, str]] = {
+    "credential": {
+        "specialist": "api_authz", "priority": "high",
+        "title": "Authenticated access review",
+        "assumption": "Recorded working credentials may reach another user's or tenant's data or a privileged function.",
+        "test": "Replay the credential against in-scope authenticated endpoints and compare authorized test identities with compare_requests.",
+        "pass_criteria": "Authenticated access reveals cross-user/tenant data or a function the identity should not reach.",
+        "kill_criteria": "Credential rejected, or access is consistent with the identity's expected scope.",
+    },
+    "differential": {
+        "specialist": "api_authz", "priority": "high",
+        "title": "Confirm response differential",
+        "assumption": "An observed response differential suggests an access-control or tenant-isolation gap.",
+        "test": "Reproduce against a matched negative control via compare_requests.",
+        "pass_criteria": "LIKELY_IMPACT: another identity's or tenant's data is returned.",
+        "kill_criteria": "NO_MATERIAL_DIFF, or the mutation is denied.",
+    },
+    "verified_finding": {
+        "specialist": "business_logic", "priority": "high",
+        "title": "Chain follow-up from a confirmed weakness",
+        "assumption": "A confirmed weakness may chain to adjacent objects or escalate privileges.",
+        "test": "Test write/export variants and adjacent object families on the same surface; do not re-prove the original finding.",
+        "pass_criteria": "An adjacent object or escalation is independently demonstrated.",
+        "kill_criteria": "No adjacent impact; the surface is isolated.",
+    },
+}
+
+
+def _fact_hypothesis(observation: dict[str, Any], kind: str) -> Any | None:
+    """Build one bounded specialist card for an in-scope fact, or None.
+
+    Mirrors the recon observation adapter: the card is value-free, linked to the
+    fact's observation, and deduped by a stable id so repeated drains do not
+    duplicate it.
+    """
+    template = _FACT_CARDS.get(kind)
+    if not template:
+        return None
+    from app.services.agent.engagement_brain import Hypothesis
+
+    key = observation["dedupe_key"]
+    host = observation.get("host") or ""
+    hid = hashlib.sha256(f"fact|{key}|{template['specialist']}".encode()).hexdigest()[:12]
+    return Hypothesis(
+        id=hid,
+        title=f"{template['title']} on {host}" if host else template["title"],
+        assumption=template["assumption"],
+        test=template["test"],
+        pass_criteria=template["pass_criteria"],
+        kill_criteria=template["kill_criteria"],
+        specialist=template["specialist"],
+        status="open",
+        priority=template["priority"],
+        target=observation["target"],
+        evidence=f"{observation.get('evidence_ref') or ''}: {kind}",
+        source="chain",
+        observation_id=key,
+    )
+
+
 def _fact_to_observation(row: Any, scope_hosts: list[str]) -> dict[str, Any] | None:
     """Turn an in-scope fact into a value-free observation for planner review."""
     target = str(getattr(row, "target", "") or "")
@@ -117,6 +180,7 @@ def consume_fact_events_into_brain(
         str(obs.get("dedupe_key") or obs.get("id") or "")
         for obs in (getattr(brain, "recon_observations", None) or [])
     }
+    open_hyp_ids = {h.id for h in (getattr(brain, "hypotheses", None) or [])}
     ingested = 0
     consumed: list[int] = []
     for row in rows:
@@ -132,6 +196,12 @@ def consume_fact_events_into_brain(
             brain.recon_observations = brain.recon_observations[-200:]
             existing.add(key)
             ingested += 1
+            # Turn the fact into one bounded, claimable specialist card so the
+            # planner assigns it, not just records it.
+            card = _fact_hypothesis(observation, str(getattr(row, "kind", "") or ""))
+            if card is not None and card.id not in open_hyp_ids:
+                brain.hypotheses.append(card)
+                open_hyp_ids.add(card.id)
         if row_id is not None:
             consumed.append(row_id)
     return ingested, consumed

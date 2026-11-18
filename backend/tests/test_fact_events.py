@@ -39,6 +39,36 @@ def test_consume_ingests_in_scope_and_dedupes():
     assert brain.recon_observations[0]["kind"] == "fact_credential"
 
 
+def test_credential_fact_creates_assignable_card():
+    brain = EngagementBrain()
+    consume_fact_events_into_brain(brain, [_fact(kind="credential")], ["app.example.test"])
+    assert len(brain.hypotheses) == 1
+    card = brain.hypotheses[0]
+    assert card.specialist == "api_authz" and card.status == "open"
+    assert card.source == "chain" and card.observation_id == brain.recon_observations[0]["dedupe_key"]
+    # re-draining the same fact does not duplicate the card
+    consume_fact_events_into_brain(brain, [_fact(kind="credential")], ["app.example.test"])
+    assert len(brain.hypotheses) == 1
+
+
+def test_verified_finding_fact_creates_business_logic_card():
+    brain = EngagementBrain()
+    consume_fact_events_into_brain(
+        brain, [_fact(kind="verified_finding", key="vf1")], ["app.example.test"],
+    )
+    assert brain.hypotheses and brain.hypotheses[0].specialist == "business_logic"
+
+
+def test_capture_fact_is_observation_only():
+    brain = EngagementBrain()
+    ingested, _ = consume_fact_events_into_brain(
+        brain, [_fact(kind="capture", key="c1")], ["app.example.test"],
+    )
+    assert ingested == 1
+    assert len(brain.recon_observations) == 1
+    assert brain.hypotheses == []  # capture is context, not its own card
+
+
 def test_consume_drops_out_of_scope_fact():
     brain = EngagementBrain()
     ingested, consumed = consume_fact_events_into_brain(

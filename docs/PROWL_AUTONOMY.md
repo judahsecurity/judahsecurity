@@ -61,10 +61,13 @@ are appended to `agent_fact_events` — an append-only, idempotent stream keyed 
 enqueue the same fact twice. Rows are thin and value-free (evidence bytes stay
 in the evidence store; a `credential` fact is the *signal* that creds exist for a
 host, never the secret). At the start of each autonomy turn, unconsumed facts
-for the session are drained into the brain's observation surface — scope-checked
-against the current RoE and consumed once — so the next planner pass turns them
-into hypotheses reliably across turns and restarts, not only when the model
-remembered to call `queue_finding_followups`. The worker's existing poll remains
+for the session are drained — scope-checked against the current RoE and consumed
+once — and each high-signal fact seeds one bounded, claimable specialist card:
+`credential` and `differential` → `api_authz`, `verified_finding` →
+`business_logic` chain follow-up (still a lead; the finding gate authorizes).
+`capture` stays observation-only context. The graph re-syncs so a specialist can
+lease the card on the same turn — reliably across turns and restarts, not only
+when the model remembered to call `queue_finding_followups`. The worker's existing poll remains
 the transport (it reads the unconsumed watermark); event-driven wake via
 `LISTEN/NOTIFY` is a later option. A `verified_finding` fact is still a lead at
 consume time — the finding gate, not the event, authorizes a reported finding.
