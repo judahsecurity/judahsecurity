@@ -223,6 +223,7 @@ class WizClient:
     """Read-only OAuth2 + GraphQL client for Wiz findings and endpoints."""
 
     PAGE_SIZE = 100
+    VM_PAGE_SIZE = 500
     MAX_PAGES = 500
     ENDPOINT_MAX_PAGES = 2000
 
@@ -351,7 +352,7 @@ class WizClient:
         for _ in range(self.ENDPOINT_MAX_PAGES):
             data = await self.graphql(
                 VIRTUAL_MACHINES_QUERY,
-                {"first": self.PAGE_SIZE, "after": cursor, "filterBy": filter_by},
+                {"first": self.VM_PAGE_SIZE, "after": cursor, "filterBy": filter_by},
             )
             connection = data.get("cloudResourcesV2") or {}
             if self.virtual_machines_total_count is None:
@@ -1082,9 +1083,13 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
     stats = _Stats()
     try:
         client = _client_for(integration)
-        findings = await client.get_vulnerability_findings()
-        stats.findings_seen = len(findings)
-        stats.findings_truncated = client.findings_truncated
+        await _sync_virtual_machines(db, integration, client, stats)
+        if integration.import_vulnerabilities:
+            findings = await client.get_vulnerability_findings()
+            stats.findings_seen = len(findings)
+            stats.findings_truncated = client.findings_truncated
+        else:
+            findings = []
         asset_cache: Dict[str, Asset] = {}
         for finding in findings:
             source = finding.get("vulnerableAsset") or {}
@@ -1113,7 +1118,6 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
                 _upsert_vulnerability(db, asset, finding, stats)
 
         db.commit()
-        await _sync_virtual_machines(db, integration, client, stats)
         await _sync_application_endpoints(db, integration, client, stats)
 
         integration.last_sync_at = datetime.utcnow()

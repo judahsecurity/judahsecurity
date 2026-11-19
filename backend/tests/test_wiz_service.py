@@ -27,7 +27,9 @@ from app.services.wiz_service import (
     _sync_application_endpoints,
     _sync_virtual_machines,
     claim_sync,
+    sync_integration,
 )
+import app.services.wiz_service as wiz_service
 from app.models.vulnerability import Severity
 
 
@@ -103,6 +105,7 @@ async def test_vm_inventory_paginates_and_deduplicates_wiz_ids():
     assert vms[0]["ipAddresses"] == ["10.0.0.1"]
     assert vms[1]["hasWideInternetExposure"] is True
     assert client.virtual_machines_total_count == 2
+    assert client.graphql.await_args_list[0].args[1]["first"] == 500
     assert client.graphql.await_args_list[0].args[1]["filterBy"]["isAccessibleFromInternet"] == {"equals": True}
     assert client.graphql.await_args_list[1].args[1]["after"] == "next"
 
@@ -143,6 +146,48 @@ async def test_vm_inventory_imports_assets_without_vulnerability_findings():
         assert assets[0].ip_addresses == ["10.0.0.1"]
         assert stats.virtual_machines_seen == stats.virtual_machines_total_count == 2
         assert stats.assets_created == 2
+    engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sync_imports_vm_inventory_before_findings(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, autoflush=False) as db:
+        org = Organization(name="Wiz sync order test")
+        db.add(org)
+        db.flush()
+        integration = WizIntegration(
+            organization_id=org.id, connection_name="Wiz", api_endpoint="https://api.us17.app.wiz.io/graphql",
+            client_id_encrypted="test", client_secret_encrypted="test",
+            import_assets=True, import_vulnerabilities=True, internet_exposed_only=True,
+        )
+        db.add(integration)
+        db.commit()
+        events = []
+
+        class Client:
+            virtual_machines_total_count = 1
+            findings_truncated = False
+
+            async def iter_virtual_machines(self, *, exposed_only):
+                events.append("virtual_machines")
+                yield [{"id": "vm-1", "name": "VM one", "providerUniqueId": "i-1",
+                        "hasLimitedInternetExposure": True}]
+
+            async def get_vulnerability_findings(self):
+                events.append("findings")
+                return []
+
+        async def fake_endpoints(*args):
+            events.append("endpoints")
+
+        monkeypatch.setattr(wiz_service, "_client_for", lambda _: Client())
+        monkeypatch.setattr(wiz_service, "_sync_application_endpoints", fake_endpoints)
+        result = await sync_integration(db, integration)
+        assert result["ok"] is True
+        assert result["virtual_machines_seen"] == 1
+        assert events == ["virtual_machines", "findings", "endpoints"]
     engine.dispose()
 
 
