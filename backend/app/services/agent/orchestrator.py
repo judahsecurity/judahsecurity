@@ -2877,7 +2877,17 @@ class AgentOrchestrator:
             current_target_info=json_dumps_safe(state.get("target_info") or {}, indent=2),
         )
         
-        if (step_data.get("success") and step_data.get("capability_map")
+        from app.services.agent.structured_output import analyze_without_model
+
+        code_analysis = analyze_without_model(
+            tool_name, tool_output, bool(step_data.get("success")),
+        )
+        if code_analysis is not None:
+            # Bookkeeping results and JSON-lines scanner output map straight
+            # onto the target model; a model pass would only restate them.
+            analysis = code_analysis
+            step_data["analysis_skipped"] = "parsed_in_code"
+        elif (step_data.get("success") and step_data.get("capability_map")
                 and tool_name in ("execute_interceptor", "execute_deep_crawl")):
             # The browser tools already returned a structured surface map. A
             # second model pass adds latency but is not needed to hand those
