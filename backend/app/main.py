@@ -348,12 +348,23 @@ async def startup_event():
     global _evidence_cleanup_task
     _evidence_cleanup_task = asyncio.create_task(_evidence_cleanup_loop())
 
+    # Judah Gate: per-run egress proxy for assessment traffic (opt-in).
+    try:
+        from app.services.agent.judah_gate import start_gate_from_env
+
+        await start_gate_from_env()
+    except Exception:
+        logger.exception("Judah Gate failed to start; assessment traffic will not be gated")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Run on application shutdown."""
     if _evidence_cleanup_task is not None:
         _evidence_cleanup_task.cancel()
+    from app.services.agent.judah_gate import stop_gate
+
+    await stop_gate()
     logger.info("Shutting down application")
 
 

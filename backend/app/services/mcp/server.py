@@ -2876,6 +2876,18 @@ class MCPServer:
         else:
             lictor_metadata = {}
 
+        # 3b. Judah Gate: point target-facing CLI tools at the run's Gate lease.
+        try:
+            from app.services.agent.judah_gate import GateConflict, cli_gate_tokens
+
+            current_args = arguments.get("args", "") if isinstance(arguments.get("args"), str) else ""
+            gate_tokens = cli_gate_tokens(name, self._parse_args(current_args) if current_args else [])
+        except GateConflict as conflict:
+            return {"success": False, "output": "", "error": str(conflict), "exit_code": -1,
+                    "judah_gate_blocked": True}
+        if gate_tokens:
+            arguments["args"] = (current_args + " " + " ".join(shlex.quote(t) for t in gate_tokens)).strip()
+
         # 4. Handler
         start = time.monotonic()
         try:

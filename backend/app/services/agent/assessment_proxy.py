@@ -1,5 +1,9 @@
 """Explicit, certificate-verified proxy for target assessment traffic only.
 
+When Judah Gate is running, target traffic for a run goes to the run's Gate
+lease (scope check, per-host pacing, request cap), and the Gate chains to the
+configured Caido proxy itself.
+
 Do not set process-wide HTTP_PROXY: the backend also calls model providers and
 internal services. Callers opt in when sending an in-scope target request.
 """
@@ -12,7 +16,32 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
+def _gate_lease():
+    """The run's Judah Gate lease, when the Gate is running for this process."""
+    try:
+        from app.services.agent.judah_gate import current_lease
+    except Exception:
+        return None
+    return current_lease()
+
+
 def assessment_proxy_url() -> str | None:
+    """Proxy for target traffic: the run's Judah Gate lease, else Caido, else none."""
+    lease = _gate_lease()
+    if lease is not None:
+        from app.services.agent.judah_gate import lease_proxy_url
+
+        return lease_proxy_url(lease)
+    return _configured_proxy_url()
+
+
+def configured_upstream_proxy() -> tuple[str | None, str | bool]:
+    """Caido (or other) proxy that Judah Gate itself chains through, with its CA."""
+    upstream = _configured_proxy_url()
+    return upstream, assessment_ca_bundle(upstream, _for_gate_upstream=True)
+
+
+def _configured_proxy_url() -> str | None:
     value = os.environ.get("AEGIS_ASSESSMENT_PROXY_URL", "").strip()
     if not value:
         return None
@@ -36,7 +65,12 @@ def assessment_proxy_url() -> str | None:
     return value.rstrip("/")
 
 
-def assessment_ca_bundle(proxy_url: str | None) -> str | bool:
+def assessment_ca_bundle(proxy_url: str | None, *, _for_gate_upstream: bool = False) -> str | bool:
+    lease = None if _for_gate_upstream else _gate_lease()
+    if lease is not None and proxy_url:
+        from app.services.agent.judah_gate_ca import ca_cert_path
+
+        return str(ca_cert_path())
     bundle = os.environ.get("AEGIS_ASSESSMENT_CA_BUNDLE", "").strip()
     insecure = os.environ.get("AEGIS_ALLOW_INSECURE_TLS", "").lower() in ("1", "true", "yes")
     if proxy_url:
@@ -73,6 +107,12 @@ def assessment_urllib_handlers() -> list:
 
 
 def assessment_browser_proxy() -> dict | None:
+    lease = _gate_lease()
+    if lease is not None:
+        from app.services.agent.judah_gate import gate_address
+
+        host, port = gate_address()
+        return {"server": f"http://{host}:{port}", "username": lease.token, "password": "x"}
     proxy_url = assessment_proxy_url()
     if proxy_url:
         assessment_ca_bundle(proxy_url)

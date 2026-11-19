@@ -1119,6 +1119,13 @@ async def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
+    try:
+        from app.services.agent.judah_gate import start_gate_from_env
+
+        await start_gate_from_env()
+    except Exception:
+        logger.exception("Judah Gate failed to start in the schedule worker")
+
     worker = ScheduleWorker()
     await worker.run()
 

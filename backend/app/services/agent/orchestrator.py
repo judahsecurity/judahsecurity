@@ -1266,6 +1266,37 @@ class AgentOrchestrator:
         # The purse also counts specialist model calls, which token_usage does not.
         purse = purse_for(_active_run_id.get(), limit_usd=limit_usd,
                           spent_usd=session_cost_usd(state.get("token_usage")))
+
+        # Judah Gate: bind this run's target traffic to a lease on its scope.
+        from app.services.agent import judah_gate
+
+        if judah_gate.gate_enabled() and judah_gate.gate_address() is None:
+            return {
+                "task_complete": True,
+                "completion_reason": "Judah Gate unavailable",
+                "messages": [AIMessage(content=(
+                    "Judah Gate is enabled but not running in this process, so target "
+                    "traffic cannot be scope-checked or paced. Stopping before any request."
+                ))],
+            }
+        try:
+            from app.services.agent.assessment_scope import observation_scope_hosts
+
+            gate_lease = judah_gate.ensure_lease_for_run(
+                _active_run_id.get(), observation_scope_hosts(self.tool_manager),
+            )
+        except Exception:
+            logger.debug("Judah Gate lease refresh skipped", exc_info=True)
+            gate_lease = None
+        if gate_lease is not None and gate_lease.budget_exhausted:
+            return {
+                "task_complete": True,
+                "completion_reason": "Request budget reached",
+                "messages": [AIMessage(content=(
+                    f"Judah Gate request budget reached ({gate_lease.requests} of "
+                    f"{gate_lease.max_requests} target requests). Stopping."
+                ))],
+            }
         if over_budget(state.get("token_usage"), limit_usd) or (
                 purse is not None and not purse.allows_call("agent_plan")):
             spent = max(float((state.get("token_usage") or {}).get("cost_usd") or 0),
@@ -2213,13 +2244,38 @@ class AgentOrchestrator:
         
         elif decision.action == "ask_user":
             if decision.user_question:
-                updates["pending_question"] = UserQuestionRequest(
+                pending = UserQuestionRequest(
                     question=decision.user_question.question,
                     context=decision.user_question.context,
                     format=decision.user_question.format,
                     options=decision.user_question.options,
                     phase=phase,
                 ).model_dump()
+                # Judah Hold: classify operator-only input, flag hosts the
+                # operator never named, refuse secret requests that name them.
+                from app.services.agent import judah_hold
+                from app.services.agent.assessment_scope import observation_scope_hosts
+
+                try:
+                    scope_hosts = observation_scope_hosts(self.tool_manager)
+                except Exception:
+                    scope_hosts = set()
+                prepared, refusal = judah_hold.prepare(pending, state, scope_hosts)
+                if refusal:
+                    step.thought = (step.thought or "") + " | Question refused by Judah Hold."
+                    step.tool_name = None
+                    blocked = decision.model_dump()
+                    blocked["action"] = "use_tool"
+                    blocked["tool_name"] = None
+                    updates["_decision"] = blocked
+                    updates["_current_step"] = step.model_dump()
+                    updates["messages"] = [AIMessage(content=refusal)]
+                    return updates
+                if prepared["hold"]["sensitive"]:
+                    judah_hold.vault.mark_pending(
+                        str(state.get("session_id") or ""), prepared["hold"]["expires_at"],
+                    )
+                updates["pending_question"] = prepared
                 updates["awaiting_user_question"] = True
         
         return updates
@@ -2709,8 +2765,14 @@ class AgentOrchestrator:
             else float(tool_cap)
         )
         try:
+            # Judah Hold placeholders become the operator's real value only here;
+            # the trace keeps the placeholder.
+            from app.services.agent import judah_hold
+
+            exec_args = (judah_hold.substitute(session_id, tool_args)
+                         if judah_hold.has_placeholder(tool_args) else tool_args)
             result = await asyncio.wait_for(
-                self.tool_manager.execute(tool_name, tool_args),
+                self.tool_manager.execute(tool_name, exec_args),
                 timeout=tool_timeout,
             )
         except asyncio.TimeoutError:
@@ -2787,6 +2849,10 @@ class AgentOrchestrator:
         # and personal data are redacted and injected instructions are fenced.
         # Raw exchanges remain in the evidence store for verifier replay.
         # Operator-facing status shows the redacted text without the seal frame.
+        from app.services.agent.judah_hold import scrub as _hold_scrub
+
+        if step_data.get("tool_output"):
+            step_data["tool_output"] = _hold_scrub(session_id, str(step_data["tool_output"]))
         display_output = step_data.get("tool_output") or ""
         try:
             from app.services.agent.content_shield import redact_sensitive, shield_tool_output
@@ -3370,9 +3436,14 @@ class AgentOrchestrator:
         if not isinstance(question, dict):
             question = {}
         
+        from app.services.agent import judah_hold
+
+        model_text, history_answer = judah_hold.accept_answer(
+            str(state.get("session_id") or ""), question, answer or "",
+        )
         qa_entry = QAHistoryEntry(
             question=UserQuestionRequest(**question) if question else UserQuestionRequest(question=""),
-            answer={"question_id": question.get("question_id") or "", "answer": answer or ""},
+            answer={"question_id": question.get("question_id") or "", "answer": history_answer},
             answered_at=utc_now(),
         )
         
@@ -3384,7 +3455,7 @@ class AgentOrchestrator:
             "user_question_answer": None,
             "qa_history": qa_history,
             "messages": [
-                HumanMessage(content=f"User answer: {answer}"),
+                HumanMessage(content=model_text),
                 AIMessage(content="Thank you. Continuing with the analysis..."),
             ],
         }
@@ -3875,7 +3946,7 @@ class AgentOrchestrator:
             if partial_closure:
                 completion_reason = self.tool_manager._scoped_assessment_partial_reason
             partial = partial_closure or any(phrase in completion_reason.lower() for phrase in (
-                "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+                "time budget", "spend cap", "request budget", "judah gate", "iteration budget", "no schedulable hypotheses",
                 "planning model unavailable",
             )) or completion_reason.startswith("Pilot stopped after ")
             finish_run(run_id, "partial" if partial else ("completed" if response.task_complete else "paused"),
@@ -3998,7 +4069,7 @@ class AgentOrchestrator:
             result = self._build_response(final_state)
             reason = str(final_state.get("completion_reason") or "")
             partial = any(phrase in reason.lower() for phrase in (
-                "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+                "time budget", "spend cap", "request budget", "judah gate", "iteration budget", "no schedulable hypotheses",
                 "planning model unavailable",
             ))
             finish_run(run_id, "partial" if partial else ("completed" if result.task_complete else "paused"), reason)
@@ -4069,7 +4140,7 @@ class AgentOrchestrator:
             result = self._build_response(final_state)
             reason = str(final_state.get("completion_reason") or "")
             partial = any(phrase in reason.lower() for phrase in (
-                "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+                "time budget", "spend cap", "request budget", "judah gate", "iteration budget", "no schedulable hypotheses",
                 "planning model unavailable",
             ))
             finish_run(run_id, "partial" if partial else ("completed" if result.task_complete else "paused"), reason)

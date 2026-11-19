@@ -21,4 +21,9 @@ def launch_options() -> dict:
     proxy = assessment_browser_proxy()
     if proxy:
         options["proxy"] = proxy
+        if proxy.get("username"):
+            # Judah Gate: trust only the Gate's leaf key, not every bad certificate.
+            from app.services.agent.judah_gate_ca import leaf_spki_sha256
+
+            options["args"] = [f"--ignore-certificate-errors-spki-list={leaf_spki_sha256()}"]
     return options

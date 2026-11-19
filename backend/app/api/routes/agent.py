@@ -742,7 +742,11 @@ async def answer_agent_question(
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
     
-    _save_conversation(db, request.session_id, current_user.id, org_id, "user", request.answer)
+    # Judah Hold: an OTP, CAPTCHA answer or credential is never written to the log.
+    from app.services.agent.judah_hold import redact_for_log
+
+    _save_conversation(db, request.session_id, current_user.id, org_id, "user",
+                       redact_for_log(request.session_id, request.answer))
 
     try:
         invoke_task = asyncio.create_task(
@@ -814,6 +818,61 @@ async def steer_agent_run(
         "queued": True,
         "run_in_progress": in_flight or has_running_task(session_id),
     }
+
+
+class AgentWhisperRequest(BaseModel):
+    question: str
+
+    @field_validator("question")
+    @classmethod
+    def _bounded_question(cls, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("question is required")
+        return value[:2000]
+
+
+@router.post("/sessions/{session_id}/whisper")
+async def whisper_agent_run(
+    session_id: str,
+    request: AgentWhisperRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Judah Whisper: answer a question about a run from a read-only snapshot.
+
+    Does not steer, pause or charge the run, and the model gets no tools.
+    """
+    conv = db.query(AgentConversation).filter(
+        AgentConversation.session_id == session_id,
+        AgentConversation.user_id == current_user.id,
+    ).first()
+    org_id = conv.organization_id if conv else None
+    if not org_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if not _agent_runtime_available():
+        raise HTTPException(status_code=503, detail="AI agent not available")
+    from app.services.agent import judah_whisper
+    from app.services.agent.model_router import LLMTask, get_llm_for_task
+    from app.services.agent.run_snapshot import load_run_snapshot
+
+    values: dict = {}
+    try:
+        orchestrator = await get_agent_orchestrator()
+        snap = await orchestrator.graph.aget_state({"configurable": {"thread_id": session_id}})
+        values = dict(getattr(snap, "values", None) or {})
+    except Exception:
+        logger.debug("whisper: checkpoint read failed for %s", session_id, exc_info=True)
+    if not values:
+        values = load_run_snapshot(org_id, session_id) or {}
+    if not values:
+        raise HTTPException(status_code=404, detail="No run state to answer from yet")
+    llm = get_llm_for_task(db, org_id, LLMTask.REPORT, max_tokens=800, timeout=60)
+    try:
+        result = await judah_whisper.answer(request.question, values, llm)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Whisper model timed out")
+    return {"session_id": session_id, **result}
 
 
 @router.post("/sessions/{session_id}/compact")
@@ -1672,7 +1731,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
 
                 db = SessionLocal()
                 try:
-                    _save_conversation(db, session_id, user_id, org_id, "user", answer_text)
+                    from app.services.agent.judah_hold import redact_for_log
+
+                    _save_conversation(db, session_id, user_id, org_id, "user",
+                                       redact_for_log(session_id, answer_text))
                 finally:
                     db.close()
 
