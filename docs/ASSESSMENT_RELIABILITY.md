@@ -19,9 +19,12 @@ missing spend data, an unchanged work revision, or a budget limit. Each result
 includes its session ID, turn count, spend, and stop reason. A worker restart
 does not yet resume the remaining turns of an interrupted schedule occurrence;
 its saved assessment can still be continued by the operator.
-The spend figure comes from the orchestrator's reported usage; nested specialist
-model calls may not be included. The turn and elapsed-time caps still bound the
-scheduled loop, but the reported spend limit is not an all-provider hard cap.
+Within a run, every model call (orchestrator and fireteam specialists) is charged
+to a run purse, and a specialist starts only if its spend cap can be reserved
+(see `docs/PROWL_DISCIPLINE.md`). Costs are estimated from token usage and the
+price table (unpriced models use a $3 / $15 per million token default), and
+specialist spend from earlier runs is not carried forward. The turn and elapsed-time caps still
+bound the scheduled loop.
 The schedule executes under its active creator's analyst account; if that
 account loses organization access, the worker records a schedule error.
 

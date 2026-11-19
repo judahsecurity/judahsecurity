@@ -339,6 +339,10 @@ class AgentState(TypedDict, total=False):
     prior_hunt_brief: Optional[str]
     compacted_brief: Optional[str]
     price_limit_usd: Optional[float]
+    # Full Pursuit discipline (org switch, resolved once per run).
+    full_pursuit_enabled: Optional[bool]
+    # Hindsight notes block ("" when none or in shadow mode; None = not loaded).
+    hindsight_brief: Optional[str]
 
 
 def format_todo_list(todo_list: List[Dict[str, Any]]) -> str:

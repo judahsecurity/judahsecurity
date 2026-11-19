@@ -306,6 +306,18 @@ def default_agent_config():
             "create_scan": "confirm",
             "add_asset": "auto",
         },
+        # Per-call refinements of the policy above, matched on the tool's
+        # arguments (see app/services/agent/argument_rules.py). "auto" rules
+        # must list every flag they allow; "deny"/"confirm" rules match
+        # anywhere in the command. Calls that cannot be parsed are confirmed.
+        # e.g. {"tool": "execute_curl", "decision": "deny", "contains": ["-X", "DELETE"]}
+        "tool_argument_rules": [],
+        # Full Pursuit: keep testing after the first finding, prove full
+        # impact, and require a browser render before completion.
+        "full_pursuit_enabled": True,
+        # Hindsight notes learned from triage ("shadow" = record and log only,
+        # "inject" = also show them to the agent, "off").
+        "hindsight_mode": "shadow",
         # Global override: when true, the gate is active; when false the
         # confirmation layer is bypassed (handy for headless automation).
         "tool_confirmation_enabled": True,

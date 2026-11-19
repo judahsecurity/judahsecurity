@@ -361,6 +361,8 @@ class ResilientFallbackChatModel(BaseChatModel):
     fallbacks: List[Any] = Field(default_factory=list, exclude=True)
     fallback_labels: List[str] = Field(default_factory=list, exclude=True)
     primary_label: str = "cloud"
+    # Provider cooldowns are shared per organization (see provider_cooldown).
+    cooldown_scope: str = "global"
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -406,6 +408,25 @@ class ResilientFallbackChatModel(BaseChatModel):
             labels.append("fallback")
         return labels
 
+    def _ordered_chain(self) -> tuple[List[Any], List[str]]:
+        """Chain with providers in cooldown moved to the back."""
+        from app.services.agent.provider_cooldown import provider_cooldowns
+
+        pairs = provider_cooldowns.order(self.cooldown_scope, self._chain(), self._labels())
+        return [llm for llm, _ in pairs], [label for _, label in pairs]
+
+    def _record_failure(self, label: str, exc: BaseException) -> None:
+        from app.services.agent.provider_cooldown import provider_cooldowns
+
+        seconds = provider_cooldowns.trip(self.cooldown_scope, label)
+        logger.warning("LLM provider %s cooling down for %.0fs after %s",
+                       label, seconds, type(exc).__name__)
+
+    def _record_success(self, label: str) -> None:
+        from app.services.agent.provider_cooldown import provider_cooldowns
+
+        provider_cooldowns.clear(self.cooldown_scope, label)
+
     def _run_chain_sync(
         self,
         messages: List[BaseMessage],
@@ -415,18 +436,24 @@ class ResilientFallbackChatModel(BaseChatModel):
     ) -> ChatResult:
         last_exc: Optional[BaseException] = None
         attempted_lazy = False
+        failed_here: set[str] = set()
         while True:
-            chain = self._chain()
-            labels = self._labels()
+            chain, labels = self._ordered_chain()
             for i, llm in enumerate(chain):
+                if labels[i] in failed_here:
+                    continue  # already failed during this call
                 try:
-                    return llm._generate(
+                    result = llm._generate(
                         messages, stop=stop, run_manager=run_manager, **kwargs
                     )
+                    self._record_success(labels[i])
+                    return result
                 except Exception as exc:
                     last_exc = exc
                     if not is_llm_credit_or_quota_error(exc):
                         raise
+                    self._record_failure(labels[i], exc)
+                    failed_here.add(labels[i])
                     # Last pre-built option failed — try lazy Ollama once.
                     if i >= len(chain) - 1:
                         if not attempted_lazy:
@@ -462,18 +489,24 @@ class ResilientFallbackChatModel(BaseChatModel):
     ) -> ChatResult:
         last_exc: Optional[BaseException] = None
         attempted_lazy = False
+        failed_here: set[str] = set()
         while True:
-            chain = self._chain()
-            labels = self._labels()
+            chain, labels = self._ordered_chain()
             for i, llm in enumerate(chain):
+                if labels[i] in failed_here:
+                    continue  # already failed during this call
                 try:
-                    return await llm._agenerate(
+                    result = await llm._agenerate(
                         messages, stop=stop, run_manager=run_manager, **kwargs
                     )
+                    self._record_success(labels[i])
+                    return result
                 except Exception as exc:
                     last_exc = exc
                     if not is_llm_credit_or_quota_error(exc):
                         raise
+                    self._record_failure(labels[i], exc)
+                    failed_here.add(labels[i])
                     if i >= len(chain) - 1:
                         if not attempted_lazy:
                             attempted_lazy = True
@@ -639,6 +672,8 @@ def _attach_credit_fallback(
         max_retries=max_retries,
     )
 
+    from app.services.agent.provider_cooldown import scope_for
+
     primary_label = f"{provider}:{model}" if model else provider
     logger.info(
         "Attached resilient LLM wrapper behind %s (prebuilt fallbacks=%s)",
@@ -649,6 +684,7 @@ def _attach_credit_fallback(
         fallbacks=fallbacks,
         fallback_labels=labels,
         primary_label=primary_label,
+        cooldown_scope=scope_for(organization_id),
     )
 
 

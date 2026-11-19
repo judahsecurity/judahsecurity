@@ -215,8 +215,17 @@ async def _ledger_llm_call(llm, messages, *, kind: str, target: str = "",
     """Show model planning, analysis, and reporting even before a tool runs."""
     from app.services.agent.action_ledger import active_run_id, append_action
 
+    from app.services.agent.run_purse import RunBudgetExhausted, call_cost_usd, get_purse
+
     run_id = active_run_id.get()
     action_id = uuid.uuid4().hex
+    purse = get_purse(run_id)
+    if purse is not None and not purse.allows_call(kind):
+        append_action(run_id, action_id, "skipped", kind, target=target, phase=phase,
+                      detail="run budget exhausted")
+        raise RunBudgetExhausted(
+            f"run spend limit reached (${purse.spent_usd:.4f} of ${purse.limit_usd:.2f})"
+        )
     append_action(run_id, action_id, "started", kind, target=target, phase=phase)
     try:
         call = llm.ainvoke(messages)
@@ -230,6 +239,11 @@ async def _ledger_llm_call(llm, messages, *, kind: str, target: str = "",
                       phase=phase, detail=type(exc).__name__)
         raise
     append_action(run_id, action_id, "completed", kind, target=target, phase=phase)
+    if purse is not None:
+        try:
+            purse.record(call_cost_usd(llm, response))
+        except Exception:
+            logger.debug("run purse cost estimate failed", exc_info=True)
     return response
 
 
@@ -1245,8 +1259,17 @@ class AgentOrchestrator:
                 }
 
         limit_usd = price_limit_usd(get_price_limit(session_id) or state.get("price_limit_usd"))
-        if over_budget(state.get("token_usage"), limit_usd):
-            spent = float((state.get("token_usage") or {}).get("cost_usd") or 0)
+        from app.services.agent.action_ledger import active_run_id as _active_run_id
+        from app.services.agent.run_purse import purse_for
+        from app.services.agent.session_ops import session_cost_usd
+
+        # The purse also counts specialist model calls, which token_usage does not.
+        purse = purse_for(_active_run_id.get(), limit_usd=limit_usd,
+                          spent_usd=session_cost_usd(state.get("token_usage")))
+        if over_budget(state.get("token_usage"), limit_usd) or (
+                purse is not None and not purse.allows_call("agent_plan")):
+            spent = max(float((state.get("token_usage") or {}).get("cost_usd") or 0),
+                        purse.spent_usd if purse is not None else 0.0)
             msg = (
                 f"Spend cap reached (${spent:.4f} of ${limit_usd:.2f}). "
                 "Stopping before more LLM calls."
@@ -1601,6 +1624,8 @@ class AgentOrchestrator:
                 except Exception:
                     forced_complete = False
 
+        full_pursuit = state.get("full_pursuit_enabled")
+        hindsight_block = state.get("hindsight_brief")
         if forced:
             cve_writeup = forced["tool_name"] in (
                 "validate_finding", "create_finding", "check_cve_applicability",
@@ -1731,6 +1756,12 @@ class AgentOrchestrator:
                 combined_knowledge = (
                     f"{combined_knowledge}\n\n{prior_hunt_brief}"
                 )
+            if hindsight_block is None and state.get("mode") != "pilot":
+                from app.services.agent.hindsight import hindsight_brief
+
+                hindsight_block = hindsight_brief(state.get("organization_id"))[1]
+            if hindsight_block:
+                combined_knowledge = f"{combined_knowledge}\n\n{hindsight_block}"
             if operator_steers:
                 steer_block = "\n".join(f"- {s}" for s in operator_steers[-6:])
                 combined_knowledge = (
@@ -1782,6 +1813,14 @@ class AgentOrchestrator:
                 # without new findings, steer it to a different, higher-value action.
                 tool_recommendations += self._repetition_guard_note(state, phase)
                 try:
+                    from app.services.agent.cold_trails import cold_trails, format_cold_trails
+
+                    tool_recommendations += format_cold_trails(
+                        cold_trails(state.get("execution_trace"))
+                    )
+                except Exception:
+                    logger.debug("cold trails note skipped", exc_info=True)
+                try:
                     from app.services.agent.tester_loop import (
                         format_tester_loop_for_prompt,
                         tester_loop_progress,
@@ -1801,7 +1840,14 @@ class AgentOrchestrator:
                 state.get("engagement_brain")
             )
 
+            full_pursuit = state.get("full_pursuit_enabled")
+            if full_pursuit is None:
+                from app.services.agent.full_pursuit import org_full_pursuit_enabled
+
+                full_pursuit = org_full_pursuit_enabled(state.get("organization_id"))
+
             system_prompt = render_system_prompt(
+                full_pursuit=full_pursuit,
                 mode=state.get("mode") or "assist",
                 current_phase=phase,
                 available_tools=available_tools,
@@ -1843,6 +1889,14 @@ class AgentOrchestrator:
                     phase=phase,
                 )
             except Exception as exc:
+                from app.services.agent.run_purse import RunBudgetExhausted
+
+                if isinstance(exc, RunBudgetExhausted):
+                    return {
+                        "task_complete": True,
+                        "completion_reason": "Spend cap reached",
+                        "messages": [AIMessage(content=f"{exc}. Stopping before more LLM calls.")],
+                    }
                 if not _is_plan_provider_timeout(exc):
                     raise
                 logger.warning(
@@ -1966,6 +2020,8 @@ class AgentOrchestrator:
             "prior_hunt_brief": prior_hunt_brief or None,
             "compacted_brief": compacted_brief or None,
             "price_limit_usd": limit_usd,
+            "full_pursuit_enabled": full_pursuit,
+            "hindsight_brief": hindsight_block,
         }
         if drain_trace_extra or compacted_brief:
             updates["execution_trace"] = merged_trace
@@ -2730,11 +2786,15 @@ class AgentOrchestrator:
         # Model-facing view of target content: bodies stay visible, but secrets
         # and personal data are redacted and injected instructions are fenced.
         # Raw exchanges remain in the evidence store for verifier replay.
+        # Operator-facing status shows the redacted text without the seal frame.
+        display_output = step_data.get("tool_output") or ""
         try:
-            from app.services.agent.content_shield import shield_tool_output
+            from app.services.agent.content_shield import redact_sensitive, shield_tool_output
 
             shielded, shield = shield_tool_output(tool_name, step_data.get("tool_output") or "")
-            if shield.injection or shield.redactions:
+            if shield.redactions:
+                display_output = redact_sensitive(display_output)[0]
+            if shield.sealed or shield.injection or shield.redactions:
                 step_data["tool_output"] = shielded
                 step_data["content_shield"] = shield.to_dict()
                 if shield.injection:
@@ -2748,6 +2808,7 @@ class AgentOrchestrator:
                 "Tool output withheld: content shield failed. Use read_evidence on the "
                 "evidence_id if one was returned."
             )
+            display_output = step_data["tool_output"]
 
         logger.info(f"[{user_id}] Tool result: success={step_data['success']}")
 
@@ -2755,7 +2816,7 @@ class AgentOrchestrator:
             "type": "tool_complete",
             "tool_name": tool_name,
             "success": step_data["success"],
-            "output_summary": (step_data["tool_output"] or "")[:300],
+            "output_summary": (display_output or "")[:300],
             "iteration": iteration,
         })
 
@@ -3349,12 +3410,14 @@ class AgentOrchestrator:
             completion_reason = "Iteration budget reached; reporting partial coverage"
         completion_reason = completion_reason or "Session ended"
 
+        from app.services.agent.last_light import append_gaps
+
         if completion_reason == _PLAN_UNAVAILABLE_REASON:
             from app.services.agent.action_ledger import active_run_id, partial_report
             return {
-                "messages": [AIMessage(content=partial_report(
+                "messages": [AIMessage(content=append_gaps(partial_report(
                     active_run_id.get(), completion_reason,
-                ))],
+                ), state, completion_reason))],
                 "task_complete": True,
                 "completion_reason": completion_reason,
                 "token_usage": state.get("token_usage"),
@@ -3385,7 +3448,8 @@ class AgentOrchestrator:
             logger.warning("Final report model unavailable: %s", type(exc).__name__)
             from app.services.agent.action_ledger import active_run_id, partial_report
             answer = partial_report(active_run_id.get(), completion_reason)
-        
+
+        answer = append_gaps(answer, state, completion_reason)
         return {
             "messages": [AIMessage(content=answer)],
             "task_complete": True,

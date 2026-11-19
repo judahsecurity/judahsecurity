@@ -946,6 +946,16 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "title": "Walk the app (execute_interceptor or execute_deep_crawl)",
             "next": "execute_interceptor (or execute_deep_crawl) on the primary URL",
         })
+    if pipeline and crawled and state.get("full_pursuit_enabled", True):
+        from app.services.agent.full_pursuit import rendered_client_side
+
+        if not rendered_client_side(state.get("execution_trace")):
+            missing.append({
+                "id": "render",
+                "title": "App never rendered in a browser (HTTP-only crawl misses client-side routes and XHR)",
+                "next": "execute_interceptor or execute_deep_crawl on the primary URL "
+                        "(or execute_katana with -headless)",
+            })
     if pipeline and (empty or not dir_brute):
         why = (
             "Root looks empty/404 — directory brute-force is mandatory"

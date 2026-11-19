@@ -405,9 +405,33 @@ async def gate(
     if (tool_name in SAFE_RECON_TOOLS or nuclei_recon) and decision != "deny" and not login_crawl:
         decision = "auto"
 
+    # Argument rules refine the name-level decision for this specific call.
+    # deny/confirm rules can only tighten; an auto rule can relax an org
+    # "confirm", but never an RoE, pilot or login-crawl escalation (those are
+    # applied below). Unparseable calls to a tool with rules go to an analyst.
+    from app.services.agent.argument_rules import evaluate as evaluate_argument_rules
+
+    arg_verdict = evaluate_argument_rules(
+        tool_name, tool_args, policy_cfg.get("tool_argument_rules") or [],
+    )
+    if arg_verdict.decision == "deny":
+        return {
+            "decision": "deny",
+            "reason": (
+                f"Tool '{tool_name}' with these arguments is denied by the "
+                f"organization's agent policy ({arg_verdict.reason})."
+            ),
+        }
+    if arg_verdict.decision == "confirm" and decision != "deny":
+        decision = "confirm"
+    elif arg_verdict.decision == "auto" and decision == "confirm":
+        decision = "auto"
+
     # RoE escalates "auto" -> "confirm" for non-readonly tools when enabled,
     # but keep SAFE_RECON_TOOLS auto so httpx/dns fingerprinting can start.
-    roe_escalated = False
+    # A call that could not be checked against its argument rules is treated
+    # like an RoE escalation: autonomous auto-approve cannot wave it through.
+    roe_escalated = arg_verdict.unparseable
     if (
         decision == "auto"
         and _roe_requires_confirmation(organization_id)

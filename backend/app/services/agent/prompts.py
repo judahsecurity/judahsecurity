@@ -1164,7 +1164,12 @@ def render_system_prompt(*, mode: str, **context: object) -> str:
     """Format template fields before adding guidance with literal JSON braces."""
     template = (PILOT_WEB_SYSTEM_PROMPT if context.get("pilot_web_only") else PILOT_SYSTEM_PROMPT
                 ) if mode == "pilot" else REACT_SYSTEM_PROMPT
+    full_pursuit = bool(context.pop("full_pursuit", True))
     rendered = template.format(**context)
     if mode != "pilot":
         rendered += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
+        if full_pursuit:
+            from app.services.agent.full_pursuit import FULL_PURSUIT_GUIDANCE
+
+            rendered += "\n\n" + FULL_PURSUIT_GUIDANCE
     return rendered

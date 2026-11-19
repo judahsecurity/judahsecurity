@@ -105,7 +105,9 @@ async def test_port_probe_result_reaches_trace_and_status_as_text(monkeypatch):
 
     output = result["_current_step"]["tool_output"]
     assert isinstance(output, str)
-    assert json.loads(output) == observation
+    parsed = json.loads(output)
+    assert parsed.pop("_untrusted_content")["sealed"] is True
+    assert parsed == observation
     completion = [call.args[0] for call in orchestrator._emit_status.await_args_list
                   if call.args[0].get("type") == "tool_complete"]
     assert completion and completion[-1]["success"] is True

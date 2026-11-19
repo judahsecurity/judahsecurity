@@ -1896,6 +1896,39 @@ async def run_fireteam(
 
             action_id = uuid.uuid4().hex
             run_id = active_run_id.get()
+            # Admit the specialist only if the run purse can hold its spend cap
+            # beside what is spent and what running specialists already hold.
+            from app.services.agent.run_purse import DEFAULT_SPECIALIST_RESERVE_USD, get_purse
+
+            purse = get_purse(run_id)
+            reserve_usd = float(getattr(directives.get(p.name), "max_spend_usd", 0) or 0) \
+                or DEFAULT_SPECIALIST_RESERVE_USD
+            if purse is not None and not purse.reserve(action_id, reserve_usd):
+                append_action(run_id, action_id, "skipped", f"specialist:{p.name}",
+                              target=targets_list[0] if targets_list else "",
+                              detail="run budget cannot cover specialist")
+                directive = directives.get(p.name)
+                hypothesis_ids = list(getattr(directive, "hypothesis_ids", []) or [])
+                return SpecialistReport(
+                    specialist=p.name, role=f"{p.epithet}: {p.role}", mission=mission,
+                    summary=(f"Not started: the run budget cannot reserve "
+                             f"${reserve_usd:.2f} for this specialist."),
+                    error="run budget exhausted", verdict="blocked",
+                    rewrite_hint="run_budget_exhausted",
+                    hypothesis_ids=hypothesis_ids,
+                    assigned_hypothesis_id=hypothesis_ids[0] if len(hypothesis_ids) == 1 else "",
+                    lease_id=str(getattr(directive, "lease_id", "") or ""),
+                )
+            try:
+                return await _run_admitted(p, execution_progress, run_id, action_id)
+            finally:
+                if purse is not None:
+                    purse.release(action_id)
+
+    async def _run_admitted(p: SpecialistProfile, execution_progress: Dict[str, Any],
+                            run_id: Optional[str], action_id: str) -> SpecialistReport:
+            from app.services.agent.action_ledger import append_action
+
             append_action(run_id, action_id, "started", f"specialist:{p.name}",
                           target=targets_list[0] if targets_list else "")
             label = f"{p.epithet} ({p.name})" if p.epithet else p.name
