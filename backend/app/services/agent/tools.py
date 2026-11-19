@@ -12297,6 +12297,101 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             150.0 if bounded_first_pass else 420.0,
             max(1.0, _remaining_dispatch_time() - reserve),
         )
+        # Rolling dispatch: as each specialist finishes, fold its result into
+        # the task graph and start work it made ready (a retry, a spawned
+        # hypothesis, or a chain step it unblocked) in the freed slot, instead
+        # of waiting for the slowest member and the next planner turn.
+        from app.services.agent.auto_prompter import (
+            apply_rewrite_to_directive,
+            apply_rewrite_to_profile,
+            record_failure_approach,
+            should_rewrite,
+        )
+        from app.services.agent.penetration_task_graph import NODE_READY
+
+        rolling = bool(getattr(settings, "FIRETEAM_ROLLING_DISPATCH", False)) and mode == "attack"
+        early_summaries: dict = {}
+        early_spawned: list = []
+        early_rewrites: dict = {}
+        mid_wave_lease_ids: set = set()
+        mid_wave_starts: list = []
+
+        async def _next_work(report, slots: int, window: float) -> list:
+            nonlocal graph
+            summary = parse_executor_summary(report)
+            early_summaries[id(report)] = summary
+            ready_before = {nid for nid, node in graph.nodes.items() if node.status == NODE_READY}
+            spawn_names = apply_executor_summary(graph, brain, summary)
+            if spawn_names:
+                early_spawned.extend(spawn_names)
+                ensure_spawned_hypotheses(brain, spawn_names)
+            graph = sync_graph_from_brain(brain)
+            additions: list = []
+            # Rule 1: one immediate retry per specialist, continuing from its
+            # progress note, when the run was cut short or asked to retry.
+            if (slots > 0 and window >= 90.0
+                    and not summary.rewrite_hint.startswith("execution_timeout")
+                    and report.specialist not in early_rewrites):
+                rewrite = should_rewrite(graph, summary, report)
+                base = get_specialist(rewrite.specialist) if rewrite else None
+                if rewrite and base:
+                    retry_lease = claim_task_leases(graph, [rewrite.specialist])
+                    directive = directives_from_hypotheses(
+                        brain=brain,
+                        profiles_by_name={rewrite.specialist: base},
+                        specialists=[rewrite.specialist],
+                        default_target=default_target or "",
+                        task_leases=retry_lease,
+                        coverage_leases=coverage_leases,
+                    ).get(rewrite.specialist)
+                    if directive is not None:
+                        record_failure_approach(brain, summary, rewrite.failure)
+                        early_rewrites[rewrite.specialist] = rewrite
+                        additions.append((
+                            apply_rewrite_to_profile(_dc_replace(base), rewrite),
+                            apply_rewrite_to_directive(directive, rewrite),
+                        ))
+                        mid_wave_starts.append({"specialist": rewrite.specialist,
+                                                "reason": "retry"})
+            # Rule 2: hypotheses this result made ready (spawned, or a chain
+            # step whose prerequisite it proved) start now, one per specialist.
+            free = slots - len(additions)
+            if free > 0:
+                newly_ready = [
+                    node for nid, node in graph.nodes.items()
+                    if node.status == NODE_READY and not node.lease_id and nid not in ready_before
+                ]
+                names = permitted_specialists(
+                    list(dict.fromkeys(node.specialist for node in newly_ready)),
+                    allow_credential_testing=bool(self._credential_testing_allowed),
+                )
+                names = [name for name in names if get_specialist(name)][:free]
+                leases = claim_task_leases(graph, names) if names else {}
+                if leases:
+                    new_profiles = {name: get_specialist(name) for name in leases}
+                    new_directives = directives_from_hypotheses(
+                        brain=brain,
+                        profiles_by_name=new_profiles,
+                        specialists=list(leases),
+                        default_target=default_target or "",
+                        task_leases=leases,
+                        coverage_leases={},
+                    )
+                    for name, lease in leases.items():
+                        directive = new_directives.get(name)
+                        if directive is None:
+                            continue
+                        mid_wave_lease_ids.add(str(getattr(directive, "lease_id", "") or ""))
+                        additions.append((new_profiles[name], directive))
+                        mid_wave_starts.append({
+                            "specialist": name,
+                            "hypothesis_id": getattr(lease, "hypothesis_id", ""),
+                            "reason": "spawned" if name in (spawn_names or []) else "unblocked",
+                        })
+            persist_graph(brain, graph)
+            _checkpoint_task_graph()
+            return additions
+
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
@@ -12310,20 +12405,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             report_callback=_verify_completed_hunter,
             member_timeout_sec=max(1.0, first_wave_timeout - 10.0),
             wave_timeout_sec=first_wave_timeout,
+            next_work=_next_work if rolling else None,
+            max_dynamic_members=max(0, int(getattr(settings, "FIRETEAM_MAX_MID_WAVE_STARTS", 6))),
         )
 
-        from app.services.agent.auto_prompter import (
-            apply_rewrite_to_directive,
-            apply_rewrite_to_profile,
-            record_failure_approach,
-            should_rewrite,
-        )
-        executor_summaries = [parse_executor_summary(r) for r in result.reports]
-        spawned: list = []
+        executor_summaries = [
+            early_summaries.get(id(r)) or parse_executor_summary(r) for r in result.reports
+        ]
+        spawned: list = list(early_spawned)
         rewrites: list = []
         for summary, report in zip(executor_summaries, result.reports):
-            spawned.extend(apply_executor_summary(graph, brain, summary))
+            if id(report) not in early_summaries:
+                spawned.extend(apply_executor_summary(graph, brain, summary))
             if summary.rewrite_hint.startswith("execution_timeout"):
+                continue
+            if report.specialist in early_rewrites:
                 continue
             rewrite = should_rewrite(graph, summary, report)
             if rewrite:
@@ -12422,6 +12518,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         reports_by_specialist = {}
         for report in result.reports:
+            if report.lease_id and report.lease_id in mid_wave_lease_ids:
+                continue  # a mid-wave hypothesis run holds no coverage lease
             reports_by_specialist.setdefault(report.specialist, []).append(report)
         for specialist, lease in coverage_leases.items():
             reports = reports_by_specialist.get(specialist, [])
@@ -12534,6 +12632,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 rewrites=[r.specialist for r in rewrites],
                 leads_recorded=leads_recorded,
             ),
+            "started_mid_wave": mid_wave_starts[:12],
             "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],
             "surface_signature": surface_signature[:32],

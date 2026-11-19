@@ -2173,6 +2173,8 @@ async def run_fireteam(
     llm_for_specialist: Optional[Callable[[SpecialistProfile], Any]] = None,
     member_timeout_sec: float = 600.0,
     wave_timeout_sec: float = 1200.0,
+    next_work: Optional[Callable[[SpecialistReport, int, float], Awaitable[list]]] = None,
+    max_dynamic_members: int = 0,
 ) -> FireteamResult:
     """Run a bounded fireteam and return completed and interrupted receipts.
 
@@ -2180,6 +2182,14 @@ async def run_fireteam(
     or fully custom :class:`SpecialistProfile` instances (for ad-hoc missions).
     ``directives`` maps specialist name → OperationDirective (optional).
     ``report_callback`` receives each completed member before the whole wave ends.
+
+    ``next_work`` turns the wave into a rolling dispatch: it is awaited as
+    ``next_work(report, slots, window_seconds)`` as soon as each member
+    finishes, and may return up to ``slots`` ``(profile, directive)`` pairs to
+    start at once in the freed slot instead of waiting for the slowest member
+    and the next planner turn. ``slots`` is 0 once ``max_dynamic_members``
+    have started or too little wave time is left; it is still called then so
+    the caller can record the result. All members share the wave deadline.
     """
     start = datetime.utcnow()
     directives = directives or {}
@@ -2202,9 +2212,11 @@ async def run_fireteam(
     sem = asyncio.Semaphore(max(1, max_parallel))
 
     def _interrupted_report(
-        p: SpecialistProfile, reason: str, *, execution_progress: Dict[str, Any]
+        p: SpecialistProfile, reason: str, *, execution_progress: Dict[str, Any],
+        directive: Any = None,
     ) -> SpecialistReport:
-        directive = directives.get(p.name)
+        if directive is None:
+            directive = directives.get(p.name)
         hypothesis_ids = list(getattr(directive, "hypothesis_ids", None) or [])
         return SpecialistReport(
             specialist=p.name,
@@ -2227,7 +2239,14 @@ async def run_fireteam(
             lease_id=str(getattr(directive, "lease_id", "") or ""),
         )
 
-    async def _run(p: SpecialistProfile, execution_progress: Dict[str, Any]) -> SpecialistReport:
+    async def _run(
+        p: SpecialistProfile,
+        execution_progress: Dict[str, Any],
+        member_directive: Any = None,
+        member_timeout: Optional[float] = None,
+    ) -> SpecialistReport:
+        if member_directive is None:
+            member_directive = directives.get(p.name)
         async with sem:
             from app.services.agent.action_ledger import active_run_id, append_action
 
@@ -2254,13 +2273,13 @@ async def run_fireteam(
                 targets_list,
                 spec_llm,
                 tools_manager,
-                directive=directives.get(p.name),
+                directive=member_directive,
                 execution_progress=execution_progress,
             ))
             try:
-                directive = directives.get(p.name)
+                directive = member_directive
                 member_cap = min(
-                    member_timeout_sec,
+                    member_timeout_sec if member_timeout is None else member_timeout,
                     float(getattr(directive, "max_seconds", 0) or member_timeout_sec),
                 )
                 done, _ = await asyncio.wait(
@@ -2274,6 +2293,7 @@ async def run_fireteam(
                     rep = _interrupted_report(
                         p, f"specialist timed out after {member_cap:g}s",
                         execution_progress=execution_progress,
+                        directive=member_directive,
                     )
             except asyncio.CancelledError:
                 member_task.cancel()
@@ -2287,6 +2307,7 @@ async def run_fireteam(
                 rep = _interrupted_report(
                     p, f"specialist failed: {exc}",
                     execution_progress=execution_progress,
+                    directive=member_directive,
                 )
             if progress_callback:
                 try:
@@ -2319,12 +2340,56 @@ async def run_fireteam(
 
     execution_progress = [{"tool_inflight": False, "completed_calls": []}
                           for _ in resolved]
+    member_directives: list[Any] = [directives.get(p.name) for p in resolved]
     tasks = [asyncio.create_task(_run(p, progress))
              for p, progress in zip(resolved, execution_progress)]
+    loop = asyncio.get_running_loop()
+    wave_deadline = loop.time() + max(0.01, wave_timeout_sec)
+    dynamic_started = 0
     try:
-        _, pending = await asyncio.wait(
-            tasks, timeout=max(0.01, wave_timeout_sec)
-        )
+        if next_work is None:
+            _, pending = await asyncio.wait(
+                tasks, timeout=max(0.01, wave_timeout_sec)
+            )
+        else:
+            pending = set(tasks)
+            while pending:
+                remaining = wave_deadline - loop.time()
+                if remaining <= 0:
+                    break
+                done, pending = await asyncio.wait(
+                    pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+                )
+                for finished in done:
+                    if finished.cancelled() or finished.exception() is not None:
+                        continue
+                    # A new member needs room to work and to wrap up. With no
+                    # room, next_work still records the result (slots=0).
+                    window = wave_deadline - loop.time() - min(5.0, wave_timeout_sec * 0.1)
+                    budget_left = max(0, int(max_dynamic_members) - dynamic_started)
+                    if window < _MIN_DYNAMIC_MEMBER_SECONDS:
+                        budget_left = 0
+                    try:
+                        additions = await next_work(
+                            finished.result(), budget_left, window,
+                        ) or []
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("Fireteam next_work failed; continuing the wave")
+                        additions = []
+                    for profile, directive in list(additions)[:budget_left]:
+                        progress = {"tool_inflight": False, "completed_calls": []}
+                        resolved.append(profile)
+                        execution_progress.append(progress)
+                        member_directives.append(directive)
+                        task = asyncio.create_task(_run(
+                            profile, progress, member_directive=directive,
+                            member_timeout=min(member_timeout_sec, window),
+                        ))
+                        tasks.append(task)
+                        pending.add(task)
+                        dynamic_started += 1
     except BaseException:
         for task in tasks:
             task.cancel()
@@ -2335,11 +2400,13 @@ async def run_fireteam(
         task.add_done_callback(_log_late_failure)
 
     reports = []
-    for profile, task, progress in zip(resolved, tasks, execution_progress):
+    for profile, task, progress, directive in zip(
+        resolved, tasks, execution_progress, member_directives
+    ):
         if task in pending:
             reports.append(_interrupted_report(
                 profile, f"fireteam wave timed out after {wave_timeout_sec:g}s",
-                execution_progress=progress,
+                execution_progress=progress, directive=directive,
             ))
             if progress_callback:
                 try:
@@ -2353,7 +2420,7 @@ async def run_fireteam(
             except BaseException as exc:
                 reports.append(_interrupted_report(
                     profile, f"specialist failed: {exc}",
-                    execution_progress=progress,
+                    execution_progress=progress, directive=directive,
                 ))
 
     merged = _merge_reports(mission, reports)

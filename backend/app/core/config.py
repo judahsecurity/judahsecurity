@@ -191,6 +191,11 @@ class Settings(BaseSettings):
     # re-sends the system prompt and history; caching bills that prefix at the
     # cache-read rate instead of the full input rate.
     AGENT_PROMPT_CACHE: bool = True
+    # Rolling fireteam dispatch: start a retry, a spawned hypothesis, or a
+    # chain step a result unblocked as soon as a specialist finishes, instead
+    # of after the whole wave. Off until benchmarked against wave mode.
+    FIRETEAM_ROLLING_DISPATCH: bool = False
+    FIRETEAM_MAX_MID_WAVE_STARTS: int = 6
     # Timeout for attaching an external MCP server (Burp/Caido).
     AGENT_MCP_CONNECT_TIMEOUT_SECONDS: float = 8.0
     # Node-level ceiling for a single tool call. Bounds any one tool so a hung

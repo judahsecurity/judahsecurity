@@ -155,3 +155,47 @@ also cap tool calls and time per specialist through the schedule's
 To test whether budget limits recall, run the same lab cases at `1.0` and at
 `2.5` with matching schedule caps, then compare with
 `python -m local_harness.ledger_compare`.
+
+## Prompt caching
+
+Anthropic models are called with automatic prompt caching
+(`AGENT_PROMPT_CACHE`, default on), so each specialist or planner turn reads
+the previous turn's system prompt and history at the cache-read rate. The
+specialist system prompt puts its fixed part (role, tools, instructions, run
+policy) above the line `=== ASSIGNMENT (everything below changes per task) ===`
+and the directive, mission, targets, notes and iteration limit below it. The
+Anthropic client adds a cache breakpoint at that line, so every lease a
+specialist takes in a run reuses the fixed part. Keep per-assignment text below
+the line: anything that varies above it stops the fixed part from being reused.
+`token_usage` reports `cache_read_tokens` and `cache_creation_tokens`, and
+spend caps price them at 0.1× and 1.25× the input rate.
+
+## Rolling dispatch
+
+With `FIRETEAM_ROLLING_DISPATCH=true` (default off), an attack-mode round no
+longer waits for its slowest specialist before acting on results. As each
+specialist finishes, `fireteam_dispatch` folds its report into the task graph
+and fills the freed slot with work that report made ready:
+
+1. a retry of that specialist (once per round, continuing from its progress
+   note) when the auto-prompter would rewrite it, if at least 90 seconds of
+   the round remain;
+2. a hypothesis it spawned, or a chain step whose prerequisite it proved, one
+   lease per specialist.
+
+New work goes through the same lease claim, directive builder and
+credential-testing permission as round-start work. At most
+`FIRETEAM_MAX_MID_WAVE_STARTS` (default 6) members start mid-round, never with
+less than 60 seconds of the round left, and they share the round's deadline.
+Work that finds no free slot or time is left for the post-round retry wave or
+the next dispatch, as before. `started_mid_wave` in the dispatch result lists
+what started and why.
+
+Out-of-lane leads and observation follow-ups are still applied after the
+round. Assigning them mid-round needs the follow-up planner's coverage-cell
+writes to merge with the cells specialists update while they run.
+
+To compare, run the same lab cases with the flag off and on and compare with
+`python -m local_harness.ledger_compare`. The follow-up chain timings in
+`chain_report` (`accept_to_claim_ms`, `observation_to_verdict_ms`) show how
+long found work waits before a specialist picks it up.
