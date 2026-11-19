@@ -738,6 +738,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "independent_verify": self.independent_verify,
             "record_verify_verdict": self.record_verify_verdict,
             "read_evidence": self.read_evidence,
+            "search_evidence": self.search_evidence,
             "run_assessment_workflow": self.run_assessment_workflow,
             # Private scoped executor: run binding and bearer tokens stay in Aegis.
             "scoped_assessment_observe": self.scoped_assessment_observe,
@@ -3191,7 +3192,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         try:
             result = await self._execute_impl(tool_name, tool_args)
             from app.services.agent.evidence_store import evidence_store
-            if tool_name != "read_evidence":
+            if tool_name not in ("read_evidence", "search_evidence"):
                 artifact_id = evidence_store(self).record("tool_output", result, success=result.get("success", False))
                 result.setdefault("artifact_id", artifact_id)
             self.record_invocation(tool_name, tool_args, result)
@@ -9679,6 +9680,20 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         """Read a redacted execution artifact without losing text beyond the preview."""
         from app.services.agent.evidence_store import evidence_store
         return json.dumps(evidence_store(self).read(evidence_id, offset, limit))
+
+    async def search_evidence(self, query: str, kind: str = "http_exchange", limit: int = 5) -> str:
+        """Search recorded, redacted HTTP exchanges in this session by text.
+
+        Use before re-requesting a URL: find leaked paths, internal hosts, stack
+        traces, key names or error formats in responses already seen. Every
+        term must match. Read a hit in full with read_evidence(evidence_id, offset).
+        """
+        from app.services.agent.evidence_store import evidence_store
+        try:
+            hits = evidence_store(self).search(query, kind=kind, limit=limit)
+        except ValueError as exc:
+            return json.dumps({"ok": False, "error": str(exc)})
+        return json.dumps({"ok": True, "count": len(hits), "matches": hits})
 
     async def register_test_identity(self, name: str, target: str, cookies=None, headers=None,
                                      storage_state=None, role: str = "", tenant: str = "") -> str:

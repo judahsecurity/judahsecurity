@@ -375,6 +375,45 @@ class EvidenceStore:
             )
         return artifact_id
 
+    def search(self, query: str, *, kind: str = "http_exchange", limit: int = 5) -> list[dict]:
+        """Full-text search over redacted artifacts, newest first.
+
+        Every term (at least three characters) must appear. Each hit returns a
+        short excerpt and the offset to pass to read() for the full context.
+        """
+        terms = [t for t in str(query or "").lower().split() if len(t) >= 3][:6]
+        if not terms:
+            raise ValueError("search needs at least one term of three or more characters")
+        limit = max(1, min(int(limit or 5), 10))
+        with self._lock:
+            records = list(self._records.values())
+        hits = []
+        for record in reversed(records):
+            if kind and record.get("kind") != kind:
+                continue
+            text = json.dumps(record.get("payload"), default=str)
+            lower = text.lower()
+            if not all(t in lower for t in terms):
+                continue
+            at = lower.find(terms[0])
+            start = max(0, at - 160)
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+            response = payload.get("response") if isinstance(payload.get("response"), dict) else {}
+            hits.append({
+                "evidence_id": record["id"],
+                "kind": record.get("kind"),
+                "identity": record.get("identity"),
+                "method": request.get("method"),
+                "url": str(request.get("url") or record.get("target") or "")[:300],
+                "status": response.get("status"),
+                "excerpt": text[start:start + 400],
+                "offset": start,
+            })
+            if len(hits) >= limit:
+                break
+        return hits
+
     def read(self, artifact_id: str, offset: int = 0, limit: int = 6000) -> dict:
         record = self.records.get(artifact_id)
         if record is None:

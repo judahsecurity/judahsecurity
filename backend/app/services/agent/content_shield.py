@@ -240,7 +240,7 @@ def sanitize_for_model(text: str) -> Tuple[str, ShieldReport]:
 TARGET_CONTENT_TOOLS = frozenset({
     "execute_browser", "execute_curl", "replay_http_request", "compare_requests",
     "mutate_captured_request", "run_intruder_batch", "list_captured_requests",
-    "read_evidence", "scoped_assessment_observe", "scoped_assessment_probe",
+    "read_evidence", "search_evidence", "scoped_assessment_observe", "scoped_assessment_probe",
     "scoped_assessment_probe_assigned", "scoped_input_probe_assigned",
     "scoped_dom_xss_assigned", "fetch_lazy_chunks", "extract_js_endpoints",
     "scan_js_sinks", "fingerprint_api", "fingerprint_passive_stack",

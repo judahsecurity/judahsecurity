@@ -437,3 +437,39 @@ def test_lead_becomes_a_capture_event_without_values():
     assert event["facts"]["path"] == "/internal/admin"
     assert event["facts"]["parameters"] == [{"location": "query", "name": "token"}]
     assert "abc" not in json.dumps(event)
+
+
+# --- evidence full-text search -----------------------------------------------
+
+def test_evidence_search_matches_all_terms_newest_first(tmp_path, monkeypatch):
+    from app.services.agent.evidence_store import EvidenceStore
+
+    monkeypatch.setenv("AEGIS_EVIDENCE_DIR", str(tmp_path))
+    store = EvidenceStore(namespace="t")
+    old = store.record("http_exchange", {
+        "request": {"method": "GET", "url": "https://app.example.test/a"},
+        "response": {"status": 500, "body": "Traceback ... at db.internal.corp:5432"},
+    }, target="https://app.example.test/a")
+    new = store.record("http_exchange", {
+        "request": {"method": "GET", "url": "https://app.example.test/b"},
+        "response": {"status": 200, "body": "upstream db.internal.corp ok"},
+    }, target="https://app.example.test/b")
+    store.record("tool_output", {"output": "db.internal.corp"})
+    hits = store.search("DB.INTERNAL.CORP")
+    assert [h["evidence_id"] for h in hits] == [new, old]
+    assert hits[0]["status"] == 200 and hits[0]["url"].endswith("/b")
+    assert [h["evidence_id"] for h in store.search("internal.corp traceback")] == [old]
+    assert len(store.search("db.internal.corp", kind="")) == 3
+    full = store.read(old, offset=hits[1]["offset"], limit=400)
+    assert "db.internal.corp" in full["content"]
+    with pytest.raises(ValueError):
+        store.search("ab")
+
+
+@pytest.mark.asyncio
+async def test_search_evidence_tool_is_registered_and_offered_to_specialists():
+    from app.services.agent import content_shield, pilot_policy
+
+    assert "search_evidence" in content_shield.TARGET_CONTENT_TOOLS
+    assert "search_evidence" in pilot_policy.PILOT_LOCAL_TOOLS
+    assert fireteam_service._action_kind("search_evidence", {}) == "read"

@@ -29,7 +29,7 @@ PILOT_LOCAL_TOOLS = frozenset({
     "list_captured_requests", "plan_intruder_mutations", "get_coverage",
     "get_assessment_coverage", "record_surface_coverage",
     "submit_finding_candidate", "independent_verify", "record_verify_verdict",
-    "create_finding", "assess_finding_risk", "read_evidence",
+    "create_finding", "assess_finding_risk", "read_evidence", "search_evidence",
     "record_recon_inventory",
 })
 # Vulnerability research: third-party intel APIs only, never target traffic.

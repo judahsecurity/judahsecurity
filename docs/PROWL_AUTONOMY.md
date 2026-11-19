@@ -133,3 +133,15 @@ that specialist's own successful tool calls. Each kept lead is committed as a
 values), so the follow-up planner validates and assigns it like any browser
 capture. At most five leads per specialist are read. `wave_changes` lists
 them and reports `leads_recorded`.
+
+## Evidence search
+
+`search_evidence(query, kind="http_exchange", limit=5)` searches the full text
+of the session's recorded HTTP exchanges, newest first, for leaked paths,
+internal hosts, stack traces, key names and error formats. Every term of three
+or more characters must match, and at most ten hits are returned, each with a
+400-character excerpt and the offset to pass to `read_evidence` for the full
+context. Artifacts are redacted when recorded, so credential values do not
+match. The tool sends no target traffic, is local-only for pilots, does not
+record its own output as evidence, and its results go through the
+target-content shield like `read_evidence`. Specialists receive it by default.

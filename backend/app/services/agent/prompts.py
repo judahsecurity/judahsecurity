@@ -426,6 +426,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **record_verify_verdict**: Verifier-only. Args: candidate_id, verdict, evidence, evidence_ids, proof. Requires fresh execution records from this verifier and a supported proof rule.
 - **run_assessment_workflow**: Run captured request steps with explicit identities, JSON field extraction, {{variable}} references, expected statuses, cleanup steps, and resumable workflow_id. Does not itself confirm findings.
 - **read_evidence**: Read full redacted artifacts by evidence_id, offset, limit.
+- **search_evidence**: Full-text search of this session's recorded, redacted HTTP exchanges (query: every term of 3+ characters must match; kind default http_exchange; limit ≤10). Use it before re-requesting a URL to find leaked paths, internal hosts, stack traces or key names; open a hit with read_evidence(evidence_id, offset).
 - **register_test_identity**: Register a named operator-provided test session (name, target, cookies/headers/storage_state, role, tenant).
 - **list_test_identities**: List configured identities without secrets.
 - **check_test_identity**: Check identity against its known endpoint (identity, url, field, expected).
@@ -729,6 +730,7 @@ TOOL_PHASE_MAP = {
     "independent_verify": ["informational", "exploitation", "post_exploitation"],
     "run_assessment_workflow": ["exploitation", "post_exploitation"],
     "read_evidence": ["informational", "exploitation", "post_exploitation"],
+    "search_evidence": ["informational", "exploitation", "post_exploitation"],
     "register_test_identity": ["informational", "exploitation", "post_exploitation"],
     "list_test_identities": ["informational", "exploitation", "post_exploitation"],
     "check_test_identity": ["informational", "exploitation", "post_exploitation"],
