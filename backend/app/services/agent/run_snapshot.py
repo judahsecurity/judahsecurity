@@ -65,6 +65,12 @@ def _recover_brain_after_restart(brain: Any) -> Any:
         )
         recovered += 1
 
+    for event in brain.get("observation_events") or []:
+        # The in-process model call died with the backend; plan it again.
+        if isinstance(event, dict) and event.get("status") == "planning":
+            event["status"] = "committed"
+            recovered += 1
+
     candidates = {
         str(row.get("id") or ""): row
         for row in (brain.get("candidates") or [])

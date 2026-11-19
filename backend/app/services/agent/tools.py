@@ -28,6 +28,10 @@ from app.models.agent_note import AgentNote
 from app.core.config import settings
 
 # Max chars for tool output (used for truncation; align with AGENT_TOOL_OUTPUT_MAX_CHARS)
+# Dispatch modes that keep their own narrow lanes and skip model follow-ups.
+_FOLLOWUP_EXCLUDED_MODES = frozenset({"recon", "coverage_followup", "cms_followup"})
+
+
 def _tool_output_max_chars() -> int:
     return getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000)
 
@@ -537,6 +541,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     def __init__(self):
         self.tools = self._register_tools()
         self._mcp_server = None
+        from app.services.agent.followup_runtime import FollowupRuntime
+
+        self._followup_runtime = FollowupRuntime()
         from app.services.agent.tool_singleflight import ToolSingleFlight
 
         self._tool_singleflight = ToolSingleFlight()
@@ -890,8 +897,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
                     brain = seed_hypotheses_from_capability_map(brain, merged)
                     ingest_capability_map_operations(brain, merged)
-                    seed_parameter_coverage_cells(brain, collect_parameter_inventory(merged))
+                    merged_inventory = collect_parameter_inventory(merged)
+                    seed_parameter_coverage_cells(brain, merged_inventory)
                     seed_js_coverage_cells(brain, merged)
+                    self._refresh_followups(brain, merged_inventory)
                     self._engagement_brain = brain.to_dict()
                     # The service run is bound to one stored asset. Persist the
                     # value-free observation there even when its Asset.value is
@@ -5726,6 +5735,20 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                             and candidate_row.get("id") == verified.id
                         ):
                             candidate_row["finding_id"] = str(vuln.id)
+                            if candidate_row.get("coverage_cell_id"):
+                                self._record_followup_event(
+                                    brain, kind="verified_finding",
+                                    identity=verified.identity or "anonymous",
+                                    evidence_ids=[
+                                        *(candidate_row.get("evidence_ids") or []),
+                                        str(verified.id),
+                                    ],
+                                    facts={
+                                        "coverage_cell_id": candidate_row["coverage_cell_id"],
+                                        "finding_id": str(vuln.id),
+                                        "test_class": verified.test_type or "",
+                                    },
+                                )
                     if verified.proof_escalation_id:
                         for escalation in brain.proof_escalations:
                             if escalation.get("id") == verified.proof_escalation_id:
@@ -6600,6 +6623,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 self._capability_map = {**cmap, "parameter_inventory": inventory}
                 brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
                 seed_parameter_coverage_cells(brain, inventory)
+                self._refresh_followups(brain, inventory)
                 self._engagement_brain = brain.to_dict()
 
         return json.dumps({
@@ -10414,11 +10438,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.coverage_cells import seed_js_coverage_cells, seed_parameter_coverage_cells
         from app.services.agent.parameter_inventory import collect_parameter_inventory
 
-        seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap if isinstance(cmap, dict) else {}))
+        sync_inventory = collect_parameter_inventory(cmap if isinstance(cmap, dict) else {})
+        seed_parameter_coverage_cells(brain, sync_inventory)
         seed_js_coverage_cells(brain, cmap if isinstance(cmap, dict) else {})
         from app.services.agent.runtime_mapper import ingest_capability_map_operations
         ingest_capability_map_operations(brain, cmap if isinstance(cmap, dict) else {})
         planning = await self._plan_brain_hypotheses(brain)
+        followup_planning = self._refresh_followups(brain, sync_inventory, reset=reset)
         graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
 
@@ -10438,6 +10464,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "threat_model": brain.threat_model or None,
                 "focus_areas": brain.focus_areas[:8],
                 "hypothesis_planning": planning,
+                "followup_planning": followup_planning,
                 "prompt_view": format_engagement_brain_for_prompt(self._engagement_brain),
                 "engagement_brain": self._engagement_brain,
                 "parameter_coverage": {
@@ -10634,6 +10661,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             valid_on=valid_on,
             secret_type=secret_type,
             notes=notes,
+        )
+        self._record_followup_event(
+            brain, kind="credential", identity="engagement",
+            evidence_ids=["credential-record:" + hashlib.sha256(
+                f"{username}|{secret_type}|{source}".encode()).hexdigest()[:16]],
+            facts={"host": (valid_on or [brain.target or ""])[0],
+                   "credential_identity": username, "role": secret_type},
         )
         self._engagement_brain = brain.to_dict()
         return json.dumps(
@@ -10951,6 +10985,55 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             logger.warning("Brain hypothesis planning unavailable: %s", type(exc).__name__)
             return {"reviewed": 0, "hypotheses": 0,
                     "status": "unavailable", "error_type": type(exc).__name__}
+
+    def _followup_key(self, brain):
+        """Keep follow-up planning inside one user, org, run, and target."""
+        return (current_user_id.get(), current_organization_id.get(),
+                current_session_id.get() or "", str(getattr(brain, "target", "") or ""))
+
+    def _record_followup_event(self, brain, *, kind, identity, evidence_ids, facts):
+        """Commit one observation event; a failure never blocks the caller."""
+        from app.services.agent.followup_runtime import current_run_id, followups_enabled
+        from app.services.agent.observation_followups import commit_observation
+
+        if not followups_enabled():
+            return None
+        try:
+            event, _created = commit_observation(
+                brain, run_id=current_run_id(), kind=kind, identity=identity,
+                evidence_ids=[str(v) for v in evidence_ids if v], facts=facts,
+            )
+            return event
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not record %s observation: %s", kind, type(exc).__name__)
+            return None
+
+    def _refresh_followups(self, brain, inventory=None, *, reset=False):
+        """Record capture events, apply finished planning, queue new planning.
+
+        Never waits for the model. The caller persists ``brain`` afterwards.
+        """
+        from app.services.agent.followup_runtime import (
+            followups_enabled, policy_for, record_inventory_captures,
+        )
+
+        if not followups_enabled():
+            return {"status": "disabled"}
+        try:
+            key = self._followup_key(brain)
+            if reset:
+                self._followup_runtime.cancel(key)
+            policy = policy_for(self, brain)
+            recorded = 0
+            if inventory is not None:
+                recorded = record_inventory_captures(brain, inventory, run_id=policy.run_id)
+            out = self._followup_runtime.refresh(key, brain, policy, self._hypothesis_llm)
+            if recorded:
+                out["new_capture_events"] = recorded
+            return out
+        except Exception as exc:  # noqa: BLE001 - follow-ups must not break mapping or dispatch
+            logger.warning("Observation follow-ups unavailable: %s", type(exc).__name__, exc_info=True)
+            return {"status": "error", "error_type": type(exc).__name__}
 
     def _hypothesis_llm(self):
         """Use the engagement's reasoning model for Brain hypothesis planning."""
@@ -11681,10 +11764,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if cmap:
             brain = seed_hypotheses_from_capability_map(brain, cmap.to_dict())
             from app.services.agent.parameter_inventory import collect_parameter_inventory
-            seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap.to_dict()))
+            dispatch_inventory = collect_parameter_inventory(cmap.to_dict())
+            seed_parameter_coverage_cells(brain, dispatch_inventory)
             seed_js_coverage_cells(brain, cmap.to_dict())
             from app.services.agent.runtime_mapper import ingest_capability_map_operations
             ingest_capability_map_operations(brain, cmap.to_dict())
+            followup_planning = self._refresh_followups(brain, dispatch_inventory)
+            self._engagement_brain = brain.to_dict()
+        else:
+            followup_planning = self._refresh_followups(brain)
             self._engagement_brain = brain.to_dict()
 
         # This entry point can be called without sync_engagement_brain. Review
@@ -11765,6 +11853,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ]
 
         pending_inventory_specialists: set[str] = set()
+        followup_specialists: set[str] = set()
         if mode != "recon":
             pending_inventory_specialists = {
                 str(cell.get("specialist") or "")
@@ -11784,6 +11873,23 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     *[name for name in ("js_secrets", "xss", "sqli") if name in pending_inventory_specialists],
                     *(chosen or []),
                 ]))
+            if mode not in _FOLLOWUP_EXCLUDED_MODES:
+                from app.services.agent.fireteam_service import get_specialist
+                from app.services.agent.followup_runtime import (
+                    followups_enabled, policy_for, specialists_with_followups,
+                )
+
+                if followups_enabled():
+                    followup_specialists = {
+                        name for name in specialists_with_followups(brain, policy_for(self, brain))
+                        if get_specialist(name)
+                    }
+                    if auto:
+                        # Model-proposed follow-ups go first so the cap below
+                        # cannot starve work that a new observation created.
+                        chosen = list(dict.fromkeys([
+                            *sorted(followup_specialists), *(chosen or []),
+                        ]))
             if mode not in {"observed_inputs", "cms_followup"}:
                 pending_proof_specialists = [
                     str(row.get("specialist") or "")
@@ -11895,6 +12001,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             if name in task_leases
             or name not in represented_specialists
             or name in pending_inventory_specialists
+            or name in followup_specialists
             or name in judge_roles
         ]
         profiles = {name: profiles[name] for name in chosen if name in profiles}
@@ -11921,9 +12028,23 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.engagement_brain import denominator_surfaces
         from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
+        # Model-proposed follow-ups claim first; each specialist holds at most
+        # one coverage lease, so the ordinary lane fills only the rest.
+        followup_leases = {}
+        followup_policy = None
+        if followup_specialists:
+            from app.services.agent.followup_runtime import (
+                claim_for_specialists, policy_for,
+            )
+
+            followup_policy = policy_for(self, brain)
+            followup_leases = claim_for_specialists(
+                brain, [name for name in chosen if name in followup_specialists],
+                followup_policy,
+            )
         coverage_leases = claim_coverage_cell_leases(
             brain,
-            chosen,
+            [name for name in chosen if name not in followup_leases],
             task_leases=task_leases,
             denominator=denominator_surfaces(brain),
             allowed_observation_sources=(
@@ -11938,6 +12059,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ),
             first_pass_only=mode == "coverage_followup",
         )
+        coverage_leases = {**coverage_leases, **followup_leases}
         directives = directives_from_hypotheses(
             brain=brain,
             profiles_by_name=profiles,
@@ -11946,6 +12068,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             task_leases=task_leases,
             coverage_leases=coverage_leases,
         )
+        if followup_leases:
+            from app.services.agent.followup_runtime import required_identities
+
+            for name, lease in followup_leases.items():
+                directive = directives.get(name)
+                needed = required_identities(brain, lease)
+                if directive is not None and needed:
+                    # A follow-up runs only as the identities it was approved for.
+                    allowed = set(directive.allowed_identities or needed)
+                    directive.allowed_identities = [i for i in needed if i in allowed]
 
         persist_graph(brain, graph)
         self._engagement_brain = brain.to_dict()
@@ -12277,6 +12409,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             reports_by_specialist.setdefault(report.specialist, []).append(report)
         for specialist, lease in coverage_leases.items():
             reports = reports_by_specialist.get(specialist, [])
+            if specialist in followup_leases:
+                from app.services.agent.followup_runtime import finish_followup
+
+                finish_followup(
+                    brain, lease, reports, run_id=followup_policy.run_id,
+                    candidate_id=next((
+                        str(raw.get("id") or "") for raw in (brain.candidates or [])
+                        if isinstance(raw, dict)
+                        and raw.get("coverage_cell_id") == lease.coverage_cell_id
+                    ), ""),
+                )
+                continue
             final_report = reports[-1] if reports else None
             evidence_ids = [
                 evidence_id
@@ -12307,6 +12451,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     else "Specialist did not return a coverage receipt"
                 ),
             )
+        # Apply planning that finished during the wave and queue the results
+        # this wave produced, so the next dispatch can claim their follow-ups.
+        followup_planning = self._refresh_followups(brain)
         self._engagement_brain = brain.to_dict()
         pending = [
             c
@@ -12372,6 +12519,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             },
             "specialists_run": result.specialists_run,
             "hypothesis_planning": hypothesis_planning,
+            "followup_planning": followup_planning,
+            "followup_leases": {
+                name: lease.to_dict() for name, lease in followup_leases.items()
+            },
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
             "capability_map_ready": bool(cmap and cmap.ready_for_attack),
@@ -12438,6 +12589,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         return json.dumps({
             "specialists_run": out["specialists_run"],
             "hypothesis_planning": out["hypothesis_planning"],
+            "followup_planning": out["followup_planning"],
+            "followup_leases": out["followup_leases"],
             "selection_source": out["selection_source"],
             "task_leases": out["task_leases"],
             "coverage_leases": out["coverage_leases"],
