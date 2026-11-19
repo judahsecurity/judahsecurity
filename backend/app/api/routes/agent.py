@@ -942,6 +942,67 @@ def _owned_conversation(db: Session, session_id: str, current_user: User) -> tup
     return conv, org_id
 
 
+class OutriderDispatchRequest(BaseModel):
+    timeout_seconds: int = Field(default=3600, ge=300, le=4 * 3600)
+
+
+@router.post("/sessions/{session_id}/outrider", status_code=201)
+async def outrider_dispatch(
+    session_id: str,
+    request: OutriderDispatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Judah Outrider: start an external ARTEX scout on this session's scope."""
+    from app.services.agent import judah_outrider as outrider
+    from app.services.agent.run_snapshot import load_run_snapshot
+
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    if not outrider.configured():
+        raise HTTPException(status_code=503, detail="Judah Outrider is not configured")
+    state = outrider.load_state(org_id, session_id)
+    if state.get("task_id"):
+        raise HTTPException(status_code=409, detail="An Outrider task already exists for this session")
+    hosts = outrider.session_scope_hosts(load_run_snapshot(org_id, session_id))
+    try:
+        async with outrider.OutriderClient() as client:
+            dispatched = await outrider.dispatch(client, session_id, hosts,
+                                                 timeout_seconds=request.timeout_seconds)
+    except outrider.OutriderError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    outrider.save_state(org_id, session_id, {**dispatched, "imported_ids": []})
+    return {"session_id": session_id, **dispatched}
+
+
+@router.post("/sessions/{session_id}/outrider/import")
+async def outrider_import(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Pull the ARTEX task's findings into this session as pending leads."""
+    from app.services.agent import judah_outrider as outrider
+
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    state = outrider.load_state(org_id, session_id)
+    if not state.get("task_id"):
+        raise HTTPException(status_code=404, detail="No Outrider task for this session")
+    try:
+        async with outrider.OutriderClient() as client:
+            task = await client.task(state["task_id"])
+            summary = await outrider.import_findings(
+                client, org_id, session_id, state["task_id"],
+                already=set(state.get("imported_ids") or []),
+            )
+    except outrider.OutriderError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    state["imported_ids"] = summary.pop("imported_ids")
+    state["last_import_at"] = time.time()
+    outrider.save_state(org_id, session_id, state)
+    return {"session_id": session_id, "task_id": state["task_id"],
+            "task_status": task.get("status"), **summary}
+
+
 @router.get("/proof-classes")
 async def get_proof_classes(current_user: User = Depends(get_current_user)):
     """PROOFS_BY_CLASS, coverage classes and severity caps (read-only)."""
