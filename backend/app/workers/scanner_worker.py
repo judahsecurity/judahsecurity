@@ -1209,7 +1209,15 @@ class ScannerWorker:
             verdict_data = None
             run_error = None
 
+            recheck_recipe = ((vuln.metadata_ or {}).get("recheck_recipe")
+                              if str(vuln.detected_by or "").lower() in ("agent", "llm_red_team") else None)
+
             async def _run_native():
+                # Judah Recheck: replay the finding's own stored proof recipe.
+                if recheck_recipe:
+                    from app.services.agent.judah_recheck import as_validation_verdict, recheck
+
+                    return as_validation_verdict(await recheck(recheck_recipe, finding_id=vuln.id))
                 from app.services.finding_revalidation_service import revalidate_finding
                 return await revalidate_finding(finding_payload)
 
@@ -1381,6 +1389,10 @@ class ScannerWorker:
             vuln.validation_status = "completed"
             vuln.last_validation_verdict = verdict_enum.value
             vuln.last_validated_at = now
+            if isinstance(verdict_data, dict) and verdict_data.get("method") == "judah_recheck":
+                from app.services.agent.judah_recheck import append_history
+
+                vuln.metadata_ = append_history(vuln.metadata_, verdict_data.get("recheck") or {})
 
             # Leo's live port check is also a verification result. Keep the Ports
             # row and scanner-generated findings in sync with its Nmap verdict.
@@ -8092,7 +8104,14 @@ async def main():
     # Register signal handlers
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-    
+
+    try:
+        from app.services.agent.judah_gate import start_gate_from_env
+
+        await start_gate_from_env()
+    except Exception:
+        logger.exception("Judah Gate failed to start in the scanner worker")
+
     worker = ScannerWorker()
     await worker.run()
 

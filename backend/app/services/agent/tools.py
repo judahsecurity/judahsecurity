@@ -5550,6 +5550,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     )
                 }
                 trace_metadata["candidate_id"] = verified.id
+            # Judah Recheck: keep the exact proof recipe so the finding can be
+            # replayed after its session evidence has expired.
+            recheck_recipe = None
+            if verified is not None:
+                from app.services.agent.judah_recheck import recipe_for_finding
+
+                recheck_recipe = recipe_for_finding(
+                    getattr(self, "_recheck_recipes", None) or {},
+                    list(getattr(verified, "evidence_ids", []) or []),
+                )
             vuln = Vulnerability(
                 title=(title or "Agent finding")[:500],
                 description=(description or "")[:10000] if description else None,
@@ -5573,7 +5583,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                             "reason": "source_verified findings are "
                                             "capped at medium without a runtime proof"}
                            if severity_capped else None,
-                           "trace": trace_metadata},
+                           "trace": trace_metadata,
+                           "recheck_recipe": recheck_recipe},
             )
             db.add(vuln)
             db.commit()

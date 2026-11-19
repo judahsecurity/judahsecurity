@@ -1227,6 +1227,11 @@ class ScopedAssessmentTools:
             "scoped_numeric_sqli", result, target=result["target"], identity=identity,
             success=result["proof_confirmed"],
         )
+        if result.get("replay_mode") != "browser_live_get":
+            from app.services.agent.judah_recheck import remember
+
+            remember(self, result["evidence_id"], result, baseline=baseline,
+                     parameter=parameter, identity=identity)
         return json.dumps(result)
 
     async def scoped_string_sqli(self, url: str, parameter: str, identity: str = "anonymous",
@@ -1579,4 +1584,9 @@ class ScopedAssessmentTools:
             "scoped_string_sqli", result, target=result["target"], identity=identity,
             success=result["proof_confirmed"],
         )
+        if result.get("replay_mode") != "browser_live_get":
+            from app.services.agent.judah_recheck import remember
+
+            remember(self, result["evidence_id"], result, baseline=baseline,
+                     parameter=parameter, identity=identity)
         return json.dumps(result)
