@@ -61,3 +61,42 @@ def list_skill_packs() -> list[str]:
     if not PACKS_DIR.is_dir():
         return []
     return sorted(p.name for p in PACKS_DIR.iterdir() if (p / "SKILL.md").is_file())
+
+
+def _trigger_patterns() -> list[tuple[str, "re.Pattern[str]", str]]:
+    """(name, compiled trigger, body) for every pack that declares ``triggers``."""
+    rows = []
+    for name in list_skill_packs():
+        pack = load_skill_md(name)
+        if not pack:
+            continue
+        meta_path = Path(pack["path"])
+        match = _FRONTMATTER.match(meta_path.read_text(encoding="utf-8"))
+        trigger = _parse_frontmatter(match.group(1)).get("triggers", "") if match else ""
+        if not trigger:
+            continue
+        try:
+            rows.append((pack["name"], re.compile(trigger), pack["body"]))
+        except re.error:
+            continue
+    return rows
+
+
+_TRIGGERED_CACHE: list[tuple[str, "re.Pattern[str]", str]] | None = None
+
+
+def triggered_skill_packs(evidence: str, *, limit: int = 3) -> list[tuple[str, str]]:
+    """Packs whose ``triggers`` regex matches what this run has observed.
+
+    Scenario guidance (an exposed datastore, a registry, a known unauth API
+    shape) used to sit in the planner's system prompt for every target. Packs
+    with a ``triggers`` frontmatter line load only once the evidence shows
+    that shape, in the order listed.
+    """
+    global _TRIGGERED_CACHE
+    if _TRIGGERED_CACHE is None:
+        _TRIGGERED_CACHE = _trigger_patterns()
+    if not evidence:
+        return []
+    hits = [(name, body) for name, pattern, body in _TRIGGERED_CACHE if pattern.search(evidence)]
+    return hits[:limit]

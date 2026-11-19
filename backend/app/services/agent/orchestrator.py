@@ -1080,6 +1080,33 @@ class AgentOrchestrator:
 
         return registry_hunt_note(state)
 
+    def _scenario_playbook_note(self, state: AgentState) -> str:
+        """Scenario skill packs whose triggers match what this run has seen.
+
+        These used to be fixed system-prompt text for every target; now a pack
+        (exposed datastore, registry, known unauth API shape) appears only once
+        the target info, map, or recent tool traffic shows that shape.
+        """
+        try:
+            from app.services.agent.skill_md import triggered_skill_packs
+
+            parts = [
+                json_dumps_safe(state.get("target_info") or {}),
+                json_dumps_safe(state.get("capability_map") or {})[:20000],
+            ]
+            for step in (state.get("execution_trace") or [])[-15:]:
+                if isinstance(step, dict):
+                    parts.append(json_dumps_safe(step.get("tool_args") or {})[:1000])
+                    parts.append(str(step.get("tool_output") or "")[:3000])
+            packs = triggered_skill_packs("\n".join(parts))
+        except Exception:
+            logger.debug("scenario playbooks skipped", exc_info=True)
+            return ""
+        if not packs:
+            return ""
+        blocks = [f"## Scenario playbook: {name}\n{body}" for name, body in packs]
+        return "\n\n" + "\n\n".join(blocks)
+
     def _stagnation_note(self, state: AgentState) -> str:
         """Warn when a test class keeps getting attempts that produce nothing.
 
@@ -1804,6 +1831,7 @@ class AgentOrchestrator:
                 # without new findings, steer it to a different, higher-value action.
                 tool_recommendations += self._repetition_guard_note(state, phase)
                 tool_recommendations += self._stagnation_note(state)
+                tool_recommendations += self._scenario_playbook_note(state)
                 try:
                     from app.services.agent.target_pacing import format_throttle_note
 

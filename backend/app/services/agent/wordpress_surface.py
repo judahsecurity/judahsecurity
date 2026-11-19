@@ -306,10 +306,12 @@ def wordpress_hunt_note(state: Optional[Dict[str, Any]] = None) -> str:
         "Content-Type: application/x-www-form-urlencoded. "
         f"baseline body: {_AJAX_BASELINE} "
         f"mutant body: {_AJAX_MUTANT} "
-        "timeout=20. If elapsed_s delta ≥ 1.5s (TIME_BASED_INJECTION_CANDIDATE), "
-        "repeat with SLEEP(4) then execute_sqlmap --technique=BT and create_finding "
-        "with the timing table as evidence."
-        + (" ALREADY RAN — publish or kill with the timing table." if status["ajax_sqli"] else "")
+        "timeout=20. An elapsed_s delta ≥ 1.5s (TIME_BASED_INJECTION_CANDIDATE) is "
+        "only a timing lead: repeat with SLEEP(4) against interleaved controls, use "
+        "bounded execute_sqlmap --technique=BT if it persists, then "
+        "submit_finding_candidate with the timing table for fresh independent "
+        "verification before create_finding."
+        + (" ALREADY RAN — submit the timing table as a candidate or kill it." if status["ajax_sqli"] else "")
     )
     lines.append(
         f"3. Login oracle (ONE attempt per username, no brute force): POST {origin}/wp-login.php "
