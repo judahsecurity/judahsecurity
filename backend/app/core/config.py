@@ -187,6 +187,10 @@ class Settings(BaseSettings):
     AGENT_PRICE_LIMIT_USD: float = 20.0
     # Auto-compact the execution trace once it exceeds this many steps.
     AGENT_COMPACT_TRACE_STEPS: int = 24
+    # Anthropic prompt caching (top-level automatic breakpoint). Each agent turn
+    # re-sends the system prompt and history; caching bills that prefix at the
+    # cache-read rate instead of the full input rate.
+    AGENT_PROMPT_CACHE: bool = True
     # Timeout for attaching an external MCP server (Burp/Caido).
     AGENT_MCP_CONNECT_TIMEOUT_SECONDS: float = 8.0
     # Node-level ceiling for a single tool call. Bounds any one tool so a hung

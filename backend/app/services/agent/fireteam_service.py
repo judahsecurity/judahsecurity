@@ -29,6 +29,8 @@ from urllib.parse import urlsplit
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from app.services.agent.llm_factory import PROMPT_CACHE_BOUNDARY
+
 if TYPE_CHECKING:
     from app.services.agent.operation_directive import OperationDirective
 
@@ -1288,6 +1290,9 @@ def validated_leads(report: "SpecialistReport", scope_hosts: Iterable[str]) -> l
 # ---------------------------------------------------------------------------
 
 
+# Everything above {cache_boundary} is fixed for a specialist within a run, so
+# the Anthropic client can cache it once and reuse it across every lease that
+# specialist takes. Per-assignment data goes below the boundary.
 _SPECIALIST_SYSTEM_PROMPT = """\
 You are {epithet}, a specialist sub-agent in Judah Security's Aegis fireteam.
 Other specialists run in parallel. Stay strictly in your lane.
@@ -1295,20 +1300,9 @@ You MUST NOT call fireteam_dispatch or spawn sub-agents.
 
 EPITHET / ROLE: {epithet} — {role}
 
-OPERATION DIRECTIVE:
-{directive}
-
-SHARED MISSION CONTEXT:
-{mission}
-
-TARGETS: {targets}
-
 AVAILABLE TOOLS (allowlist -- you MAY NOT call anything else):
 {tool_list}
 Use only the argument names shown above. Names with ? are optional. For execute_* tools that take args, pass one CLI argument string in {{"args": "..."}}.
-
-PALACE / HUNT NOTES (compact — URL, param, hypothesis, next mutation):
-{memory}
 
 INSTRUCTIONS:
 1. Obey the operation directive (goal, PASS/KILL, hypothesis ids).
@@ -1349,12 +1343,27 @@ INSTRUCTIONS:
 6. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
-7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
+7. Respect the iteration limit in your assignment. If unsure, finish with done=true.
 8. Work only on the single leased hypothesis or exact parameter coverage cell in the directive. Return one hypothesis_results entry when a hypothesis ID is leased; sibling tests stay open. Pass hypothesis_id and coverage_cell_id to replay_http_request/compare_requests when available. A scoped_input_probe_assigned receipt belongs to its exact coverage cell and lease; a negative receipt for one technique is inconclusive for the whole input. Only independent verification marks proven.
 9. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
 9. save_note(category='hunt') with URL/param/hypothesis/next mutation — not raw httpx.
 
 {suffix}
+
+{cache_boundary}
+
+OPERATION DIRECTIVE:
+{directive}
+
+SHARED MISSION CONTEXT:
+{mission}
+
+TARGETS: {targets}
+
+PALACE / HUNT NOTES (compact — URL, param, hypothesis, next mutation):
+{memory}
+
+ITERATION LIMIT: do not exceed {max_iter} iterations.
 """
 
 
@@ -1526,13 +1535,11 @@ async def _wrap_up_specialist(
             logger.warning("fireteam %s: wrap-up LLM failure: %s", profile.name, exc)
             break
         if directive is not None and directive.max_spend_usd:
-            from app.services.agent.observability import estimate_cost_usd, usage_from_llm_response
+            from app.services.agent.observability import cost_from_usage, usage_from_llm_response
 
             usage = usage_from_llm_response(response)
             model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
-            report.reported_spend_usd += estimate_cost_usd(
-                model, usage["input_tokens"], usage["output_tokens"],
-            )
+            report.reported_spend_usd += cost_from_usage(model, usage)
         text = getattr(response, "content", "") or ""
         messages.append(AIMessage(content=text))
         payload = _extract_json(text)
@@ -1743,6 +1750,7 @@ async def _run_specialist(
         memory=memory_block,
         max_iter=max_iter,
         suffix=suffix,
+        cache_boundary=PROMPT_CACHE_BOUNDARY,
     )
 
     messages: list = [SystemMessage(content=sys_prompt)]
@@ -1793,12 +1801,10 @@ async def _run_specialist(
                 phase=profile.name,
             )
             if budget and directive.max_spend_usd:
-                from app.services.agent.observability import estimate_cost_usd, usage_from_llm_response
+                from app.services.agent.observability import cost_from_usage, usage_from_llm_response
                 usage = usage_from_llm_response(response)
                 model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
-                report.reported_spend_usd += estimate_cost_usd(
-                    model, usage["input_tokens"], usage["output_tokens"],
-                )
+                report.reported_spend_usd += cost_from_usage(model, usage)
                 if report.reported_spend_usd >= directive.max_spend_usd:
                     report.verdict = "inconclusive"
                     report.rewrite_hint = "specialist reported spend budget exhausted"
@@ -2148,6 +2154,10 @@ def _extract_json(text: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+
+# A member started mid-wave needs at least this long to do useful work.
+_MIN_DYNAMIC_MEMBER_SECONDS = 60.0
 
 
 async def run_fireteam(

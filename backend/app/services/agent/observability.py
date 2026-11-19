@@ -70,12 +70,23 @@ def redact_value(value: Any, key: str = "") -> Any:
 
 
 def usage_from_llm_response(response: Any) -> Dict[str, int]:
-    """Pull input/output tokens off a LangChain AIMessage or similar."""
+    """Pull input/output tokens off a LangChain AIMessage or similar.
+
+    ``input_tokens`` is the total prompt size. When the provider reports prompt
+    caching, ``cache_read_tokens`` and ``cache_creation_tokens`` say how much of
+    that total was read from or written to the cache, so cost can be priced
+    correctly.
+    """
     meta = getattr(response, "usage_metadata", None)
     if isinstance(meta, dict) and (meta.get("input_tokens") or meta.get("output_tokens")):
+        details = meta.get("input_token_details") or {}
+        if not isinstance(details, dict):
+            details = {}
         return {
             "input_tokens": int(meta.get("input_tokens") or 0),
             "output_tokens": int(meta.get("output_tokens") or 0),
+            "cache_read_tokens": int(details.get("cache_read") or 0),
+            "cache_creation_tokens": int(details.get("cache_creation") or 0),
         }
     rm = getattr(response, "response_metadata", None) or {}
     if not isinstance(rm, dict):
@@ -85,8 +96,15 @@ def usage_from_llm_response(response: Any) -> Dict[str, int]:
         inp = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
         out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         if inp or out:
-            return {"input_tokens": int(inp), "output_tokens": int(out)}
-    return {"input_tokens": 0, "output_tokens": 0}
+            read = int(usage.get("cache_read_input_tokens") or 0)
+            created = int(usage.get("cache_creation_input_tokens") or 0)
+            # Anthropic's raw usage reports uncached input separately.
+            if "cache_read_input_tokens" in usage:
+                inp = int(inp) + read + created
+            return {"input_tokens": int(inp), "output_tokens": int(out),
+                    "cache_read_tokens": read, "cache_creation_tokens": created}
+    return {"input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0}
 
 
 def model_id(llm: Any) -> str:
@@ -97,7 +115,20 @@ def model_id(llm: Any) -> str:
     return ""
 
 
-def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+# Anthropic prompt-cache pricing relative to the base input rate.
+_CACHE_READ_MULTIPLIER = 0.1
+_CACHE_WRITE_MULTIPLIER = 1.25
+
+
+def estimate_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> float:
+    """Estimate spend. ``input_tokens`` is the total prompt, cached parts included."""
     pricing = MODEL_PRICING.get(model)
     if pricing is None:
         for key, rates in MODEL_PRICING.items():
@@ -106,10 +137,28 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
                 break
     if pricing is None:
         pricing = {"input": 3.0, "output": 15.0}
+    read = max(0, int(cache_read_tokens or 0))
+    created = max(0, int(cache_creation_tokens or 0))
+    uncached = max(0, int(input_tokens or 0) - read - created)
+    effective_input = (
+        uncached
+        + read * _CACHE_READ_MULTIPLIER
+        + created * _CACHE_WRITE_MULTIPLIER
+    )
     return round(
-        (input_tokens / 1_000_000) * pricing["input"]
+        (effective_input / 1_000_000) * pricing["input"]
         + (output_tokens / 1_000_000) * pricing["output"],
         6,
+    )
+
+
+def cost_from_usage(model: str, usage: Dict[str, int]) -> float:
+    return estimate_cost_usd(
+        model,
+        usage.get("input_tokens", 0),
+        usage.get("output_tokens", 0),
+        cache_read_tokens=usage.get("cache_read_tokens", 0),
+        cache_creation_tokens=usage.get("cache_creation_tokens", 0),
     )
 
 
@@ -118,6 +167,8 @@ def empty_token_usage() -> Dict[str, Any]:
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
         "cost_usd": 0.0,
         "calls": [],
     }
@@ -136,7 +187,11 @@ def record_llm_usage(
     totals["input_tokens"] = int(totals.get("input_tokens") or 0) + usage["input_tokens"]
     totals["output_tokens"] = int(totals.get("output_tokens") or 0) + usage["output_tokens"]
     totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
-    call_cost = estimate_cost_usd(model, usage["input_tokens"], usage["output_tokens"])
+    totals["cache_read_tokens"] = int(totals.get("cache_read_tokens") or 0) + usage["cache_read_tokens"]
+    totals["cache_creation_tokens"] = (
+        int(totals.get("cache_creation_tokens") or 0) + usage["cache_creation_tokens"]
+    )
+    call_cost = cost_from_usage(model, usage)
     totals["cost_usd"] = round(float(totals.get("cost_usd") or 0) + call_cost, 6)
     calls = list(totals.get("calls") or [])
     calls.append(
@@ -145,6 +200,7 @@ def record_llm_usage(
             "model": model,
             "input_tokens": usage["input_tokens"],
             "output_tokens": usage["output_tokens"],
+            "cache_read_tokens": usage["cache_read_tokens"],
             "cost_usd": call_cost,
         }
     )

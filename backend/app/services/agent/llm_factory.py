@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -49,6 +49,50 @@ DEFAULT_MODEL_BY_PROVIDER = {
     ExternalService.GEMINI: "gemini-2.5-pro",
     ExternalService.OPENROUTER: "openai/gpt-4o",
 }
+
+
+# A system prompt that contains this line is split there for Anthropic models:
+# the text above it gets its own cache breakpoint so that every call sharing
+# that fixed prefix (for example every lease a specialist takes) reads it from
+# the cache. It is an ordinary section header, so other providers just see a
+# heading.
+PROMPT_CACHE_BOUNDARY = "=== ASSIGNMENT (everything below changes per task) ==="
+
+
+def split_system_at_cache_boundary(system: Any) -> Any:
+    """Return Anthropic ``system`` blocks with a breakpoint before the boundary.
+
+    ``system`` is the payload value: a string, a list of text blocks, or None.
+    Anything without the boundary is returned unchanged.
+    """
+    blocks: list
+    if isinstance(system, str):
+        blocks = [{"type": "text", "text": system}]
+    elif isinstance(system, list):
+        blocks = list(system)
+    else:
+        return system
+    out: list = []
+    split_done = False
+    for block in blocks:
+        text = block.get("text") if isinstance(block, dict) and block.get("type") == "text" else None
+        if split_done or not isinstance(text, str) or PROMPT_CACHE_BOUNDARY not in text:
+            out.append(block)
+            continue
+        head, tail = text.split(PROMPT_CACHE_BOUNDARY, 1)
+        if not head.strip():
+            out.append(block)
+            continue
+        fixed = {k: v for k, v in block.items() if k != "cache_control"}
+        fixed["text"] = head.rstrip()
+        fixed["cache_control"] = {"type": "ephemeral"}
+        rest = {k: v for k, v in block.items() if k not in ("text", "cache_control")}
+        rest["text"] = PROMPT_CACHE_BOUNDARY + tail
+        if "cache_control" in block:
+            rest["cache_control"] = block["cache_control"]
+        out.extend([fixed, rest])
+        split_done = True
+    return out if split_done else system
 
 
 class UnsupportedProviderError(ValueError):
@@ -140,6 +184,31 @@ def build_chat_model(
     return llm
 
 
+_CACHING_ANTHROPIC: Any = None
+
+
+def _caching_anthropic_class():
+    """ChatAnthropic that honours PROMPT_CACHE_BOUNDARY in the system prompt."""
+    global _CACHING_ANTHROPIC
+    if _CACHING_ANTHROPIC is None:
+        from langchain_anthropic import ChatAnthropic
+
+        class CachingChatAnthropic(ChatAnthropic):
+            def _get_request_payload(self, input_, *, stop=None, **kwargs):
+                payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+                if _prompt_cache_enabled() and payload.get("system"):
+                    payload["system"] = split_system_at_cache_boundary(payload["system"])
+                return payload
+
+        _CACHING_ANTHROPIC = CachingChatAnthropic
+    return _CACHING_ANTHROPIC
+
+
+def _prompt_cache_enabled() -> bool:
+    from app.core.config import settings
+    return bool(getattr(settings, "AGENT_PROMPT_CACHE", True))
+
+
 def _construct(
     provider: str,
     model: str,
@@ -159,11 +228,15 @@ def _construct(
         common["max_tokens"] = max_tokens
 
     if provider == ExternalService.ANTHROPIC:
-        from langchain_anthropic import ChatAnthropic
         kwargs = dict(common)
         if api_key:
             kwargs["api_key"] = api_key
-        return ChatAnthropic(model=model, **kwargs)
+        if _prompt_cache_enabled():
+            # Top-level automatic caching: the API places the breakpoint on the
+            # last cacheable block, so each agent turn reads the previous
+            # turn's prefix (system prompt + history) at the cache-read rate.
+            kwargs["model_kwargs"] = {"cache_control": {"type": "ephemeral"}}
+        return _caching_anthropic_class()(model=model, **kwargs)
 
     if provider == ExternalService.OPENAI:
         from langchain_openai import ChatOpenAI

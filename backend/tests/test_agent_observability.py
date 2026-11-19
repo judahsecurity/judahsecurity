@@ -49,7 +49,10 @@ def test_usage_from_langchain_style_message():
     class Msg:
         usage_metadata = {"input_tokens": 10, "output_tokens": 4}
 
-    assert usage_from_llm_response(Msg()) == {"input_tokens": 10, "output_tokens": 4}
+    assert usage_from_llm_response(Msg()) == {
+        "input_tokens": 10, "output_tokens": 4,
+        "cache_read_tokens": 0, "cache_creation_tokens": 0,
+    }
 
 
 def test_sonnet_cost_matches_vanguard_table():
