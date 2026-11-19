@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
+from app.services.censys_field_mapping import apply_mapped_values, mapped_values
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,10 @@ _SEVERITY_MAP = {
     "info": Severity.INFO,
     "informational": Severity.INFO,
 }
+
+
+class CensysApiError(RuntimeError):
+    """A Censys read failed; a sync must not be reported as successful."""
 
 
 def _map_severity(value: Optional[str]) -> Severity:
@@ -66,25 +71,23 @@ class CensysAsmClient:
 
     async def _get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
         url = f"{self.BASE_URL}{path}"
-        try:
-            async with httpx.AsyncClient(timeout=30.0, headers=self._headers) as client:
-                resp = await client.get(url, params=params)
-                if resp.status_code == 429:
-                    logger.warning("Censys ASM rate limited on %s, backing off 10s", path)
-                    await asyncio.sleep(10)
-                    return await self._get(path, params)
-                if resp.status_code in (401, 403):
-                    logger.error("Censys ASM: unauthorized (HTTP %s) on %s", resp.status_code, path)
-                    return None
-                if resp.status_code != 200:
-                    logger.warning(
-                        "Censys ASM GET %s -> HTTP %s: %s", path, resp.status_code, resp.text[:200]
-                    )
-                    return None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=30.0, headers=self._headers) as client:
+                    resp = await client.get(url, params=params)
+            except httpx.HTTPError as exc:
+                raise CensysApiError(f"Censys ASM request failed for {path}") from exc
+            if resp.status_code == 429 and attempt < 2:
+                logger.warning("Censys ASM rate limited on %s, retrying", path)
+                await asyncio.sleep(10)
+                continue
+            if resp.status_code != 200:
+                raise CensysApiError(f"Censys ASM GET {path} returned HTTP {resp.status_code}")
+            try:
                 return resp.json()
-        except Exception as exc:  # noqa: BLE001 — network errors are expected
-            logger.error("Censys ASM GET %s error: %s", path, exc)
-            return None
+            except ValueError as exc:
+                raise CensysApiError(f"Censys ASM GET {path} returned invalid JSON") from exc
+        raise CensysApiError(f"Censys ASM GET {path} did not complete")
 
     # ── Validation ───────────────────────────────────────────────────────────
     async def get_account(self) -> Optional[Dict]:
@@ -124,42 +127,40 @@ class CensysAsmClient:
 
     # ── Risks ─────────────────────────────────────────────────────────────────
     async def get_risk_instances(self) -> List[Dict]:
-        """Fetch open risk instances (paginated by cursor when provided)."""
-        results: List[Dict] = []
-        cursor: Optional[str] = None
-        for _ in range(self.MAX_PAGES):
-            params: Dict[str, Any] = {"includeEvents": "false", "limit": self.PAGE_SIZE}
-            if cursor:
-                params["cursor"] = cursor
-            payload = await self._get("/v2/risk-instances", params=params)
-            if not payload:
-                break
-            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-            batch = (
-                data.get("risks")
-                or data.get("riskInstances")
-                or data.get("results")
-                or []
-            )
-            if not isinstance(batch, list) or not batch:
-                break
-            results.extend(batch)
-            cursor = (
-                payload.get("nextCursor")
-                or payload.get("cursor")
-                or (data.get("nextCursor") if isinstance(data, dict) else None)
-            )
-            if not cursor:
-                break
-            await asyncio.sleep(self.RATE_LIMIT_DELAY)
-        return results
+        """Fetch active risk instances using the ASM risk-instance list contract.
+
+        Censys's ASM SDK exposes ``includeEvents`` for this GET endpoint and
+        returns the complete collection under ``risks``. Its cursor belongs to
+        the risk-events endpoint, not this one. An unknown shape is an error,
+        since treating it as an empty workspace hides lost findings.
+        """
+        payload = await self._get("/v2/risk-instances", params={"includeEvents": "false"})
+        return _risk_batch(payload)
+
+
+def _risk_batch(payload: Any) -> List[Dict]:
+    if not isinstance(payload, dict):
+        raise CensysApiError("Censys ASM risk-instance response is not an object")
+    data = payload.get("data", payload)
+    if isinstance(data, list):
+        batch = data
+    elif isinstance(data, dict):
+        batch = next((data[key] for key in ("risks", "riskInstances", "results") if key in data), None)
+    else:
+        batch = None
+    if not isinstance(batch, list) or any(not isinstance(risk, dict) for risk in batch):
+        raise CensysApiError("Censys ASM risk-instance response has no risk list")
+    return batch
 
 
 async def test_connection(api_key: str) -> Dict[str, Any]:
     """Validate a Censys ASM API key. Returns {ok, message, workspace_id}."""
     client = CensysAsmClient(api_key)
-    account = await client.get_account()
-    if account is None:
+    try:
+        account = await client.get_account()
+    except CensysApiError:
+        account = None
+    if not isinstance(account, dict):
         return {"ok": False, "message": "Could not authenticate to Censys ASM with this API key.", "workspace_id": None}
     workspace_id = account.get("workspaceId") or account.get("workspace_id")
     return {
@@ -167,6 +168,28 @@ async def test_connection(api_key: str) -> Dict[str, Any]:
         "message": "Connected to Censys ASM successfully.",
         "workspace_id": str(workspace_id) if workspace_id else None,
     }
+
+
+async def sample_record(api_key: str, entity: str) -> Optional[Dict]:
+    """Fetch one record for the mapping editor without a full sync."""
+    paths = {
+        "host": ("/v1/assets/hosts", "assets"),
+        "domain": ("/v1/assets/domains", "assets"),
+        "subdomain": ("/v1/assets/subdomains", "subdomains"),
+        "certificate": ("/v1/assets/certificates", "assets"),
+        "risk": ("/v2/risk-instances", "risks"),
+    }
+    path, key = paths[entity]
+    params = {"includeEvents": "false"} if entity == "risk" else {"pageNumber": 1, "pageSize": 1}
+    payload = await CensysAsmClient(api_key)._get(path, params=params)
+    if not isinstance(payload, dict):
+        raise ValueError("Censys did not return a sample. Check the API response and workspace permissions.")
+    if entity == "risk":
+        batch = _risk_batch(payload)
+    else:
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        batch = data.get(key) or data.get("assets") or []
+    return batch[0] if isinstance(batch, list) and batch and isinstance(batch[0], dict) else None
 
 
 # ── Field extraction helpers (defensive; Censys field names vary) ─────────────
@@ -200,11 +223,13 @@ def _risk_affected_assets(risk: Dict) -> List[Dict]:
     for key in ("affectedAssets", "affected_assets", "assets"):
         v = risk.get(key)
         if isinstance(v, list) and v:
-            return v
+            return [ref for ref in v if isinstance(ref, dict)]
     # Some payloads carry a single asset reference inline.
     single = risk.get("asset") or risk.get("context")
     if isinstance(single, dict):
         return [single]
+    if _first(risk, "assetId", "ip", "domain", "name"):
+        return [risk]
     return []
 
 
@@ -221,6 +246,8 @@ class _Stats:
         self.subdomains_seen = 0
         self.certificates_seen = 0
         self.risks_seen = 0
+        self.risks_without_asset = 0
+        self.risk_assets_unmatched = 0
 
     def as_dict(self) -> Dict[str, int]:
         return {
@@ -233,6 +260,8 @@ class _Stats:
             "subdomains_seen": self.subdomains_seen,
             "certificates_seen": self.certificates_seen,
             "risks_seen": self.risks_seen,
+            "risks_without_asset": self.risks_without_asset,
+            "risk_assets_unmatched": self.risk_assets_unmatched,
         }
 
 
@@ -244,6 +273,8 @@ def _upsert_asset(
     stats: _Stats,
     *,
     metadata: Optional[Dict] = None,
+    mapped_fields: Optional[Dict] = None,
+    custom_fields: Optional[Dict] = None,
 ) -> Optional[Asset]:
     """Create the asset if missing, else refresh last_seen. Returns the asset."""
     value = (value or "").strip()
@@ -260,6 +291,9 @@ def _upsert_asset(
         if f"source:{DISCOVERY_SOURCE}" not in tags:
             tags.append(f"source:{DISCOVERY_SOURCE}")
             existing.tags = tags
+        if metadata:
+            existing.metadata_ = {**(existing.metadata_ or {}), **metadata}
+        apply_mapped_values(existing, mapped_fields or {}, custom_fields or {})
         stats.assets_updated += 1
         return existing
 
@@ -275,6 +309,7 @@ def _upsert_asset(
         tags=[f"source:{DISCOVERY_SOURCE}"],
         metadata_=metadata or {},
     )
+    apply_mapped_values(asset, mapped_fields or {}, custom_fields or {})
     db.add(asset)
     db.flush()  # assign id for risk association
     stats.assets_created += 1
@@ -296,6 +331,7 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
 
     # Map "value" -> Asset for quick risk association within this run.
     asset_index: Dict[str, Asset] = {}
+    mapping_rules = integration.field_mappings or []
 
     try:
         if integration.import_assets:
@@ -304,7 +340,9 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
             for h in hosts:
                 ip = _host_ip(h)
                 if ip:
-                    a = _upsert_asset(db, org_id, ip, AssetType.IP_ADDRESS, stats)
+                    fields, custom = mapped_values(h, "host", mapping_rules)
+                    a = _upsert_asset(db, org_id, ip, AssetType.IP_ADDRESS, stats,
+                                      mapped_fields=fields, custom_fields=custom)
                     if a:
                         asset_index[ip] = a
 
@@ -313,7 +351,9 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
             for d in domains:
                 name = _domain_name(d)
                 if name:
-                    a = _upsert_asset(db, org_id, name, AssetType.DOMAIN, stats)
+                    fields, custom = mapped_values(d, "domain", mapping_rules)
+                    a = _upsert_asset(db, org_id, name, AssetType.DOMAIN, stats,
+                                      mapped_fields=fields, custom_fields=custom)
                     if a:
                         asset_index[name] = a
 
@@ -322,7 +362,9 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
             for s in subdomains:
                 name = _subdomain_name(s)
                 if name:
-                    a = _upsert_asset(db, org_id, name, AssetType.SUBDOMAIN, stats)
+                    fields, custom = mapped_values(s, "subdomain", mapping_rules)
+                    a = _upsert_asset(db, org_id, name, AssetType.SUBDOMAIN, stats,
+                                      mapped_fields=fields, custom_fields=custom)
                     if a:
                         asset_index[name] = a
 
@@ -331,9 +373,11 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
             for c in certs:
                 fp = _cert_fingerprint(c)
                 if fp:
+                    fields, custom = mapped_values(c, "certificate", mapping_rules)
                     a = _upsert_asset(
                         db, org_id, fp, AssetType.CERTIFICATE, stats,
                         metadata={"censys_certificate": c},
+                        mapped_fields=fields, custom_fields=custom,
                     )
                     if a:
                         asset_index[fp] = a
@@ -344,7 +388,15 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
             risks = await client.get_risk_instances()
             stats.risks_seen = len(risks)
             for risk in risks:
-                _import_risk(db, org_id, risk, asset_index, stats, integration.import_assets)
+                _import_risk(db, org_id, risk, asset_index, stats,
+                             integration.import_assets, mapping_rules)
+            if stats.risks_seen and not (stats.vulns_created or stats.vulns_updated):
+                raise CensysApiError(
+                    f"Censys returned {stats.risks_seen} active risk instance(s), "
+                    "but none could be linked to a Judah asset "
+                    f"({stats.risks_without_asset} without an asset reference, "
+                    f"{stats.risk_assets_unmatched} unmatched references)"
+                )
             db.commit()
 
         integration.last_sync_at = datetime.utcnow()
@@ -356,8 +408,9 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
         return {
             "ok": True,
             "message": (
-                f"Imported {stats.assets_created} new asset(s) and "
-                f"{stats.vulns_created} new risk(s) from Censys ASM."
+                f"Censys ASM returned {stats.risks_seen} active risk instance(s): "
+                f"{stats.vulns_created} new finding(s), {stats.vulns_updated} updated. "
+                f"Imported {stats.assets_created} new asset(s)."
             ),
             **stats.as_dict(),
         }
@@ -367,6 +420,7 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = False
         integration.last_error = str(exc)[:1000]
+        integration.last_sync_stats = stats.as_dict()
         db.commit()
         return {"ok": False, "message": f"Sync failed: {exc}", **stats.as_dict()}
 
@@ -378,22 +432,32 @@ def _import_risk(
     asset_index: Dict[str, Asset],
     stats: _Stats,
     can_create_assets: bool,
+    mapping_rules: Optional[List[Dict[str, str]]] = None,
 ) -> None:
     """Import a single Censys risk instance as a Vulnerability."""
     risk_id = _first(risk, "id", "riskInstanceId", "risk_instance_id")
-    title = _first(risk, "title", "name", "type") or "Censys ASM risk"
+    risk_type = risk.get("type")
+    risk_type_name = risk_type.get("name") if isinstance(risk_type, dict) else risk_type
+    title = _first(risk, "displayName", "title", "name") or risk_type_name or "Censys ASM risk"
+    title = str(title)[:500]
     severity = _map_severity(_first(risk, "severity", "riskSeverity"))
-    description = _first(risk, "description", "summary")
+    description = _first(risk, "description", "summary") or (
+        risk_type.get("description") if isinstance(risk_type, dict) else None
+    )
+    mapped_fields, custom_fields = mapped_values(risk, "risk", mapping_rules or [])
 
     affected = _risk_affected_assets(risk)
     if not affected:
+        stats.risks_without_asset += 1
         return
 
     for ref in affected:
-        ref_id = _first(ref, "id", "assetId", "value", "ip", "domain")
-        ref_type = (_first(ref, "type", "assetType") or "").upper()
+        ref_id = _first(ref, "assetId", "value", "ip", "domain", "name", "id")
+        ref_type = str(_first(ref, "type", "assetType") or "").upper()
         if not ref_id:
+            stats.risk_assets_unmatched += 1
             continue
+        ref_id = str(ref_id)
 
         asset = asset_index.get(ref_id)
         if asset is None:
@@ -404,6 +468,7 @@ def _import_risk(
             )
         if asset is None:
             if not can_create_assets:
+                stats.risk_assets_unmatched += 1
                 continue
             atype = {
                 "HOST": AssetType.IP_ADDRESS,
@@ -411,11 +476,13 @@ def _import_risk(
                 "SUBDOMAIN": AssetType.SUBDOMAIN,
                 "CERT": AssetType.CERTIFICATE,
                 "CERTIFICATE": AssetType.CERTIFICATE,
+                "WEB": AssetType.URL,
             }.get(ref_type, AssetType.OTHER)
             asset = _upsert_asset(db, org_id, ref_id, atype, stats)
             if asset:
                 asset_index[ref_id] = asset
         if asset is None:
+            stats.risk_assets_unmatched += 1
             continue
 
         # Dedup: match by Censys risk id in metadata, else by title+asset.
@@ -425,7 +492,7 @@ def _import_risk(
                 db.query(Vulnerability)
                 .filter(
                     Vulnerability.asset_id == asset.id,
-                    Vulnerability.metadata_["censys_risk_id"].astext == str(risk_id),
+                    Vulnerability.metadata_["censys_risk_id"].as_string() == str(risk_id),
                 )
                 .first()
             )
@@ -443,6 +510,7 @@ def _import_risk(
         if existing:
             existing.severity = severity
             existing.last_detected = datetime.utcnow()
+            apply_mapped_values(existing, mapped_fields, custom_fields)
             stats.vulns_updated += 1
             continue
 
@@ -456,9 +524,10 @@ def _import_risk(
             tags=["source:censys_asm"],
             metadata_={
                 "censys_risk_id": str(risk_id) if risk_id else None,
-                "censys_risk_type": _first(risk, "type", "riskType"),
+                "censys_risk_type": str(risk_type_name or _first(risk, "riskType") or ""),
                 "source": DISCOVERY_SOURCE,
             },
         )
+        apply_mapped_values(vuln, mapped_fields, custom_fields)
         db.add(vuln)
         stats.vulns_created += 1

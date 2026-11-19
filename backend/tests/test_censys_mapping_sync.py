@@ -1,0 +1,168 @@
+"""Verify saved Censys mappings reach imported asset and finding rows."""
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.models.asset import Asset
+from app.models.vulnerability import Vulnerability
+from app.services import censys_asm_service
+
+
+def test_sync_applies_canonical_and_custom_mappings():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    added = []
+    db.add.side_effect = added.append
+
+    def flush():
+        for row in added:
+            if isinstance(row, Asset) and row.id is None:
+                row.id = 10
+
+    db.flush.side_effect = flush
+    integration = SimpleNamespace(
+        organization_id=7,
+        get_api_key=lambda: "test-key",
+        import_assets=True,
+        import_vulnerabilities=True,
+        field_mappings=[
+            {"entity": "host", "source_path": "host.operating_system.product", "target": "operating_system"},
+            {"entity": "host", "source_path": "host.location.country", "target": "custom.reported_country"},
+            {"entity": "risk", "source_path": "score", "target": "cvss_score"},
+            {"entity": "risk", "source_path": "details.evidence", "target": "evidence"},
+        ],
+    )
+
+    with patch.object(censys_asm_service, "CensysAsmClient") as client_class:
+        client = client_class.return_value
+        client.get_hosts = AsyncMock(return_value=[{
+            "assetId": "192.0.2.1",
+            "host": {"operating_system": {"product": "Linux"}, "location": {"country": "US"}},
+        }])
+        client.get_domains = AsyncMock(return_value=[])
+        client.get_subdomains = AsyncMock(return_value=[])
+        client.get_certificates = AsyncMock(return_value=[])
+        client.get_risk_instances = AsyncMock(return_value=[{
+            "title": "Exposed service", "severity": "high", "score": "8.1",
+            "details": {"evidence": "Public service observed"},
+            "affectedAssets": [{"id": "192.0.2.1", "type": "HOST"}],
+        }])
+        result = asyncio.run(censys_asm_service.sync_integration(db, integration))
+
+    assert result["ok"] is True
+    assert result["assets_created"] == 1
+    assert result["vulns_created"] == 1
+    asset = next(row for row in added if isinstance(row, Asset))
+    finding = next(row for row in added if isinstance(row, Vulnerability))
+    assert asset.organization_id == 7
+    assert asset.operating_system == "Linux"
+    assert asset.metadata_["censys_asm"]["custom"]["reported_country"] == "US"
+    assert finding.asset_id == asset.id
+    assert finding.cvss_score == 8.1
+    assert finding.evidence == "Public service observed"
+
+
+def test_source_failure_is_recorded_as_failed_sync():
+    db = MagicMock()
+    integration = SimpleNamespace(
+        organization_id=7, get_api_key=lambda: "test-key",
+        import_assets=True, import_vulnerabilities=True, field_mappings=[],
+    )
+    with patch.object(censys_asm_service, "CensysAsmClient") as client_class:
+        client_class.return_value.get_hosts = AsyncMock(
+            side_effect=censys_asm_service.CensysApiError("Censys ASM GET /v1/assets/hosts returned HTTP 429")
+        )
+        result = asyncio.run(censys_asm_service.sync_integration(db, integration))
+    assert result["ok"] is False
+    assert integration.last_sync_ok is False
+    assert "429" in integration.last_error
+    db.commit.assert_called_once()
+
+
+def test_risk_list_rejects_unknown_shape_instead_of_reporting_zero():
+    with pytest.raises(censys_asm_service.CensysApiError, match="no risk list"):
+        censys_asm_service._risk_batch({"unexpected": []})
+    assert censys_asm_service._risk_batch({"risks": []}) == []
+
+
+def test_risk_list_uses_supported_get_parameters():
+    client = censys_asm_service.CensysAsmClient("test-key")
+    client._get = AsyncMock(return_value={"risks": [{"id": 1}]})
+    assert asyncio.run(client.get_risk_instances()) == [{"id": 1}]
+    client._get.assert_awaited_once_with(
+        "/v2/risk-instances", params={"includeEvents": "false"}
+    )
+
+
+def test_sync_imports_censys_risk_context_and_display_name():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    added = []
+    db.add.side_effect = added.append
+
+    def flush():
+        for row in added:
+            if isinstance(row, Asset) and row.id is None:
+                row.id = 11
+
+    db.flush.side_effect = flush
+    integration = SimpleNamespace(
+        organization_id=7, get_api_key=lambda: "test-key",
+        import_assets=True, import_vulnerabilities=True, field_mappings=[],
+    )
+    risk = {
+        "id": 1333,
+        "context": {"ip": "192.0.2.9", "port": 443, "type": "host"},
+        "displayName": "HTTP Missing Common Security Headers",
+        "severity": "medium",
+        "status": "open",
+        "type": {"id": "missing-common-security-headers", "name": "HTTP Missing Common Security Headers",
+                 "description": "The service omitted security headers."},
+    }
+    with patch.object(censys_asm_service, "CensysAsmClient") as client_class:
+        client = client_class.return_value
+        client.get_hosts = AsyncMock(return_value=[])
+        client.get_domains = AsyncMock(return_value=[])
+        client.get_subdomains = AsyncMock(return_value=[])
+        client.get_certificates = AsyncMock(return_value=[])
+        client.get_risk_instances = AsyncMock(return_value=[risk])
+        result = asyncio.run(censys_asm_service.sync_integration(db, integration))
+
+    assert result["ok"] is True
+    assert result["risks_seen"] == 1
+    assert result["vulns_created"] == 1
+    assert result["risks_without_asset"] == 0
+    asset = next(row for row in added if isinstance(row, Asset))
+    finding = next(row for row in added if isinstance(row, Vulnerability))
+    assert asset.value == "192.0.2.9"
+    assert finding.asset_id == asset.id
+    assert finding.title == risk["displayName"]
+    assert finding.description == risk["type"]["description"]
+    assert finding.metadata_["censys_risk_type"] == risk["type"]["name"]
+
+
+def test_risk_without_asset_is_counted():
+    stats = censys_asm_service._Stats()
+    censys_asm_service._import_risk(MagicMock(), 7, {"id": 1, "displayName": "Unlinked"}, {}, stats, False)
+    assert stats.risks_without_asset == 1
+
+
+def test_sync_fails_when_all_returned_risks_lack_assets():
+    db = MagicMock()
+    integration = SimpleNamespace(
+        organization_id=7, get_api_key=lambda: "test-key",
+        import_assets=False, import_vulnerabilities=True, field_mappings=[],
+    )
+    with patch.object(censys_asm_service, "CensysAsmClient") as client_class:
+        client_class.return_value.get_risk_instances = AsyncMock(
+            return_value=[{"id": 1, "displayName": "Unlinked"}]
+        )
+        result = asyncio.run(censys_asm_service.sync_integration(db, integration))
+    assert result["ok"] is False
+    assert result["risks_seen"] == 1
+    assert result["risks_without_asset"] == 1
+    assert integration.last_sync_ok is False
+    assert integration.last_sync_stats["risks_without_asset"] == 1

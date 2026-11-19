@@ -1,7 +1,7 @@
 """Pydantic schemas for the Censys ASM integration."""
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -45,6 +45,7 @@ class CensysIntegrationResponse(BaseModel):
     next_sync_at: Optional[datetime] = None
     last_sync_stats: Optional[Dict[str, Any]] = None
     last_error: Optional[str] = None
+    field_mappings: List[Dict[str, str]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -69,3 +70,15 @@ class CensysSyncResult(BaseModel):
     subdomains_seen: int = 0
     certificates_seen: int = 0
     risks_seen: int = 0
+    risks_without_asset: int = 0
+    risk_assets_unmatched: int = 0
+
+
+class CensysFieldMappingRule(BaseModel):
+    entity: str
+    source_path: str
+    target: str
+
+
+class CensysFieldMappingUpdate(BaseModel):
+    rules: List[CensysFieldMappingRule] = Field(default_factory=list, max_length=50)
