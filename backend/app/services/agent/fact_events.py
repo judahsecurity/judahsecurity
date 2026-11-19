@@ -12,12 +12,15 @@ identities and in-session brain memory).
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from app.services.agent.action_ledger import safe_target
 from app.services.agent.recon_observation_adapter import _allowed, _host
+
+logger = logging.getLogger(__name__)
 
 # Imported lazily where needed to avoid a heavy import at module load.
 
@@ -47,6 +50,8 @@ def append_fact_event(
     dedupe_key)`` unique constraint plus a pre-check make a worker retry or a
     restart a no-op rather than a double hypothesis.
     """
+    from sqlalchemy.exc import IntegrityError
+
     from app.db.database import SessionLocal
     from app.models.agent_fact_event import FACT_KINDS, AgentFactEvent
     from app.services.agent.observability import redact_value
@@ -74,8 +79,12 @@ def append_fact_event(
         ))
         try:
             db.commit()
+        except IntegrityError:
+            db.rollback()  # lost the (org, dedupe_key) race; already recorded
+            return None
         except Exception:
             db.rollback()
+            logger.warning("fact event append failed to commit", exc_info=True)
             return None
     return event_uuid
 

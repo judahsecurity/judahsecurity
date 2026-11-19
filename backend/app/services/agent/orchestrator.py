@@ -1089,10 +1089,17 @@ class AgentOrchestrator:
                     brain, organization_id=int(org_id), session_id=session_id,
                     scope_hosts=scope_hosts,
                 ):
-                    from app.services.agent.penetration_task_graph import sync_graph_from_brain
-
-                    sync_graph_from_brain(brain)
+                    # drain already marked these facts consumed, so capture the
+                    # ingested cards before the riskier graph sync — a sync
+                    # failure must not drop work the ledger can no longer replay.
                     out["engagement_brain"] = brain.to_dict()
+                    try:
+                        from app.services.agent.penetration_task_graph import sync_graph_from_brain
+
+                        sync_graph_from_brain(brain)
+                        out["engagement_brain"] = brain.to_dict()
+                    except Exception:
+                        logger.debug("task graph sync after fact drain skipped", exc_info=True)
         except Exception:
             logger.debug("fact event drain skipped", exc_info=True)
         # Hand off recent first-party takeover scanner observations to opted-in

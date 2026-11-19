@@ -11799,13 +11799,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # wave are already skipped by the planner, so it cannot race
         # run_fireteam's live-brain mutations, and it scopes its proposals to the
         # still-unclaimed cells that the next assignment will order.
-        # (_plan_brain_hypotheses is exception-safe and returns a status dict, so
-        # a run_fireteam failure still propagates cleanly from gather.)
+        # (_plan_brain_hypotheses is exception-safe and returns a status dict.)
+        # Run the planner as its own task so that if run_fireteam raises we can
+        # cancel the in-flight planner LLM call instead of orphaning it.
         _planner_brain = engagement_brain_from_dict(
             getattr(self, "_engagement_brain", None)
         )
-        result, hypothesis_planning = await asyncio.gather(
-            run_fireteam(
+        _planner_task = asyncio.ensure_future(
+            self._plan_brain_hypotheses(_planner_brain)
+        )
+        try:
+            result = await run_fireteam(
                 mission=mission,
                 targets=target_list,
                 specialists=first_wave_profiles,
@@ -11818,9 +11822,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 report_callback=_verify_completed_hunter,
                 member_timeout_sec=max(1.0, first_wave_timeout - 10.0),
                 wave_timeout_sec=first_wave_timeout,
-            ),
-            self._plan_brain_hypotheses(_planner_brain),
-        )
+            )
+        except BaseException:
+            _planner_task.cancel()
+            raise
+        hypothesis_planning = await _planner_task
         # Carry the advisory LLM ordering hints (llm_hypothesis / priority rank /
         # review digest) back onto the live brain for the next wave, without
         # disturbing the status/lease fields run_fireteam just updated.
