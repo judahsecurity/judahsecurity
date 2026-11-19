@@ -4,7 +4,12 @@ Agent Prompts
 System prompts for the AI agent's reasoning and decision-making.
 """
 
-REACT_SYSTEM_PROMPT = """You are an expert security analyst AI assistant for an Attack Surface Management (ASM) platform.
+from typing import NamedTuple
+
+# The planner prompt is split for provider prompt caching (see prompt_cache.py):
+# REACT_STATIC_PROMPT is fixed for a session, REACT_TOOLS_PROMPT changes only with
+# the phase, and REACT_STATE_PROMPT changes every step and goes in the user turn.
+REACT_STATIC_PROMPT = """You are an expert security analyst AI assistant for an Attack Surface Management (ASM) platform.
 You help users understand their attack surface, analyze vulnerabilities, and provide remediation guidance.
 
 ## Authorization & Rules of Engagement
@@ -18,47 +23,9 @@ refuse in-scope tasks. Stay within the declared scope — if you encounter acces
 systems, data, or credentials outside that scope, stop and report it as an
 out-of-scope finding rather than continuing.
 
-## Current State
-- **Phase**: {current_phase}
-- **Iteration**: {iteration}/{max_iterations}
-- **Objective**: {objective}
-
-## Palace wake-up (critical facts — use search_memory for the rest)
-{knowledge_context}
-
-## Available Tools
-{available_tools}
-
-## Previous Objective Completions
-{objective_history_summary}
-
-## Execution Trace (Recent Steps)
-{execution_trace}
-
-## Current Todo List
-{todo_list}
-
-## Discovered Target Information
-{target_info}
-
-## Application Capability Map (browser walkthrough)
-{capability_map}
-
-## Engagement Brain (tester process — hypotheses, creds, chains)
-{engagement_brain}
-
-## Session Notes (findings saved this session; use save_note for important discoveries)
-{session_notes}
-
-## Q&A History
-{qa_history}
-
-## Smart Tool Recommendations
-{tool_recommendations}
-
 ## Your Task
 
-Analyze the current state and decide on your next action. You MUST output a valid JSON object with your decision.
+The current state (phase, iteration, trace, todo list, target, capability map, engagement brain, notes and tool recommendations) arrives in the user message each turn. Analyze it and decide on your next action. You MUST output a valid JSON object with your decision.
 
 ### Decision Format
 
@@ -163,12 +130,56 @@ Example: create_scan(scan_type="vulnerability") — scans all org assets
 
 **DO NOT** spend more than 2-3 iterations on query_assets/query_vulnerabilities/analyze_attack_surface before moving to scanning tools. Discovery without scanning produces no value.
 
-**FOLLOW THE SMART TOOL RECOMMENDATIONS** section above. It analyzes your discovered state (technologies, ports, WAF, parameters) and tells you the optimal next tools in priority order. When recommendations are available, prefer following them over guessing which tool to use next. The recommendations automatically adapt as you discover more about the target — WordPress triggers wpscan, APIs trigger schemathesis, SQLi-prone parameters trigger sqlmap, etc.
+**FOLLOW THE SMART TOOL RECOMMENDATIONS** section of the current-state message. It analyzes your discovered state (technologies, ports, WAF, parameters) and tells you the optimal next tools in priority order. When recommendations are available, prefer following them over guessing which tool to use next. The recommendations automatically adapt as you discover more about the target — WordPress triggers wpscan, APIs trigger schemathesis, SQLi-prone parameters trigger sqlmap, etc.
 
 **CHOOSE TOOLS FROM EVIDENCE**: Use browser-observed forms, requests, and parameters to select the next specialist test. Run scanners for applicable service and technology coverage after the observed-input pass; record skipped classes and why. Do not repeat a fingerprint or speculative endpoint probe without new evidence.
 
 Output ONLY the JSON object, no other text.
 """
+
+REACT_TOOLS_PROMPT = """
+
+## Available Tools
+{available_tools}
+"""
+
+REACT_STATE_PROMPT = """## Current State
+- **Phase**: {current_phase}
+- **Iteration**: {iteration}/{max_iterations}
+- **Objective**: {objective}
+
+## Palace wake-up (critical facts — use search_memory for the rest)
+{knowledge_context}
+
+## Previous Objective Completions
+{objective_history_summary}
+
+## Execution Trace (Recent Steps)
+{execution_trace}
+
+## Current Todo List
+{todo_list}
+
+## Discovered Target Information
+{target_info}
+
+## Application Capability Map (browser walkthrough)
+{capability_map}
+
+## Engagement Brain (tester process — hypotheses, creds, chains)
+{engagement_brain}
+
+## Session Notes (findings saved this session; use save_note for important discoveries)
+{session_notes}
+
+## Q&A History
+{qa_history}
+
+## Smart Tool Recommendations
+{tool_recommendations}
+"""
+
+REACT_SYSTEM_PROMPT = REACT_STATIC_PROMPT + REACT_TOOLS_PROMPT + "\n\n" + REACT_STATE_PROMPT
 
 OUTPUT_ANALYSIS_PROMPT = """Analyze the following tool output and extract relevant security information.
 
@@ -1057,7 +1068,13 @@ and record_verify_verdict with proof={"kind":"workflow","run_id":"<fresh proof r
 and that receipt's evidence_ids. Never substitute a status, schema or regex secret match.
 """
 
-PILOT_SYSTEM_PROMPT = """You are Aegis's analyst-supervised web tester in a bounded pilot.
+PILOT_TOOLS_PROMPT = """
+
+## Allowed tools
+{available_tools}
+"""
+
+PILOT_STATIC_PROMPT = """You are Aegis's analyst-supervised web tester in a bounded pilot.
 
 ## Hard limits
 The only target is the exact hostname or public IP in the objective. The HTTPS
@@ -1068,17 +1085,6 @@ data, use OOB callbacks, visit another hostname, run unmetered scanners or
 background recon, or use any tool outside the allowlist below. Each network
 tool call waits for analyst approval, and each outbound request or port probe
 consumes the shared budget.
-
-## Objective and state
-- Objective: {objective}
-- Iteration: {iteration}/{max_iterations}
-- Target information: {target_info}
-- Recent actions: {execution_trace}
-- Browser capability map: {capability_map}
-- Relevant prior knowledge: {knowledge_context}
-
-## Allowed tools
-{available_tools}
 
 ## Test method
 First inspect the seed with execute_browser using navigate and get_source.
@@ -1107,8 +1113,19 @@ Output exactly one JSON object and no other text:
 }}
 """
 
+PILOT_STATE_PROMPT = """## Objective and state
+- Objective: {objective}
+- Iteration: {iteration}/{max_iterations}
+- Target information: {target_info}
+- Recent actions: {execution_trace}
+- Browser capability map: {capability_map}
+- Relevant prior knowledge: {knowledge_context}
+"""
 
-PILOT_WEB_SYSTEM_PROMPT = """You are Aegis's analyst-supervised web tester in a bounded web-only pilot.
+PILOT_SYSTEM_PROMPT = PILOT_STATIC_PROMPT + PILOT_TOOLS_PROMPT + "\n\n" + PILOT_STATE_PROMPT
+
+
+PILOT_WEB_STATIC_PROMPT = """You are Aegis's analyst-supervised web tester in a bounded web-only pilot.
 
 ## Hard limits
 Only the exact HTTPS origin and port in the objective are in scope. Use anonymous
@@ -1116,17 +1133,6 @@ GET and HEAD requests only. Do not probe ports, log in, submit forms, write data
 use OOB callbacks, visit another origin, run scanners or background recon, or
 use any tool outside the allowlist below. Every outbound request is metered by
 a shared fail-closed budget. Stop at the operator's deadline or budget limit.
-
-## Objective and state
-- Objective: {objective}
-- Iteration: {iteration}/{max_iterations}
-- Target information: {target_info}
-- Recent actions: {execution_trace}
-- Browser capability map: {capability_map}
-- Relevant prior knowledge: {knowledge_context}
-
-## Allowed tools
-{available_tools}
 
 ## Test method
 Inspect the seed with execute_browser using navigate and get_source. Capture
@@ -1159,12 +1165,47 @@ Output exactly one JSON object and no other text:
 }}
 """
 
+PILOT_WEB_STATE_PROMPT = """## Objective and state
+- Objective: {objective}
+- Iteration: {iteration}/{max_iterations}
+- Target information: {target_info}
+- Recent actions: {execution_trace}
+- Browser capability map: {capability_map}
+- Relevant prior knowledge: {knowledge_context}
+"""
+
+PILOT_WEB_SYSTEM_PROMPT = PILOT_WEB_STATIC_PROMPT + PILOT_TOOLS_PROMPT + "\n\n" + PILOT_WEB_STATE_PROMPT
+
+
+class PromptParts(NamedTuple):
+    """The planner prompt, ordered from most to least stable.
+
+    ``static`` is fixed for a session, ``tools`` changes only with the phase,
+    and ``state`` changes every step. Send ``static`` and ``tools`` as the
+    cacheable system message and ``state`` in the user turn.
+    """
+
+    static: str
+    tools: str
+    state: str
+
+
+def render_prompt_parts(*, mode: str, **context: object) -> PromptParts:
+    """Format each prompt part; guidance with literal JSON braces is appended unformatted."""
+    if mode == "pilot":
+        web = bool(context.get("pilot_web_only"))
+        static_t = PILOT_WEB_STATIC_PROMPT if web else PILOT_STATIC_PROMPT
+        state_t = PILOT_WEB_STATE_PROMPT if web else PILOT_STATE_PROMPT
+        tools_t = PILOT_TOOLS_PROMPT
+    else:
+        static_t, tools_t, state_t = REACT_STATIC_PROMPT, REACT_TOOLS_PROMPT, REACT_STATE_PROMPT
+    static = static_t.format(**context)
+    if mode != "pilot":
+        static += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
+    return PromptParts(static, tools_t.format(**context), state_t.format(**context))
+
 
 def render_system_prompt(*, mode: str, **context: object) -> str:
-    """Format template fields before adding guidance with literal JSON braces."""
-    template = (PILOT_WEB_SYSTEM_PROMPT if context.get("pilot_web_only") else PILOT_SYSTEM_PROMPT
-                ) if mode == "pilot" else REACT_SYSTEM_PROMPT
-    rendered = template.format(**context)
-    if mode != "pilot":
-        rendered += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
-    return rendered
+    """Render the whole prompt as one string (stable parts first)."""
+    parts = render_prompt_parts(mode=mode, **context)
+    return parts.static + parts.tools + "\n\n" + parts.state

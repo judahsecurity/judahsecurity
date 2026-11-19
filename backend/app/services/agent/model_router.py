@@ -45,6 +45,7 @@ from app.models.api_config import (
     ExternalService,
     resolve_llm_key,
 )
+from app.services.agent.prompt_cache import prepare_for_model
 from app.services.agent.llm_factory import (
     DEFAULT_MODEL_BY_PROVIDER,
     build_chat_model,
@@ -421,7 +422,7 @@ class ResilientFallbackChatModel(BaseChatModel):
             for i, llm in enumerate(chain):
                 try:
                     return llm._generate(
-                        messages, stop=stop, run_manager=run_manager, **kwargs
+                        prepare_for_model(llm, messages), stop=stop, run_manager=run_manager, **kwargs
                     )
                 except Exception as exc:
                     last_exc = exc
@@ -468,7 +469,7 @@ class ResilientFallbackChatModel(BaseChatModel):
             for i, llm in enumerate(chain):
                 try:
                     return await llm._agenerate(
-                        messages, stop=stop, run_manager=run_manager, **kwargs
+                        prepare_for_model(llm, messages), stop=stop, run_manager=run_manager, **kwargs
                     )
                 except Exception as exc:
                     last_exc = exc

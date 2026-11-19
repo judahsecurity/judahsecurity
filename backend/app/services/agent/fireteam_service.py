@@ -27,7 +27,9 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, Optional
 from urllib.parse import urlsplit
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
+
+from app.services.agent.prompt_cache import cacheable_system
 
 if TYPE_CHECKING:
     from app.services.agent.operation_directive import OperationDirective
@@ -1482,7 +1484,9 @@ async def _run_specialist(
         suffix=suffix,
     )
 
-    messages: list = [SystemMessage(content=sys_prompt)]
+    # The system prompt is fixed for this specialist run; the rolling
+    # breakpoint lets each turn read the earlier turns from cache.
+    messages: list = [cacheable_system(sys_prompt, cache_history=True)]
     messages.append(HumanMessage(content="Begin."))
 
     iteration = 0

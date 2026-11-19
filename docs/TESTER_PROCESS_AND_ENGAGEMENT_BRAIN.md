@@ -302,6 +302,13 @@ Use for IDOR, host-tenant, authz, and workflow tampers. Then `update_hypothesis`
 
 ## Efficiency notes
 
+- **Prompt caching** — the planner system message holds only session-stable text
+  (rules, proof guidance) and the phase's tool list; per-step state (iteration,
+  trace, brain, recommendations) goes in the user turn (`render_prompt_parts` in
+  `prompts.py`). `prompt_cache.py` adds Anthropic `cache_control` breakpoints
+  only when the concrete model is `ChatAnthropic`, including per member of the
+  fallback chain; other providers get a plain string. Fireteam specialists also
+  mark their newest message, so each loop turn reads earlier turns from cache.
 - **Logic before spray** — broad Nuclei is gated until a capability map exists (unless `force=true` / non-browser).  
 - **Coverage specialist** — deep / authenticated Nuclei after creds or high-value hits.  
 - **Future `nuclei_scout`** — optional thin early Nuclei lead-generator that only enqueues cards (does not judge impact). See harness docs for measuring chain recall.

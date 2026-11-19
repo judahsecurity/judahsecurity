@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -47,8 +47,9 @@ from app.services.agent.state import (
     utc_now,
     clip_text,
 )
+from app.services.agent.prompt_cache import cacheable_system, prepare_for_model
 from app.services.agent.prompts import (
-    render_system_prompt,
+    render_prompt_parts,
     OUTPUT_ANALYSIS_PROMPT,
     PHASE_TRANSITION_MESSAGE,
     USER_QUESTION_MESSAGE,
@@ -219,7 +220,7 @@ async def _ledger_llm_call(llm, messages, *, kind: str, target: str = "",
     action_id = uuid.uuid4().hex
     append_action(run_id, action_id, "started", kind, target=target, phase=phase)
     try:
-        call = llm.ainvoke(messages)
+        call = llm.ainvoke(prepare_for_model(llm, messages))
         response = await asyncio.wait_for(call, timeout=timeout) if timeout else await call
     except asyncio.CancelledError:
         append_action(run_id, action_id, "interrupted", kind, target=target,
@@ -1801,7 +1802,7 @@ class AgentOrchestrator:
                 state.get("engagement_brain")
             )
 
-            system_prompt = render_system_prompt(
+            prompt_parts = render_prompt_parts(
                 mode=state.get("mode") or "assist",
                 current_phase=phase,
                 available_tools=available_tools,
@@ -1830,9 +1831,11 @@ class AgentOrchestrator:
                     + "\n\n"
                     + steer_prompt
                 )
+            # Stable guidance and the phase's tool list form a cacheable system
+            # prefix; the per-step state rides in the user turn after it.
             messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=steer_prompt),
+                cacheable_system(prompt_parts.static, prompt_parts.tools),
+                HumanMessage(content=prompt_parts.state + "\n\n" + steer_prompt),
             ]
 
             llm = self._resolve_llm(state, LLMTask.REASONING)
