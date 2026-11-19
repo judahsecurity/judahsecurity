@@ -10,6 +10,7 @@ Related code:
 | Engagement brain | `backend/app/services/agent/engagement_brain.py` |
 | Grounded LLM hypothesis planner | `backend/app/services/agent/brain_hypothesis_planner.py` |
 | Input/class assignment ledger | `backend/app/services/agent/coverage_cells.py` |
+| Observation → follow-up assignment | `backend/app/services/agent/observation_followups.py` |
 | Penetration Task Graph | `backend/app/services/agent/penetration_task_graph.py` |
 | Auto-prompter | `backend/app/services/agent/auto_prompter.py` |
 | Capability map | `backend/app/services/agent/capability_map.py` |
@@ -111,6 +112,68 @@ JSON, the sync reports `hypothesis_planning.status=unavailable` and existing
 coverage work remains assignable. These cell-linked hypotheses do not create
 separate task graph nodes, so the same request is not assigned twice through
 two scheduling lanes.
+
+### Observation events → follow-up work
+
+`observation_followups.py` turns a new fact into the next assignment. Coverage
+cells stay the execution record; this path only decides which cell to create or
+reuse.
+
+1. **Event.** `commit_observation` records a capture, worker result, credential
+   discovery (identity name only), or verified finding with run ID, evidence
+   IDs, identity, host scope, and timestamp. Captures are stored by shape
+   (`capture_facts` drops query values). The same fact seen again adds evidence
+   and `seen_count` to the existing event and is not planned again.
+2. **Proposal.** `FollowupPlanner.drain` sends the model a short, value-free
+   packet: the event, the catalog-applicable classes per observed input, the
+   approved identities, and existing work on that surface. The model returns
+   `{target, test_class, reason, prerequisites{identities, depends_on},
+   evidence_ids}`.
+3. **Validation and deduplication.** Each proposal must match the observed
+   method/host/path and an observed parameter, be in scope, use an applicable
+   class, and cite evidence on the event. `authz` needs an approved identity
+   other than the observer. Proposals that name an unapproved identity are
+   **held** (no cell) until `release_held_proposals` sees the approval. A
+   proposal maps to the same `coverage_cell_id` the inventory lane would
+   produce, so work that already exists is linked (`merged`), not duplicated,
+   and a later event proposing the same work is a `duplicate`. Per-event and
+   per-run budgets apply. Validation runs against the live brain after the
+   model returns.
+4. **Wake and claim.** `commit_observation(on_commit=planner.notify)` wakes the
+   planner. `claim_followup` leases one eligible cell for a specialist (approved
+   identities re-checked, dependencies settled) with no `await` between check
+   and write. `complete_followup` requires the live lease and evidence IDs,
+   releases the cell, and commits a `worker_result` event, which can produce
+   the next follow-up.
+5. **Measurement.** `chain_report` gives observation → accept → claim → first
+   request → verdict durations, plus time spent waiting on the planner, the
+   model, identity approval, and a worker.
+
+**Live wiring** (`followup_runtime.py`):
+
+| Where | What happens |
+|-------|--------------|
+| Browser capture, `discover_parameters`, `sync_engagement_brain`, `fireteam_dispatch` | Inventory rows backed by a capture artifact become one capture event per request shape; the planner is queued in the background (never awaited) |
+| Next sync or dispatch | Finished model results are validated against the live brain; held proposals are released if their identities are now approved |
+| `fireteam_dispatch` | Specialists with claimable follow-ups join `auto` waves and claim them before ordinary coverage work; the directive's `allowed_identities` is narrowed to the follow-up's approved identities |
+| End of the wave | Each follow-up lease closes through `finish_followup`: with evidence it commits a `worker_result` event, without evidence it is released as inconclusive |
+| `add_engagement_credential` | Records a `credential` event (identity name only; recorded, not planned) |
+| `create_finding` | Records a `verified_finding` event for the published candidate's coverage cell |
+| Restart recovery | Events left mid-planning return to `committed` |
+
+**Approved identities** are `anonymous`, identities registered with the
+assessment identity registry, and the engagement's own sessions on the brain.
+A scheduled turn narrows them to its `allowed_identities`. **Scope** is the
+assessment's observation scope.
+
+Settings: `PROWL_FOLLOWUP_PLANNER_ENABLED` (default `true`) turns the path off
+entirely; `PROWL_FOLLOWUP_MAX_EVENTS_PER_RUN` (default `60`) caps model calls
+per run. Sync and dispatch report `followup_planning`; dispatch also reports
+`followup_leases`.
+
+Known limits: the background model call and the claim lock are per process.
+Authz cells seeded by the parameter-inventory lane do not yet require an
+approved second identity. Acceptance tests: `backend/tests/test_observation_followups.py`.
 
 ### Agent tools
 

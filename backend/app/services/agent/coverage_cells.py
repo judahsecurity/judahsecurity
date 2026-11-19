@@ -48,6 +48,11 @@ def lead_packet_for_cell(cell: dict[str, Any]) -> dict[str, Any]:
         "xss_remaining_attempts": int(xss.get("remaining_attempts") or 0),
         "sqli_trace": sqli,
         "llm_hypothesis": dict(cell.get("llm_hypothesis") or {}),
+        "followup": {
+            key: (cell.get("followup") or {}).get(key)
+            for key in ("reason", "required_identities", "depends_on", "event_ids")
+            if (cell.get("followup") or {}).get(key)
+        },
     }
 
 

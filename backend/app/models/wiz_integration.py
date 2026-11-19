@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -75,8 +75,48 @@ class WizIntegration(Base):
         return self.last_sync_at + timedelta(minutes=self.sync_interval_minutes or 1440)
 
     def is_sync_due(self, now: datetime | None = None) -> bool:
+        sync_state = self.last_sync_stats or {}
+        if sync_state.get("sync_in_progress"):
+            try:
+                started = datetime.fromisoformat(sync_state.get("sync_started_at", ""))
+                if (now or datetime.utcnow()) - started < timedelta(hours=2):
+                    return False
+            except (TypeError, ValueError):
+                pass
         next_sync = self.next_sync_at
         return next_sync is not None and (now or datetime.utcnow()) >= next_sync
 
     def __repr__(self) -> str:
         return f"<WizIntegration org={self.organization_id} name={self.connection_name!r}>"
+
+
+class WizApplicationEndpoint(Base):
+    """One Wiz ENDPOINT graph entity, with its direct issue relationships."""
+
+    __tablename__ = "wiz_application_endpoints"
+    __table_args__ = (
+        UniqueConstraint("integration_id", "wiz_id", name="uq_wiz_endpoint_source"),
+        Index("ix_wiz_endpoint_org_ai", "organization_id", "is_ai"),
+        Index("ix_wiz_endpoint_org_exposure", "organization_id", "exposure_level"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    integration_id = Column(Integer, ForeignKey("wiz_integrations.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    asset_id = Column(Integer, ForeignKey("assets.id", ondelete="SET NULL"), nullable=True, index=True)
+    wiz_id = Column(String(255), nullable=False)
+    name = Column(Text, nullable=True)
+    host = Column(String(500), nullable=True)
+    port = Column(Integer, nullable=True)
+    exposure_level = Column(String(30), nullable=True)
+    is_ai = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    endpoint_data = Column(JSON, nullable=False, default=dict)
+    ai_components = Column(JSON, nullable=False, default=list)
+    ai_graph_seen_at = Column(DateTime, nullable=True)
+    related_issues = Column(JSON, nullable=False, default=list)
+    related_issue_count = Column(Integer, nullable=True)
+    last_seen = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    integration = relationship("WizIntegration")
+    asset = relationship("Asset")

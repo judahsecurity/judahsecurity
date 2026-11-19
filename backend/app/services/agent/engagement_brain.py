@@ -121,6 +121,10 @@ class EngagementBrain:
     task_graph: Dict[str, Any] = field(default_factory=dict)
     hypothesis_wave_history: List[str] = field(default_factory=list)
     pending_risk_assessments: List[Dict[str, Any]] = field(default_factory=list)
+    # Observation -> follow-up assignment path (observation_followups.py).
+    observation_events: List[Dict[str, Any]] = field(default_factory=list)
+    followup_proposals: List[Dict[str, Any]] = field(default_factory=list)
+    assignment_chains: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -150,6 +154,9 @@ class EngagementBrain:
             "task_graph": dict(self.task_graph or {}),
             "hypothesis_wave_history": list(self.hypothesis_wave_history[-100:]),
             "pending_risk_assessments": list(self.pending_risk_assessments or []),
+            "observation_events": list(self.observation_events or []),
+            "followup_proposals": list(self.followup_proposals or []),
+            "assignment_chains": list(self.assignment_chains or []),
         }
 
 

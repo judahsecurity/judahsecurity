@@ -63,7 +63,7 @@ from app.models.workflow import (
     WorkflowNodeRunStatus,
     ScriptLanguage,
 )
-from app.models.wiz_integration import WizIntegration
+from app.models.wiz_integration import WizIntegration, WizApplicationEndpoint
 from app.models.tenable_integration import TenableVmIntegration
 from app.models.crowdstrike_integration import CrowdStrikeIntegration, CrowdStrikeAssetLink
 from app.models.exposure_evidence import FindingSourceEvidence, ExposurePath, ExposurePathStep
@@ -148,6 +148,7 @@ __all__ = [
     "WorkflowRunStatus",
     "WorkflowNodeRunStatus",
     "WizIntegration",
+    "WizApplicationEndpoint",
     "TenableVmIntegration",
     "CrowdStrikeIntegration",
     "CrowdStrikeAssetLink",
