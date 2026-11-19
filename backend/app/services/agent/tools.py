@@ -11370,10 +11370,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         proof_run_id: str = "",
         verifier_run_id: str = "",
         finding_id: str = "",
+        new_lead: str = "",
     ) -> str:
         """Record one surface/test/identity result; inconclusive needs a proof gap.
 
         Use tested_clean only with validated negative execution evidence.
+        Reopening a tested_clean or blocked cell needs a new evidence_id or a
+        new_lead naming the new fact, entry point or parameter.
         """
         from app.services.agent.engagement_brain import (
             coverage_progress,
@@ -11497,6 +11500,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 proof_run_id=proof_run_id or "",
                 verifier_run_id=verifier_run_id or "",
                 finding_id=finding_id or "",
+                new_lead=new_lead or "",
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)}, indent=2)

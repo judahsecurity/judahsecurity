@@ -1080,6 +1080,25 @@ class AgentOrchestrator:
 
         return registry_hunt_note(state)
 
+    def _stagnation_note(self, state: AgentState) -> str:
+        """Warn when a test class keeps getting attempts that produce nothing.
+
+        Complements the tool-name repetition guard: rotating tools on the same
+        dead class (sqli via three different probes) never trips that one.
+        """
+        brain_raw = state.get("engagement_brain")
+        if not brain_raw:
+            return ""
+        try:
+            from app.services.agent.coverage_cells import format_stagnation_note
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+            note = format_stagnation_note(engagement_brain_from_dict(brain_raw))
+        except Exception:
+            logger.debug("stagnation note skipped", exc_info=True)
+            return ""
+        return "\n\n" + note if note else ""
+
     def _repetition_guard_note(self, state: AgentState, phase: str) -> str:
         """Detect an unproductive loop — the model re-running the same tool over
         and over without surfacing anything new — and steer it toward a
@@ -1784,6 +1803,7 @@ class AgentOrchestrator:
                 # Break unproductive loops: if the model has been hammering one tool
                 # without new findings, steer it to a different, higher-value action.
                 tool_recommendations += self._repetition_guard_note(state, phase)
+                tool_recommendations += self._stagnation_note(state)
                 try:
                     from app.services.agent.tester_loop import (
                         format_tester_loop_for_prompt,

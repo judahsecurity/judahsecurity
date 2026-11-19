@@ -23,6 +23,14 @@ CELL_TERMINAL = frozenset({"finding", "tested_clean", "skipped"})
 CELL_OPEN = frozenset({"untested", "in_focus", "inconclusive"})
 CELL_STATUSES = frozenset({*CELL_TERMINAL, *CELL_OPEN, "leased", "blocked"})
 MAX_COVERAGE_CELLS = 10_000
+# A route closed with negative evidence, or blocked, stays closed unless the
+# caller brings something new: a fact, entry point or parameter.
+DEAD_ROUTE_STATUSES = frozenset({"tested_clean", "blocked"})
+MIN_NEW_LEAD_CHARS = 15
+MAX_REOPEN_HISTORY = 5
+# Per test class: this many attempts with nothing to show for any of them
+# means the class is stagnant on this target.
+STAGNATION_ATTEMPTS = 3
 
 
 def lead_packet_for_cell(cell: dict[str, Any]) -> dict[str, Any]:
@@ -1176,9 +1184,16 @@ def record_coverage_cell(
     reason: str = "",
     coverage_cell_id_value: str = "",
     coverage_lease_id: str = "",
+    new_lead: str = "",
     **trace: Any,
 ) -> dict[str, Any]:
-    """Upsert one exact cell and enforce lease ownership when a lease is cited."""
+    """Upsert one exact cell and enforce lease ownership when a lease is cited.
+
+    Reopening a dead route (``tested_clean`` or ``blocked``) needs something
+    new: an ``evidence_id`` the cell does not already cite, or ``new_lead``
+    naming the new fact, entry point or parameter. Otherwise the same dead
+    route would be retried with the same knowledge.
+    """
     migrate_coverage_cells(brain)
     proposed = _new_cell(
         brain,
@@ -1246,7 +1261,10 @@ def record_coverage_cell(
         raise ValueError(
             "Coverage lease is missing, expired, or belongs to another executor"
         )
+    reopen = _check_route_reopen(existing, _status(status), evidence_id, new_lead)
     updated = _merge_cell(existing or proposed, proposed)
+    if reopen:
+        updated["reopened"] = [*(updated.get("reopened") or []), reopen][-MAX_REOPEN_HISTORY:]
     updated["status"] = _status(status)
     updated["reason"] = _text(reason)[:500]
     if evidence_id:
@@ -1279,6 +1297,96 @@ def record_coverage_cell(
     if not any(cell.get("id") == updated["id"] for cell in brain.coverage_cells):
         brain.coverage_cells.append(updated)
     return updated
+
+
+def _check_route_reopen(
+    existing: dict[str, Any] | None,
+    status: str,
+    evidence_id: str,
+    new_lead: str,
+) -> dict[str, Any] | None:
+    """Refuse to reopen a dead route without new information.
+
+    Returns the reopen record to keep on the cell, or None when this update
+    does not reopen anything.
+    """
+    if not existing or existing.get("status") not in DEAD_ROUTE_STATUSES:
+        return None
+    if status not in CELL_OPEN and status != "leased":
+        return None
+    lead = _text(new_lead)
+    fresh_evidence = bool(evidence_id) and evidence_id not in (existing.get("evidence_ids") or [])
+    if not fresh_evidence and len(lead) < MIN_NEW_LEAD_CHARS:
+        closed_reason = _text(existing.get("reason"))[:200] or "no reason recorded"
+        raise ValueError(
+            f"This route is closed as {existing.get('status')} ({closed_reason}). "
+            "Reopen it only with something new: cite an evidence_id this cell does "
+            "not already have, or pass new_lead naming the new fact, entry point "
+            "or parameter. Otherwise test a different route."
+        )
+    return {
+        "from_status": existing.get("status"),
+        "to_status": status,
+        "evidence_id": evidence_id if fresh_evidence else "",
+        "new_lead": lead[:300],
+        "at": time.time(),
+    }
+
+
+def class_stagnation(brain: Any, *, threshold: int = STAGNATION_ATTEMPTS) -> list[dict[str, Any]]:
+    """Test classes tried ``threshold``+ times on this target with nothing to show.
+
+    A class counts as productive once any of its cells reaches a finding, a
+    candidate, or a first-pass proof signal. Repeated attempts at an
+    unproductive class get flagged so the planner changes mechanism (encoding,
+    method, parameter, path) or moves to a different class.
+    """
+    stats: dict[str, dict[str, Any]] = {}
+    for cell in getattr(brain, "coverage_cells", None) or []:
+        test_type = _text(cell.get("test_type")).lower()
+        if not test_type or test_type == "surface_review":
+            continue
+        row = stats.setdefault(test_type, {
+            "test_type": test_type, "attempts": 0, "cells_tried": 0,
+            "closed": 0, "open": 0, "productive": False,
+        })
+        attempts = int(cell.get("attempts") or 0)
+        status = cell.get("status")
+        tried = attempts > 0 or status in DEAD_ROUTE_STATUSES or status == "inconclusive"
+        row["attempts"] += max(attempts, 1 if tried else 0)
+        row["cells_tried"] += int(tried)
+        row["closed"] += int(status in DEAD_ROUTE_STATUSES)
+        row["open"] += int(status in CELL_OPEN and not tried)
+        if (status == "finding" or cell.get("candidate_id") or cell.get("finding_id")
+                or cell.get("first_pass_outcome") == "proof_signal"):
+            row["productive"] = True
+    stagnant = [
+        row for row in stats.values()
+        if not row["productive"] and row["attempts"] >= threshold
+    ]
+    stagnant.sort(key=lambda row: (-row["attempts"], row["test_type"]))
+    return stagnant
+
+
+def format_stagnation_note(brain: Any) -> str:
+    """Prompt block naming stagnant test classes, or empty when none."""
+    rows = class_stagnation(brain)
+    if not rows:
+        return ""
+    lines = ["## Stagnation warning (per test class, whole engagement)"]
+    for row in rows[:6]:
+        lines.append(
+            f"- {row['test_type']}: {row['attempts']} attempts across "
+            f"{row['cells_tried']} inputs, no candidate or finding "
+            f"({row['closed']} closed, {row['open']} untouched)."
+        )
+    lines.append(
+        "Do not dispatch more of the same. Either change the mechanism (encoding, "
+        "HTTP method, parameter, path, identity) because a specific new fact "
+        "suggests it, or move to a different class or surface. Closed routes "
+        "reopen only with new evidence or a new_lead."
+    )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)

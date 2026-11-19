@@ -3911,6 +3911,7 @@ def record_surface_coverage(
     proof_run_id: str = "",
     verifier_run_id: str = "",
     finding_id: str = "",
+    new_lead: str = "",
 ) -> Dict[str, Any]:
     status = (status or "tested_clean").strip().lower()
     if status not in _COVERAGE_STATUSES:
@@ -3999,6 +4000,7 @@ def record_surface_coverage(
                 operation_id=operation_id,
                 coverage_cell_id_value=coverage_cell_id,
                 coverage_lease_id=coverage_lease_id,
+                new_lead=new_lead,
                 capture_id=capture_id,
                 request_ids=request_ids or [],
                 candidate_id=candidate_id,
@@ -4042,6 +4044,7 @@ def record_surface_coverage(
         operation_id=operation_id,
         coverage_cell_id_value=coverage_cell_id,
         coverage_lease_id=coverage_lease_id,
+        new_lead=new_lead,
         capture_id=capture_id,
         request_ids=request_ids or [],
         candidate_id=candidate_id,
