@@ -296,3 +296,87 @@ def test_breaker_cooling_ladder_and_reset(monkeypatch):
     now[0] += 61
     assert not breakers.is_open("k")  # a success restarts the ladder
     assert not breakers.is_open("")  # untracked members are never skipped
+
+
+# --- peer trace search --------------------------------------------------------
+
+def test_peer_board_excludes_own_run_and_matches_all_terms():
+    board = fireteam_service.PeerTraceBoard()
+    inv = fireteam_service.ToolInvocation
+    board.record("run-a", "xss", [inv(tool="http_get", args={"url": "/search"}, success=True,
+                                      summary="500 error: hidden param debug_mode=1 leaked")])
+    board.record("run-b", "sqli", [inv(tool="http_get", args={}, success=True, summary="200 ok")])
+    hits = board.search("debug_mode leaked", exclude_run="run-b")
+    assert [h["specialist"] for h in hits] == ["xss"]
+    assert "debug_mode=1" in hits[0]["excerpt"]
+    assert board.search("debug_mode", exclude_run="run-a") == []
+    assert board.search("debug_mode missing", exclude_run="run-b") == []
+    assert [h["specialist"] for h in board.search("", exclude_run="nobody")] == ["sqli", "xss"]
+
+
+def test_peer_board_is_bounded():
+    board = fireteam_service.PeerTraceBoard()
+    inv = fireteam_service.ToolInvocation(tool="t", args={}, success=True, summary="x" * 5000)
+    for i in range(fireteam_service._PEER_BOARD_MAX + 50):
+        board.record(f"r{i}", "s", [inv])
+    assert len(board._entries) == fireteam_service._PEER_BOARD_MAX
+    assert len(board._entries[-1]["summary"]) == fireteam_service._PEER_SUMMARY_CHARS
+
+
+@pytest.mark.asyncio
+async def test_specialist_reads_peer_results_without_spending_tool_budget(monkeypatch):
+    manager = _Manager()
+    board = fireteam_service._peer_board(manager)
+    board.record("earlier-run", "api_authz", [fireteam_service.ToolInvocation(
+        tool="compare_requests", args={}, success=True, summary="X-Debug-Token header echoed",
+    )])
+    prompts = []
+
+    def replies(_kind, n):
+        if n == 1:
+            return {"tool_calls": [
+                {"tool": "search_peer_traces", "args": {"q": "x-debug-token"}},
+            ]}
+        return {"done": True, "summary": "used peer lead", "verdict": "inconclusive"}
+
+    calls, _kinds = _patch(monkeypatch, replies)
+
+    async def capture_llm(_llm, messages, **kwargs):
+        prompts.append([getattr(m, "content", "") for m in messages])
+        return SimpleNamespace(content=json.dumps(replies(kwargs.get("kind"), len(prompts))))
+
+    monkeypatch.setattr(orchestrator, "_ledger_llm_call", capture_llm)
+    report = await _run_specialist(
+        _profile(), "Assess", [TARGET], llm=None, tools_manager=manager,
+        directive=_directive(max_tool_calls=1),
+    )
+    assert calls == []
+    assert report.stop_reason == "done"
+    assert "search_peer_traces" in prompts[0][0]  # offered in the system prompt
+    peer_feedback = json.loads(prompts[1][-1])["peer_results"][0]
+    assert peer_feedback["matches"][0]["specialist"] == "api_authz"
+
+
+@pytest.mark.asyncio
+async def test_peer_search_is_capped_per_run(monkeypatch):
+    manager = _Manager()
+
+    def replies(_kind, n):
+        if n <= 6:
+            return {"tool_calls": [{"tool": "search_peer_traces", "args": {"q": "x"}}]}
+        return {"done": True, "summary": "s", "verdict": "inconclusive"}
+
+    seen = []
+
+    async def capture_llm(_llm, messages, **kwargs):
+        seen.append(getattr(messages[-1], "content", ""))
+        return SimpleNamespace(content=json.dumps(replies(kwargs.get("kind"), len(seen))))
+
+    _patch(monkeypatch, replies)
+    monkeypatch.setattr(orchestrator, "_ledger_llm_call", capture_llm)
+    await _run_specialist(
+        _profile(max_iterations=10), "Assess", [TARGET], llm=None, tools_manager=manager,
+        directive=_directive(max_iterations=10),
+    )
+    limited = [m for m in seen if "peer search limit reached" in m]
+    assert len(limited) == 2  # searches 5 and 6 are refused

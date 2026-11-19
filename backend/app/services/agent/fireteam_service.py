@@ -1335,6 +1335,82 @@ def _tool_contract(tools_manager: Any, tool_name: str) -> str:
     return f"  - {tool_name}({', '.join(names)})"
 
 
+# Peer trace search: specialists in one session can read what other specialists'
+# tool calls returned (an error body, a hidden parameter, a token format) before
+# re-probing. It is answered from memory here, never sent to the target, and is
+# scoped to the session's tools manager so it cannot cross tenants.
+PEER_SEARCH_TOOL = "search_peer_traces"
+_PEER_SEARCH_MAX = 4
+_PEER_BOARD_MAX = 400
+_PEER_SUMMARY_CHARS = 1500
+_PEER_RESULTS = 6
+_PEER_CONTRACT = (
+    f"  - {PEER_SEARCH_TOOL}(q?) — read-only search of other specialists' tool "
+    "results in this engagement (keywords, all must match; empty q lists the "
+    f"newest). No target traffic; at most {_PEER_SEARCH_MAX} per run and it does "
+    "not use your tool budget. Use it before re-probing something a peer may "
+    "already have seen."
+)
+
+
+class PeerTraceBoard:
+    """Bounded, session-scoped record of specialist tool results."""
+
+    def __init__(self) -> None:
+        self._entries: list[dict] = []
+
+    def record(self, run_key: str, specialist: str, results: Iterable[ToolInvocation]) -> None:
+        for r in results:
+            self._entries.append({
+                "run": run_key,
+                "specialist": specialist,
+                "tool": r.tool,
+                "args": json.dumps(r.args or {}, default=str)[:300],
+                "success": bool(r.success),
+                "summary": (r.summary or "")[:_PEER_SUMMARY_CHARS],
+                "error": (r.error or "")[:300],
+                "evidence_ids": list(r.evidence_ids or [])[:8],
+            })
+        if len(self._entries) > _PEER_BOARD_MAX:
+            del self._entries[: len(self._entries) - _PEER_BOARD_MAX]
+
+    def search(self, query: str, *, exclude_run: str) -> list[dict]:
+        terms = [t for t in str(query or "").lower().split() if t][:8]
+        hits = []
+        for entry in reversed(self._entries):
+            if entry["run"] == exclude_run:
+                continue
+            hay = " ".join((entry["tool"], entry["args"], entry["summary"], entry["error"])).lower()
+            if terms and not all(t in hay for t in terms):
+                continue
+            text = entry["summary"] or entry["error"]
+            at = text.lower().find(terms[0]) if terms else 0
+            start = max(0, at - 200) if at >= 0 else 0
+            hits.append({
+                "specialist": entry["specialist"],
+                "tool": entry["tool"],
+                "args": entry["args"],
+                "success": entry["success"],
+                "excerpt": text[start:start + 600],
+                "evidence_ids": entry["evidence_ids"],
+            })
+            if len(hits) >= _PEER_RESULTS:
+                break
+        return hits
+
+
+def _peer_board(tools_manager: Any) -> Optional[PeerTraceBoard]:
+    board = getattr(tools_manager, "_peer_trace_board", None)
+    if isinstance(board, PeerTraceBoard):
+        return board
+    board = PeerTraceBoard()
+    try:
+        setattr(tools_manager, "_peer_trace_board", board)
+    except Exception:
+        return None
+    return board
+
+
 # Wrap-up after a budget stop: a few model turns with only write-back tools so a
 # specialist cut off mid-hunt still records what it evidenced and where it
 # stopped. Network probing tools are never offered here.
@@ -1587,13 +1663,21 @@ async def _run_specialist(
     except Exception:
         logger.debug("specialist hunt-brief skipped", exc_info=True)
 
+    # Bounded pilots keep their exact tool list; everyone else may read peers.
+    peer_board = _peer_board(tools_manager) if pilot is None else None
+    run_key = uuid.uuid4().hex
+    peer_searches_left = _PEER_SEARCH_MAX
+
     sys_prompt = _SPECIALIST_SYSTEM_PROMPT.format(
         epithet=profile.epithet or profile.name,
         role=profile.role,
         directive=directive_block,
         mission=mission_for_prompt,
         targets=", ".join(target_list) or "<see analyze_attack_surface output>",
-        tool_list="\n".join(_tool_contract(tools_manager, t) for t in allowed_tools),
+        tool_list="\n".join(
+            [_tool_contract(tools_manager, t) for t in allowed_tools]
+            + ([_PEER_CONTRACT] if peer_board is not None else [])
+        ),
         memory=memory_block,
         max_iter=max_iter,
         suffix=suffix,
@@ -1686,6 +1770,22 @@ async def _run_specialist(
             report.summary = payload.get("reasoning") or text[:2000]
             break
 
+        # Peer searches are answered locally and do not use the tool budget.
+        peer_results = []
+        if peer_board is not None:
+            for tc in tool_calls:
+                if not isinstance(tc, dict) or tc.get("tool") != PEER_SEARCH_TOOL:
+                    continue
+                if peer_searches_left <= 0:
+                    peer_results.append({"tool": PEER_SEARCH_TOOL, "error": "peer search limit reached"})
+                    continue
+                peer_searches_left -= 1
+                query = str((tc.get("args") or {}).get("q") or "")[:200]
+                peer_results.append({
+                    "tool": PEER_SEARCH_TOOL, "q": query,
+                    "matches": peer_board.search(query, exclude_run=run_key),
+                })
+
         # Enforce allowlist + max parallelism per turn.
         tool_calls = [tc for tc in tool_calls if tc.get("tool") in allowed_tools][: profile.max_tools_per_iteration]
         if budget and directive.max_parallel_tool_calls:
@@ -1694,6 +1794,9 @@ async def _run_specialist(
             tool_calls = tool_calls[:max_tool_calls - len(report.tool_calls)]
 
         if not tool_calls:
+            if peer_results:
+                messages.append(HumanMessage(content=json.dumps({"peer_results": peer_results})))
+                continue
             messages.append(HumanMessage(
                 content="None of the tools you requested are allowed. "
                         "Pick from the allowlist or finish with done=true."
@@ -1718,6 +1821,8 @@ async def _run_specialist(
 
         for tc, tr in zip(tool_calls, tool_results):
             report.tool_calls.append(tr)
+        if peer_board is not None:
+            peer_board.record(run_key, profile.name, tool_results)
 
         feedback = {
             "tool_results": [
@@ -1731,6 +1836,8 @@ async def _run_specialist(
                 for tr in tool_results
             ],
         }
+        if peer_results:
+            feedback["peer_results"] = peer_results
         messages.append(HumanMessage(content=json.dumps(feedback)))
     else:
         # The loop condition ended the run: the turn budget ran out.

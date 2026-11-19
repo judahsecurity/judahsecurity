@@ -107,3 +107,15 @@ Every specialist report now carries a `stop_reason`: `done` (it concluded),
   then 30 on repeated failures, and a success resets it. Breakers are keyed by
   provider, model and a hash of the key, so one organization's failing key
   does not affect another's. The orchestrator's default model is not tracked.
+
+## Peer trace search
+
+Specialists can call `search_peer_traces(q)` to read what other specialists'
+tool calls returned in the same session: an error body, a hidden parameter, a
+token format. Every term must match; an empty query lists the newest results.
+It is answered from an in-memory board on the session's tools manager (the
+newest 400 results, 1,500 characters each), so it sends no target traffic and
+cannot cross tenants. It excludes the caller's own run but not earlier runs of
+the same specialist, so a retry can read its predecessor's results. Each run
+gets at most four searches, and they do not count against the tool budget.
+Bounded pilots do not get the tool, so their tool list stays exact.
