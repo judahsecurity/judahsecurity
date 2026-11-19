@@ -7660,7 +7660,10 @@ class ScannerWorker:
         scan_id = body.get("scan_id")
         organization_id = body.get("organization_id")
         config = body.get("config") or {}
-        db = SessionLocal()
+        db = self.get_db_session()
+        if not db:
+            logger.error("EMAIL_BREACH: no database connection")
+            return
 
         try:
             scan = db.query(Scan).filter(Scan.id == scan_id).first() if scan_id else None
@@ -7745,7 +7748,10 @@ class ScannerWorker:
         scan_id = body.get("scan_id")
         organization_id = body.get("organization_id")
         config = body.get("config") or {}
-        db = SessionLocal()
+        db = self.get_db_session()
+        if not db:
+            logger.error("DNS_THREAT: no database connection")
+            return
 
         try:
             scan = db.query(Scan).filter(Scan.id == scan_id).first() if scan_id else None
@@ -7817,7 +7823,10 @@ class ScannerWorker:
         scan_id = body.get("scan_id")
         organization_id = body.get("organization_id")
         config = body.get("config") or {}
-        db = SessionLocal()
+        db = self.get_db_session()
+        if not db:
+            logger.error("URLHAUS_LOOKUP: no database connection")
+            return
 
         try:
             scan = db.query(Scan).filter(Scan.id == scan_id).first() if scan_id else None
@@ -7897,7 +7906,10 @@ class ScannerWorker:
         scan_id = body.get("scan_id")
         organization_id = body.get("organization_id")
         config = body.get("config") or {}
-        db = SessionLocal()
+        db = self.get_db_session()
+        if not db:
+            logger.error("BGP_LOOKUP: no database connection")
+            return
 
         try:
             scan = db.query(Scan).filter(Scan.id == scan_id).first() if scan_id else None
@@ -7947,14 +7959,14 @@ class ScannerWorker:
                         .first()
                     )
                     if asset:
-                        meta = asset.metadata or {}
+                        meta = dict(asset.metadata_ or {})
                         meta["bgp"] = {
                             "asn": result.asn,
                             "asn_name": result.asn_name,
                             "prefix": result.covering_prefix,
                             "block_name": result.block_name,
                         }
-                        asset.metadata = meta
+                        asset.metadata_ = meta
                 db.commit()
 
             asn_summary: dict[str, int] = {}
