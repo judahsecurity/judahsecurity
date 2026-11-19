@@ -1526,13 +1526,11 @@ async def _wrap_up_specialist(
             logger.warning("fireteam %s: wrap-up LLM failure: %s", profile.name, exc)
             break
         if directive is not None and directive.max_spend_usd:
-            from app.services.agent.observability import estimate_cost_usd, usage_from_llm_response
+            from app.services.agent.observability import usage_cost_usd, usage_from_llm_response
 
             usage = usage_from_llm_response(response)
             model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
-            report.reported_spend_usd += estimate_cost_usd(
-                model, usage["input_tokens"], usage["output_tokens"],
-            )
+            report.reported_spend_usd += usage_cost_usd(model, usage)
         text = getattr(response, "content", "") or ""
         messages.append(AIMessage(content=text))
         payload = _extract_json(text)
@@ -1793,12 +1791,10 @@ async def _run_specialist(
                 phase=profile.name,
             )
             if budget and directive.max_spend_usd:
-                from app.services.agent.observability import estimate_cost_usd, usage_from_llm_response
+                from app.services.agent.observability import usage_cost_usd, usage_from_llm_response
                 usage = usage_from_llm_response(response)
                 model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
-                report.reported_spend_usd += estimate_cost_usd(
-                    model, usage["input_tokens"], usage["output_tokens"],
-                )
+                report.reported_spend_usd += usage_cost_usd(model, usage)
                 if report.reported_spend_usd >= directive.max_spend_usd:
                     report.verdict = "inconclusive"
                     report.rewrite_hint = "specialist reported spend budget exhausted"

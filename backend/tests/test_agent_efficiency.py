@@ -116,7 +116,7 @@ async def test_turn_budget_stop_also_wraps_up(monkeypatch):
 async def test_spend_stop_makes_no_further_model_call(monkeypatch):
     calls, kinds = _patch(monkeypatch, _probe_then_wrap_up)
     monkeypatch.setattr(
-        "app.services.agent.observability.estimate_cost_usd", lambda *_a: 5.0,
+        "app.services.agent.observability.estimate_cost_usd", lambda *_a, **_k: 5.0,
     )
     monkeypatch.setattr(
         "app.services.agent.observability.usage_from_llm_response",

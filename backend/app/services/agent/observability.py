@@ -70,12 +70,22 @@ def redact_value(value: Any, key: str = "") -> Any:
 
 
 def usage_from_llm_response(response: Any) -> Dict[str, int]:
-    """Pull input/output tokens off a LangChain AIMessage or similar."""
+    """Pull input/output tokens off a LangChain AIMessage or similar.
+
+    ``input_tokens`` is the total prompt size, cached parts included;
+    ``cache_read_tokens`` and ``cache_creation_tokens`` say how much of it was
+    served from, or written to, the provider's prompt cache.
+    """
     meta = getattr(response, "usage_metadata", None)
     if isinstance(meta, dict) and (meta.get("input_tokens") or meta.get("output_tokens")):
+        details = meta.get("input_token_details") or {}
+        if not isinstance(details, dict):
+            details = {}
         return {
             "input_tokens": int(meta.get("input_tokens") or 0),
             "output_tokens": int(meta.get("output_tokens") or 0),
+            "cache_read_tokens": int(details.get("cache_read") or 0),
+            "cache_creation_tokens": int(details.get("cache_creation") or 0),
         }
     rm = getattr(response, "response_metadata", None) or {}
     if not isinstance(rm, dict):
@@ -85,8 +95,14 @@ def usage_from_llm_response(response: Any) -> Dict[str, int]:
         inp = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
         out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         if inp or out:
-            return {"input_tokens": int(inp), "output_tokens": int(out)}
-    return {"input_tokens": 0, "output_tokens": 0}
+            return {
+                "input_tokens": int(inp),
+                "output_tokens": int(out),
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+            }
+    return {"input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0}
 
 
 def model_id(llm: Any) -> str:
@@ -97,7 +113,21 @@ def model_id(llm: Any) -> str:
     return ""
 
 
-def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+# Prompt-cache pricing relative to the base input rate (Anthropic: reads 0.1x,
+# 5-minute writes 1.25x). OpenAI-style automatic caching reports reads only.
+CACHE_READ_MULTIPLIER = 0.1
+CACHE_WRITE_MULTIPLIER = 1.25
+
+
+def estimate_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> float:
+    """Estimate call cost; ``input_tokens`` includes any cached tokens."""
     pricing = MODEL_PRICING.get(model)
     if pricing is None:
         for key, rates in MODEL_PRICING.items():
@@ -106,10 +136,29 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
                 break
     if pricing is None:
         pricing = {"input": 3.0, "output": 15.0}
+    cache_read_tokens = max(0, min(cache_read_tokens, input_tokens))
+    cache_creation_tokens = max(0, min(cache_creation_tokens, input_tokens - cache_read_tokens))
+    uncached = input_tokens - cache_read_tokens - cache_creation_tokens
+    effective_input = (
+        uncached
+        + cache_read_tokens * CACHE_READ_MULTIPLIER
+        + cache_creation_tokens * CACHE_WRITE_MULTIPLIER
+    )
     return round(
-        (input_tokens / 1_000_000) * pricing["input"]
+        (effective_input / 1_000_000) * pricing["input"]
         + (output_tokens / 1_000_000) * pricing["output"],
         6,
+    )
+
+
+def usage_cost_usd(model: str, usage: Dict[str, int]) -> float:
+    """``estimate_cost_usd`` for a dict from ``usage_from_llm_response``."""
+    return estimate_cost_usd(
+        model,
+        usage.get("input_tokens", 0),
+        usage.get("output_tokens", 0),
+        cache_read_tokens=usage.get("cache_read_tokens", 0),
+        cache_creation_tokens=usage.get("cache_creation_tokens", 0),
     )
 
 
@@ -118,6 +167,8 @@ def empty_token_usage() -> Dict[str, Any]:
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
         "cost_usd": 0.0,
         "calls": [],
     }
@@ -136,7 +187,9 @@ def record_llm_usage(
     totals["input_tokens"] = int(totals.get("input_tokens") or 0) + usage["input_tokens"]
     totals["output_tokens"] = int(totals.get("output_tokens") or 0) + usage["output_tokens"]
     totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
-    call_cost = estimate_cost_usd(model, usage["input_tokens"], usage["output_tokens"])
+    for key in ("cache_read_tokens", "cache_creation_tokens"):
+        totals[key] = int(totals.get(key) or 0) + int(usage.get(key) or 0)
+    call_cost = usage_cost_usd(model, usage)
     totals["cost_usd"] = round(float(totals.get("cost_usd") or 0) + call_cost, 6)
     calls = list(totals.get("calls") or [])
     calls.append(
@@ -145,6 +198,7 @@ def record_llm_usage(
             "model": model,
             "input_tokens": usage["input_tokens"],
             "output_tokens": usage["output_tokens"],
+            "cache_read_tokens": int(usage.get("cache_read_tokens") or 0),
             "cost_usd": call_cost,
         }
     )

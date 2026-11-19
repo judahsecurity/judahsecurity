@@ -48,7 +48,7 @@ from app.services.agent.state import (
     clip_text,
 )
 from app.services.agent.prompts import (
-    render_system_prompt,
+    render_prompt_parts,
     OUTPUT_ANALYSIS_PROMPT,
     PHASE_TRANSITION_MESSAGE,
     USER_QUESTION_MESSAGE,
@@ -1687,6 +1687,9 @@ class AgentOrchestrator:
 
             # Model-led recon: until the model has recorded an inventory and
             # ranked attack ideas, show it how; afterwards, a one-line reminder.
+            # This changes mid-session, so it goes with the per-step state, not
+            # the tool list in the cached system prompt.
+            recon_note = ""
             try:
                 from app.services.agent.recon_inventory import (
                     RECON_REASONING_GUIDANCE,
@@ -1694,12 +1697,12 @@ class AgentOrchestrator:
                 )
                 brain_now = recon_brain_update or state.get("engagement_brain") or {}
                 if has_recon_inventory(brain_now):
-                    available_tools += (
-                        "\n\nRecon inventory recorded. Call record_recon_inventory again "
+                    recon_note = (
+                        "Recon inventory recorded. Call record_recon_inventory again "
                         "when recon reveals new components, inputs, or features."
                     )
                 else:
-                    available_tools += "\n\n" + RECON_REASONING_GUIDANCE
+                    recon_note = RECON_REASONING_GUIDANCE
             except Exception:
                 logger.debug("recon guidance skipped", exc_info=True)
 
@@ -1801,7 +1804,11 @@ class AgentOrchestrator:
                 state.get("engagement_brain")
             )
 
-            system_prompt = render_system_prompt(
+            if recon_note:
+                tool_recommendations = (
+                    recon_note + ("\n\n" + tool_recommendations if tool_recommendations else "")
+                )
+            prompt_parts = render_prompt_parts(
                 mode=state.get("mode") or "assist",
                 current_phase=phase,
                 available_tools=available_tools,
@@ -1830,9 +1837,12 @@ class AgentOrchestrator:
                     + "\n\n"
                     + steer_prompt
                 )
+            # Instructions + tools stay byte-identical across steps so the
+            # provider can serve them from its prompt cache; everything that
+            # changes per step rides in the user turn after that prefix.
             messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=steer_prompt),
+                SystemMessage(content=prompt_parts.system),
+                HumanMessage(content=prompt_parts.state + "\n\n" + steer_prompt),
             ]
 
             llm = self._resolve_llm(state, LLMTask.REASONING)

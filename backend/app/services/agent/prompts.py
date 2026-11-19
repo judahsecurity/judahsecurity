@@ -4,6 +4,8 @@ Agent Prompts
 System prompts for the AI agent's reasoning and decision-making.
 """
 
+from dataclasses import dataclass
+
 REACT_SYSTEM_PROMPT = """You are an expert security analyst AI assistant for an Attack Surface Management (ASM) platform.
 You help users understand their attack surface, analyze vulnerabilities, and provide remediation guidance.
 
@@ -58,7 +60,7 @@ out-of-scope finding rather than continuing.
 
 ## Your Task
 
-Analyze the current state and decide on your next action. You MUST output a valid JSON object with your decision.
+Analyze the current state (sent in the latest user message) and decide on your next action. You MUST output a valid JSON object with your decision.
 
 ### Decision Format
 
@@ -163,7 +165,7 @@ Example: create_scan(scan_type="vulnerability") — scans all org assets
 
 **DO NOT** spend more than 2-3 iterations on query_assets/query_vulnerabilities/analyze_attack_surface before moving to scanning tools. Discovery without scanning produces no value.
 
-**FOLLOW THE SMART TOOL RECOMMENDATIONS** section above. It analyzes your discovered state (technologies, ports, WAF, parameters) and tells you the optimal next tools in priority order. When recommendations are available, prefer following them over guessing which tool to use next. The recommendations automatically adapt as you discover more about the target — WordPress triggers wpscan, APIs trigger schemathesis, SQLi-prone parameters trigger sqlmap, etc.
+**FOLLOW THE SMART TOOL RECOMMENDATIONS** section in the current state message. It analyzes your discovered state (technologies, ports, WAF, parameters) and tells you the optimal next tools in priority order. When recommendations are available, prefer following them over guessing which tool to use next. The recommendations automatically adapt as you discover more about the target — WordPress triggers wpscan, APIs trigger schemathesis, SQLi-prone parameters trigger sqlmap, etc.
 
 **CHOOSE TOOLS FROM EVIDENCE**: Use browser-observed forms, requests, and parameters to select the next specialist test. Run scanners for applicable service and technology coverage after the observed-input pass; record skipped classes and why. Do not repeat a fingerprint or speculative endpoint probe without new evidence.
 
@@ -1162,11 +1164,66 @@ Output exactly one JSON object and no other text:
 """
 
 
-def render_system_prompt(*, mode: str, **context: object) -> str:
-    """Format template fields before adding guidance with literal JSON braces."""
-    template = (PILOT_WEB_SYSTEM_PROMPT if context.get("pilot_web_only") else PILOT_SYSTEM_PROMPT
-                ) if mode == "pilot" else REACT_SYSTEM_PROMPT
-    rendered = template.format(**context)
+@dataclass(frozen=True)
+class PromptParts:
+    """The planner prompt split by how often each part changes.
+
+    ``system`` holds the instructions and the tool list. It is identical on
+    every step of a session (it changes only when the phase changes the tool
+    list), so providers can serve it from their prompt cache. ``state`` holds
+    everything that changes per step and belongs in the user turn, after the
+    cached prefix.
+    """
+
+    system: str
+    state: str
+
+
+def _split_template(template: str, state_heading: str, tools_heading: str,
+                    after_state_heading: str) -> tuple[str, str, str]:
+    """Cut a template into (instructions, per-step state, tools section).
+
+    The state block runs from ``state_heading`` to ``after_state_heading`` and
+    contains the tools section, which is lifted out so it can sit at the end of
+    the cached system prompt instead of between per-step fields.
+    """
+    start = template.index(state_heading)
+    end = template.index(after_state_heading, start)
+    state = template[start:end]
+    tools_start = state.index(tools_heading)
+    tools_end = state.index("\n\n", tools_start + len(tools_heading)) + 2
+    tools = state[tools_start:tools_end]
+    state = state[:tools_start] + state[tools_end:]
+    instructions = template[:start] + template[end:]
+    return instructions, state.strip() + "\n", tools.strip() + "\n"
+
+
+_REACT_PARTS = _split_template(
+    REACT_SYSTEM_PROMPT, "## Current State", "## Available Tools", "## Your Task",
+)
+_PILOT_PARTS = _split_template(
+    PILOT_SYSTEM_PROMPT, "## Objective and state", "## Allowed tools", "## Test method",
+)
+_PILOT_WEB_PARTS = _split_template(
+    PILOT_WEB_SYSTEM_PROMPT, "## Objective and state", "## Allowed tools", "## Test method",
+)
+
+
+def render_prompt_parts(*, mode: str, **context: object) -> PromptParts:
+    """Render the planner prompt as a stable system part and a per-step state part."""
+    if mode == "pilot":
+        parts = _PILOT_WEB_PARTS if context.get("pilot_web_only") else _PILOT_PARTS
+    else:
+        parts = _REACT_PARTS
+    instructions, state, tools = parts
+    system = instructions.format(**context).rstrip()
     if mode != "pilot":
-        rendered += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
-    return rendered
+        system += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
+    system += "\n\n" + tools.format(**context)
+    return PromptParts(system=system, state=state.format(**context))
+
+
+def render_system_prompt(*, mode: str, **context: object) -> str:
+    """Whole planner prompt as one string (instructions, tools, then state)."""
+    parts = render_prompt_parts(mode=mode, **context)
+    return parts.system + "\n\n" + parts.state

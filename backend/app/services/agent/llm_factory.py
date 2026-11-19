@@ -140,6 +140,96 @@ def build_chat_model(
     return llm
 
 
+# Below this size the system prompt is under every model's minimum cacheable
+# prefix, so a breakpoint would only add a cache-write surcharge attempt.
+_MIN_CACHED_SYSTEM_CHARS = 4000
+
+
+def add_system_cache_breakpoint(payload: dict) -> dict:
+    """Mark the end of the system prompt as an Anthropic prompt-cache breakpoint.
+
+    Agent loops resend the same system prompt on every step; a breakpoint there
+    lets later steps read it from cache instead of paying full input price.
+    Leaves the payload alone when it already carries a breakpoint (callers that
+    manage their own) or when the system prompt is too short to cache.
+    """
+    system = payload.get("system")
+    if not system:
+        return payload
+    if isinstance(system, str):
+        blocks = [{"type": "text", "text": system}]
+    elif isinstance(system, list):
+        blocks = [dict(b) if isinstance(b, dict) else b for b in system]
+    else:
+        return payload
+    if any(isinstance(b, dict) and b.get("cache_control") for b in blocks):
+        return payload
+    if "cache_control" in payload:
+        return payload
+    text_len = sum(len(b.get("text") or "") for b in blocks if isinstance(b, dict))
+    if text_len < _MIN_CACHED_SYSTEM_CHARS:
+        return payload
+    last = blocks[-1]
+    if not (isinstance(last, dict) and last.get("type") == "text"):
+        return payload
+    last["cache_control"] = {"type": "ephemeral"}
+    payload["system"] = blocks
+    _add_conversation_breakpoint(payload)
+    return payload
+
+
+def _add_conversation_breakpoint(payload: dict) -> None:
+    """Cache a growing multi-turn conversation up to its newest message.
+
+    Only for real conversations (an earlier assistant turn exists): the next
+    request repeats this whole prefix and reads it back. A one-shot
+    system + user request changes its user turn every call, so a breakpoint
+    there would only ever be written, never read.
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or len(messages) < 3:
+        return
+    if not any(isinstance(m, dict) and m.get("role") == "assistant" for m in messages[:-1]):
+        return
+    last = messages[-1]
+    if not isinstance(last, dict):
+        return
+    content = last.get("content")
+    if isinstance(content, str):
+        if not content:
+            return
+        content = [{"type": "text", "text": content}]
+    elif isinstance(content, list) and content:
+        content = [dict(b) if isinstance(b, dict) else b for b in content]
+    else:
+        return
+    tail = content[-1]
+    if not isinstance(tail, dict) or tail.get("cache_control"):
+        return
+    if tail.get("type") not in ("text", "tool_result", "image", "document"):
+        return
+    tail["cache_control"] = {"type": "ephemeral"}
+    payload["messages"] = messages[:-1] + [{**last, "content": content}]
+
+
+_CACHING_CHAT_ANTHROPIC = None
+
+
+def _caching_chat_anthropic_class():
+    """ChatAnthropic that caches the system prompt (built lazily: optional dep)."""
+    global _CACHING_CHAT_ANTHROPIC
+    if _CACHING_CHAT_ANTHROPIC is None:
+        from langchain_anthropic import ChatAnthropic
+
+        class CachingChatAnthropic(ChatAnthropic):
+            def _get_request_payload(self, input_, *, stop=None, **kwargs):
+                payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+                return add_system_cache_breakpoint(payload)
+
+        _CACHING_CHAT_ANTHROPIC = CachingChatAnthropic
+    return _CACHING_CHAT_ANTHROPIC
+
+
 def _construct(
     provider: str,
     model: str,
@@ -159,11 +249,10 @@ def _construct(
         common["max_tokens"] = max_tokens
 
     if provider == ExternalService.ANTHROPIC:
-        from langchain_anthropic import ChatAnthropic
         kwargs = dict(common)
         if api_key:
             kwargs["api_key"] = api_key
-        return ChatAnthropic(model=model, **kwargs)
+        return _caching_chat_anthropic_class()(model=model, **kwargs)
 
     if provider == ExternalService.OPENAI:
         from langchain_openai import ChatOpenAI
