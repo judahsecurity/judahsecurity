@@ -1191,6 +1191,8 @@ class SpecialistReport:
     # Where an exhausted run stopped and the next step, written during wrap-up
     # so a retry can continue instead of starting over.
     progress: str = ""
+    # Out-of-lane endpoints a specialist saw but did not test (raw, unvalidated).
+    leads: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1228,6 +1230,45 @@ def _fill_summary_contract(report: SpecialistReport, payload: dict) -> None:
     progress = payload.get("progress")
     if progress:
         report.progress = str(progress)[:800]
+    leads = payload.get("leads") or []
+    if isinstance(leads, list):
+        report.leads = [
+            {
+                "method": str(row.get("method") or "GET")[:8].upper(),
+                "url": str(row.get("url") or "")[:2048],
+                "why": str(row.get("why") or "")[:300],
+                "evidence_ids": [str(e) for e in (row.get("evidence_ids") or [])][:8],
+            }
+            for row in leads[:_MAX_LEADS]
+            if isinstance(row, dict) and row.get("url")
+        ]
+
+
+_MAX_LEADS = 5
+
+
+def validated_leads(report: "SpecialistReport", scope_hosts: Iterable[str]) -> list[dict]:
+    """Leads a specialist may hand off: in-scope and backed by its own evidence.
+
+    A lead must cite evidence IDs from one of the specialist's own successful
+    tool calls, so a model cannot invent an endpoint it never observed.
+    """
+    hosts = {str(h).lower().rstrip(".") for h in scope_hosts if h}
+    owned = {
+        eid for call in (report.tool_calls or []) if call.success
+        for eid in (call.evidence_ids or [])
+    }
+    out = []
+    for lead in report.leads or []:
+        parsed = urlsplit(lead.get("url") or "")
+        host = (parsed.hostname or "").lower().rstrip(".")
+        evidence = [e for e in lead.get("evidence_ids") or [] if e in owned]
+        if parsed.scheme not in ("http", "https") or host not in hosts or not evidence:
+            continue
+        if lead.get("method") not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+            continue
+        out.append({**lead, "evidence_ids": evidence})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1285,8 +1326,13 @@ INSTRUCTIONS:
      "hypothesis_results": [{{"hypothesis_id": "one id", "verdict": "killed|blocked|inconclusive|retry", "evidence_ids": ["execution-owned evidence_id"], "evidence": "what this specific test established"}}],
      "evidence": "tool-backed proof only — quote tool output, never imagined",
      "spawn": ["optional specialist names to enqueue, e.g. graphql_api"],
-     "rewrite_hint": "if retry: what to try differently"
+     "rewrite_hint": "if retry: what to try differently",
+     "leads": [{{"method": "GET", "url": "in-scope URL a tool result revealed", "why": "one line", "evidence_ids": ["evidence_id of that tool result"]}}]
    }}
+
+   leads: endpoints outside your lane that a tool result revealed (a path in an
+   error, a hidden API, a linked admin route). Do not test them; hand them off.
+   A lead without your own evidence_id is dropped.
 
 6. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
    Write demonstrated-compromise reports (description + impact + assets + remediation),

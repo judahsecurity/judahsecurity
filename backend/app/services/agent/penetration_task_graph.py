@@ -89,6 +89,7 @@ class ExecutorSummary:
     lease_id: str = ""
     stop_reason: str = ""  # done | exhausted | blocked
     progress: str = ""     # where an exhausted run stopped + next step
+    leads: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -509,6 +510,7 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
         lease_id=str(getattr(report, "lease_id", "") or ""),
         stop_reason=str(getattr(report, "stop_reason", "") or ""),
         progress=str(getattr(report, "progress", "") or "")[:800],
+        leads=[dict(x) for x in (getattr(report, "leads", None) or []) if isinstance(x, dict)][:5],
     )
 
 
@@ -576,6 +578,7 @@ def wave_changes(
     candidates_lifted: int = 0,
     spawned: Optional[List[str]] = None,
     rewrites: Optional[List[str]] = None,
+    leads_recorded: int = 0,
     limit: int = 12,
 ) -> Dict[str, Any]:
     """One line per specialist of what this wave changed, for the planner.
@@ -596,6 +599,11 @@ def wave_changes(
             row["progress"] = s.progress[:300]
         elif s.summary:
             row["result"] = s.summary[:200]
+        if s.leads:
+            row["leads"] = [
+                f"{lead.get('method', 'GET')} {lead.get('url', '')[:160]} — {lead.get('why', '')[:120]}"
+                for lead in s.leads[:3]
+            ]
         rows.append(row)
     counts: Dict[str, int] = {}
     for s in summaries:
@@ -607,6 +615,7 @@ def wave_changes(
         "candidates_lifted": int(candidates_lifted or 0),
         "spawned": list(spawned or [])[:8],
         "retried": list(rewrites or [])[:8],
+        "leads_recorded": int(leads_recorded or 0),
     }
 
 

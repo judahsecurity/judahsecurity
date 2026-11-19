@@ -119,3 +119,17 @@ cannot cross tenants. It excludes the caller's own run but not earlier runs of
 the same specialist, so a retry can read its predecessor's results. Each run
 gets at most four searches, and they do not count against the tool budget.
 Bounded pilots do not get the tool, so their tool list stays exact.
+
+## Out-of-lane leads
+
+A specialist's final JSON may include `leads`: endpoints a tool result
+revealed outside its lane (a path in an error body, a hidden API, a linked
+admin route), each with a method, URL, one-line reason and the evidence ID of
+the tool result that showed it. The specialist does not test them. After the
+round, `fireteam_dispatch` keeps a lead only if its host is an engagement
+target, its method is a standard HTTP method, and it cites evidence from one of
+that specialist's own successful tool calls. Each kept lead is committed as a
+`capture` observation event (method, host, path and parameter names; no
+values), so the follow-up planner validates and assigns it like any browser
+capture. At most five leads per specialist are read. `wave_changes` lists
+them and reports `leads_recorded`.

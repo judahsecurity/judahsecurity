@@ -12452,6 +12452,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     else "Specialist did not return a coverage receipt"
                 ),
             )
+        # Endpoints a specialist saw outside its lane become capture events,
+        # so the follow-up planner validates and assigns them like any capture.
+        from urllib.parse import urlsplit
+
+        from app.services.agent.fireteam_service import validated_leads
+        from app.services.agent.observation_followups import capture_facts
+
+        lead_hosts = {
+            urlsplit(t if "://" in t else f"https://{t}").hostname or ""
+            for t in [*target_list, default_target or ""] if t
+        }
+        leads_recorded = 0
+        for report in result.reports:
+            for lead in validated_leads(report, lead_hosts):
+                if self._record_followup_event(
+                    brain, kind="capture", identity="anonymous",
+                    evidence_ids=lead["evidence_ids"],
+                    facts=capture_facts(lead["method"], lead["url"]),
+                ) is not None:
+                    leads_recorded += 1
         # Apply planning that finished during the wave and queue the results
         # this wave produced, so the next dispatch can claim their follow-ups.
         followup_planning = self._refresh_followups(brain)
@@ -12497,6 +12517,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 candidates_lifted=len(lifted),
                 spawned=spawned,
                 rewrites=[r.specialist for r in rewrites],
+                leads_recorded=leads_recorded,
             ),
             "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],

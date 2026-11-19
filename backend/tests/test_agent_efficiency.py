@@ -380,3 +380,60 @@ async def test_peer_search_is_capped_per_run(monkeypatch):
     )
     limited = [m for m in seen if "peer search limit reached" in m]
     assert len(limited) == 2  # searches 5 and 6 are refused
+
+
+# --- out-of-lane leads --------------------------------------------------------
+
+def _report_with(leads, evidence=("ev-1",)):
+    report = fireteam_service.SpecialistReport(specialist="xss", role="r", mission="m", summary="")
+    report.tool_calls = [fireteam_service.ToolInvocation(
+        tool="http_get", args={}, success=True, summary="500: see /internal/admin",
+        evidence_ids=list(evidence),
+    )]
+    fireteam_service._fill_summary_contract(report, {"leads": leads})
+    return report
+
+
+def test_leads_need_scope_and_own_evidence():
+    report = _report_with([
+        {"method": "get", "url": "https://app.example.test/internal/admin?x=1",
+         "why": "path leaked in 500 body", "evidence_ids": ["ev-1"]},
+        {"url": "https://evil.example.org/admin", "evidence_ids": ["ev-1"]},     # out of scope
+        {"url": "https://app.example.test/made-up", "evidence_ids": ["ev-9"]},  # not its evidence
+        {"url": "ftp://app.example.test/file", "evidence_ids": ["ev-1"]},       # not http
+        {"method": "TRACE", "url": "https://app.example.test/t", "evidence_ids": ["ev-1"]},
+    ])
+    assert len(report.leads) == 5
+    leads = fireteam_service.validated_leads(report, ["app.example.test"])
+    assert [lead["url"] for lead in leads] == ["https://app.example.test/internal/admin?x=1"]
+    assert leads[0]["method"] == "GET" and leads[0]["evidence_ids"] == ["ev-1"]
+
+
+def test_leads_are_capped_and_shown_in_wave_changes():
+    report = _report_with([
+        {"url": f"https://app.example.test/p{i}", "why": "w", "evidence_ids": ["ev-1"]}
+        for i in range(9)
+    ])
+    assert len(report.leads) == fireteam_service._MAX_LEADS
+    summary = parse_executor_summary(report)
+    out = wave_changes([summary], leads_recorded=2)
+    assert out["leads_recorded"] == 2
+    assert out["specialists"][0]["leads"][0].startswith("GET https://app.example.test/p0")
+
+
+def test_lead_becomes_a_capture_event_without_values():
+    from app.services.agent.engagement_brain import EngagementBrain
+    from app.services.agent.observation_followups import capture_facts, commit_observation
+
+    brain = EngagementBrain(target="https://app.example.test")
+    lead = fireteam_service.validated_leads(_report_with([
+        {"url": "https://app.example.test/internal/admin?token=abc", "evidence_ids": ["ev-1"]},
+    ]), ["app.example.test"])[0]
+    event, created = commit_observation(
+        brain, run_id="run", kind="capture", identity="anonymous",
+        evidence_ids=lead["evidence_ids"], facts=capture_facts(lead["method"], lead["url"]),
+    )
+    assert created and event["status"] == "committed"
+    assert event["facts"]["path"] == "/internal/admin"
+    assert event["facts"]["parameters"] == [{"location": "query", "name": "token"}]
+    assert "abc" not in json.dumps(event)
