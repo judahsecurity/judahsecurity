@@ -167,6 +167,9 @@ class Settings(BaseSettings):
     
     # Agent settings (overridable per-org via project_settings.agent)
     AGENT_MAX_ITERATIONS: int = 100
+    # Scales every specialist's turn limit (bounded 0.5-4). Use for equal-budget
+    # benchmark runs of bigger budgets without editing specialist profiles.
+    AGENT_SPECIALIST_TURN_MULTIPLIER: float = 1.0
     AGENT_MAX_OUTPUT_TOKENS: int = 4096  # Max tokens for LLM response (Claude/OpenAI); increase for long answers (e.g. 8192, 16384, 64000)
     AGENT_TOOL_OUTPUT_MAX_CHARS: int = 20000  # RedAmon-style default; truncation for LLM context
     AGENT_ANALYZE_TIMEOUT_SECONDS: int = 90  # Optional tool-output analysis must not stall an assessment.

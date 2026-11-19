@@ -1247,6 +1247,18 @@ def _fill_summary_contract(report: SpecialistReport, payload: dict) -> None:
 _MAX_LEADS = 5
 
 
+def _scaled_turns(turns: int) -> int:
+    """Apply AGENT_SPECIALIST_TURN_MULTIPLIER to a specialist's turn limit."""
+    from app.core.config import settings
+
+    try:
+        factor = float(getattr(settings, "AGENT_SPECIALIST_TURN_MULTIPLIER", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        factor = 1.0
+    factor = min(4.0, max(0.5, factor))
+    return max(1, round(int(turns or 1) * factor))
+
+
 def validated_leads(report: "SpecialistReport", scope_hosts: Iterable[str]) -> list[dict]:
     """Leads a specialist may hand off: in-scope and backed by its own evidence.
 
@@ -1631,6 +1643,7 @@ async def _run_specialist(
         )
         mission_for_prompt = mission
         max_iter = profile.max_iterations
+    max_iter = _scaled_turns(max_iter)
 
     allowed_tools = list(profile.allowed_tools)
     if not getattr(tools_manager, "_oob_callbacks_allowed", False):

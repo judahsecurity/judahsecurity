@@ -473,3 +473,11 @@ async def test_search_evidence_tool_is_registered_and_offered_to_specialists():
     assert "search_evidence" in content_shield.TARGET_CONTENT_TOOLS
     assert "search_evidence" in pilot_policy.PILOT_LOCAL_TOOLS
     assert fireteam_service._action_kind("search_evidence", {}) == "read"
+
+
+def test_turn_multiplier_scales_and_is_bounded(monkeypatch):
+    from app.core.config import settings
+
+    for factor, turns, expected in ((1.0, 8, 8), (2.5, 8, 20), (10, 8, 32), (0.1, 8, 4), ("bad", 8, 8)):
+        monkeypatch.setattr(settings, "AGENT_SPECIALIST_TURN_MULTIPLIER", factor, raising=False)
+        assert fireteam_service._scaled_turns(turns) == expected

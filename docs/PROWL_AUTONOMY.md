@@ -145,3 +145,13 @@ context. Artifacts are redacted when recorded, so credential values do not
 match. The tool sends no target traffic, is local-only for pilots, does not
 record its own output as evidence, and its results go through the
 target-content shield like `read_evidence`. Specialists receive it by default.
+
+## Benchmarking bigger specialist budgets
+
+`AGENT_SPECIALIST_TURN_MULTIPLIER` (default `1.0`, bounded to 0.5–4) scales
+every specialist's turn limit, from its profile or directive. Scheduled runs
+also cap tool calls and time per specialist through the schedule's
+`max_specialist_tool_calls` (cap 40) and `max_specialist_seconds` (cap 600).
+To test whether budget limits recall, run the same lab cases at `1.0` and at
+`2.5` with matching schedule caps, then compare with
+`python -m local_harness.ledger_compare`.
