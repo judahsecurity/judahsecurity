@@ -6,6 +6,7 @@ eval / innerHTML / postMessage / location sinks for spa_client to prove.
 
 from __future__ import annotations
 
+from app.services.agent.target_pacing import pacing_event_hooks
 import re
 from itertools import islice
 from typing import Any, Dict, Iterable, List
@@ -82,7 +83,7 @@ async def scan_js_sinks(
     analyzed_urls: List[str] = []
     analyzed = 0
     errors: List[str] = []
-    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+    async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), follow_redirects=False, timeout=timeout) as client:
         for url in urls:
             parsed = urlparse(url)
             if (not parsed.hostname or parsed.username or parsed.password or

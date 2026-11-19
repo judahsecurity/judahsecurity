@@ -6,6 +6,7 @@ IDOR / SSRF / open-redirect — not a secret scanner.
 
 from __future__ import annotations
 
+from app.services.agent.target_pacing import pacing_event_hooks
 import re
 from typing import Any, Dict, Iterable, List, Set
 from urllib.parse import urlparse
@@ -182,7 +183,7 @@ async def extract_js_endpoints(
     params: Set[str] = set()
     analyzed = 0
     errors: List[str] = []
-    async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
+    async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), follow_redirects=True, verify=False, timeout=timeout) as client:
         for url in urls:
             try:
                 r = await client.get(url)

@@ -305,8 +305,11 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
             limits_from_config,
         )
 
+        from app.services.agent.target_pacing import current_pacing_profile
+
         limits = limits_from_config(limits_config, target=target)
         token = current_autonomy_limits.set(limits)
+        pacing_token = current_pacing_profile.set(limits.pacing_profile or None)
         gate_token = current_autonomy_recon_gate.set(AutonomyRequestGate(
             limits.max_recon_tool_starts, limits.specialist_interval_ms,
         ))
@@ -323,6 +326,7 @@ async def process_claimed(work_id: str, owner: str) -> dict[str, Any]:
                 price_limit_usd=remaining_usd,
             ), timeout=max(1.0, remaining_seconds))
         finally:
+            current_pacing_profile.reset(pacing_token)
             current_autonomy_recon_gate.reset(gate_token)
             current_autonomy_limits.reset(token)
         if response.error or getattr(response, "awaiting_question", False) or getattr(response, "awaiting_approval", False):

@@ -167,6 +167,8 @@ class Settings(BaseSettings):
     
     # Agent settings (overridable per-org via project_settings.agent)
     AGENT_MAX_ITERATIONS: int = 100
+    # Target request pacing: quiet | balanced | aggressive | off (see target_pacing).
+    AGENT_PACING_PROFILE: str = "balanced"
     # Scales every specialist's turn limit (bounded 0.5-4). Use for equal-budget
     # benchmark runs of bigger budgets without editing specialist profiles.
     AGENT_SPECIALIST_TURN_MULTIPLIER: float = 1.0

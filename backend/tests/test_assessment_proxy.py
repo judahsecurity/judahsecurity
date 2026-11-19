@@ -16,6 +16,7 @@ from app.services.agent.assessment_proxy import (
     assessment_urllib_handlers,
 )
 from app.services.agent.scoped_assessment.browser_runtime import launch_options
+from app.services.agent.target_pacing import PacingHandler
 
 
 def test_proxy_is_disabled_without_explicit_configuration(monkeypatch):
@@ -23,11 +24,16 @@ def test_proxy_is_disabled_without_explicit_configuration(monkeypatch):
     monkeypatch.delenv("AEGIS_ASSESSMENT_CA_BUNDLE", raising=False)
     monkeypatch.delenv("AEGIS_ALLOW_INSECURE_TLS", raising=False)
     monkeypatch.setenv("HTTP_PROXY", "http://unrelated.test:8000")
-    assert assessment_httpx_options() == {"verify": True, "trust_env": False}
+    options = assessment_httpx_options()
+    assert {k: options[k] for k in ("verify", "trust_env")} == {"verify": True, "trust_env": False}
+    assert "proxy" not in options and "proxies" not in options
+    assert options["event_hooks"]["request"] and options["event_hooks"]["response"]
+    assert "event_hooks" not in assessment_httpx_options(paced=False)
     assert assessment_browser_proxy() is None
     assert "proxy" not in launch_options()
     handlers = assessment_urllib_handlers()
-    assert len(handlers) == 1 and isinstance(handlers[0], ProxyHandler)
+    assert len(handlers) == 2 and isinstance(handlers[0], ProxyHandler)
+    assert isinstance(handlers[-1], PacingHandler)
     assert handlers[0].proxies == {}
 
 

@@ -8,6 +8,7 @@ quoted fallbacks (including Next.js ``[accountId]`` chunks). In-scope HTTP only.
 
 from __future__ import annotations
 
+from app.services.agent.target_pacing import pacing_event_hooks
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set
 from urllib.parse import urljoin, urlparse
@@ -256,7 +257,7 @@ async def fetch_lazy_chunks(
     if not bundle_url.startswith("http"):
         return {"ok": False, "error": "bundle_url must be https://..."}
     origin_host = _host(base_url or bundle_url)
-    async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
+    async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), follow_redirects=True, verify=False, timeout=timeout) as client:
         try:
             resp = await client.get(bundle_url)
         except Exception as exc:
@@ -282,7 +283,7 @@ async def fetch_lazy_chunks(
     }
     if dry_run:
         return result
-    async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
+    async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), follow_redirects=True, verify=False, timeout=timeout) as client:
         for url in urls:
             try:
                 r = await client.get(url)

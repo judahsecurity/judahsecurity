@@ -23,6 +23,9 @@ class AutonomyLimits:
     max_specialist_spend_usd: float = 2.0
     max_recon_tool_starts: int = 8
     request_rate_per_second: int = 1
+    # target_pacing profile for this run (quiet | balanced | aggressive); empty
+    # keeps the deployment default.
+    pacing_profile: str = ""
 
 
 current_autonomy_limits: ContextVar[AutonomyLimits | None] = ContextVar(
@@ -97,4 +100,9 @@ def limits_from_config(config: dict | None, *, target: str = "") -> AutonomyLimi
         max_specialist_spend_usd=spend,
         max_recon_tool_starts=bounded("max_recon_tool_starts", 8, 30),
         request_rate_per_second=bounded("request_rate_per_second", 1, 20),
+        pacing_profile=(
+            str(cfg.get("pacing_profile")).strip().lower()
+            if str(cfg.get("pacing_profile") or "").strip().lower() in {"quiet", "balanced", "aggressive"}
+            else ""
+        ),
     )

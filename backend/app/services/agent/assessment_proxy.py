@@ -48,9 +48,19 @@ def assessment_ca_bundle(proxy_url: str | None) -> str | bool:
     return False if insecure else (bundle or True)
 
 
-def assessment_httpx_options() -> dict:
+def assessment_httpx_options(*, paced: bool = True) -> dict:
+    """httpx client options for in-scope target traffic.
+
+    ``paced`` adds per-host pacing and 429/503 backoff hooks. Pass
+    ``paced=False`` only for tests that must fire a deliberate burst (race
+    conditions), where pacing would defeat the measurement.
+    """
     proxy_url = assessment_proxy_url()
     options = {"verify": assessment_ca_bundle(proxy_url), "trust_env": False}
+    if paced:
+        from app.services.agent.target_pacing import pacing_event_hooks
+
+        options["event_hooks"] = pacing_event_hooks()
     if proxy_url:
         import httpx
 
@@ -69,6 +79,9 @@ def assessment_urllib_handlers() -> list:
     handlers = [ProxyHandler({"http": proxy_url, "https": proxy_url} if proxy_url else {})]
     if isinstance(certificate, str):
         handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=certificate)))
+    from app.services.agent.target_pacing import PacingHandler
+
+    handlers.append(PacingHandler())
     return handlers
 
 

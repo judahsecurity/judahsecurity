@@ -1805,6 +1805,17 @@ class AgentOrchestrator:
                 tool_recommendations += self._repetition_guard_note(state, phase)
                 tool_recommendations += self._stagnation_note(state)
                 try:
+                    from app.services.agent.target_pacing import format_throttle_note
+
+                    from urllib.parse import urlsplit
+
+                    seed = primary_target if "://" in primary_target else f"https://{primary_target}"
+                    throttle_note = format_throttle_note([urlsplit(seed).hostname or ""])
+                    if throttle_note:
+                        tool_recommendations += "\n\n" + throttle_note
+                except Exception:
+                    logger.debug("throttle note skipped", exc_info=True)
+                try:
                     from app.services.agent.tester_loop import (
                         format_tester_loop_for_prompt,
                         tester_loop_progress,

@@ -8,3 +8,6 @@ module that imports `settings` is loaded.
 import os
 
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
+# Tests drive many requests through mock transports; real pacing would only
+# slow them down. test_target_pacing exercises the profiles explicitly.
+os.environ.setdefault("AGENT_PACING_PROFILE", "off")

@@ -4,6 +4,7 @@ Agent Tools
 Tools for the AI agent to interact with the ASM platform.
 """
 
+from app.services.agent.target_pacing import pacing_event_hooks
 import asyncio
 import hashlib
 import json
@@ -6518,7 +6519,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.injection_payloads import INTERESTING_PARAM_NAMES
 
         try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True, verify=False) as client:
+            async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=20, follow_redirects=True, verify=False) as client:
                 resp = await client.get(url)
         except Exception as e:
             return json.dumps({"error": f"Failed to fetch {url}: {e}"})
@@ -7632,6 +7633,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 return "", {}, f"{target} (fetch failed: {e})"
         try:
             async with httpx.AsyncClient(
+                event_hooks=pacing_event_hooks(),
                 verify=False,
                 headers={"User-Agent": "JudahASM-Kickoff/1.0"},
                 follow_redirects=True,
@@ -8877,7 +8879,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         baseline_status = None
         baseline_length = 0
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False) as client:
+            async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=timeout, follow_redirects=False, verify=False) as client:
                 br = await client.get(url, headers=base_headers)
                 baseline_status = br.status_code
                 baseline_length = len(br.content)
@@ -8888,7 +8890,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         async def probe_one(p: Dict) -> Dict:
             try:
-                async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=False) as client:
+                async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=timeout, follow_redirects=False, verify=False) as client:
                     method = p.get("method", "GET")
                     if method == "POST":
                         resp = await client.post(p["url"], headers=p["headers"])
@@ -9124,7 +9126,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             probe_hdrs = {header_name: canary_value, "Cache-Control": "no-cache", "Pragma": "no-cache"}
             probe_url = busted(url)
             try:
-                async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=False) as client:
+                async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=timeout, verify=False, follow_redirects=False) as client:
                     # Poison probe on a unique cache key
                     r1 = await client.get(probe_url, headers={**probe_hdrs, "User-Agent": "Mozilla/5.0 (Security Assessment)"})
                     body1 = r1.text[:4000]
@@ -9163,7 +9165,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # Fat GET probe: inject query param into body for GET request
         fat_get_result = None
         try:
-            async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=False) as client:
+            async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=timeout, verify=False, follow_redirects=False) as client:
                 r = await client.request("GET", busted(url), content=f"utm_content={canary}",
                                          headers={"Content-Length": str(len(f"utm_content={canary}")),
                                                   "Content-Type": "application/x-www-form-urlencoded"})
@@ -9342,7 +9344,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "/auth/realms/", "/auth/oauth2/callback", "/login/oauth/callback",
             ]
             discovered_endpoints: List[str] = []
-            async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=False) as client:
+            async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=timeout, verify=False, follow_redirects=False) as client:
                 for p in saml_paths:
                     probes_run += 1
                     try:
@@ -9362,7 +9364,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # 2. OAuth state parameter check
         if "oauth_bypass" in active:
             oauth_paths = ["/oauth/authorize", "/oauth2/authorize", "/connect/authorize", "/auth/realms/"]
-            async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=False) as client:
+            async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=timeout, verify=False, follow_redirects=False) as client:
                 for p in oauth_paths:
                     probes_run += 1
                     try:
@@ -9391,7 +9393,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if "oidc_misconfig" in active:
             probes_run += 1
             try:
-                async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
+                async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=timeout, verify=False, follow_redirects=True) as client:
                     r = await client.get(f"{url}/.well-known/openid-configuration")
                     if r.status_code == 200:
                         try:
@@ -9554,7 +9556,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 await _asyncio.sleep(delay_seconds)
                 try:
                     payload = {username_field: username, password_field: password}
-                    async with httpx.AsyncClient(timeout=15, verify=False, follow_redirects=True) as client:
+                    async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), timeout=15, verify=False, follow_redirects=True) as client:
                         resp = await client.post(login_url, json=payload,
                                                  headers={"Content-Type": "application/json",
                                                           "User-Agent": "Mozilla/5.0 (Authorized Security Test)"})

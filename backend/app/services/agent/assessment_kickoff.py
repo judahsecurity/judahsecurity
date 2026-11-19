@@ -13,6 +13,7 @@ into agent state so the LLM is not planning blind while Interceptor starts.
 
 from __future__ import annotations
 
+from app.services.agent.target_pacing import pacing_event_hooks
 import asyncio
 import logging
 import re
@@ -333,6 +334,7 @@ async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
     root: Dict[str, Any] = {}
     try:
         async with httpx.AsyncClient(
+            event_hooks=pacing_event_hooks(),
             verify=False,
             headers={"User-Agent": "JudahASM-Kickoff/1.0"},
         ) as client:

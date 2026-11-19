@@ -89,7 +89,8 @@ async def probe_race(action_url: str, readback_url: str, cleanup_template: str, 
         headers["Cookie"] = cookie
 
     seq, burst = _seq_canary(nonce), _burst_canary(nonce)
-    options = assessment_httpx_options()
+    # The burst must leave together; per-host pacing would serialise it.
+    options = assessment_httpx_options(paced=False)
     async with httpx.AsyncClient(timeout=30, follow_redirects=False, **options) as client:
         # Sequential control: the same canary twice, in series.
         seq_statuses = [await _submit(client, action_url, method=method, field=field,

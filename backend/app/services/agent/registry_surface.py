@@ -7,6 +7,7 @@ complete until it ran. Do not pull images, push, or reuse recovered tokens.
 
 from __future__ import annotations
 
+from app.services.agent.target_pacing import pacing_event_hooks
 import json
 import re
 from typing import Any, Dict, List, Optional
@@ -349,7 +350,7 @@ async def probe_anonymous_pull(host: str, *, timeout: float = 15.0) -> Dict[str,
     }
     headers = {"User-Agent": "JudahASM-RegistryProbe/1.0"}
     try:
-        async with httpx.AsyncClient(verify=True, headers=headers, follow_redirects=True) as client:
+        async with httpx.AsyncClient(event_hooks=pacing_event_hooks(), verify=True, headers=headers, follow_redirects=True) as client:
             token_url = (
                 f"{base}/oauth2/token?service={host}&scope=registry:catalog:*"
             )
