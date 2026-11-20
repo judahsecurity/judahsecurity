@@ -3468,6 +3468,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             logger.warning("Tool guard blocked %s (rule=%s)", tool_name, guard.rule)
             return guard.to_result(tool_name)
 
+        # Custom roles can withhold active testing from a user's agent runs.
+        denied = self._active_testing_denied(tool_name)
+        if denied:
+            return denied
+
         # -- Per-tool confirmation gate ---------------------------------------
         # Consult the org's agent confirmation policy. Dangerous tools
         # (execute_*, create_scan, ...) either pause for a human ``approve`` or
@@ -6920,6 +6925,28 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             max_findings=max_findings,
             max_failures=max_failures,
         ) or ""
+
+    def _active_testing_denied(self, tool_name: str) -> Optional[Dict[str, Any]]:
+        from app.services.agent.confirmation_service import READONLY_TOOLS, SAFE_RECON_TOOLS
+
+        if tool_name in READONLY_TOOLS or tool_name in SAFE_RECON_TOOLS or tool_name.endswith("_help"):
+            return None
+        user_id, _ = get_tenant_context()
+        if not user_id:
+            return None
+        try:
+            from app.core.permissions import user_id_restricted_from
+
+            if not user_id_restricted_from(int(user_id), "agent.active_testing"):
+                return None
+        except Exception:
+            logger.exception("Permission check failed for %s", tool_name)
+            return {"success": False, "error": "permission_check_failed",
+                    "output": "Tool blocked: the permission check could not be completed."}
+        return {"success": False, "error": "permission_denied",
+                "output": (f"Tool '{tool_name}' needs the 'agent.active_testing' permission, "
+                           "which your role does not include. Use read-only queries and light "
+                           "recon, or ask an admin.")}
 
     def _start_ai_review(self, token: str, tool_name: str, tool_args: Dict[str, Any],
                          org_id: Optional[int]):

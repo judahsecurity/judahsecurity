@@ -21,6 +21,20 @@ export function resolveAxiosRequestUrl(error: { config?: { baseURL?: string; url
  * Handles FastAPI's validation error format (detail as array of objects)
  * as well as simple string detail messages.
  */
+export interface CustomRole {
+  id: number;
+  name: string;
+  description: string;
+  permissions: string[];
+  members: number;
+}
+
+export interface RoleCatalog {
+  permissions: { name: string; description: string }[];
+  builtin: Record<string, string[]>;
+  roles: CustomRole[];
+}
+
 export interface AuditLogEntry {
   id: number;
   created_at: string;
@@ -1069,6 +1083,30 @@ class ApiClient {
     );
     const next = response.headers?.etag;
     if (next) this.settingsEtags.set(key, next);
+    return response.data;
+  }
+
+  async getRoles(): Promise<RoleCatalog> {
+    const response = await this.client.get('/roles');
+    return response.data;
+  }
+
+  async createRole(body: { name: string; description: string; permissions: string[] }) {
+    const response = await this.client.post('/roles', body);
+    return response.data;
+  }
+
+  async updateRole(id: number, body: { name: string; description: string; permissions: string[] }) {
+    const response = await this.client.put(`/roles/${id}`, body);
+    return response.data;
+  }
+
+  async deleteRole(id: number) {
+    await this.client.delete(`/roles/${id}`);
+  }
+
+  async assignRole(userId: number, roleId: number | null) {
+    const response = await this.client.put('/roles/assign', { user_id: userId, role_id: roleId });
     return response.data;
   }
 

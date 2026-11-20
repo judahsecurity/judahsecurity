@@ -4,7 +4,9 @@ import asyncio
 import logging
 import os
 from fastapi import FastAPI, Request
+from fastapi import Depends
 from fastapi.middleware.cors import CORSMiddleware
+from app.api.permissions_dep import enforce_route_permission
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import or_
@@ -67,6 +69,7 @@ from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot  
 from app.models.scoped_assessment_run import ScopedAssessmentRun  # noqa: F401 — private service capabilities
 from app.models.prowl_publication import ProwlPublication  # noqa: F401 — finding idempotency
 from app.models.platform_audit import PlatformAuditLog  # noqa: F401 — platform audit log
+from app.models.org_role import OrgRole  # noqa: F401 — custom roles
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
     Workflow,
     WorkflowVersion,
@@ -128,7 +131,8 @@ Track and report on exposed services with structured data:
     """,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json"
+    openapi_url="/api/openapi.json",
+    dependencies=[Depends(enforce_route_permission)],
 )
 
 # Trust proxy headers from nginx so FastAPI knows requests arrive over HTTPS.
@@ -225,6 +229,8 @@ app.include_router(mcp_router.router, prefix=settings.API_PREFIX)
 app.include_router(prowl_router.router, prefix=settings.API_PREFIX)
 from app.api.routes import audit as audit_router
 app.include_router(audit_router.router, prefix=settings.API_PREFIX)
+from app.api.routes import roles as roles_router
+app.include_router(roles_router.router, prefix=settings.API_PREFIX)
 app.include_router(mitre_router.router, prefix=settings.API_PREFIX)
 app.include_router(llm_red_team_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)
@@ -319,6 +325,7 @@ async def startup_event():
     apply_oracle_migrations()
     apply_scan_profile_migrations()
     apply_agent_ledger_migrations()
+    apply_rbac_migrations()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -758,6 +765,20 @@ def apply_agent_ledger_migrations():
             "ALTER TABLE agent_action_receipts "
             "ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(64)"
         ))
+
+
+def apply_rbac_migrations():
+    """Add the optional custom-role link to existing users tables."""
+    from sqlalchemy import text
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_role_id INTEGER "
+                "REFERENCES org_roles(id) ON DELETE SET NULL"
+            ))
+    except Exception as exc:
+        logger.error("RBAC schema migration failed (non-fatal): %s", exc)
 
 
 def apply_scan_profile_migrations():

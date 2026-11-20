@@ -138,6 +138,9 @@ async def test_tool_manager_runs_review_while_waiting(monkeypatch):
                         lambda _org: {**AI, "tool_confirmation_policy": {"execute_*": "confirm"}})
     monkeypatch.setattr(confirmation_service, "_roe_requires_confirmation", lambda _org: False)
     monkeypatch.setattr(action_ledger, "append_action", lambda *_a, **_k: None)
+    from app.core import permissions
+
+    monkeypatch.setattr(permissions, "user_id_restricted_from", lambda *_a: False)
     manager = ASMToolsManager()
     llm = FakeLLM('{"decision":"approve","reason":"ok"}')
     monkeypatch.setattr(manager, "_start_ai_review", lambda token, *a: asyncio.create_task(
