@@ -29,6 +29,7 @@ MODULE_AGENT = "agent"
 MODULE_SCAN_TOGGLES = "scan_toggles"
 MODULE_RULES_OF_ENGAGEMENT = "rules_of_engagement"
 MODULE_COMMONCRAWL = "commoncrawl"
+MODULE_NOTIFICATIONS = "notifications"
 
 ALL_MODULES = [
     MODULE_TARGET,
@@ -47,6 +48,7 @@ ALL_MODULES = [
     MODULE_SCAN_TOGGLES,
     MODULE_RULES_OF_ENGAGEMENT,
     MODULE_COMMONCRAWL,
+    MODULE_NOTIFICATIONS,
 ]
 
 
@@ -401,6 +403,21 @@ def default_commoncrawl_config():
     }
 
 
+def default_notifications_config():
+    """Chat notifications (chat_notifier.py). Summaries only, never evidence.
+
+    telegram_chat_ids: numeric chat IDs (groups are negative) or @channel names.
+    Only org admins can change this module (it routes the org's findings).
+    """
+    return {
+        "telegram_enabled": False,
+        "telegram_chat_ids": [],
+        "notify_findings": True,
+        "notify_run_finished": True,
+        "min_severity": "high",
+    }
+
+
 def get_default_config(module: str) -> dict:
     """Return default config for a module."""
     defaults = {
@@ -420,6 +437,7 @@ def get_default_config(module: str) -> dict:
         MODULE_SCAN_TOGGLES: default_scan_toggles_config,
         MODULE_RULES_OF_ENGAGEMENT: default_rules_of_engagement_config,
         MODULE_COMMONCRAWL: default_commoncrawl_config,
+        MODULE_NOTIFICATIONS: default_notifications_config,
     }
     fn = defaults.get(module)
     return fn() if fn else {}

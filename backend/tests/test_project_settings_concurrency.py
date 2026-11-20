@@ -66,3 +66,52 @@ def test_save_without_if_match_keeps_last_write_wins(client):
 def test_get_and_put_etags_agree(client):
     saved = client.put(URL, json={"config": {"timeout": 55}})
     assert client.get(URL).headers["ETag"] == saved.headers["ETag"]
+
+
+def _as(client, role):
+    from types import SimpleNamespace
+
+    from app.models.user import UserRole
+
+    user = SimpleNamespace(role=getattr(UserRole, role), is_superuser=False)
+    client.app.dependency_overrides[get_current_active_user] = lambda: user
+
+
+NOTIFY = "/organizations/1/settings/notifications"
+
+
+def test_notification_settings_are_admin_only_and_validated(client):
+    _as(client, "ANALYST")
+    denied = client.put(NOTIFY, json={"config": {"telegram_enabled": True}})
+    assert denied.status_code == 403
+
+    _as(client, "ADMIN")
+    bad = client.put(NOTIFY, json={"config": {"telegram_chat_ids": ["42", "evil chat"]}})
+    assert bad.status_code == 422
+    ok = client.put(NOTIFY, json={"config": {"telegram_enabled": True,
+                                             "telegram_chat_ids": "-1001, @prowl_alerts"}})
+    assert ok.status_code == 200
+    assert ok.json()["telegram_chat_ids"] == ["-1001", "@prowl_alerts"]
+    assert client.put(NOTIFY, json={"config": {"min_severity": "urgent"}}).status_code == 422
+
+
+def test_test_notification_endpoint(client, monkeypatch):
+    from app.services import chat_notifier
+
+    _as(client, "ADMIN")
+    monkeypatch.setattr(chat_notifier, "default_notifier", lambda: None)
+    assert client.post("/organizations/1/notifications/test").status_code == 409
+
+    class Rec:
+        name = "fake"
+        sent = []
+
+        def send(self, chat_id, text):
+            self.sent.append(chat_id)
+
+    rec = Rec()
+    monkeypatch.setattr(chat_notifier, "default_notifier", lambda: rec)
+    assert client.post("/organizations/1/notifications/test").status_code == 409
+    client.put(NOTIFY, json={"config": {"telegram_enabled": True, "telegram_chat_ids": ["42"]}})
+    response = client.post("/organizations/1/notifications/test")
+    assert response.status_code == 200 and response.json() == {"results": {"42": "sent"}}

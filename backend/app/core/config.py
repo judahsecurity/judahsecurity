@@ -210,6 +210,11 @@ class Settings(BaseSettings):
     # government/military domains; disable it only for engagements that are
     # authorized against them. AGENT_TOOL_GUARD_RULES is a JSON list of
     # {"name", "pattern", "reminder", "enabled"} objects.
+    # Chat notifications (chat_notifier.py). The bot token is a platform secret;
+    # each org opts in and lists its own chat IDs in the notifications module.
+    TELEGRAM_BOT_TOKEN: str = ""
+    # Base URL of the web app, used for links in notifications (optional).
+    PUBLIC_APP_URL: str = ""
     AGENT_TOOL_GUARD_ENABLED: bool = True
     AGENT_TOOL_GUARD_DEFAULT_RULES: bool = True
     AGENT_TOOL_GUARD_RULES: str = ""

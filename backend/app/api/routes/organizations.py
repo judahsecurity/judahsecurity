@@ -11,8 +11,10 @@ from app.models.organization import Organization
 from app.models.asset import Asset
 from app.models.scan import Scan, ScanType, ScanStatus
 from app.models.vulnerability import Vulnerability, Severity
-from app.models.user import User
-from app.models.project_settings import ProjectSettings, ALL_MODULES, get_default_config, MODULE_COMMONCRAWL
+from app.models.user import User, UserRole
+from app.models.project_settings import (
+    ProjectSettings, ALL_MODULES, get_default_config, MODULE_COMMONCRAWL, MODULE_NOTIFICATIONS,
+)
 from app.schemas.organization import (
     OrganizationCreate,
     OrganizationUpdate,
@@ -369,6 +371,9 @@ def update_project_settings_module(
     _check_org_access(db, org_id, current_user)
     if module not in ALL_MODULES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown module: {module}")
+    if module == MODULE_NOTIFICATIONS:
+        _require_org_admin(current_user)
+        _validate_notifications_config(body.config)
     if if_match and if_match.strip() != "*":
         current = ProjectSettings.config_version(db, org_id, module, lock=True)
         expected = {tag.strip() for tag in if_match.split(",")}
@@ -385,6 +390,50 @@ def update_project_settings_module(
     db.commit()
     response.headers["ETag"] = ProjectSettings.config_version(db, org_id, module)
     return ProjectSettings.get_config(db, org_id, module)
+
+
+def _require_org_admin(user: User) -> None:
+    if not (getattr(user, "is_superuser", False) or getattr(user, "role", None) == UserRole.ADMIN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only organization admins can change notification settings")
+
+
+def _validate_notifications_config(config: Dict[str, Any]) -> None:
+    from app.services.chat_notifier import SEVERITY_RANK, valid_chat_ids
+
+    if "telegram_chat_ids" in config:
+        raw = config["telegram_chat_ids"]
+        items = raw if isinstance(raw, list) else str(raw or "").replace(",", " ").split()
+        valid = valid_chat_ids(items)
+        if len(valid) != len([i for i in items if str(i).strip()]):
+            raise HTTPException(status_code=422, detail=(
+                "telegram_chat_ids must be numeric chat IDs (groups are negative) or "
+                "@channel usernames, at most 10, no duplicates"))
+        config["telegram_chat_ids"] = valid
+    if "min_severity" in config and str(config["min_severity"]).lower() not in SEVERITY_RANK:
+        raise HTTPException(status_code=422, detail="min_severity must be one of "
+                            + ", ".join(SEVERITY_RANK))
+
+
+@router.post("/{org_id}/notifications/test")
+def send_test_notification(
+    org_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Send a test message to this org's configured chats; returns per-chat results."""
+    _check_org_access(db, org_id, current_user)
+    _require_org_admin(current_user)
+    from app.services.chat_notifier import default_notifier, dispatch, valid_chat_ids
+
+    if default_notifier() is None:
+        raise HTTPException(status_code=409, detail="TELEGRAM_BOT_TOKEN is not configured on the server")
+    config = ProjectSettings.get_config(db, org_id, MODULE_NOTIFICATIONS)
+    if not config.get("telegram_enabled") or not valid_chat_ids(config.get("telegram_chat_ids")):
+        raise HTTPException(status_code=409, detail="Enable Telegram and add at least one chat ID first")
+    results = dispatch(org_id, "test", "Prowl notifications are connected for this organization.",
+                       background=False, config={**config, "notify_test": True})
+    return {"results": results or {}}
 
 
 @router.post("/{org_id}/settings/ensure-defaults")

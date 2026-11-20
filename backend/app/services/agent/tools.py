@@ -5701,6 +5701,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 cve_id=cve_id,
                 confirmed=str(gate_msg or "").startswith("verify_ok"),
             )
+            try:
+                from app.services.chat_notifier import notify_finding
+
+                notify_finding(org_id, finding_id=vuln.id, title=vuln.title,
+                               severity=vuln.severity.value, asset=asset.value,
+                               verified=verification_level == "exploit_verified")
+            except Exception:
+                logger.debug("finding notification skipped", exc_info=True)
             chain_n = (agent_detection or {}).get("step_count") or 0
             msg = (
                 f"Finding created: id={vuln.id}, title={vuln.title[:60]}..., "

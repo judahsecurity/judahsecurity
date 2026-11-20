@@ -1058,6 +1058,11 @@ class ApiClient {
     return response.data;
   }
 
+  async sendTestNotification(organizationId: number): Promise<{ results: Record<string, string> }> {
+    const response = await this.client.post(`/organizations/${organizationId}/notifications/test`);
+    return response.data;
+  }
+
   // Assets
   async getAssets(params?: { 
     organization_id?: number; 

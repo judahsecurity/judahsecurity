@@ -247,6 +247,13 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # and the agent gets an execution_id for wait/cancel_tool_execution. 0 disables.
 # AGENT_TOOL_WAIT_SECONDS=120
 
+# Telegram notifications (agent run finished / new finding). Create a bot with
+# @BotFather, put the token in your secret store (never commit it). Each org then
+# enables Telegram and lists its chat IDs under Settings -> Telegram Notifications.
+# TELEGRAM_BOT_TOKEN=
+# Web app URL used for links in notifications (optional)
+# PUBLIC_APP_URL=https://prowl.example.com
+
 # Tool guard: regex block-list checked before any agent tool runs, on top of
 # scope. The default rule blocks government/military domains (.gov, .mil,
 # gov.<cc>); set DEFAULT_RULES=false only for engagements authorized against them.

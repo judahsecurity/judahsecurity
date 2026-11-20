@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { SeverityWeightsCard } from '@/components/settings/SeverityWeightsCard';
+import { TelegramNotificationsCard } from '@/components/settings/TelegramNotificationsCard';
 import { useToast } from '@/hooks/use-toast';
 
 interface ApiConfig {
@@ -1015,6 +1016,9 @@ export default function SettingsPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Chat notifications */}
+        <TelegramNotificationsCard orgId={selectedOrg ? parseInt(selectedOrg) : null} />
 
         {/* Severity evaluation: organization default factor weights */}
         <SeverityWeightsCard />
