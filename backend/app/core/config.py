@@ -195,6 +195,9 @@ class Settings(BaseSettings):
     # chain step a result unblocked as soon as a specialist finishes, instead
     # of after the whole wave. Off until benchmarked against wave mode.
     FIRETEAM_ROLLING_DISPATCH: bool = False
+    # Render a single-page app's signed-in screens without credentials once,
+    # after the anonymous JS inspection, when no login is configured.
+    AGENT_SHELL_UNLOCK: bool = True
     FIRETEAM_MAX_MID_WAVE_STARTS: int = 6
     # Timeout for attaching an external MCP server (Burp/Caido).
     AGENT_MCP_CONNECT_TIMEOUT_SECONDS: float = 8.0

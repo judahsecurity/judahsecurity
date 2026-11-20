@@ -490,8 +490,17 @@ class ScopedAssessmentTools:
         xhr_capture_id: str = "",
         readback_url: str = "", cleanup_url_template: str = "",
         client_test_type: str = "",
+        unlock_shell: bool = False,
+        shell_routes: list[str] | None = None,
     ) -> str:
-        """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium."""
+        """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium.
+
+        ``unlock_shell=True`` (map or inspect_js) renders a single-page app's
+        signed-in screens without credentials: placeholder auth markers, "not
+        signed in" API answers replaced in the page only, state-changing
+        requests never sent. ``shell_unlock.auth_gated`` lists the API
+        requests the server refused without a session.
+        """
         if operation not in ("map", "crawl", "inspect_js", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client"):
             raise ValueError("Unsupported scoped browser operation")
         if xhr_capture_id and operation != "check_xhr_xss":
@@ -565,6 +574,8 @@ class ScopedAssessmentTools:
             xhr_baseline_request_sha256=hashlib.sha256(xhr_post[0]).hexdigest() if xhr_post else "",
             readback_url=readback_url, cleanup_url_template=cleanup_url_template,
             client_test_type=client_test_type,
+            unlock_shell=bool(unlock_shell),
+            shell_routes=shell_routes,
         )
         result["identity"] = identity
         if link_baselines:
@@ -711,10 +722,24 @@ class ScopedAssessmentTools:
                 continue
             key = (host, method, path)
             if key not in known and len(brain.surfaces) < 200:
-                brain.surfaces.append({"host": host, "method": method, "path": path,
-                                       "takes_input": bool(request.get("query_keys") or method != "GET"),
-                                       "source": "scoped_browser"})
+                surface = {"host": host, "method": method, "path": path,
+                           "takes_input": bool(request.get("query_keys") or method != "GET"),
+                           "source": "scoped_browser"}
+                if request.get("shell_unlock"):
+                    surface["source"] = "shell_unlock"
+                brain.surfaces.append(surface)
                 known.add(key)
+            if request.get("auth_gated") or request.get("not_sent"):
+                # The server guards it (or the app would change data with it):
+                # an authorization target once a test identity exists.
+                for surface in brain.surfaces:
+                    if (isinstance(surface, dict)
+                            and (surface.get("host"), surface.get("method"), surface.get("path")) == key):
+                        if request.get("auth_gated"):
+                            surface["auth_gated"] = True
+                        if request.get("not_sent"):
+                            surface["state_changing"] = True
+                        break
         for endpoint in (inventory.get("endpoints") or [])[:100]:
             if "live_browser" not in (endpoint.get("sources") or []):
                 continue

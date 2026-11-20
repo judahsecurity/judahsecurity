@@ -199,3 +199,33 @@ To compare, run the same lab cases with the flag off and on and compare with
 `python -m local_harness.ledger_compare`. The follow-up chain timings in
 `chain_report` (`accept_to_claim_ms`, `observation_to_verdict_ms`) show how
 long found work waits before a specialist picks it up.
+
+## Signed-in shell without credentials
+
+Many single-page apps stop an anonymous browser at a client-side login gate,
+so the APIs behind it never appear in the map. `scoped_browser_assessment`
+with `operation="map"` or `"inspect_js"` and `unlock_shell=true` renders those
+screens without a login:
+
+- Before any page script runs, placeholder auth markers are put in local and
+  session storage and a `token` cookie. The placeholder is JWT-shaped with an
+  invalid HS256 signature (never `alg: none`), so no server accepts it.
+- Same-origin XHR/fetch GETs go to the server as usual. When the server says
+  "not signed in" (401/403/419/440, or a JSON body with a login error), the
+  page receives a neutral success body instead, or a placeholder user for
+  identity, permission and menu endpoints, so the app keeps rendering.
+- XHR/fetch requests other than GET, HEAD and OPTIONS are never sent. Their
+  method and path are recorded with `not_sent: true`, and the page receives a
+  placeholder success.
+- Client routes from the caller (`shell_routes`), a mounted Vue router, router
+  tables in loaded scripts, and page links are visited with
+  `history.pushState`, at most 12, skipping login and state-changing paths.
+
+`shell_unlock.auth_gated` lists the requests the server refused without a
+session, with their real status. Those surfaces are marked `auth_gated` in the
+engagement brain, and withheld requests are marked `state_changing`. They are
+authorization targets, not findings. Placeholder responses are never kept as
+replayable captures.
+
+The assessment pipeline runs this once after the anonymous JS inspection when
+no login is configured (`AGENT_SHELL_UNLOCK`, default on).

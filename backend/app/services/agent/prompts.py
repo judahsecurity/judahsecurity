@@ -951,7 +951,10 @@ APPLICATION_ASSESSMENT_GUIDANCE = """
 For a first-party web assessment, use scoped_browser_assessment(operation="map"|
 "crawl"|"inspect_js"|"check_xss", url=...) under the current exact origin.
 The inspect_js result has action-linked traffic artifact IDs and a redacted
-surface_inventory. Use list_scoped_browser_exchanges to locate an observed
+surface_inventory. When a single-page app stops at a login screen and no test
+identity exists, inspect_js with unlock_shell=true renders its signed-in screens
+without credentials; shell_unlock.auth_gated lists API requests the server
+refused without a session. Those are authorization targets, not findings. Use list_scoped_browser_exchanges to locate an observed
 XHR/fetch sample. scoped_http_get and scoped_http_compare return bounded
 response metadata. scoped_query_probe is exploratory; changed responses are
 leads only. scoped_numeric_sqli runs six bounded requests on one observed

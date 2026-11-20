@@ -232,7 +232,20 @@ def test_prowl_uses_built_in_browser_after_crawl_and_as_fallback():
         {"tool_name": "scoped_browser_assessment", "tool_args": inspection["tool_args"],
          "success": True},
     ]}
-    assert forced_next_step(inspected)["tool_name"] == "spawn_recon_workers"
+    # Without a configured login, render the signed-in shell once.
+    unlock = forced_next_step(inspected)
+    assert unlock["tool_name"] == "scoped_browser_assessment"
+    assert unlock["tool_args"]["operation"] == "inspect_js"
+    assert unlock["tool_args"]["unlock_shell"] is True
+    unlocked = {**inspected, "execution_trace": [
+        *inspected["execution_trace"],
+        {"tool_name": "scoped_browser_assessment", "tool_args": unlock["tool_args"],
+         "success": True},
+    ]}
+    assert forced_next_step(unlocked)["tool_name"] == "spawn_recon_workers"
+    # A run with a real login does not need the placeholder shell.
+    with_login = {**inspected, "auth_login": {"username": "tester"}}
+    assert forced_next_step(with_login)["tool_name"] == "spawn_recon_workers"
 
 
 def test_forced_pipeline_crawl_then_enrich_then_fireteam():

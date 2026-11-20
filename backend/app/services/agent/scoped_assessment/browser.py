@@ -239,8 +239,14 @@ async def check_browser(
     xhr_baseline_request_sha256: str = "",
     readback_url: str = "", cleanup_url_template: str = "",
     client_test_type: str = "",
+    unlock_shell: bool = False,
+    shell_routes: list[str] | None = None,
 ) -> tuple[dict, bytes | None]:
-    """Execute one bounded browser check with HTTP and WebSocket origin routing."""
+    """Execute one bounded browser check with HTTP and WebSocket origin routing.
+
+    ``unlock_shell`` (map and inspect_js only) renders a single-page app's
+    signed-in shell without credentials; see ``browser_shell_unlock``.
+    """
     from playwright.async_api import async_playwright
 
     if operation not in ("map", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client", "crawl", "inspect_js"):
@@ -257,6 +263,16 @@ async def check_browser(
         raise ValueError("Crawl page limit must be between 1 and 10")
     if xhr_actions is None:
         xhr_actions = []
+    shell = None
+    if unlock_shell:
+        from .browser_shell_unlock import MAX_ROUTES, ShellUnlock
+
+        if operation not in {"map", "inspect_js"}:
+            raise ValueError("Shell unlock applies only to browser map and JavaScript inspection")
+        if shell_routes is not None and (not isinstance(shell_routes, list)
+                                         or len(shell_routes) > MAX_ROUTES * 2):
+            raise ValueError("Shell routes must be a short list of client paths")
+        shell = ShellUnlock()
     assert_in_scope(url, allowed_origins)
     nonce = secrets.token_hex(8) if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client"} else ""
     if operation == "check_xss" and NONCE_MARKER not in url:
@@ -390,6 +406,9 @@ async def check_browser(
             if scoped_state:
                 context_args["storage_state"] = scoped_state
             context = await browser.new_context(**context_args)
+            if shell is not None:
+                from .browser_shell_unlock import INIT_SCRIPT
+                await context.add_init_script(INIT_SCRIPT)
 
             async def route_request(route):
                 nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
@@ -465,6 +484,11 @@ async def check_browser(
                         return
                     if post_action_active and route.request.method.upper() == "POST":
                         approved_post_requests += 1
+                    if (shell is not None and not post_action_active
+                            and not read_only_interaction
+                            and route.request.resource_type in {"xhr", "fetch"}):
+                        await shell.handle(route)
+                        return
                     await route.continue_()
                 else:
                     blocked_requests += 1
@@ -575,6 +599,8 @@ async def check_browser(
                         request = response.request
                         if origin(response.url) != expected_origin or request.resource_type not in {"document", "xhr", "fetch"}:
                             return
+                        if shell is not None and shell.is_faked(request):
+                            return  # a placeholder response is not evidence
                         if request.resource_type == "document":
                             from .browser_actions import allowed_discovery_path
                             parts = urlsplit(response.url)
@@ -779,6 +805,61 @@ async def check_browser(
                         or not blocked_marker_navigation):
                     raise
                 response = None
+            if shell is not None:
+                from .browser_actions import allowed_discovery_path
+                from .browser_shell_unlock import (
+                    PUSH_ROUTE_JS, ROUTE_SETTLE_MS, ROUTER_ROUTES_JS,
+                    choose_routes, looks_like_login, routes_from_sources,
+                )
+
+                await page.wait_for_timeout(ROUTE_SETTLE_MS)
+                candidates: list[object] = list(shell_routes or [])
+                try:
+                    candidates.extend(await page.evaluate(ROUTER_ROUTES_JS))
+                except Exception:
+                    pass
+                await settle_capture()
+                candidates.extend(routes_from_sources(javascript_sources or []))
+                try:
+                    hrefs = await page.locator("a[href]").evaluate_all(
+                        f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.getAttribute('href'))"
+                    )
+                    candidates.extend(hrefs)
+                except Exception:
+                    pass
+                entry_url = page.url
+                for index, route_path in enumerate(
+                    choose_routes(candidates, allowed_path=allowed_discovery_path), start=1,
+                ):
+                    current_action_ref = f"shell-route-{index}"
+                    start = (len(requests), len(javascript_sources or []), len(traffic_exchanges or []))
+                    try:
+                        await page.evaluate(PUSH_ROUTE_JS, route_path)
+                        await page.wait_for_timeout(ROUTE_SETTLE_MS)
+                        assert_in_scope(page.url, allowed_origins)
+                        # Kept out of ``actions``: inspect_js budgets its own
+                        # discovery actions from that list.
+                        progress = await checkpoint(current_action_ref, "shell_route", start)
+                        shell.routes.append({
+                            "route": route_path,
+                            "final_path": urlsplit(page.url).path or "/",
+                            "login_redirect": looks_like_login(page.url),
+                            "requests": progress["request_count"],
+                            "scripts_added": progress["scripts_added"],
+                        })
+                    except ValueError:
+                        raise
+                    except Exception as exc:
+                        shell.routes.append({"route": route_path, "error": type(exc).__name__})
+                current_action_ref = "navigate"
+                if shell.routes:
+                    try:
+                        await page.goto(entry_url, wait_until="domcontentloaded", timeout=20_000)
+                        assert_in_scope(page.url, allowed_origins)
+                    except ValueError:
+                        raise
+                    except Exception:
+                        pass
             xhr_actions_replayed = 0
             if operation == "check_xhr_xss" and xhr_actions:
                 from .browser_actions import allowed_discovery_control
@@ -1082,6 +1163,8 @@ async def check_browser(
                 "requests": requests,
                 "blocked_requests": blocked_requests,
             }
+            if shell is not None:
+                result["shell_unlock"] = shell.summary(shell.annotate(request_rows))
             if operation == "map":
                 hrefs = await page.locator("a[href]").evaluate_all(
                     f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"

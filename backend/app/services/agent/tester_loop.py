@@ -102,6 +102,12 @@ def normalized_tools_run(trace: Optional[Iterable[Any]]) -> Set[str]:
     return names
 
 
+def _shell_unlock_enabled() -> bool:
+    from app.core.config import settings
+
+    return bool(getattr(settings, "AGENT_SHELL_UNLOCK", True))
+
+
 def _kickoff_step(trace: Optional[Iterable[Any]]) -> Dict[str, Any]:
     for step in _steps(trace):
         if step.get("tool_name") == "assessment_kickoff":
@@ -1483,6 +1489,31 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             "tool_args": {"operation": "inspect_js", "url": target,
                           "max_pages": 10, "max_actions": 3},
             "thought": "Prowl: capture browser actions, inputs, and first-party API traffic for specialist work.",
+        }
+
+    # An anonymous browser sees a client-side login gate and little behind it.
+    # Render the signed-in shell once without credentials to list the APIs the
+    # app calls there; the server-guarded ones become authorization targets.
+    if (state.get("mode") == "agent" and _shell_unlock_enabled()
+            and not state.get("auth_login") and not dir_started
+            and any(
+                step.get("tool_name") == "scoped_browser_assessment"
+                and isinstance(step.get("tool_args"), dict)
+                and step["tool_args"].get("operation") == "inspect_js"
+                for step in trace
+            )
+            and not any(
+                step.get("tool_name") == "scoped_browser_assessment"
+                and isinstance(step.get("tool_args"), dict)
+                and step["tool_args"].get("unlock_shell")
+                for step in trace
+            )):
+        return {
+            "tool_name": "scoped_browser_assessment",
+            "tool_args": {"operation": "inspect_js", "url": target, "max_pages": 10,
+                          "max_actions": 3, "unlock_shell": True},
+            "thought": ("Prowl: render the app's signed-in screens without credentials "
+                        "to find the APIs behind the login gate."),
         }
 
     # Launch enrichment without waiting for it before testing real browser inputs.
