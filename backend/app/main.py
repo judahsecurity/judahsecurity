@@ -158,6 +158,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Settings GETs return an ETag that saves echo back in If-Match.
+    expose_headers=["ETag"],
 )
 
 

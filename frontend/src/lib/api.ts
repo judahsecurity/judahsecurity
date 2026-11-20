@@ -1034,13 +1034,27 @@ class ApiClient {
     return response.data;
   }
 
+  // ETag of each settings module as last loaded, sent back as If-Match so a
+  // save cannot silently overwrite someone else's newer save (409 instead).
+  private settingsEtags = new Map<string, string>();
+
   async getProjectSettings(organizationId: number, module: string) {
     const response = await this.client.get(`/organizations/${organizationId}/settings/${module}`);
+    const etag = response.headers?.etag;
+    if (etag) this.settingsEtags.set(`${organizationId}:${module}`, etag);
     return response.data;
   }
 
   async updateProjectSettingsModule(organizationId: number, module: string, config: Record<string, any>) {
-    const response = await this.client.put(`/organizations/${organizationId}/settings/${module}`, { config });
+    const key = `${organizationId}:${module}`;
+    const etag = this.settingsEtags.get(key);
+    const response = await this.client.put(
+      `/organizations/${organizationId}/settings/${module}`,
+      { config },
+      etag ? { headers: { 'If-Match': etag } } : undefined,
+    );
+    const next = response.headers?.etag;
+    if (next) this.settingsEtags.set(key, next);
     return response.data;
   }
 

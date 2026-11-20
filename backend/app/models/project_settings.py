@@ -460,6 +460,26 @@ class ProjectSettings(Base):
         return merged
 
     @classmethod
+    def config_version(cls, db, organization_id: int, module: str, *, lock: bool = False) -> str:
+        """Opaque version of the stored config (content hash), for If-Match saves.
+
+        ``lock`` takes a row lock so a compare-and-save is atomic on PostgreSQL.
+        """
+        import hashlib
+        import json as _json
+
+        query = db.query(cls).filter(
+            cls.organization_id == organization_id,
+            cls.module == module,
+        )
+        if lock:
+            query = query.with_for_update()
+        row = query.first()
+        stored = row.config if row and row.config else None
+        blob = _json.dumps(stored, sort_keys=True, default=str)
+        return '"' + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32] + '"'
+
+    @classmethod
     def set_config(cls, db, organization_id: int, module: str, config: dict) -> "ProjectSettings":
         """Set config for org+module (partial update merged with existing)."""
         row = db.query(cls).filter(

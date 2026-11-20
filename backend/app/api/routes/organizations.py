@@ -1,7 +1,7 @@
 """Organization routes."""
 
 from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
@@ -333,13 +333,15 @@ def get_all_project_settings(
 def get_project_settings_module(
     org_id: int,
     module: str,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Get one module's project settings."""
+    """Get one module's project settings. The ETag header versions the config."""
     _check_org_access(db, org_id, current_user)
     if module not in ALL_MODULES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown module: {module}")
+    response.headers["ETag"] = ProjectSettings.config_version(db, org_id, module)
     return ProjectSettings.get_config(db, org_id, module)
 
 
@@ -352,15 +354,36 @@ def update_project_settings_module(
     org_id: int,
     module: str,
     body: ProjectSettingsUpdate,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
+    if_match: str | None = Header(default=None),
 ):
-    """Update one module's project settings (partial merge)."""
+    """Update one module's project settings (partial merge).
+
+    Send the ETag from the last GET as ``If-Match``: if someone else saved
+    this module since, the save is refused with 409 instead of overwriting
+    their change. Saves without ``If-Match`` keep the old last-write-wins
+    behavior.
+    """
     _check_org_access(db, org_id, current_user)
     if module not in ALL_MODULES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown module: {module}")
+    if if_match and if_match.strip() != "*":
+        current = ProjectSettings.config_version(db, org_id, module, lock=True)
+        expected = {tag.strip() for tag in if_match.split(",")}
+        if current not in expected and current.strip('"') not in expected:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=("These settings were changed by someone else since you loaded them. "
+                        "Your edits were not saved; reload to see the latest values, then "
+                        "reapply your changes."),
+                headers={"ETag": current},
+            )
     ProjectSettings.set_config(db, org_id, module, body.config)
     db.commit()
+    response.headers["ETag"] = ProjectSettings.config_version(db, org_id, module)
     return ProjectSettings.get_config(db, org_id, module)
 
 
