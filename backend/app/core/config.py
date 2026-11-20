@@ -193,6 +193,17 @@ class Settings(BaseSettings):
     # tool can never block the turn, and guarantees a tool_complete event is
     # emitted (so the UI never dangles on a tool_start).
     AGENT_TOOL_HARD_TIMEOUT_SECONDS: int = 600
+    # How the deterministic assessment pipeline (tester_loop.forced_next_step)
+    # drives Joshua once the app is mapped. "strict" forces every pipeline step.
+    # "advisory" shows the pipeline step as a suggestion and gives the model
+    # AGENT_STEERING_FREE_TURNS of its own decisions before the step is forced.
+    # Mapping, proof bookkeeping, CVE applicability and pilot steps are always
+    # forced, and the completion gate is unchanged in both modes.
+    AGENT_STEERING_MODE: str = "strict"
+    AGENT_STEERING_FREE_TURNS: int = 2
+    # Add hunting-discipline rules (exhaust bypasses, depth over breadth,
+    # re-examine negatives, hand off side clues) to Joshua and specialists.
+    AGENT_HUNT_DISCIPLINE_PROMPT: bool = False
 
     # Private scoped-assessment executor. Aegis remains the agent/model runtime.
     PROWL_ASSESSMENT_URL: str = ""

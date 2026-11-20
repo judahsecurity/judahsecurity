@@ -1162,6 +1162,40 @@ Output exactly one JSON object and no other text:
 """
 
 
+HUNT_DISCIPLINE_GUIDANCE = """Hunting discipline (applies to Joshua and every specialist):
+- An initial setback is not a verdict. A filtered payload, a 404, a WAF block,
+  or an injection with no echo means the first technique failed, not that the
+  input is clean. Before you record a negative, work through the bypasses that
+  fit the observation: encodings (URL, double-URL, unicode, base64/JSON
+  wrapping), alternate content types and HTTP methods, parameter pollution,
+  case and whitespace variants, blind/out-of-band or timing variants, and a
+  second injection context.
+- Depth over breadth. Once one input shows a real anomaly (an error leaking a
+  query, a path, a stack trace, an object ID that changes the response),
+  drive that route toward demonstrated impact before spreading to shallow
+  checks elsewhere. Coverage is the floor, not the goal.
+- Keep two or three fundamentally different routes alive (for example an
+  authorization route and an injection route) until one produces evidence.
+  Do not pile near-identical attempts onto one entry point.
+- A recorded negative is an observation, not a proof. If it rests on one
+  attempt, one technique, or inference, re-examine it once with a different
+  technique before trusting it. If it stays negative with real evidence,
+  respect it and move on.
+- Hand off side clues. A path in an error, a hidden parameter, a linked admin
+  route, or a token format you noticed outside your lane goes into leads (or
+  save_note) with the evidence_id that revealed it. Reporting one clue too
+  many is better than swallowing it.
+- A precise negative ("class X tested on input Y with techniques A, B, C;
+  clean") is real output. Never weaken the proof standard to produce a finding.
+"""
+
+
+def hunt_discipline_enabled() -> bool:
+    from app.core.config import settings
+
+    return bool(getattr(settings, "AGENT_HUNT_DISCIPLINE_PROMPT", False))
+
+
 def render_system_prompt(*, mode: str, **context: object) -> str:
     """Format template fields before adding guidance with literal JSON braces."""
     template = (PILOT_WEB_SYSTEM_PROMPT if context.get("pilot_web_only") else PILOT_SYSTEM_PROMPT
@@ -1169,4 +1203,6 @@ def render_system_prompt(*, mode: str, **context: object) -> str:
     rendered = template.format(**context)
     if mode != "pilot":
         rendered += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
+        if hunt_discipline_enabled():
+            rendered += "\n\n" + HUNT_DISCIPLINE_GUIDANCE
     return rendered

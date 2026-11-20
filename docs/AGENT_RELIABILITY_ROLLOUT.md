@@ -51,3 +51,24 @@ verified findings, and known-vulnerability recall. A clean result requires
 evidence of completed negative tests; zero findings alone does not establish
 coverage. Compare finding quality against ground truth before claiming that
 the new scheduler detects more vulnerabilities.
+
+## Steering and hunt-discipline experiments
+
+Two flags let the model lead more of an assessment. Both are off by default,
+so production behavior is unchanged until you enable them. Measure each one
+separately against a strict baseline with the comparison above.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `AGENT_STEERING_MODE` | `strict` | `advisory` turns post-map pipeline steps (enrichment, JS mining, threat-model sync, fireteam waves) into a suggestion in Joshua's prompt. |
+| `AGENT_STEERING_FREE_TURNS` | `2` | In advisory mode, how many of its own decisions the model gets after the last forced step before the suggested step is forced (0-10). |
+| `AGENT_HUNT_DISCIPLINE_PROMPT` | `false` | Adds hunting rules to Joshua and every specialist: exhaust bypasses before recording a negative, depth over breadth, keep 2-3 routes open, re-examine weak negatives once, hand off side clues. Also replaces the specialist rule "If unsure, finish with done=true". |
+
+Advisory mode never defers the initial application map (crawl, map,
+inspect_js), proof bookkeeping (candidate handoff, independent_verify,
+create_finding), CVE-applicability steps, or bounded pilots. The completion
+gate is unchanged in both modes, so the model cannot finish before coverage is
+met. Each deferral is logged as `Advisory steering: deferring pipeline step`.
+
+Suggested sequence: strict baseline, then `AGENT_HUNT_DISCIPLINE_PROMPT=true`,
+then that plus `AGENT_STEERING_MODE=advisory`, all at the same budget.

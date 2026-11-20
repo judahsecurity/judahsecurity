@@ -80,3 +80,111 @@ def registry_step_due(state: Optional[Dict[str, Any]]) -> bool:
     return stack_forced_step_due(
         (state or {}).get("execution_trace"), detect=REGISTRY_DETECT, surface=REGISTRY_SURFACE,
     )
+
+
+# --- advisory steering for the deterministic assessment pipeline ------------
+#
+# In "strict" mode every step tester_loop.forced_next_step returns replaces the
+# model's decision. In "advisory" mode a pipeline step is first shown to the
+# model as a suggestion; the model gets ``free_turns`` of its own decisions
+# after the last forced step, and only then is the pipeline step forced. The
+# pipeline still runs to completion, but the model can chase a live lead
+# between steps instead of being driven straight through the checklist.
+
+STEERING_MODES = ("strict", "advisory")
+DEFAULT_STEERING_FREE_TURNS = 2
+
+# Steps that stay forced in every mode: the initial application map (nothing
+# can be hunted without it) and proof bookkeeping (a confirmed candidate must
+# not wait behind the model's curiosity).
+ALWAYS_FORCED_TOOLS = frozenset({
+    "execute_interceptor",
+    "execute_deep_crawl",
+    "independent_verify",
+    "submit_finding_candidate",
+    "create_finding",
+    "validate_finding",
+    "check_cve_applicability",
+    "probe_pilot_ports",
+})
+_ALWAYS_FORCED_BROWSER_OPERATIONS = frozenset({"map", "crawl", "inspect_js"})
+
+
+def steering_mode() -> str:
+    from app.core.config import settings
+
+    mode = str(getattr(settings, "AGENT_STEERING_MODE", "strict") or "strict").strip().lower()
+    return mode if mode in STEERING_MODES else "strict"
+
+
+def steering_free_turns() -> int:
+    from app.core.config import settings
+
+    try:
+        value = int(getattr(settings, "AGENT_STEERING_FREE_TURNS", DEFAULT_STEERING_FREE_TURNS))
+    except (TypeError, ValueError):
+        return DEFAULT_STEERING_FREE_TURNS
+    return max(0, min(value, 10))
+
+
+def always_forced(step: Optional[Dict[str, Any]]) -> bool:
+    """True for pipeline steps advisory mode must never defer."""
+    if not isinstance(step, dict):
+        return False
+    name = str(step.get("tool_name") or "")
+    if name in ALWAYS_FORCED_TOOLS:
+        return True
+    if name == "scoped_browser_assessment":
+        args = step.get("tool_args") or {}
+        operation = str(args.get("operation") or "") if isinstance(args, dict) else ""
+        return operation in _ALWAYS_FORCED_BROWSER_OPERATIONS
+    return False
+
+
+def model_turns_since_forced(trace: Optional[Iterable[Any]]) -> int:
+    """Count the model's own decisions after the most recent forced step."""
+    count = 0
+    for step in reversed([s for s in trace or [] if isinstance(s, dict)]):
+        source = step.get("decision_source")
+        if source == "forced":
+            break
+        if source == "model":
+            count += 1
+    return count
+
+
+def pipeline_step_due(
+    state: Optional[Dict[str, Any]],
+    step: Optional[Dict[str, Any]],
+    *,
+    mode: Optional[str] = None,
+    free_turns: Optional[int] = None,
+) -> bool:
+    """Whether a forced pipeline step should replace the model's decision now."""
+    if not step:
+        return False
+    state = state or {}
+    mode = steering_mode() if mode is None else mode
+    if mode != "advisory" or state.get("mode") == "pilot" or always_forced(step):
+        return True
+    free_turns = steering_free_turns() if free_turns is None else free_turns
+    return model_turns_since_forced(state.get("execution_trace")) >= free_turns
+
+
+def format_pipeline_suggestion(step: Dict[str, Any], free_turns_left: int) -> str:
+    """Prompt block that presents a deferred pipeline step to the model."""
+    try:
+        args = json.dumps(step.get("tool_args") or {}, default=str)[:600]
+    except (TypeError, ValueError):
+        args = str(step.get("tool_args") or {})[:600]
+    return (
+        "## Suggested pipeline step (advisory)\n"
+        f"The assessment pipeline would run next: {step.get('tool_name')} {args}\n"
+        f"Why: {step.get('thought') or 'next coverage step'}\n"
+        "If a concrete lead from the evidence so far is worth more (an error that "
+        "leaks a path, a parameter that behaved oddly, a chain step whose "
+        "prerequisite just landed), pursue it now and say why in reasoning. "
+        "Otherwise take the suggested step. "
+        f"The pipeline step runs automatically after {max(0, free_turns_left)} more "
+        "of your own decisions, and completion stays blocked until coverage is met."
+    )

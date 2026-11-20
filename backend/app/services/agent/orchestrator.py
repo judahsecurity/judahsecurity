@@ -1601,6 +1601,33 @@ class AgentOrchestrator:
                 except Exception:
                     forced_complete = False
 
+        # Advisory steering: once the app is mapped, a pipeline step becomes a
+        # suggestion until the model has had its free turns. Proof bookkeeping,
+        # mapping, CVE and pilot steps stay forced (see model_led.always_forced).
+        pipeline_suggestion = None
+        if forced:
+            try:
+                from app.services.agent.model_led import (
+                    model_turns_since_forced,
+                    pipeline_step_due,
+                    steering_free_turns,
+                )
+                if not pipeline_step_due(
+                    {**state, "execution_trace": merged_trace}, forced,
+                ):
+                    pipeline_suggestion = forced
+                    forced = None
+                    pipeline_suggestion["_free_turns_left"] = (
+                        steering_free_turns()
+                        - model_turns_since_forced(merged_trace)
+                    )
+                    logger.info(
+                        "[%s] Advisory steering: deferring pipeline step %s",
+                        user_id, pipeline_suggestion["tool_name"],
+                    )
+            except Exception:
+                logger.exception("advisory steering check failed")
+
         if forced:
             cve_writeup = forced["tool_name"] in (
                 "validate_finding", "create_finding", "check_cve_applicability",
@@ -1702,6 +1729,13 @@ class AgentOrchestrator:
                     available_tools += "\n\n" + RECON_REASONING_GUIDANCE
             except Exception:
                 logger.debug("recon guidance skipped", exc_info=True)
+
+            if pipeline_suggestion:
+                from app.services.agent.model_led import format_pipeline_suggestion
+                available_tools += "\n\n" + format_pipeline_suggestion(
+                    pipeline_suggestion,
+                    int(pipeline_suggestion.get("_free_turns_left") or 0),
+                )
 
             # Append prior session intelligence to knowledge context
             combined_knowledge = knowledge_context
