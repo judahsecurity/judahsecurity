@@ -27,6 +27,7 @@ from app.models.hackerone_integration import HackerOneIntegration, HackerOneRepo
 from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 — ensure table is created
 from app.models.f5_integration import F5Integration  # noqa: F401 — ensure table is created
 from app.models.netbrain_integration import NetBrainIntegration  # noqa: F401 — ensure table is created
+from app.models.netbrain_path import NetBrainPath  # noqa: F401 — ensure table is created
 from app.models.akamai_integration import AkamaiWafIntegration  # noqa: F401 — ensure table is created
 from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: F401 — ensure table is created
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
