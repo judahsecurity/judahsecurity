@@ -210,6 +210,9 @@ class Settings(BaseSettings):
     # it as a checklist; inconclusive candidates with hunter evidence and a
     # challenge are flagged needs_analyst_review instead of disappearing.
     AGENT_SELF_CHALLENGE: bool = False
+    # A specialist "killed" verdict backed by one evidence receipt or one
+    # testing tool goes back once for a different technique before closing.
+    AGENT_RECHECK_WEAK_NEGATIVES: bool = False
     # Where run_custom_probe / run_poc_python execute model-written Python.
     # "off": tool disabled. "isolated": sent to the probe-runner container
     # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).
