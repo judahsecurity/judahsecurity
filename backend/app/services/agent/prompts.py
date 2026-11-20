@@ -4,6 +4,8 @@ Agent Prompts
 System prompts for the AI agent's reasoning and decision-making.
 """
 
+import re
+
 REACT_SYSTEM_PROMPT = """You are an expert security analyst AI assistant for an Attack Surface Management (ASM) platform.
 You help users understand their attack surface, analyze vulnerabilities, and provide remediation guidance.
 
@@ -809,6 +811,7 @@ TOOL_PHASE_MAP = {
     "run_oob_callback_workflow": ["informational", "exploitation", "post_exploitation"],
     "suggest_capability_chains": ["informational", "exploitation", "post_exploitation"],
     "analyze_screenshot": ["informational", "exploitation", "post_exploitation"],
+    "describe_tools": ["informational", "exploitation", "post_exploitation"],
     "get_tool_execution": ["informational", "exploitation", "post_exploitation"],
     "wait_tool_execution": ["informational", "exploitation", "post_exploitation"],
     "cancel_tool_execution": ["informational", "exploitation", "post_exploitation"],
@@ -1169,6 +1172,97 @@ Output exactly one JSON object and no other text:
   "completion_reason": "tested coverage and limits if completing"
 }}
 """
+
+
+_TOOL_LINE = re.compile(r"^- ((?:\*\*[a-z0-9_]+\*\*(?:\s*\([^)]*\))?(?:\s*/\s*|,\s*)?)+):\s*(.*)$")
+_TOOL_NAME = re.compile(r"\*\*([a-z0-9_]+)\*\*")
+TOOL_INDEX_SUMMARY_CHARS = 140
+TOOL_INDEX_NOTE = (
+    "Tool index (one line each). Before you first use a tool in this run, call "
+    "describe_tools(names=[...]) to read its full arguments and rules (you may pass "
+    "several names). Reading docs is free and needs no approval."
+)
+
+
+def _summary(text: str) -> str:
+    match = re.match(r"(.+?[.!?])(\s|$)", text)
+    first = match.group(1) if match else text
+    if len(first) > TOOL_INDEX_SUMMARY_CHARS:
+        first = first[:TOOL_INDEX_SUMMARY_CHARS].rstrip() + "…"
+    return first
+
+
+def tool_doc_entries(tool_docs: str) -> dict:
+    """Map each tool name to its full doc line from a get_phase_tools block."""
+    entries = {}
+    for line in tool_docs.splitlines():
+        match = _TOOL_LINE.match(line.strip())
+        if not match:
+            continue
+        for name in _TOOL_NAME.findall(match.group(1)):
+            entries.setdefault(name, line.strip())
+    return entries
+
+
+def tool_index(tool_docs: str) -> str:
+    """Shorten a tool-doc block to one summary line per tool, keeping headings."""
+    out = [TOOL_INDEX_NOTE]
+    for line in tool_docs.splitlines():
+        stripped = line.strip()
+        match = _TOOL_LINE.match(stripped)
+        if match:
+            out.append(f"- {match.group(1).strip()}: {_summary(match.group(2))}")
+        elif stripped.startswith("#") or stripped.startswith("**CRITICAL"):
+            out.append(stripped)
+    return "\n".join(out)
+
+
+def all_tool_docs() -> dict:
+    """Full doc line per tool across every phase."""
+    docs = {}
+    for phase in ("informational", "exploitation", "post_exploitation"):
+        for name, line in tool_doc_entries(get_phase_tools(phase)).items():
+            docs.setdefault(name, line)
+    return docs
+
+
+def _split_react_template() -> tuple:
+    """Split REACT_SYSTEM_PROMPT into (static head+tail, dynamic state) templates.
+
+    The static text (role, rules, decision format, methodology) does not
+    change between steps of a run, so it goes first where a provider can
+    cache it; the per-step state (phase, iteration, trace, brain, ...) goes
+    last. The Available Tools section is rendered separately.
+    """
+    template = REACT_SYSTEM_PROMPT
+    state_start = template.index("## Current State")
+    task_start = template.index("## Your Task")
+    tools_section = "## Available Tools\n{available_tools}\n\n"
+    dynamic = template[state_start:task_start]
+    if tools_section not in dynamic:
+        raise RuntimeError("REACT_SYSTEM_PROMPT layout changed; update _split_react_template")
+    dynamic = dynamic.replace(tools_section, "")
+    static = template[:state_start] + template[task_start:]
+    return static, dynamic
+
+
+_REACT_STATIC, _REACT_DYNAMIC = _split_react_template()
+
+
+def render_system_prompt_parts(*, mode: str, **context: object) -> tuple:
+    """Return (static, tools, dynamic) prompt text, most stable first.
+
+    Same content as ``render_system_prompt`` for non-pilot modes, reordered so
+    the unchanging instructions and the phase's tool docs form a cacheable
+    prefix. Pilot prompts are short and stay a single dynamic block.
+    """
+    if mode == "pilot":
+        return "", "", render_system_prompt(mode=mode, **context)
+    static = (_REACT_STATIC.format(**context) + "\n\n" + PROOF_GUIDANCE
+              + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE)
+    tools = "## Available Tools\n" + str(context.get("available_tools") or "")
+    dynamic = _REACT_DYNAMIC.format(**context)
+    return static, tools, dynamic
 
 
 def render_system_prompt(*, mode: str, **context: object) -> str:

@@ -49,6 +49,7 @@ from app.services.agent.state import (
 )
 from app.services.agent.prompts import (
     render_system_prompt,
+    render_system_prompt_parts,
     OUTPUT_ANALYSIS_PROMPT,
     PHASE_TRANSITION_MESSAGE,
     USER_QUESTION_MESSAGE,
@@ -1687,6 +1688,10 @@ class AgentOrchestrator:
             qa_history_formatted = format_qa_history(state.get("qa_history") or [])
             objective_history_formatted = format_objective_history(state.get("objective_history") or [])
             available_tools = get_phase_tools(phase)
+            if str(getattr(settings, "AGENT_TOOL_DOCS_MODE", "full")).lower() == "index":
+                from app.services.agent.prompts import tool_index
+
+                available_tools = tool_index(available_tools)
             available_tools += self._unavailable_tools_note()
             if state.get("mode") == "pilot":
                 from app.services.agent.pilot_policy import (
@@ -1827,7 +1832,7 @@ class AgentOrchestrator:
                 state.get("engagement_brain")
             )
 
-            system_prompt = render_system_prompt(
+            prompt_static, prompt_tools, prompt_dynamic = render_system_prompt_parts(
                 mode=state.get("mode") or "assist",
                 current_phase=phase,
                 available_tools=available_tools,
@@ -1856,12 +1861,13 @@ class AgentOrchestrator:
                     + "\n\n"
                     + steer_prompt
                 )
+            llm = self._resolve_llm(state, LLMTask.REASONING)
+            from app.services.agent.prompt_cache import system_message_for
+
             messages = [
-                SystemMessage(content=system_prompt),
+                system_message_for(llm, prompt_static, prompt_tools, prompt_dynamic),
                 HumanMessage(content=steer_prompt),
             ]
-
-            llm = self._resolve_llm(state, LLMTask.REASONING)
             try:
                 response, llm = await _bounded_planning_call(
                     llm, messages,

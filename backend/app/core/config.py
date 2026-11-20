@@ -205,6 +205,10 @@ class Settings(BaseSettings):
     # seconds once running; if still running they continue in the background
     # under the hard cap and the agent gets an execution_id. 0 disables.
     AGENT_TOOL_WAIT_SECONDS: int = 120
+    # Tool docs in the planner prompt: "full" (every tool's full description,
+    # ~15k tokens) or "index" (one line per tool, ~3.6k tokens; the agent calls
+    # describe_tools for full docs). Benchmark "index" before making it default.
+    AGENT_TOOL_DOCS_MODE: str = "full"
     # Tool guard (tool_guard.py): regex block-list checked before any tool
     # runs, on top of the scope allow-list. The default rule blocks
     # government/military domains; disable it only for engagements that are

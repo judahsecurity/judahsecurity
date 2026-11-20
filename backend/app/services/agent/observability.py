@@ -73,10 +73,18 @@ def usage_from_llm_response(response: Any) -> Dict[str, int]:
     """Pull input/output tokens off a LangChain AIMessage or similar."""
     meta = getattr(response, "usage_metadata", None)
     if isinstance(meta, dict) and (meta.get("input_tokens") or meta.get("output_tokens")):
-        return {
+        details = meta.get("input_token_details") or {}
+        usage = {
             "input_tokens": int(meta.get("input_tokens") or 0),
             "output_tokens": int(meta.get("output_tokens") or 0),
         }
+        # Prompt-cache detail (included in input_tokens, priced differently).
+        if isinstance(details, dict):
+            if details.get("cache_read"):
+                usage["cache_read_tokens"] = int(details["cache_read"])
+            if details.get("cache_creation"):
+                usage["cache_write_tokens"] = int(details["cache_creation"])
+        return usage
     rm = getattr(response, "response_metadata", None) or {}
     if not isinstance(rm, dict):
         rm = {}
@@ -97,7 +105,11 @@ def model_id(llm: Any) -> str:
     return ""
 
 
-def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int,
+                      cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> float:
+    """Cost estimate. Cache tokens are part of ``input_tokens``; cache reads bill
+    at 10% of input on Anthropic (50% assumed elsewhere) and Anthropic cache
+    writes at 125%."""
     pricing = MODEL_PRICING.get(model)
     if pricing is None:
         for key, rates in MODEL_PRICING.items():
@@ -106,8 +118,15 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
                 break
     if pricing is None:
         pricing = {"input": 3.0, "output": 15.0}
+    claude = "claude" in (model or "")
+    read_rate = 0.1 if claude else 0.5
+    write_rate = 1.25 if claude else 1.0
+    cache_read = max(0, min(int(cache_read_tokens or 0), input_tokens))
+    cache_write = max(0, min(int(cache_write_tokens or 0), input_tokens - cache_read))
+    plain = input_tokens - cache_read - cache_write
+    effective_input = plain + cache_read * read_rate + cache_write * write_rate
     return round(
-        (input_tokens / 1_000_000) * pricing["input"]
+        (effective_input / 1_000_000) * pricing["input"]
         + (output_tokens / 1_000_000) * pricing["output"],
         6,
     )
@@ -136,7 +155,11 @@ def record_llm_usage(
     totals["input_tokens"] = int(totals.get("input_tokens") or 0) + usage["input_tokens"]
     totals["output_tokens"] = int(totals.get("output_tokens") or 0) + usage["output_tokens"]
     totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
-    call_cost = estimate_cost_usd(model, usage["input_tokens"], usage["output_tokens"])
+    call_cost = estimate_cost_usd(model, usage["input_tokens"], usage["output_tokens"],
+                                  usage.get("cache_read_tokens", 0),
+                                  usage.get("cache_write_tokens", 0))
+    totals["cache_read_tokens"] = (int(totals.get("cache_read_tokens") or 0)
+                                   + int(usage.get("cache_read_tokens") or 0))
     totals["cost_usd"] = round(float(totals.get("cost_usd") or 0) + call_cost, 6)
     calls = list(totals.get("calls") or [])
     calls.append(
@@ -145,6 +168,7 @@ def record_llm_usage(
             "model": model,
             "input_tokens": usage["input_tokens"],
             "output_tokens": usage["output_tokens"],
+            "cache_read_tokens": usage.get("cache_read_tokens", 0),
             "cost_usd": call_cost,
         }
     )

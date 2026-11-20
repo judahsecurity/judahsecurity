@@ -254,6 +254,11 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # Web app URL used for links in notifications (optional)
 # PUBLIC_APP_URL=https://prowl.example.com
 
+# Planner tool docs: "full" (default, ~15k tokens/step) or "index" (one line per
+# tool, ~3.6k tokens; the agent calls describe_tools for details). The fixed
+# prompt prefix is cached on Anthropic either way. Benchmark before switching.
+# AGENT_TOOL_DOCS_MODE=full
+
 # Tool guard: regex block-list checked before any agent tool runs, on top of
 # scope. The default rule blocks government/military domains (.gov, .mil,
 # gov.<cc>); set DEFAULT_RULES=false only for engagements authorized against them.

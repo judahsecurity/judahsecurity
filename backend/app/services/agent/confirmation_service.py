@@ -93,6 +93,7 @@ READONLY_TOOLS = {
     # Brain-only bookkeeping (no target traffic).
     "suggest_capability_chains",
     "analyze_screenshot",  # reads a local screenshot; no target traffic
+    "describe_tools",
     # Background tool execution control: reads, waits and cancels only.
     "get_tool_execution",
     "wait_tool_execution",

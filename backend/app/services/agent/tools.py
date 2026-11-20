@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import re as _re
 import signal
 from collections import deque
@@ -727,6 +728,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "queue_finding_followups": self.queue_finding_followups,
             "suggest_capability_chains": self.suggest_capability_chains,
             "analyze_screenshot": self.analyze_screenshot,
+            "describe_tools": self.describe_tools,
             "log_engagement_approach": self.log_engagement_approach,
             "add_engagement_credential": self.add_engagement_credential,
             "get_engagement_brain": self.get_engagement_brain,
@@ -10747,6 +10749,31 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             },
             indent=2,
         )[:_tool_output_max_chars()]
+
+    async def describe_tools(self, names: Any = None) -> str:
+        """Full documentation (arguments, rules, examples) for the named tools.
+
+        names: list of tool names, or a comma/space separated string (max 15)."""
+        from app.services.agent.prompts import all_tool_docs
+
+        if isinstance(names, str):
+            wanted = [n for n in re.split(r"[\s,]+", names) if n]
+        else:
+            wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
+        if not wanted:
+            return "Pass names=[...] with one or more tool names from the tool index."
+        docs = all_tool_docs()
+        lines, unknown = [], []
+        for name in wanted[:15]:
+            if name in docs:
+                lines.append(docs[name])
+            elif name in self.tools:
+                lines.append(f"- **{name}**: {(getattr(self.tools[name], '__doc__', '') or '').strip()[:1500]}")
+            else:
+                unknown.append(name)
+        if unknown:
+            lines.append("Unknown tools: " + ", ".join(unknown))
+        return "\n".join(lines)
 
     async def analyze_screenshot(self, path: str, question: str = "") -> str:
         """Describe a browser screenshot with the org's vision model (text only).
