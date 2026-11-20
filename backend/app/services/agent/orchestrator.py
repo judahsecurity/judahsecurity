@@ -274,6 +274,22 @@ async def _bounded_planning_call(llm, messages, *, target: str, phase: str):
         return response, alternate
 
 
+def _cap_persisted_tool_output(updates: dict) -> dict:
+    """Cap tool output in the trace/current step written to the checkpoint.
+
+    The node has already parsed the full output; what persists (and is
+    replayed on resume) is the same capped text the model was given.
+    """
+    from app.services.agent.state import cap_trace, cap_trace_step
+
+    max_chars = int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)
+    if "execution_trace" in updates:
+        updates["execution_trace"] = cap_trace(updates["execution_trace"], max_chars)
+    if "_current_step" in updates:
+        updates["_current_step"] = cap_trace_step(updates["_current_step"], max_chars)
+    return updates
+
+
 async def _cancel_background_executions(run_id: str) -> None:
     """Stop background tool executions that outlive their agent run."""
     try:
@@ -2767,6 +2783,8 @@ class AgentOrchestrator:
                 step_data["tool_output"] = str(raw_output)
         step_data["success"] = result.get("success", False)
         step_data["error_message"] = result.get("error")
+        if result.get("artifact_id"):
+            step_data["artifact_id"] = result["artifact_id"]
         # WPScan exit 5 / findings-in-stdout must never land as a failed step.
         if tool_name == "execute_wpscan":
             from app.services.mcp.cli_results import (
@@ -2900,7 +2918,7 @@ class AgentOrchestrator:
         error_code = str(step_data.get("error_message") or "")
         if state.get("mode") == "pilot" and error_code in pilot_stop_errors:
             reason = f"Pilot stopped after {tool_name}: {error_code}"
-            return {
+            return _cap_persisted_tool_output({
                 "_current_step": step_data,
                 "execution_trace": (state.get("execution_trace") or []) + [step_data],
                 "task_complete": True,
@@ -2909,7 +2927,7 @@ class AgentOrchestrator:
                     f"{reason}. {str(tool_output)[:300]} "
                     "No further target actions were attempted; coverage is incomplete."
                 ))],
-            }
+            })
         
         if not tool_output:
             tool_output = step_data.get("error_message") or "No output"
@@ -3215,7 +3233,7 @@ class AgentOrchestrator:
                 "next_steps": (brain_update.get("next_steps") or [])[:5],
             })
 
-        return updates
+        return _cap_persisted_tool_output(updates)
 
     @staticmethod
     def _inject_auth_session(
