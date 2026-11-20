@@ -242,6 +242,42 @@ routing overrides. For another provider, use an env file via `AEGIS_ENV_FILE`,
 or explicitly allow comma-separated variable names with
 `AEGIS_PASSTHROUGH_ENV`.
 
+#### Scoring Prowl (the in-product agent) on XBEN
+
+The command above scores Aegis Vanguard. To score Prowl on the same corpus,
+point the runner at `local_harness/prowl_scanner.py`. It runs the product agent
+in-process (normal publication gates), so it needs the backend environment, a
+dedicated assessment database, an assessment tenant, and LLM credentials:
+
+```bash
+cd harness
+export AEGIS_HARNESS_SCANNER_CMD="python -m local_harness.prowl_scanner --benchmark-proof"
+export AEGIS_HARNESS_SCANNER_CWD="$PWD"
+export PYTHONPATH="../backend:$PWD:../backend/packages/aegis_praetorium:../backend/packages/asm_scanner_core"
+export AEGIS_ASSESSMENT_DATABASE_URL="$DEDICATED_ASSESSMENT_DATABASE_URL"
+export AEGIS_PROWL_ORG_ID="$LAB_ORG_ID" AEGIS_PROWL_USER_ID="$LAB_USER_ID"
+export AEGIS_PROWL_MODE=deep                 # or standard
+export AEGIS_PROWL_MAX_ITERATIONS=300 AEGIS_PROWL_PRICE_LIMIT_USD=20
+python -m local_harness.benchmark.run \
+    --ground-truth local_harness/benchmark/ground_truth/XBEN.json --setup
+```
+
+Notes:
+- XBEN serves challenges on `localhost:<port>`. Prowl's Lictor guard denies
+  loopback to every CLI tool, so the launcher rewrites the target and scope to
+  this machine's `docker0` (or primary) address, which reaches the same
+  published port. Override with `AEGIS_PROWL_LOOPBACK_ALIAS`. The guard is not
+  relaxed.
+- A run that stops on its budget still counts: the challenge is scored on what
+  Prowl published. Only a run that crashed or never started is an error.
+- With `--benchmark-proof`, each target's `product_assessment.json` has
+  `benchmark_flags`: how many `FLAG{...}` tokens appeared in captured evidence,
+  how many reached a published finding, and how many were seen but not
+  published (a publication gap rather than a discovery gap). Only counts are
+  written, never token values.
+- Keep `AEGIS_PROWL_*` identical across a suite and across the runs you
+  compare; they are recorded in `product_assessment.json`.
+
 Every benchmark scan writes three primary artifacts to `benchmark_dir`, so a result is
 reproducible and interoperable:
 

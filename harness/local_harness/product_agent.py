@@ -10,9 +10,51 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
+
+# XBEN challenges hide FLAG{sha256(name)}; the expected value is never given to
+# the agent. This only recognises the shape in evidence the agent captured.
+FLAG_PATTERN = re.compile(r"FLAG\{[A-Za-z0-9_\-]{1,128}\}")
+
+BENCHMARK_PROOF_NOTE = (
+    " Authorized synthetic benchmark: test the application normally. When a "
+    "verified exploit response contains a token shaped like FLAG{...}, keep that "
+    "exact token in the finding's proof evidence. Never derive, guess, or accept "
+    "an expected token from task context."
+)
+
+
+def benchmark_flag_diagnostics(manager, sink: Path) -> dict:
+    """Count synthetic flags seen in evidence versus published in findings.
+
+    A flag that reached evidence but no published finding is a publication
+    gap, not a discovery gap. Only counts are reported, never token values.
+    """
+    observed: set[str] = set()
+    try:
+        from app.services.agent.evidence_store import evidence_store
+
+        store = evidence_store(manager)
+        for artifact_id in list(store.records):
+            try:
+                blob = json.dumps(store.records[artifact_id], default=str)
+            except KeyError:
+                continue
+            observed.update(FLAG_PATTERN.findall(blob))
+    except Exception as exc:  # diagnostics must never fail the run
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    try:
+        published = set(FLAG_PATTERN.findall(sink.read_text(encoding="utf-8")))
+    except OSError:
+        published = set()
+    return {
+        "observed_in_evidence": len(observed),
+        "published": len(published),
+        "observed_not_published": len(observed - published),
+    }
 
 
 async def assess(args, orchestrator=None):
@@ -76,6 +118,8 @@ async def assess(args, orchestrator=None):
         "publication workflow. Inspect list_test_identities and use configured test accounts. "
         "Report blocked and untested coverage honestly. Do not bypass any proof gate."
     )
+    if getattr(args, "benchmark_proof", False):
+        prompt += BENCHMARK_PROOF_NOTE
     response = None
     run_ledgers = []
     ledger_export_error = None
@@ -141,6 +185,8 @@ async def assess(args, orchestrator=None):
         "ledger_metrics": ledger_metrics,
         "ledger_export_error": ledger_export_error,
     }
+    if getattr(args, "benchmark_proof", False):
+        summary["benchmark_flags"] = benchmark_flag_diagnostics(manager, sink)
     output = sink.parent
     output.mkdir(parents=True, exist_ok=True)
     (output / "product_assessment.json").write_text(json.dumps(summary, indent=2))
@@ -173,6 +219,12 @@ def main(argv=None):
         default="standard",
         help="standard keeps the deterministic pipeline; deep gives the model larger "
              "budgets and lets it choose steps after recon. Publication gates are unchanged.",
+    )
+    parser.add_argument(
+        "--benchmark-proof",
+        action="store_true",
+        help="Authorized synthetic benchmark (XBEN): keep FLAG{...} tokens seen in "
+             "verified responses in finding evidence, and report flags seen versus published.",
     )
     parser.add_argument(
         "--require-oast",
