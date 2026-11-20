@@ -339,6 +339,11 @@ class AgentState(TypedDict, total=False):
     prior_hunt_brief: Optional[str]
     compacted_brief: Optional[str]
     price_limit_usd: Optional[float]
+    # Planner no-progress guard (planner_progress.py): gate rejections since the
+    # last tool run, and the last prompt fingerprint with its repeat count.
+    planner_feedback: Optional[List[Dict[str, Any]]]
+    planner_fingerprint: Optional[str]
+    planner_repeats: Optional[int]
 
 
 def format_todo_list(todo_list: List[Dict[str, Any]]) -> str:

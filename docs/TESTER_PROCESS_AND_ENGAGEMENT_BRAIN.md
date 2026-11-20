@@ -309,6 +309,11 @@ Use for IDOR, host-tenant, authz, and workflow tampers. Then `update_hypothesis`
   only when the concrete model is `ChatAnthropic`, including per member of the
   fallback chain; other providers get a plain string. Fireteam specialists also
   mark their newest message, so each loop turn reads earlier turns from cache.
+- **No paid repeats** — a gated `complete`, a blocked phase transition or an
+  unparseable reply runs no tool. Its rejection reason now appears in the next
+  planner prompt until a tool runs (`planner_progress.py`). If the same prompt,
+  ignoring the iteration counter, would be sent a third time in a row, the turn
+  stops with a "Coverage is incomplete" reason instead of calling the model.
 - **Logic before spray** — broad Nuclei is gated until a capability map exists (unless `force=true` / non-browser).  
 - **Coverage specialist** — deep / authenticated Nuclei after creds or high-value hits.  
 - **Future `nuclei_scout`** — optional thin early Nuclei lead-generator that only enqueues cards (does not judge impact). See harness docs for measuring chain recall.

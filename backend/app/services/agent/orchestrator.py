@@ -48,6 +48,15 @@ from app.services.agent.state import (
     clip_text,
 )
 from app.services.agent.prompt_cache import cacheable_system, prepare_for_model
+from app.services.agent.planner_progress import (
+    MAX_IDENTICAL_PLANS,
+    PARSE_FAILURE_NOTE,
+    format_feedback as format_planner_feedback,
+    prompt_fingerprint,
+    record_feedback as record_planner_feedback,
+    repeat_count as planner_repeat_count,
+    stall_reason as planner_stall_reason,
+)
 from app.services.agent.prompts import (
     render_prompt_parts,
     OUTPUT_ANALYSIS_PROMPT,
@@ -1602,6 +1611,9 @@ class AgentOrchestrator:
                 except Exception:
                     forced_complete = False
 
+        plan_fp: Optional[str] = None
+        plan_repeats = 0
+        parse_failed = False
         if forced:
             cve_writeup = forced["tool_name"] in (
                 "validate_finding", "create_finding", "check_cve_applicability",
@@ -1833,9 +1845,36 @@ class AgentOrchestrator:
                 )
             # Stable guidance and the phase's tool list form a cacheable system
             # prefix; the per-step state rides in the user turn after it.
+            feedback_txt = format_planner_feedback(state)
+            human_prompt = (
+                prompt_parts.state
+                + ("\n\n" + feedback_txt if feedback_txt else "")
+                + "\n\n" + steer_prompt
+            )
+            plan_fp = prompt_fingerprint(human_prompt)
+            plan_repeats = planner_repeat_count(state, plan_fp)
+            if plan_repeats >= MAX_IDENTICAL_PLANS:
+                # Same context, already rejected: another call would be paid for
+                # the same answer. Close with an explicit partial result.
+                reason = planner_stall_reason(state)
+                logger.warning("[%s/%s] %s", user_id, session_id, reason)
+                await self._emit_status({
+                    "type": "thinking",
+                    "iteration": iteration,
+                    "phase": phase,
+                    "thought": reason[:300],
+                    "action": "complete",
+                })
+                return {
+                    "task_complete": True,
+                    "completion_reason": reason,
+                    "planner_fingerprint": plan_fp,
+                    "planner_repeats": plan_repeats,
+                    "messages": [AIMessage(content=reason)],
+                }
             messages = [
                 cacheable_system(prompt_parts.static, prompt_parts.tools),
-                HumanMessage(content=prompt_parts.state + "\n\n" + steer_prompt),
+                HumanMessage(content=human_prompt),
             ]
 
             llm = self._resolve_llm(state, LLMTask.REASONING)
@@ -1891,6 +1930,7 @@ class AgentOrchestrator:
 
             # Parse decision
             decision = self._parse_llm_decision(response_text)
+            parse_failed = decision.reasoning == "Failed to parse response"
 
             logger.info(f"[{user_id}] Decision: action={decision.action}, tool={decision.tool_name}")
 
@@ -1969,6 +2009,8 @@ class AgentOrchestrator:
             "prior_hunt_brief": prior_hunt_brief or None,
             "compacted_brief": compacted_brief or None,
             "price_limit_usd": limit_usd,
+            "planner_fingerprint": plan_fp,
+            "planner_repeats": plan_repeats,
         }
         if drain_trace_extra or compacted_brief:
             updates["execution_trace"] = merged_trace
@@ -2005,6 +2047,7 @@ class AgentOrchestrator:
                 updates["_decision"] = blocked
                 updates["_current_step"] = step.model_dump()
                 updates["messages"] = [AIMessage(content=tester_block)]
+                updates["planner_feedback"] = self._planner_feedback(state, updates, parse_failed)
                 return updates
             brain_state = state.get("engagement_brain") or {}
             cmap = state.get("capability_map") or {}
@@ -2053,6 +2096,7 @@ class AgentOrchestrator:
                             "Or set completion_reason to include 'defer methodologies' / "
                             "'force complete' if intentionally skipping."
                         ))]
+                        updates["planner_feedback"] = self._planner_feedback(state, updates, parse_failed)
                         return updates
                 except Exception:
                     logger.exception("methodology complete-gate failed")
@@ -2068,6 +2112,7 @@ class AgentOrchestrator:
                         "crawl, directory brute-force, parameter mining, then "
                         "fireteam_dispatch(specialists='auto')."
                     ))]
+                    updates["planner_feedback"] = self._planner_feedback(state, updates, parse_failed)
                     return updates
             updates["task_complete"] = True
             updates["completion_reason"] = decision.completion_reason or "Task completed"
@@ -2107,6 +2152,7 @@ class AgentOrchestrator:
                     "If this target is not a web app, request the transition again with reason "
                     "containing 'non-browser'."
                 ))]
+                updates["planner_feedback"] = self._planner_feedback(state, updates, parse_failed)
                 return updates
 
             # Soft nudge: exploitation with map but no methodology cards
@@ -2132,6 +2178,7 @@ class AgentOrchestrator:
                     "Call **sync_engagement_brain** so observation→methodology hypotheses "
                     "(CWE/CAPEC-tagged) drive the fireteam, then transition again."
                 ))]
+                updates["planner_feedback"] = self._planner_feedback(state, updates, parse_failed)
                 return updates
 
             if to_phase == phase:
@@ -3475,6 +3522,16 @@ class AgentOrchestrator:
             return "process_answer"
         return "think"
     
+    @staticmethod
+    def _planner_feedback(state: AgentState, updates: dict, parse_failed: bool) -> list:
+        """Record why this think step's decision was rejected, for the next prompt."""
+        msgs = updates.get("messages") or []
+        text = str(getattr(msgs[-1], "content", "") or "") if msgs else ""
+        if parse_failed:
+            text = PARSE_FAILURE_NOTE + " " + text
+        trace = updates.get("execution_trace", state.get("execution_trace")) or []
+        return record_planner_feedback(state, text, trace_len=len(trace))
+
     def _route_after_think(self, state: AgentState) -> str:
         from app.services.agent.run_control import is_stop_requested
         if is_stop_requested(state.get("session_id")):
