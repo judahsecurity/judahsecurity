@@ -118,6 +118,10 @@ services:
       - AGENT_STEERING_MODE=${AGENT_STEERING_MODE:-advisory}
       - AGENT_STEERING_FREE_TURNS=${AGENT_STEERING_FREE_TURNS:-2}
       - AGENT_HUNT_DISCIPLINE_PROMPT=${AGENT_HUNT_DISCIPLINE_PROMPT:-true}
+      # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
+      - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
+      - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
+      - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
       # Legacy optional executor; normal Prowl mode uses the built-in backend tools.
       - PROWL_ASSESSMENT_URL=${PROWL_ASSESSMENT_URL:-}
       - PROWL_ADMIN_TOKEN=${PROWL_ADMIN_TOKEN:-}
@@ -307,6 +311,55 @@ services:
     networks:
       - asm_network
 
+  # Isolated execution for model-written probe scripts (run_custom_probe).
+  # Enable with `--profile probe-sandbox` and AGENT_CUSTOM_PROBE_MODE=isolated.
+  # probe-runner sits only on probe_net (internal: no route out); its single
+  # exit is probe-egress's scope-checking proxy, keyed by a per-job credential.
+  probe-egress:
+    build:
+      context: ./backend
+      dockerfile: probe_sandbox/Dockerfile
+    image: ${PROBE_SANDBOX_IMAGE:-asm-probe-sandbox:latest}
+    command: ["python", "-I", "/app/egress.py"]
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      - PROBE_RELAY_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
+      - PROBE_RUNNER_TOKEN=${PROBE_RUNNER_TOKEN:-}
+      - PROBE_RUNNER_URL=http://probe-runner:8000
+      - PROBE_PROXY_HOST=probe-egress
+    networks:
+      - asm_network
+      - probe_net
+    profiles:
+      - probe-sandbox
+
+  probe-runner:
+    image: ${PROBE_SANDBOX_IMAGE:-asm-probe-sandbox:latest}
+    command: ["python", "-I", "/app/runner.py"]
+    restart: unless-stopped
+    depends_on:
+      - probe-egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # Root only to drop each script to uid 65534; no other capabilities.
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, KILL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    environment:
+      - PROBE_RUNNER_TOKEN=${PROBE_RUNNER_TOKEN:-}
+    networks:
+      - probe_net
+    profiles:
+      - probe-sandbox
+
   # Scanner Worker for async scan tasks
   scanner:
     build:
@@ -472,6 +525,10 @@ services:
       - AGENT_STEERING_MODE=${AGENT_STEERING_MODE:-advisory}
       - AGENT_STEERING_FREE_TURNS=${AGENT_STEERING_FREE_TURNS:-2}
       - AGENT_HUNT_DISCIPLINE_PROMPT=${AGENT_HUNT_DISCIPLINE_PROMPT:-true}
+      # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
+      - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
+      - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
+      - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
       - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
       - AEGIS_ASSESSMENT_PROXY_URL=${AEGIS_ASSESSMENT_PROXY_URL:-}
@@ -773,6 +830,9 @@ services:
 networks:
   asm_network:
     driver: bridge
+  probe_net:
+    driver: bridge
+    internal: true
 
 volumes:
   prowl_assessment_data:

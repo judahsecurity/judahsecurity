@@ -6963,12 +6963,25 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         Allowed imports: json, re, httpx, hashlib, hmac, base64, time, math,
         datetime, collections, urllib.parse. Hosts must be in engagement scope.
-        Print results to stdout. Not a shell — no os/subprocess/sockets.
+        Print results to stdout. Runs only when AGENT_CUSTOM_PROBE_MODE allows it;
+        "isolated" executes in the probe-runner container behind a scope proxy.
         """
         if self._scoped_policy_applied:
             return json.dumps({"error": "Custom Python HTTP probes cannot enforce operator method and path approvals; use structured replay tools."})
-        from app.services.agent.custom_probe import run_custom_probe_async
+        from app.services.agent.custom_probe import (
+            custom_probe_mode,
+            run_custom_probe_async,
+            run_custom_probe_isolated,
+        )
 
+        mode = custom_probe_mode()
+        if mode == "off":
+            return json.dumps({
+                "error": "custom_probe_disabled",
+                "detail": "Custom Python probes are disabled on this deployment "
+                          "(AGENT_CUSTOM_PROBE_MODE=off). Use mutate_captured_request, "
+                          "replay_http_request, compare_requests, or mutate_list.",
+            })
         hosts: List[str] = []
         if allowed_hosts:
             hosts.extend(
@@ -6981,7 +6994,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if isinstance(cmap, dict) and cmap.get("target"):
             hosts.append(str(cmap.get("target")))
 
-        result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
+        runner = run_custom_probe_isolated if mode == "isolated" else run_custom_probe_async
+        result = await runner(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
+        result["execution"] = mode
         result["oob_allowed"] = True
         result["hint"] = (
             "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "

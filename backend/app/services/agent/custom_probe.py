@@ -356,3 +356,74 @@ async def run_custom_probe_async(
         "stderr": stderr.decode("utf-8", errors="replace")[:2000],
         "allowed_hosts": hosts,
     }
+
+
+# --- execution mode / isolated runner client --------------------------------
+
+PROBE_MODES = ("off", "isolated", "inprocess")
+
+
+def custom_probe_mode() -> str:
+    """off | isolated | inprocess. Unknown values fail closed to off."""
+    from app.core.config import settings
+
+    mode = str(getattr(settings, "AGENT_CUSTOM_PROBE_MODE", "off") or "off").strip().lower()
+    return mode if mode in PROBE_MODES else "off"
+
+
+async def run_custom_probe_isolated(
+    source: str,
+    *,
+    allowed_hosts: Sequence[str],
+    timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """Run the probe in the probe-runner container via the probe-egress relay.
+
+    The relay registers the scope for this one job, the runner executes the
+    script as an unprivileged user on a network whose only exit is the relay's
+    scope-enforcing proxy, and the relay returns the result plus its egress log.
+    """
+    import httpx
+
+    from app.core.config import settings
+
+    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
+    if isinstance(prepared, dict):
+        return prepared
+    hosts, timeout_sec, script, _env = prepared
+    url = str(getattr(settings, "AGENT_PROBE_RUNNER_URL", "") or "").rstrip("/")
+    token = str(getattr(settings, "AGENT_PROBE_RUNNER_TOKEN", "") or "")
+    if not url or not token:
+        return {"ok": False, "error": "probe runner is not configured "
+                "(AGENT_PROBE_RUNNER_URL / AGENT_PROBE_RUNNER_TOKEN)"}
+    payload = {
+        "script": script,
+        "allowed_hosts": hosts,
+        "oob_suffixes": list(OOB_HOST_SUFFIXES),
+        "timeout_sec": timeout_sec,
+    }
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=timeout_sec + 15) as client:
+            response = await client.post(
+                f"{url}/run", json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as exc:
+        return {"ok": False, "error": f"probe runner unreachable: {type(exc).__name__}"}
+    if response.status_code != 200:
+        return {"ok": False, "error": f"probe runner returned HTTP {response.status_code}"}
+    try:
+        result = response.json()
+    except ValueError:
+        return {"ok": False, "error": "probe runner returned invalid JSON"}
+    if not isinstance(result, dict):
+        return {"ok": False, "error": "probe runner returned invalid JSON"}
+    return {
+        "ok": bool(result.get("ok")),
+        "exit_code": result.get("exit_code"),
+        "stdout": str(result.get("stdout") or "")[:MAX_OUTPUT_CHARS],
+        "stderr": str(result.get("stderr") or "")[:2000],
+        "error": result.get("error"),
+        "egress": (result.get("egress") or [])[:200],
+        "allowed_hosts": hosts,
+    }

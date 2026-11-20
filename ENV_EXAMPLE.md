@@ -256,6 +256,13 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # AGENT_STEERING_FREE_TURNS=2
 # AGENT_HUNT_DISCIPLINE_PROMPT=true
 
+# Model-written probe scripts: off (default) | isolated | inprocess (lab only).
+# isolated needs `docker compose --profile probe-sandbox` and two random tokens
+# (openssl rand -hex 24). See docs/AGENT_RELIABILITY_ROLLOUT.md.
+# AGENT_CUSTOM_PROBE_MODE=off
+# AGENT_PROBE_RUNNER_TOKEN=
+# PROBE_RUNNER_TOKEN=
+
 # =============================================================================
 # Neo4j Graph Database (optional - for asset relationship modeling)
 # =============================================================================

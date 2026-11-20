@@ -204,6 +204,14 @@ class Settings(BaseSettings):
     # Add hunting-discipline rules (exhaust bypasses, depth over breadth,
     # re-examine negatives, hand off side clues) to Joshua and specialists.
     AGENT_HUNT_DISCIPLINE_PROMPT: bool = False
+    # Where run_custom_probe / run_poc_python execute model-written Python.
+    # "off": tool disabled. "isolated": sent to the probe-runner container
+    # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).
+    # "inprocess": legacy subprocess inside this container; its AST checks are
+    # bypassable (shell and file access), so use it only on isolated lab hosts.
+    AGENT_CUSTOM_PROBE_MODE: str = "off"
+    AGENT_PROBE_RUNNER_URL: str = "http://probe-egress:9000"
+    AGENT_PROBE_RUNNER_TOKEN: str = ""
 
     # Private scoped-assessment executor. Aegis remains the agent/model runtime.
     PROWL_ASSESSMENT_URL: str = ""

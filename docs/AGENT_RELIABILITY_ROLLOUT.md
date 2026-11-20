@@ -72,3 +72,47 @@ met. Each deferral is logged as `Advisory steering: deferring pipeline step`.
 
 Suggested sequence: strict baseline, then `AGENT_HUNT_DISCIPLINE_PROMPT=true`,
 then that plus `AGENT_STEERING_MODE=advisory`, all at the same budget.
+
+## Custom probes (run_custom_probe / run_poc_python)
+
+Specialists can write one-off Python HTTP probes. The original in-process
+runner executed them inside the backend container behind AST checks, and those
+checks are bypassable: module attributes reach `os` (shell as the backend user),
+`codecs` (file reads), and raw `urllib`/`httpx` transports (any host). Because
+probe source is model-written and target content can steer the model, the tool
+is now controlled by `AGENT_CUSTOM_PROBE_MODE`:
+
+| Mode | Behavior |
+|---|---|
+| `off` (default) | Tool refused and removed from specialist tool lists. |
+| `isolated` | Script runs in `probe-runner` via `probe-egress`. |
+| `inprocess` | Legacy runner in the backend container. Isolated lab hosts only. |
+
+`isolated` architecture (`backend/probe_sandbox/`, compose profile
+`probe-sandbox`):
+
+- `probe-runner` is attached only to `probe_net`, an `internal: true` network
+  with no route out. It holds no backend code, secrets, or volumes, runs with
+  a read-only root and dropped capabilities, and executes each script as uid
+  65534 with CPU, memory, file and process limits. Scripts cannot read the
+  runner's environment.
+- `probe-egress` bridges `asm_network` and `probe_net`. Its relay (port 9000)
+  accepts jobs from the backend, registers that job's scope, and hands the
+  runner a one-job proxy credential. Its proxy (port 3128) allows only
+  in-scope hosts plus OAST suffixes, refuses names that resolve only to
+  private, loopback, link-local or metadata addresses, connects to the address
+  it checked, caps requests per job, and returns an egress log with the result.
+
+Enable:
+
+```bash
+echo "AGENT_PROBE_RUNNER_TOKEN=$(openssl rand -hex 24)" >> .env
+echo "PROBE_RUNNER_TOKEN=$(openssl rand -hex 24)" >> .env
+echo "AGENT_CUSTOM_PROBE_MODE=isolated" >> .env
+docker compose --profile probe-sandbox up -d --build probe-egress probe-runner backend autonomy-worker
+```
+
+Known limits: HTTPS through the proxy is tunneled, so request/response bodies
+are not recorded (the egress log has host, port, method and verdict). DNS
+queries from the runner go to Docker's embedded resolver. Lab targets on
+private addresses need `PROBE_ALLOW_PRIVATE_TARGETS=true` on `probe-egress`.
