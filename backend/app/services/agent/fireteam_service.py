@@ -1710,6 +1710,11 @@ async def _run_specialist(
         # specialists from spending turns on a disabled tool.
         allowed_tools = [name for name in allowed_tools
                          if name not in ("run_custom_probe", "run_poc_python")]
+    from app.core.config import settings as _settings
+
+    if (custom_probe_mode() == "isolated" and getattr(_settings, "AGENT_SANDBOX_SHELL", False)
+            and "run_custom_probe" in allowed_tools and "sandbox_shell" not in allowed_tools):
+        allowed_tools.append("sandbox_shell")
     from app.services.agent.pilot_policy import current_pilot
 
     pilot = current_pilot()

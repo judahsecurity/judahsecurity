@@ -125,6 +125,21 @@ echo "AGENT_CUSTOM_PROBE_MODE=isolated" >> .env
 docker compose --profile probe-sandbox up -d --build probe-egress probe-runner backend autonomy-worker
 ```
 
+### sandbox_shell
+
+With `AGENT_CUSTOM_PROBE_MODE=isolated` and `AGENT_SANDBOX_SHELL=true` (the
+compose default), specialists that have `run_custom_probe` also get
+`sandbox_shell(command, allowed_hosts?, timeout_sec<=120)`. It runs `bash -c`
+as uid 65534 in `probe-runner`, whose image carries curl, wget, jq, sqlmap,
+ffuf, python (requests, httpx, pyjwt) and `/opt/wordlists`. curl, wget and
+python honor the proxy variables; ffuf and sqlmap need `-x "$PROBE_PROXY"` /
+`--proxy="$PROBE_PROXY"`, and anything that ignores the proxy simply has no
+route out. Every exchange is recorded as evidence like custom probes.
+Destructive flags are refused before the job is sent (`--os-shell`,
+`--os-pwn`, `--sql-shell`, `--file-write`, `--dump-all`, `--risk=3`, and
+brute-force tools such as hydra); this is a guardrail on in-scope impact, not
+the security boundary, which is the network sandbox.
+
 Known limits: WebSocket upgrades and HTTP/2 are not supported through the
 proxy (HTTP/1.1 only). Brotli bodies are stored still encoded. DNS queries
 from the runner go to Docker's embedded resolver. Lab targets on private

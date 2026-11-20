@@ -383,21 +383,68 @@ async def run_custom_probe_isolated(
     script as an unprivileged user on a network whose only exit is the relay's
     scope-enforcing proxy, and the relay returns the result plus its egress log.
     """
-    import httpx
-
-    from app.core.config import settings
-
     prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
     if isinstance(prepared, dict):
         return prepared
     hosts, timeout_sec, script, _env = prepared
+    return await _post_to_relay({"script": script}, hosts, timeout_sec)
+
+
+# Flags that turn a sandboxed check into a destructive or exfiltrating action
+# against the customer's systems. The network sandbox bounds where traffic
+# goes; this bounds what in-scope traffic is allowed to do.
+SHELL_DENY_PATTERNS = (
+    r"--os-(?:shell|pwn|cmd|smbrelay|bof)\b",
+    r"--(?:sql-shell|sql-query|file-write|file-dest|reg-add|reg-del|priv-esc)\b",
+    r"--dump-all\b",
+    r"--risk[ =]?3\b",
+    r"\bhydra\b|\bmedusa\b|\bpatator\b",
+)
+MAX_SHELL_TIMEOUT_SEC = 120.0
+
+
+def shell_command_violations(command: str) -> List[str]:
+    import re
+
+    text = command or ""
+    if not text.strip():
+        return ["command is empty"]
+    if len(text.encode()) > 8000:
+        return ["command exceeds 8000 bytes"]
+    return [f"blocked flag or tool: {match.group(0)}"
+            for pattern in SHELL_DENY_PATTERNS
+            for match in [re.search(pattern, text, re.IGNORECASE)] if match]
+
+
+async def run_sandbox_shell(
+    command: str,
+    *,
+    allowed_hosts: Sequence[str],
+    timeout_sec: float = 60,
+) -> dict[str, Any]:
+    """Run a shell command in probe-runner; network only via probe-egress."""
+    hosts = _normalize_hosts(allowed_hosts)
+    if not hosts:
+        return {"ok": False, "error": "No in-scope hosts. Pass allowed_hosts or set a primary target first."}
+    violations = shell_command_violations(command)
+    if violations:
+        return {"ok": False, "error": "Sandbox rejected command", "violations": violations}
+    timeout_sec = max(3.0, min(float(timeout_sec or 60), MAX_SHELL_TIMEOUT_SEC))
+    return await _post_to_relay({"command": command}, hosts, timeout_sec)
+
+
+async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: float) -> dict[str, Any]:
+    import httpx
+
+    from app.core.config import settings
+
     url = str(getattr(settings, "AGENT_PROBE_RUNNER_URL", "") or "").rstrip("/")
     token = str(getattr(settings, "AGENT_PROBE_RUNNER_TOKEN", "") or "")
     if not url or not token:
         return {"ok": False, "error": "probe runner is not configured "
                 "(AGENT_PROBE_RUNNER_URL / AGENT_PROBE_RUNNER_TOKEN)"}
     payload = {
-        "script": script,
+        **job,
         "allowed_hosts": hosts,
         "oob_suffixes": list(OOB_HOST_SUFFIXES),
         "timeout_sec": timeout_sec,

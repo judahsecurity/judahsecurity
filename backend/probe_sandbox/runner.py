@@ -29,6 +29,9 @@ MAX_CONCURRENT = int(os.environ.get("PROBE_MAX_CONCURRENT", "4"))
 MAX_SCRIPT_BYTES = 200_000
 MAX_OUTPUT = 20_000
 MAX_TIMEOUT = 45.0
+MAX_SHELL_TIMEOUT = 120.0
+MAX_COMMAND_BYTES = 8000
+SHELL = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 
@@ -51,12 +54,14 @@ def _drop_privileges() -> None:
         os.setuid(PROBE_UID)
 
 
-def run_script(script: str, timeout: float, proxy_url: str, ca_pem: str = "") -> dict:
+def run_script(script: str, timeout: float, proxy_url: str, ca_pem: str = "",
+               *, command: str = "") -> dict:
+    """Run a Python probe (script) or a shell command (command) as PROBE_UID."""
     workdir = tempfile.mkdtemp(prefix="probe-")
     try:
         path = os.path.join(workdir, "probe.py")
         with open(path, "w", encoding="utf-8") as handle:
-            handle.write(script)
+            handle.write(script or "")
         ca_path = os.path.join(workdir, "proxy-ca.pem")
         with open(ca_path, "w", encoding="ascii") as handle:
             handle.write(ca_pem)
@@ -78,9 +83,13 @@ def run_script(script: str, timeout: float, proxy_url: str, ca_pem: str = "") ->
             "HTTP_PROXY": proxy_url, "HTTPS_PROXY": proxy_url, "ALL_PROXY": proxy_url,
             "http_proxy": proxy_url, "https_proxy": proxy_url, "all_proxy": proxy_url,
             "NO_PROXY": "", "no_proxy": "",
+            # For tools that ignore the proxy variables (ffuf -x, sqlmap --proxy).
+            "PROBE_PROXY": proxy_url,
+            "TERM": "dumb",
         }
-        process = subprocess.Popen(  # noqa: S603 - fixed interpreter, isolated container
-            [sys.executable, "-I", path], cwd=workdir, env=env,
+        argv = [SHELL, "-c", command] if command else [sys.executable, "-I", path]
+        process = subprocess.Popen(  # noqa: S603 - isolated container, unprivileged uid
+            argv, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=_drop_privileges,
         )
         try:
@@ -133,12 +142,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self.rfile.read(length))
-            script = str(req["script"])
+            command = str(req.get("command") or "")
+            script = "" if command else str(req["script"])
             proxy_url = str(req["proxy_url"])
-            timeout = max(3.0, min(float(req.get("timeout_sec") or 20), MAX_TIMEOUT))
+            ceiling = MAX_SHELL_TIMEOUT if command else MAX_TIMEOUT
+            timeout = max(3.0, min(float(req.get("timeout_sec") or 20), ceiling))
             ca_pem = str(req.get("ca_pem") or "")
         except (ValueError, KeyError, TypeError):
             self._json(400, {"error": "invalid job"})
+            return
+        if len(command.encode()) > MAX_COMMAND_BYTES:
+            self._json(413, {"error": "command too long"})
             return
         if ca_pem and not ca_pem.startswith("-----BEGIN CERTIFICATE-----"):
             self._json(400, {"error": "invalid CA certificate"})
@@ -147,7 +161,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(503, {"error": "runner busy"})
             return
         try:
-            self._json(200, run_script(script, timeout, proxy_url, ca_pem))
+            self._json(200, run_script(script, timeout, proxy_url, ca_pem, command=command))
         finally:
             _slots.release()
 

@@ -776,6 +776,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "mcp_disconnect": self.mcp_disconnect,
             "run_custom_probe": self.run_custom_probe,
             "run_poc_python": self.run_custom_probe,
+            "sandbox_shell": self.sandbox_shell,
             "list_captured_requests": self.list_captured_requests,
             "plan_intruder_mutations": self.plan_intruder_mutations,
             "run_intruder_batch": self.run_intruder_batch,
@@ -7011,18 +7012,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                           "(AGENT_CUSTOM_PROBE_MODE=off). Use mutate_captured_request, "
                           "replay_http_request, compare_requests, or mutate_list.",
             })
-        hosts: List[str] = []
-        if allowed_hosts:
-            hosts.extend(
-                p.strip() for p in str(allowed_hosts).replace(",", "\n").splitlines() if p.strip()
-            )
-        fallback = (getattr(self, "_fallback_target", "") or "").strip()
-        if fallback:
-            hosts.append(fallback)
-        cmap = getattr(self, "_capability_map", None) or {}
-        if isinstance(cmap, dict) and cmap.get("target"):
-            hosts.append(str(cmap.get("target")))
-
+        hosts = self._probe_scope_hosts(allowed_hosts)
         runner = run_custom_probe_isolated if mode == "isolated" else run_custom_probe_async
         result = await runner(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
         result["execution"] = mode
@@ -7041,6 +7031,56 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "submit_finding_candidate instead of pasting stdout."
             )
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    async def sandbox_shell(
+        self,
+        command: str,
+        allowed_hosts: Optional[str] = None,
+        timeout_sec: float = 60,
+        **kwargs: Any,
+    ) -> str:
+        """Run a shell command in the isolated probe runner (bash, curl, jq,
+        sqlmap, ffuf, python with requests/httpx/pyjwt). Network leaves only
+        through the scope proxy: in-scope hosts and OAST, HTTP(S) only, every
+        exchange recorded as evidence. curl, wget and python honor the proxy
+        automatically; pass ffuf -x "$PROBE_PROXY" and
+        sqlmap --proxy="$PROBE_PROXY". Nothing persists between calls.
+        """
+        from app.services.agent.custom_probe import custom_probe_mode, run_sandbox_shell
+
+        if self._scoped_policy_applied:
+            return json.dumps({"error": "Sandbox shell cannot enforce operator method and path approvals; use structured replay tools."})
+        if custom_probe_mode() != "isolated" or not getattr(settings, "AGENT_SANDBOX_SHELL", False):
+            return json.dumps({
+                "error": "sandbox_shell_disabled",
+                "detail": "Requires AGENT_CUSTOM_PROBE_MODE=isolated and AGENT_SANDBOX_SHELL=true.",
+            })
+        result = await run_sandbox_shell(
+            command, allowed_hosts=self._probe_scope_hosts(allowed_hosts), timeout_sec=timeout_sec,
+        )
+        result["execution"] = "isolated"
+        if result.get("exchanges"):
+            result["exchanges"] = self._record_probe_exchanges(result["exchanges"])
+            result["hint"] = (
+                "Every request is recorded under exchanges[].evidence_id. Read bodies "
+                "with read_evidence, search with search_evidence, cite the IDs in "
+                "submit_finding_candidate."
+            )
+        return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    def _probe_scope_hosts(self, allowed_hosts: Optional[str]) -> List[str]:
+        hosts: List[str] = []
+        if allowed_hosts:
+            hosts.extend(
+                p.strip() for p in str(allowed_hosts).replace(",", "\n").splitlines() if p.strip()
+            )
+        fallback = (getattr(self, "_fallback_target", "") or "").strip()
+        if fallback:
+            hosts.append(fallback)
+        cmap = getattr(self, "_capability_map", None) or {}
+        if isinstance(cmap, dict) and cmap.get("target"):
+            hosts.append(str(cmap.get("target")))
+        return hosts
 
     async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:
         """Index captured XHR/API samples from the capability map for mutate_captured_request."""

@@ -123,6 +123,7 @@ services:
       - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
       - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
+      - AGENT_SANDBOX_SHELL=${AGENT_SANDBOX_SHELL:-true}
       # Legacy optional executor; normal Prowl mode uses the built-in backend tools.
       - PROWL_ASSESSMENT_URL=${PROWL_ASSESSMENT_URL:-}
       - PROWL_ADMIN_TOKEN=${PROWL_ADMIN_TOKEN:-}
@@ -320,7 +321,8 @@ services:
     build:
       context: ./backend
       dockerfile: probe_sandbox/Dockerfile
-    image: ${PROBE_SANDBOX_IMAGE:-asm-probe-sandbox:latest}
+      target: egress
+    image: ${PROBE_EGRESS_IMAGE:-asm-probe-egress:latest}
     command: ["python", "-I", "/app/egress.py"]
     restart: unless-stopped
     user: "10001:10001"
@@ -341,7 +343,11 @@ services:
       - probe-sandbox
 
   probe-runner:
-    image: ${PROBE_SANDBOX_IMAGE:-asm-probe-sandbox:latest}
+    build:
+      context: ./backend
+      dockerfile: probe_sandbox/Dockerfile
+      target: runner
+    image: ${PROBE_RUNNER_IMAGE:-asm-probe-runner:latest}
     command: ["python", "-I", "/app/runner.py"]
     restart: unless-stopped
     depends_on:
@@ -533,6 +539,7 @@ services:
       - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
       - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
+      - AGENT_SANDBOX_SHELL=${AGENT_SANDBOX_SHELL:-true}
       - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
       - AEGIS_ASSESSMENT_PROXY_URL=${AEGIS_ASSESSMENT_PROXY_URL:-}

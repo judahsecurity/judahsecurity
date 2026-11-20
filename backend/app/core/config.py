@@ -218,6 +218,9 @@ class Settings(BaseSettings):
     AGENT_CUSTOM_PROBE_MODE: str = "off"
     AGENT_PROBE_RUNNER_URL: str = "http://probe-egress:9000"
     AGENT_PROBE_RUNNER_TOKEN: str = ""
+    # Give specialists sandbox_shell (bash + curl/sqlmap/ffuf/python) inside
+    # probe-runner. Needs AGENT_CUSTOM_PROBE_MODE=isolated; never runs in-process.
+    AGENT_SANDBOX_SHELL: bool = False
 
     # Private scoped-assessment executor. Aegis remains the agent/model runtime.
     PROWL_ASSESSMENT_URL: str = ""

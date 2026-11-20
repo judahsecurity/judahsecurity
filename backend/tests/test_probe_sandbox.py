@@ -229,3 +229,83 @@ def test_probe_exchanges_become_redacted_evidence():
     assert record["kind"] == "http_exchange" and record["test_type"] == "custom_probe"
     assert record["payload"]["request"]["headers"]["Authorization"] == "[redacted]"
     assert '"bob"' in record["payload"]["response"]["body"]
+
+
+# --- sandbox_shell ------------------------------------------------------------
+
+from app.services.agent.custom_probe import shell_command_violations
+
+
+@pytest.mark.parametrize("command,blocked", [
+    ("curl -s https://app.example.com/api/me", False),
+    ("ffuf -x \"$PROBE_PROXY\" -w /opt/wordlists/app-dirs-common.txt -u https://a/FUZZ", False),
+    ("sqlmap -u 'https://a/x?id=1' --batch --proxy=\"$PROBE_PROXY\"", False),
+    ("sqlmap -u 'https://a/x?id=1' --os-shell", True),
+    ("sqlmap -u x --OS-PWN", True),
+    ("sqlmap -u x --dump-all", True),
+    ("sqlmap -u x --risk=3", True),
+    ("sqlmap -u x --file-write=/tmp/a --file-dest=/var/www/a", True),
+    ("hydra -l admin -P list https://a", True),
+    ("", True),
+])
+def test_shell_guard(command, blocked):
+    assert bool(shell_command_violations(command)) is blocked
+
+
+def _shell_manager():
+    from app.services.agent.tools import ASMToolsManager
+
+    manager = ASMToolsManager.__new__(ASMToolsManager)
+    manager._scoped_policy_applied = False
+    manager._fallback_target = "https://app.example.com"
+    manager._capability_map = {}
+    return manager
+
+
+def test_sandbox_shell_needs_isolated_mode_and_flag(monkeypatch):
+    manager = _shell_manager()
+    out = json.loads(asyncio.run(manager.sandbox_shell("curl -s https://app.example.com/")))
+    assert out["error"] == "sandbox_shell_disabled"
+    monkeypatch.setattr(settings, "AGENT_CUSTOM_PROBE_MODE", "inprocess")
+    monkeypatch.setattr(settings, "AGENT_SANDBOX_SHELL", True)
+    out = json.loads(asyncio.run(manager.sandbox_shell("curl -s https://app.example.com/")))
+    assert out["error"] == "sandbox_shell_disabled"
+
+
+def test_sandbox_shell_posts_command_and_records_exchanges(monkeypatch):
+    from app.services.agent import custom_probe
+    from app.services.agent.evidence_store import evidence_store
+
+    monkeypatch.setattr(settings, "AGENT_CUSTOM_PROBE_MODE", "isolated")
+    monkeypatch.setattr(settings, "AGENT_SANDBOX_SHELL", True)
+    sent = {}
+
+    async def fake_relay(job, hosts, timeout):
+        sent.update(job=job, hosts=hosts, timeout=timeout)
+        return {"ok": True, "stdout": "200", "exchanges": [{
+            "request": {"method": "GET", "url": "https://app.example.com/", "headers": {}},
+            "response": {"status": 200, "headers": {}, "body": "hi", "length": 2},
+        }]}
+
+    monkeypatch.setattr(custom_probe, "_post_to_relay", fake_relay)
+    manager = _shell_manager()
+    out = json.loads(asyncio.run(manager.sandbox_shell("curl -s https://app.example.com/",
+                                                        timeout_sec=999)))
+    assert sent["job"] == {"command": "curl -s https://app.example.com/"}
+    assert sent["hosts"] == ["app.example.com"] and sent["timeout"] == 120.0
+    evidence_id = out["exchanges"][0]["evidence_id"]
+    assert evidence_store(manager).records[evidence_id]["test_type"] == "custom_probe"
+
+
+def test_sandbox_shell_refuses_guarded_command_before_network(monkeypatch):
+    from app.services.agent import custom_probe
+
+    monkeypatch.setattr(settings, "AGENT_CUSTOM_PROBE_MODE", "isolated")
+    monkeypatch.setattr(settings, "AGENT_SANDBOX_SHELL", True)
+
+    async def boom(*_a, **_k):
+        raise AssertionError("guarded command must not reach the relay")
+
+    monkeypatch.setattr(custom_probe, "_post_to_relay", boom)
+    out = json.loads(asyncio.run(_shell_manager().sandbox_shell("sqlmap -u x --os-shell")))
+    assert out["error"] == "Sandbox rejected command"

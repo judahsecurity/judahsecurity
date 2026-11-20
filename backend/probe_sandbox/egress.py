@@ -55,6 +55,7 @@ UPSTREAM_VERIFY = os.environ.get("PROBE_UPSTREAM_VERIFY_TLS", "true").lower() no
 MAX_REQUESTS_PER_JOB = int(os.environ.get("PROBE_MAX_REQUESTS_PER_JOB", "300"))
 MAX_SCRIPT_BYTES = 200_000
 MAX_TIMEOUT = 45.0
+MAX_SHELL_TIMEOUT = 120.0
 MAX_HEAD_BYTES = 64 * 1024
 MAX_MESSAGE_BODY = 32 * 1024 * 1024       # relayed in full up to this size
 MAX_RECORDED_BODY = 256 * 1024             # stored per request or response body
@@ -609,14 +610,16 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
         try:
             req = json.loads(self.rfile.read(length))
-            script = str(req["script"])
+            command = str(req.get("command") or "")
+            script = "" if command else str(req["script"])
             allowed = [str(h) for h in req.get("allowed_hosts") or []]
             oob = [str(h) for h in req.get("oob_suffixes") or []]
-            timeout = max(3.0, min(float(req.get("timeout_sec") or 20), MAX_TIMEOUT))
+            ceiling = MAX_SHELL_TIMEOUT if command else MAX_TIMEOUT
+            timeout = max(3.0, min(float(req.get("timeout_sec") or 20), ceiling))
         except (ValueError, KeyError, TypeError):
             self._json(400, {"error": "invalid job"})
             return
-        if not allowed or len(script.encode()) > MAX_SCRIPT_BYTES:
+        if not allowed or len(script.encode()) > MAX_SCRIPT_BYTES or len(command.encode()) > 8000:
             self._json(400, {"error": "scope and a bounded script are required"})
             return
         token = secrets.token_urlsafe(24)
@@ -627,7 +630,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         try:
             result = _run_on_runner(
                 script, timeout, f"http://job:{token}@{PROXY_HOST}:{PROXY_PORT}",
-                certificate_authority().cert_pem,
+                certificate_authority().cert_pem, command=command,
             )
         finally:
             with _jobs_lock:
@@ -638,9 +641,10 @@ class RelayHandler(BaseHTTPRequestHandler):
         self._json(200, result)
 
 
-def _run_on_runner(script: str, timeout: float, proxy_url: str, ca_pem: str) -> dict:
-    payload = json.dumps({"script": script, "timeout_sec": timeout, "proxy_url": proxy_url,
-                          "ca_pem": ca_pem}).encode()
+def _run_on_runner(script: str, timeout: float, proxy_url: str, ca_pem: str,
+                   *, command: str = "") -> dict:
+    payload = json.dumps({"script": script, "command": command, "timeout_sec": timeout,
+                          "proxy_url": proxy_url, "ca_pem": ca_pem}).encode()
     request = urllib.request.Request(
         f"{RUNNER_URL}/run", data=payload, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {RUNNER_TOKEN}"},
