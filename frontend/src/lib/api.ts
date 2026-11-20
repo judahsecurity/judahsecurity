@@ -1261,6 +1261,11 @@ class ApiClient {
     return response.data;
   }
 
+  async retestFinding(vulnId: number) {
+    const response = await this.client.post(`/vulnerabilities/${vulnId}/retest`);
+    return response.data;
+  }
+
   async askLeo(vulnId: number) {
     const response = await this.client.post(`/vulnerabilities/${vulnId}/risk-assessment/ask`);
     return response.data;

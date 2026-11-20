@@ -314,6 +314,10 @@ async def startup_event():
     apply_oracle_migrations()
     apply_scan_profile_migrations()
     apply_agent_ledger_migrations()
+    try:
+        apply_validation_verdict_migrations()
+    except Exception as exc:  # non-fatal: retests then fail to save, not startup
+        logger.error("Validation verdict migration failed: %s", exc)
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -742,6 +746,26 @@ def apply_oracle_migrations():
         logger.info("Oracle schema migrations applied.")
     except Exception as exc:
         logger.error("Oracle schema migrations failed (non-fatal): %s", exc)
+
+
+def apply_validation_verdict_migrations():
+    """Add retest verdicts to a native validationverdict enum, if one exists.
+
+    Databases built from db/migrations store the verdict as VARCHAR and need
+    nothing; databases created by create_all have a Postgres enum type.
+    """
+    from sqlalchemy import text
+
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        exists = conn.execute(text(
+            "SELECT 1 FROM pg_type WHERE typname = 'validationverdict'"
+        )).first()
+        if not exists:
+            return
+        for label in ("FIXED", "INCONCLUSIVE"):
+            conn.execute(text(f"ALTER TYPE validationverdict ADD VALUE IF NOT EXISTS '{label}'"))
 
 
 def apply_agent_ledger_migrations():

@@ -1264,8 +1264,21 @@ class ScannerWorker:
                 )
                 raise RuntimeError("no_verdict_in_output")
 
+            retest = (
+                isinstance(validation.raw_output, dict)
+                and validation.raw_output.get("purpose") == "retest"
+            )
             try:
-                if mode in ("native", "auto"):
+                if retest:
+                    # Still there, or fixed? Replay the original proof rather
+                    # than judge whether the finding was ever real.
+                    from app.services.finding_retest_service import retest_finding
+
+                    verdict_data = await retest_finding(
+                        {**finding_payload, "organization_id": validation.organization_id},
+                        vuln.metadata_,
+                    )
+                elif mode in ("native", "auto"):
                     verdict_data = await _run_native()
                     # Escalate to Vanguard only when native is inconclusive and a
                     # Vanguard backend is explicitly available / requested via auto.
@@ -1313,7 +1326,7 @@ class ScannerWorker:
             # The port exposure gate applies even when Leo uses Vanguard instead
             # of the native validator. A filtered/closed port cannot validate an
             # internet-exposure finding, regardless of the agent's other evidence.
-            if source_kind == "network_service" and (
+            if not retest and source_kind == "network_service" and (
                 not isinstance(verdict_data, dict)
                 or verdict_data.get("method") != "nmap_port_verify"
             ):
@@ -1358,6 +1371,8 @@ class ScannerWorker:
                 "confirmed": ValidationVerdict.CONFIRMED,
                 "false_positive": ValidationVerdict.FALSE_POSITIVE,
                 "needs_more_evidence": ValidationVerdict.NEEDS_MORE_EVIDENCE,
+                "fixed": ValidationVerdict.FIXED,
+                "inconclusive": ValidationVerdict.INCONCLUSIVE,
             }
             verdict_enum = verdict_map.get(verdict_str, ValidationVerdict.NEEDS_MORE_EVIDENCE)
             template_logic_issue = verdict_data.get("template_logic_issue")
@@ -1381,6 +1396,10 @@ class ScannerWorker:
             vuln.validation_status = "completed"
             vuln.last_validation_verdict = verdict_enum.value
             vuln.last_validated_at = now
+            if retest:
+                from app.services.finding_retest_service import apply_retest_status
+
+                apply_retest_status(vuln, verdict_data, validation_id=validation.id, now=now)
 
             # Leo's live port check is also a verification result. Keep the Ports
             # row and scanner-generated findings in sync with its Nmap verdict.

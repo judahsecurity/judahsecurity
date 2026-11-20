@@ -99,6 +99,9 @@ def _validation_to_dict(v: FindingValidation) -> dict:
         # Enhanced re-validation signals (from validator JSON / sanity short-circuit)
         "still_open": raw.get("still_open"),
         "logical_mismatch": raw.get("logical_mismatch"),
+        "purpose": raw.get("purpose") or "validate",
+        "retest_verdict": raw.get("retest_verdict"),
+        "method": raw.get("method"),
         "sanity_flags": raw.get("sanity_flags"),
         "requested_by_user_id": v.requested_by_user_id,
         "created_at": v.created_at,
@@ -1794,6 +1797,27 @@ def validate_finding(
     target and writes a verdict back. Returns the queued FindingValidation
     record; poll GET /vulnerabilities/{id}/validation for the result.
     """
+    return _queue_validation(vuln_id, db, current_user, purpose="validate")
+
+
+@router.post("/{vuln_id}/retest")
+def retest_finding(
+    vuln_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Queue a retest: is this finding still there, or fixed?
+
+    Replays the original proof (agent proof step, template, or port check)
+    and records reproduced, fixed, or inconclusive. "fixed" needs the original
+    trigger to fail under comparable conditions while a control request
+    succeeds; it resolves an open finding. "reproduced" reopens a resolved
+    one. "inconclusive" changes nothing. Poll GET /vulnerabilities/{id}/validation.
+    """
+    return _queue_validation(vuln_id, db, current_user, purpose="retest")
+
+
+def _queue_validation(vuln_id: int, db: Session, current_user: User, *, purpose: str) -> dict:
     vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
     if not vuln:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vulnerability not found")
@@ -1821,6 +1845,7 @@ def validate_finding(
         organization_id=organization_id,
         status=ValidationStatus.QUEUED,
         requested_by_user_id=current_user.id,
+        **({"raw_output": {"purpose": purpose}} if purpose != "validate" else {}),
     )
     db.add(validation)
     vuln.validation_status = "queued"

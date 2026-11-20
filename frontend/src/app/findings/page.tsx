@@ -1477,6 +1477,38 @@ export default function FindingsPage() {
     }
   };
 
+  const handleRetestFinding = async () => {
+    if (!selectedFinding) return;
+    const findingId = selectedFinding.id;
+    setValidating(true);
+    try {
+      const initial = await api.retestFinding(findingId);
+      setValidationResult(initial);
+      toast({
+        title: 'Retest queued',
+        description: 'Replaying the original proof to check whether the issue is fixed.',
+      });
+      await pollValidation(findingId);
+      try {
+        const fresh = await api.getVulnerability(findingId);
+        if (openFindingIdRef.current === findingId) {
+          setSelectedFinding(fresh);
+          setFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, ...fresh } : f)));
+        }
+      } catch {
+        // The status refresh is best-effort; the verdict is already shown.
+      }
+    } catch (err: any) {
+      toast({
+        title: 'Could not start retest',
+        description: getApiErrorMessage(err),
+        variant: 'destructive',
+      });
+    } finally {
+      setValidating(false);
+    }
+  };
+
   const pollLeo = async (findingId: number) => {
     for (let i = 0; i < 90; i++) {
       await new Promise((r) => setTimeout(r, 4000));
@@ -2977,12 +3009,27 @@ export default function FindingsPage() {
                       </>
                     )}
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleRetestFinding}
+                    disabled={
+                      validating ||
+                      validationResult?.status === 'queued' ||
+                      validationResult?.status === 'running'
+                    }
+                  >
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Retest fix
+                  </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Replays the original detection path on the live target: nuclei
                   template re-run, port probes, or the finding’s steps to reproduce.
                   Confirms whether the issue is still open and catches bad matches
-                  (e.g. LDAP on port 443).
+                  (e.g. LDAP on port 443). Retest fix replays the original proof
+                  instead: reproduced reopens a resolved finding, fixed resolves an
+                  open one, and inconclusive changes nothing.
                 </p>
 
                 {templatePattern && (
@@ -3048,6 +3095,21 @@ export default function FindingsPage() {
                       {validationResult.verdict === 'false_positive' && (
                         <Badge className="bg-gray-600/20 text-gray-400 border-gray-600/30">
                           <XCircle className="h-3 w-3 mr-1" /> False Positive
+                        </Badge>
+                      )}
+                      {validationResult.purpose === 'retest' && validationResult.verdict === 'confirmed' && (
+                        <Badge className="bg-red-600/20 text-red-400 border-red-600/30">
+                          Retest: reproduced
+                        </Badge>
+                      )}
+                      {validationResult.verdict === 'fixed' && (
+                        <Badge className="bg-green-600/20 text-green-400 border-green-600/30">
+                          <CheckCircle className="h-3 w-3 mr-1" /> Retest: fixed
+                        </Badge>
+                      )}
+                      {validationResult.verdict === 'inconclusive' && (
+                        <Badge className="bg-yellow-600/20 text-yellow-400 border-yellow-600/30">
+                          <AlertCircle className="h-3 w-3 mr-1" /> Retest: inconclusive
                         </Badge>
                       )}
                       {validationResult.verdict === 'needs_more_evidence' && (

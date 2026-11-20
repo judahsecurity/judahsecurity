@@ -30,6 +30,9 @@ class ValidationVerdict(str, enum.Enum):
     CONFIRMED = "confirmed"
     FALSE_POSITIVE = "false_positive"
     NEEDS_MORE_EVIDENCE = "needs_more_evidence"
+    # Retest outcomes ("reproduced" is stored as CONFIRMED).
+    FIXED = "fixed"
+    INCONCLUSIVE = "inconclusive"
 
 
 class FindingValidation(Base):
