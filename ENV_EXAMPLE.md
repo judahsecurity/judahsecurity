@@ -250,6 +250,12 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # Agent max iterations per REST request (default 15; increase for longer tool chains)
 # AGENT_REST_MAX_ITERATIONS=15
 
+# Prowl hunting behavior (on by default in docker-compose.yml; see
+# docs/AGENT_RELIABILITY_ROLLOUT.md). Roll back with strict / false.
+# AGENT_STEERING_MODE=advisory
+# AGENT_STEERING_FREE_TURNS=2
+# AGENT_HUNT_DISCIPLINE_PROMPT=true
+
 # =============================================================================
 # Neo4j Graph Database (optional - for asset relationship modeling)
 # =============================================================================
