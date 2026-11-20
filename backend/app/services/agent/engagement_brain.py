@@ -125,8 +125,24 @@ class EngagementBrain:
     observation_events: List[Dict[str, Any]] = field(default_factory=list)
     followup_proposals: List[Dict[str, Any]] = field(default_factory=list)
     assignment_chains: List[Dict[str, Any]] = field(default_factory=list)
+    # Operator-stated end results and boundaries (engagement_goals.py).
+    engagement_goals: List[Dict[str, Any]] = field(default_factory=list)
+    operator_constraints: List[Dict[str, Any]] = field(default_factory=list)
+    goals_derived: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
+        data = self._base_dict()
+        # Written only when set, so runs without operator goals keep the same
+        # (size-bounded) brain snapshots.
+        if self.engagement_goals:
+            data["engagement_goals"] = [dict(goal) for goal in self.engagement_goals]
+        if self.operator_constraints:
+            data["operator_constraints"] = [dict(row) for row in self.operator_constraints]
+        if self.goals_derived:
+            data["goals_derived"] = True
+        return data
+
+    def _base_dict(self) -> Dict[str, Any]:
         return {
             "application_operations": list(self.application_operations),
             "authorization_matrix": list(self.authorization_matrix),
@@ -3562,12 +3578,15 @@ def methodology_progress(
         r for r in (brain.pending_risk_assessments or [])
         if isinstance(r, dict) and r.get("status") != "complete"
     ]
+    unaccounted_goals = [goal for goal in brain.engagement_goals or []
+                         if isinstance(goal, dict) and goal.get("status") == "open"]
     ready_to_complete = (
         ready_to_complete_methods
         and cov.get("ready_to_complete_coverage", True)
         and not pending_candidates
         and not unpublished_candidates
         and not pending_ras
+        and not unaccounted_goals
     )
     blockers = [
         {
@@ -3611,6 +3630,16 @@ def methodology_progress(
                 "status": "confirmed",
             })
 
+    for goal in unaccounted_goals[:5]:
+        blockers.append({
+            "id": goal.get("id"),
+            "methodology_id": "engagement_goal",
+            "title": f"goal not yet proven or closed: {goal.get('text')}",
+            "specialist": "orchestrator",
+            "priority": "high",
+            "status": "open",
+        })
+
     for r in pending_ras[:6]:
         blockers.append({
             "id": r.get("finding_id"),
@@ -3636,6 +3665,8 @@ def methodology_progress(
         "ready_to_complete_methods": ready_to_complete_methods,
         "coverage": cov,
         "pending_candidates": len(pending_candidates),
+        "open_goals": len(unaccounted_goals),
+        "goals_block": _goals_block(brain),
         "candidate_verdicts": candidate_status,
         "inconclusive_candidates": inconclusive_candidates[:12],
         "open_proof_gaps": inconclusive_candidates[:12],
@@ -3656,13 +3687,21 @@ def methodology_progress(
     }
 
 
+def _goals_block(brain: EngagementBrain) -> str:
+    from app.services.agent.engagement_goals import goals_prompt_block
+
+    return goals_prompt_block(brain)
+
+
 def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
+    goals = (progress or {}).get("goals_block") or ""
     if not progress or not progress.get("seeded"):
-        return (
+        return "\n".join(filter(None, [goals, (
             "Methodology checklist: not seeded yet. Run execute_deep_crawl → "
             "sync_engagement_brain before coverage or complete."
-        )
-    lines = [
+        )]))
+    lines = [goals] if goals else []
+    lines += [
         progress.get("summary") or "Methodology progress:",
         f"ready_for_coverage_spray={progress.get('ready_for_coverage_spray')}  "
         f"ready_to_complete={progress.get('ready_to_complete')}",

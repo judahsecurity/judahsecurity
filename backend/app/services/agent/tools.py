@@ -582,6 +582,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "create_scan": self.create_scan,
             # Session notes and findings
             "save_note": self.save_note,
+            "derive_engagement_goals": self.derive_engagement_goals,
+            "list_engagement_goals": self.list_engagement_goals,
+            "prove_goal": self.prove_goal,
+            "close_goal": self.close_goal,
             "get_notes": self.get_notes,
             "create_finding": self.create_finding,
             "assess_finding_risk": self.assess_finding_risk,
@@ -6311,6 +6315,65 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if len(report) > max_chars:
             report = report[:max_chars] + "\n\n... (truncated)"
         return report
+
+    async def derive_engagement_goals(self, objective: str) -> str:
+        """Read the operator's objective into end-result goals and stated allow/deny constraints (once per engagement)."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent import engagement_goals as goals_mod
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        if brain.goals_derived:
+            return json.dumps({"already_derived": True,
+                               "goals": brain.engagement_goals,
+                               "constraints": brain.operator_constraints})
+        goals: list = []
+        constraints: list = []
+        if goals_mod.objective_states_more_than_a_target(objective):
+            try:
+                goals, constraints = await goals_mod.derive_goals(objective, self._hypothesis_llm())
+            except Exception as exc:  # the run continues without explicit goals
+                logger.warning("Engagement goal extraction failed: %s", type(exc).__name__)
+                return json.dumps({"success": False, "error": "goal_extraction_failed"})
+        goals_mod.record_goals(brain, goals, constraints)
+        self._engagement_brain = brain.to_dict()
+        return json.dumps({"success": True, "goals": brain.engagement_goals,
+                           "constraints": brain.operator_constraints})
+
+    async def list_engagement_goals(self) -> str:
+        """List the engagement's goals (open, met with proof, or closed) and operator constraints."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        return json.dumps({"goals": brain.engagement_goals,
+                           "constraints": brain.operator_constraints})
+
+    async def prove_goal(self, goal_id: str, candidate_id: str, reason: str) -> str:
+        """Mark an engagement goal met by one independently verified (confirmed) finding candidate; reason says how it demonstrates the goal."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent import engagement_goals as goals_mod
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        try:
+            goal = goals_mod.prove_goal(brain, goal_id, candidate_id, reason)
+        except ValueError as exc:
+            return json.dumps({"success": False, "error": str(exc)})
+        self._engagement_brain = brain.to_dict()
+        return json.dumps({"success": True, "goal": goal,
+                           "open_goals": len(goals_mod.open_goals(brain))})
+
+    async def close_goal(self, goal_id: str, reason: str) -> str:
+        """Close an engagement goal as not achieved; reason must name the routes tried and why each failed."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent import engagement_goals as goals_mod
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        try:
+            goal = goals_mod.close_goal(brain, goal_id, reason)
+        except ValueError as exc:
+            return json.dumps({"success": False, "error": str(exc)})
+        self._engagement_brain = brain.to_dict()
+        return json.dumps({"success": True, "goal": goal,
+                           "open_goals": len(goals_mod.open_goals(brain))})
 
     async def save_note(
         self,

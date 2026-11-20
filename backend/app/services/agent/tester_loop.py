@@ -102,6 +102,24 @@ def normalized_tools_run(trace: Optional[Iterable[Any]]) -> Set[str]:
     return names
 
 
+def _engagement_goals_step(state: Dict[str, Any], ran: Set[str]) -> Optional[Dict[str, Any]]:
+    """Read the operator's objective into goals and constraints, once."""
+    if state.get("mode") != "agent" or "derive_engagement_goals" in ran:
+        return None
+    if (state.get("engagement_brain") or {}).get("goals_derived"):
+        return None
+    objective = str(state.get("original_objective") or "")
+    from app.services.agent.engagement_goals import objective_states_more_than_a_target
+
+    if not objective_states_more_than_a_target(objective):
+        return None
+    return {
+        "tool_name": "derive_engagement_goals",
+        "tool_args": {"objective": objective[:4000]},
+        "thought": "Record the operator's end-result goals and stated constraints before testing.",
+    }
+
+
 def _shell_unlock_enabled() -> bool:
     from app.core.config import settings
 
@@ -1408,6 +1426,9 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             return followup
         return _ready_hypothesis_wave(state, trace, target)
     ran = normalized_tools_run(trace)
+    goals_step = _engagement_goals_step(state, ran)
+    if goals_step:
+        return goals_step
     crawled = bool(ran & _CRAWL_TOOLS)
     # Respect an operator's no-directory constraint without stalling the
     # observed-input queue behind enrichment that will never be launched.

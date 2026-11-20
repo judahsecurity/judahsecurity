@@ -1618,6 +1618,17 @@ async def _run_specialist(
     suffix_parts.append(PROOF_GUIDANCE)
     from app.services.agent.prompts import APPLICATION_ASSESSMENT_GUIDANCE
     suffix_parts.append(APPLICATION_ASSESSMENT_GUIDANCE)
+    try:
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.engagement_goals import specialist_block
+
+        goals_block = specialist_block(engagement_brain_from_dict(
+            getattr(tools_manager, "_engagement_brain", None)
+        ))
+        if goals_block:
+            suffix_parts.append(goals_block)
+    except Exception:
+        logger.debug("engagement goals block skipped", exc_info=True)
     if not getattr(tools_manager, "_credential_testing_allowed", False):
         suffix_parts.append(
             "This run has no operator authorization for credential guessing, default "

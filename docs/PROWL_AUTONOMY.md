@@ -229,3 +229,34 @@ replayable captures.
 
 The assessment pipeline runs this once after the anonymous JS inspection when
 no login is configured (`AGENT_SHELL_UNLOCK`, default on).
+
+## Engagement goals and operator constraints
+
+When the operator's objective says more than which target to assess (for
+example "show whether one customer can read another customer's invoices; do
+not touch the payments API"), the pipeline's first step,
+`derive_engagement_goals`, reads it once into:
+
+- **goals:** end results that evidence can prove, not steps, at most five,
+  each with an optional vulnerability class;
+- **constraints:** allow/deny rules the operator stated, rewritten to name the
+  concrete host or path, at most ten. Uncertain rules become deny.
+
+The model's JSON is validated, and anything malformed is dropped. Nothing is
+invented for an objective that only names a target.
+
+Constraints and goals appear at the top of the planner's progress text, and
+constraints and open goals go into every specialist's fixed prompt.
+Constraints add to Prowl's scope and permission checks; they never widen them.
+
+Every goal must be accounted for before the run counts as complete. An open
+goal is a completion blocker, like an untested coverage cell. Two tools
+resolve it:
+
+- `prove_goal(goal_id, candidate_id, reason)` links the goal to an
+  independently verified (confirmed) finding candidate.
+- `close_goal(goal_id, reason)` records it as not achieved. The reason must
+  name the routes tried and why each failed.
+
+`list_engagement_goals` shows the current state. Goal fields are written to
+the brain snapshot only when set.
