@@ -32,6 +32,7 @@ import { useRouter } from 'next/navigation';
 import { AttackScenarioPanel, ChainData } from '@/components/agent/AttackScenarioPanel';
 import { EngagementReplay, ReplayStep, TokenUsage } from '@/components/agent/EngagementReplay';
 import { RunLedgerPanel, AgentRunLedger } from '@/components/agent/RunLedgerPanel';
+import { ReviewQueuePanel } from '@/components/agent/ReviewQueuePanel';
 import {
   CapabilityMapPanel,
   CapabilityMapState,
@@ -2283,6 +2284,11 @@ function AgentPageContent() {
                 {runLedger?.run_id && (
                   <div className="mt-4 w-full">
                     <RunLedgerPanel run={runLedger} />
+                  </div>
+                )}
+                {sessionId && runLedger?.run_id && (
+                  <div className="mt-4 w-full">
+                    <ReviewQueuePanel sessionId={sessionId} refreshKey={`${runLedger.run_id}:${runLedger.status}`} />
                   </div>
                 )}
                 {ledgerError && loading && (

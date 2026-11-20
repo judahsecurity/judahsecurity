@@ -2758,6 +2758,11 @@ class ApiClient {
     return response.data;
   }
 
+  async listAgentCandidates(sessionId: string) {
+    const response = await this.client.get(`/agent/sessions/${sessionId}/candidates`);
+    return response.data;
+  }
+
   async getAgentRunLedger(sessionId: string) {
     const response = await this.client.get(`/agent/conversations/${sessionId}/ledger`);
     return response.data;
