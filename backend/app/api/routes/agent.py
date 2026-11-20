@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Literal, List
 from urllib.parse import urlsplit
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect, Query, Response
 from pydantic import BaseModel, field_validator, model_validator, Field
 
 from sqlalchemy.orm import Session
@@ -930,6 +930,103 @@ async def submit_session_candidate(
     logger.info("External candidate intake user=%s session=%s accepted=%s queued=%s",
                 current_user.id, session_id, result.get("accepted"), bool(result.get("queued")))
     return {"session_id": session_id, **result}
+
+
+class CaptureTokenRequest(BaseModel):
+    identity: str = Field(..., max_length=40)
+    role: str = Field("", max_length=40)
+    tenant: str = Field("", max_length=80)
+
+
+class CaptureBatch(BaseModel):
+    entries: List[dict] = Field(default_factory=list, max_length=1000)
+
+
+class HarUpload(CaptureTokenRequest):
+    har: dict
+
+
+def _capture_http_error(exc) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@router.post("/sessions/{session_id}/capture-token", status_code=201)
+async def issue_capture_token(
+    session_id: str,
+    payload: CaptureTokenRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Short-lived token the Judah capture extension uses to stream one
+    logged-in session into this assessment as a named test identity."""
+    from app.services.agent.operator_capture import CaptureError, issue_token
+
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    try:
+        return issue_token(organization_id=org_id, session_id=session_id, user_id=current_user.id,
+                           identity=payload.identity, role=payload.role, tenant=payload.tenant)
+    except CaptureError as exc:
+        raise _capture_http_error(exc)
+
+
+@router.post("/capture", status_code=202)
+async def ingest_extension_capture(
+    batch: CaptureBatch,
+    authorization: str = Header(default=""),
+    db: Session = Depends(get_db),
+):
+    """Receive captured exchanges from the capture extension (capture-token auth)."""
+    from app.services.agent.operator_capture import CaptureError, enqueue, normalize_batch, verify_token
+
+    token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    try:
+        claims = verify_token(token)
+        conv = db.query(AgentConversation).filter(
+            AgentConversation.session_id == claims["sid"]).first()
+        if conv is None or conv.user_id != claims["uid"] or conv.organization_id != claims["org"]:
+            raise CaptureError(401, "capture token no longer matches a conversation")
+        result = enqueue(claims["org"], claims["sid"], identity=claims["identity"],
+                         role=claims.get("role", ""), tenant=claims.get("tenant", ""),
+                         entries=normalize_batch(batch.entries), source="extension")
+    except CaptureError as exc:
+        raise _capture_http_error(exc)
+    return {"session_id": claims["sid"], "identity": claims["identity"], **result}
+
+
+@router.post("/sessions/{session_id}/har", status_code=202)
+async def upload_har_capture(
+    session_id: str,
+    payload: HarUpload,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Upload a DevTools HAR of a logged-in session as a named test identity."""
+    from app.services.agent.operator_capture import (
+        CaptureError, enqueue, har_entries, normalize_batch, validate_identity,
+    )
+
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    try:
+        identity = validate_identity(payload.identity)
+        entries = normalize_batch(har_entries(payload.har))
+        result = enqueue(org_id, session_id, identity=identity, role=payload.role,
+                         tenant=payload.tenant, entries=entries, source="har")
+    except CaptureError as exc:
+        raise _capture_http_error(exc)
+    return {"session_id": session_id, "identity": identity, **result}
+
+
+@router.get("/sessions/{session_id}/captures")
+async def capture_status(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Number of captured batches waiting for the assessment to pick up."""
+    from app.services.agent.operator_capture import pending_count
+
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    return {"session_id": session_id, "pending_batches": pending_count(org_id, session_id)}
 
 
 @router.get("/sessions/{session_id}/candidates")

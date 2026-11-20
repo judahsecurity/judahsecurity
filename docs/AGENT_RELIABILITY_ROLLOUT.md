@@ -146,3 +146,21 @@ from the runner go to Docker's embedded resolver. Lab targets on private
 addresses need `PROBE_ALLOW_PRIVATE_TARGETS=true` on `probe-egress`, and
 self-signed lab certificates need `PROBE_UPSTREAM_VERIFY_TLS=false`; never set
 either for customer targets.
+
+## Logged-in capture (extension and HAR)
+
+Analysts can hand Prowl sessions it cannot log in to itself. See
+`capture-extension/README.md`. API:
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /agent/sessions/{id}/capture-token` | user | Issue a 4-hour token bound to one session and identity |
+| `POST /agent/capture` | `Bearer jcap.…` | Extension batches (≤1000 entries, chunked into encrypted 50-entry batches) |
+| `POST /agent/sessions/{id}/har` | user | DevTools HAR upload as a named identity |
+| `GET /agent/sessions/{id}/captures` | user | Batches waiting to be drained |
+
+Batches are AES-GCM encrypted under `AEGIS_EVIDENCE_DIR/operator_captures/`
+(required) and drained at the start of each Joshua step: out-of-scope exchanges
+are dropped, the identity's cookies and auth headers are registered, each
+exchange becomes redacted `http_exchange` evidence (`test_type=operator_capture`),
+and requests are mapped into operations.

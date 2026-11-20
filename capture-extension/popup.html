@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Judah Capture</title>
+  <style>
+    body { font: 13px system-ui, sans-serif; width: 320px; margin: 12px; color: #111; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    label { display: block; margin: 8px 0 2px; color: #444; }
+    input { width: 100%; box-sizing: border-box; padding: 5px; font: inherit; }
+    button { margin-top: 10px; width: 100%; padding: 7px; font: inherit; cursor: pointer; }
+    #status { margin-top: 10px; padding: 6px; background: #f3f3f3; border-radius: 4px; white-space: pre-line; }
+    .hint { color: #666; font-size: 12px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Judah Capture</h1>
+  <label for="server">API base URL</label>
+  <input id="server" placeholder="https://aegis.example.com/api/v1" autocomplete="off">
+  <label for="token">Capture token</label>
+  <input id="token" type="password" placeholder="jcap…" autocomplete="off">
+  <label for="hosts">Only send these hosts (comma-separated, optional)</label>
+  <input id="hosts" placeholder="app.example.com" autocomplete="off">
+  <button id="toggle">Start capture on this tab</button>
+  <div id="status">Not capturing.</div>
+  <p class="hint">Get a token from the agent page (Capture logged-in session). Log in to the
+    target first or after starting; everything this tab sends to allowed hosts is recorded,
+    including cookies. Stop when done.</p>
+  <script src="popup.js"></script>
+</body>
+</html>

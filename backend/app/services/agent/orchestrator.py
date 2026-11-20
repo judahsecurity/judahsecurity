@@ -1338,7 +1338,41 @@ class AgentOrchestrator:
         except Exception:
             logger.exception("external candidate inbox drain failed")
 
-        compacted_brief = (state.get("compacted_brief") or "").strip()
+        # Operator-captured logged-in traffic (capture extension / HAR upload).
+        try:
+            from app.services.agent.operator_capture import apply_batches, drain as drain_captures
+
+            capture_batches = drain_captures(org_id, session_id) if org_id and session_id else []
+            if capture_batches and self.tool_manager is not None:
+                if state.get("engagement_brain") is not None:
+                    self.tool_manager._engagement_brain = state.get("engagement_brain")
+                capture_summary = await apply_batches(self.tool_manager, capture_batches)
+                inbox_brain_update = self.tool_manager._engagement_brain
+                state = {**state, "engagement_brain": inbox_brain_update}
+                capture_note = (
+                    f"Operator capture: {capture_summary['recorded']} logged-in exchanges recorded "
+                    f"as evidence for identities {', '.join(capture_summary['identities']) or 'none'}"
+                    f"; {capture_summary['out_of_scope']} out-of-scope exchanges dropped. "
+                    "The identities are registered (credentials hidden); use them with "
+                    "list_test_identities, compare_requests and mutate_captured_request."
+                )
+                inbox_trace.append(
+                    ExecutionStep(
+                        iteration=iteration,
+                        phase=phase,
+                        thought="Analyst-captured logged-in traffic entered the assessment",
+                        reasoning="Captured by a human login; credentials stay in the identity registry",
+                        tool_name="operator_capture_intake",
+                        tool_args={"batches": len(capture_batches)},
+                        tool_output=json.dumps({**capture_summary, "note": capture_note})[:4000],
+                        success=True,
+                    ).model_dump()
+                )
+                await self._emit_status({"type": "captures_ingested", "message": capture_note[:400]})
+        except Exception:
+            logger.exception("operator capture drain failed")
+
+        compacted_brief =(state.get("compacted_brief") or "").strip()
         compacted_trace = list(state.get("execution_trace", []) or [])
         if consume_compact(session_id) or should_auto_compact(compacted_trace):
             compacted_trace, compact_note = compact_execution_trace(compacted_trace)

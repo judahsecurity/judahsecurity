@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Judah Capture",
+  "version": "0.1.0",
+  "description": "Stream a logged-in browser session to a Judah Prowl assessment as a named test identity.",
+  "permissions": ["debugger", "storage", "activeTab"],
+  "host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "Judah Capture" },
+  "minimum_chrome_version": "116"
+}
