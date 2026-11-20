@@ -118,6 +118,7 @@ services:
       - AGENT_STEERING_MODE=${AGENT_STEERING_MODE:-advisory}
       - AGENT_STEERING_FREE_TURNS=${AGENT_STEERING_FREE_TURNS:-2}
       - AGENT_HUNT_DISCIPLINE_PROMPT=${AGENT_HUNT_DISCIPLINE_PROMPT:-true}
+      - AGENT_SELF_CHALLENGE=${AGENT_SELF_CHALLENGE:-true}
       # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
       - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
@@ -527,6 +528,7 @@ services:
       - AGENT_STEERING_MODE=${AGENT_STEERING_MODE:-advisory}
       - AGENT_STEERING_FREE_TURNS=${AGENT_STEERING_FREE_TURNS:-2}
       - AGENT_HUNT_DISCIPLINE_PROMPT=${AGENT_HUNT_DISCIPLINE_PROMPT:-true}
+      - AGENT_SELF_CHALLENGE=${AGENT_SELF_CHALLENGE:-true}
       # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
       - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}

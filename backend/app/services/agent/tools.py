@@ -11167,8 +11167,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         proof_run_id: str = "",
         proof_escalation_id: str = "",
         vulnerability_class: str = "",
+        challenge: Any = None,
     ) -> str:
         """Queue a medium+ finding for independent verification.
+
+        challenge: the hunter's adversarial self-review, an object with
+        reachability, preconditions, downstream_controls, scope,
+        benign_explanation, strongest_objection and disproof_test (one or two
+        sentences each). Required when AGENT_SELF_CHALLENGE is on, except for
+        execution-owned coverage-cell proofs.
 
         Set vulnerability_class to exposure, sql_injection, xss, authorization,
         ssrf, xxe, command_injection, path_traversal, csrf, known_cve, or
@@ -11183,6 +11190,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.proof_policy import inferred_vulnerability_class
         from types import SimpleNamespace
 
+        from app.services.agent.independent_verify import (
+            SELF_CHALLENGE_FIELDS, normalize_challenge, self_challenge_required,
+        )
+
+        clean_challenge, missing_challenge = normalize_challenge(challenge)
+        # Coverage-cell handoffs carry execution-owned proof receipts and come
+        # from the deterministic pipeline; every other claim argues against
+        # itself before it reaches the verifier.
+        if self_challenge_required() and missing_challenge and not (coverage_cell_id and evidence_ids):
+            return json.dumps({
+                "error": "self_challenge_required",
+                "missing": missing_challenge,
+                "detail": (
+                    "Before submitting, argue against your own claim and pass challenge="
+                    "{" + ", ".join(f'"{name}": "..."' for name in SELF_CHALLENGE_FIELDS) + "}. "
+                    "Answer each with what you actually observed. If the argument kills the "
+                    "claim, do not submit: record the negative with evidence instead. "
+                    "disproof_test is one concrete request that would refute it."
+                ),
+            })
         self._require_independent_verify = True
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         trace = {}
@@ -11288,6 +11315,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             proof_run_id=proof_run_id or "",
             proof_escalation_id=proof_escalation_id or "",
             vulnerability_class=vulnerability_class or "",
+            challenge=clean_challenge,
         )
         if coverage_cell_id and evidence_ids:
             for cell in brain.coverage_cells:

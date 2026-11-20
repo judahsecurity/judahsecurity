@@ -1190,6 +1190,29 @@ HUNT_DISCIPLINE_GUIDANCE = """Hunting discipline (applies to Joshua and every sp
 """
 
 
+SELF_CHALLENGE_GUIDANCE = """Self-challenge before submit_finding_candidate:
+A candidate is a hypothesis until you have tried to break it. Before submitting,
+argue the opposite case from your own evidence and pass it as challenge={...}:
+reachability (can a real attacker reach this, from where), preconditions (what
+accounts, position or state it needs), downstream_controls (what could block
+the impact after the trigger), scope (why the asset is authorized), and
+benign_explanation (the most plausible harmless reading and why it fails), then
+strongest_objection (the best case that this is not a vulnerability) and
+disproof_test (one concrete request that would refute it). Run the disproof
+test yourself first when you can. If the argument kills the claim, do not
+submit: record the negative with its evidence. Eliminations need evidence at
+the same bar as confirmations; "probably validated server-side" eliminates
+nothing. The independent verifier receives your challenge as a checklist and
+decides; you never confirm your own finding.
+"""
+
+
+def self_challenge_guidance() -> str:
+    from app.services.agent.independent_verify import self_challenge_required
+
+    return SELF_CHALLENGE_GUIDANCE if self_challenge_required() else ""
+
+
 def hunt_discipline_enabled() -> bool:
     from app.core.config import settings
 
@@ -1205,4 +1228,7 @@ def render_system_prompt(*, mode: str, **context: object) -> str:
         rendered += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
         if hunt_discipline_enabled():
             rendered += "\n\n" + HUNT_DISCIPLINE_GUIDANCE
+        challenge = self_challenge_guidance()
+        if challenge:
+            rendered += "\n\n" + challenge
     return rendered

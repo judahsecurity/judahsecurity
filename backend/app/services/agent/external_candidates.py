@@ -243,6 +243,9 @@ def candidate_summary(raw: Dict[str, Any]) -> Dict[str, Any]:
         "duplicate_titles": list(raw.get("duplicate_titles") or []),
         "verified_at": raw.get("verified_at") or "",
         "finding_id": raw.get("finding_id") or "",
+        "review_status": raw.get("review_status") or "",
+        "challenge": dict(raw.get("challenge") or {}),
+        "proof_gap": dict(raw.get("proof_gap") or {}),
     }
 
 

@@ -1629,6 +1629,10 @@ async def _run_specialist(
     from app.services.agent.prompts import HUNT_DISCIPLINE_GUIDANCE, hunt_discipline_enabled
     if hunt_discipline_enabled():
         suffix_parts.append(HUNT_DISCIPLINE_GUIDANCE)
+    from app.services.agent.prompts import self_challenge_guidance
+
+    if self_challenge_guidance():
+        suffix_parts.append(self_challenge_guidance())
     if not getattr(tools_manager, "_credential_testing_allowed", False):
         suffix_parts.append(
             "This run has no operator authorization for credential guessing, default "

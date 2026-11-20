@@ -204,6 +204,12 @@ class Settings(BaseSettings):
     # Add hunting-discipline rules (exhaust bypasses, depth over breadth,
     # re-examine negatives, hand off side clues) to Joshua and specialists.
     AGENT_HUNT_DISCIPLINE_PROMPT: bool = False
+    # Hunters must attach an adversarial self-review (reachability,
+    # preconditions, downstream controls, scope, benign explanation, strongest
+    # objection, disproof test) to submit_finding_candidate. The verifier gets
+    # it as a checklist; inconclusive candidates with hunter evidence and a
+    # challenge are flagged needs_analyst_review instead of disappearing.
+    AGENT_SELF_CHALLENGE: bool = False
     # Where run_custom_probe / run_poc_python execute model-written Python.
     # "off": tool disabled. "isolated": sent to the probe-runner container
     # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).
