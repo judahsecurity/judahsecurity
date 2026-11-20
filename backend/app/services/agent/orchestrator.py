@@ -1988,6 +1988,26 @@ class AgentOrchestrator:
         
         # Handle actions
         if decision.action == "complete":
+            # A run cannot finish while a background scan it started is still
+            # running or its result was never read. No override: cancel it.
+            try:
+                from app.services.agent.action_ledger import active_run_id as _run_var
+                from app.services.agent.tool_executions import completion_blocker
+
+                bg_block = completion_blocker(_run_var.get() or "")
+            except Exception:
+                logger.exception("background execution complete-gate failed")
+                bg_block = None
+            if bg_block:
+                step.thought = (step.thought or "") + " | Complete blocked — background executions."
+                step.tool_name = None
+                blocked = decision.model_dump()
+                blocked["action"] = "use_tool"
+                blocked["tool_name"] = None
+                updates["_decision"] = blocked
+                updates["_current_step"] = step.model_dump()
+                updates["messages"] = [AIMessage(content=bg_block)]
+                return updates
             from app.services.agent.tester_loop import (
                 complete_blocked_reason,
                 completion_override_allowed,
@@ -4135,6 +4155,20 @@ class AgentOrchestrator:
                 break
         
         step = state.get("_current_step", {})
+        if state.get("task_complete") and not str(final_answer or "").strip():
+            # Never report a finished run with an empty answer: fall back to
+            # the ledger's evidence-backed partial report.
+            try:
+                from app.services.agent.action_ledger import active_run_id, partial_report
+
+                final_answer = partial_report(active_run_id.get(), "empty final answer")
+            except Exception:
+                logger.exception("partial report for empty answer failed")
+            if not str(final_answer or "").strip():
+                final_answer = (
+                    "The run ended without a written answer. See the execution "
+                    "trace and findings for what was done."
+                )
 
         from app.services.agent.model_router import consume_llm_degrade_notice
         from app.services.agent.observability import replay_from_execution_trace

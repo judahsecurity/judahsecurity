@@ -224,3 +224,43 @@ async def test_orchestrator_backgrounds_slow_scanner_and_announces_completion(mo
     finally:
         action_ledger.active_run_id.reset(token)
         await cancel_run("r-orchestrator")
+
+
+@pytest.mark.asyncio
+async def test_completion_blocked_until_background_result_is_read():
+    from app.services.agent.tool_executions import completion_blocker, format_result
+
+    execution = start(run_id="r-final", session_id="s", tool_name="execute_nmap",
+                      factory=_factory(0.1), hard_timeout=5)
+    execution.backgrounded = True
+    assert "still" in completion_blocker("r-final")
+    await tool_executions.wait(execution, 2)
+    assert "not read yet" in completion_blocker("r-final")
+    format_result(execution)
+    assert completion_blocker("r-final") is None
+    await cancel_run("r-final")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_background_execution_does_not_block_completion():
+    from app.services.agent.tool_executions import completion_blocker
+
+    execution = start(run_id="r-final-c", session_id="s", tool_name="execute_ffuf",
+                      factory=_factory(30), hard_timeout=60)
+    execution.backgrounded = True
+    await asyncio.sleep(0.01)
+    tool_executions.cancel(execution)
+    await tool_executions.wait(execution, 2)
+    assert completion_blocker("r-final-c") is None
+    await cancel_run("r-final-c")
+
+
+def test_empty_final_answer_falls_back_to_report(monkeypatch):
+    from app.services.agent import action_ledger
+    from app.services.agent.orchestrator import AgentOrchestrator
+
+    monkeypatch.setattr(action_ledger, "partial_report",
+                        lambda run_id, reason: f"Assessment ended: {reason}.")
+    response = AgentOrchestrator()._build_response(
+        {"messages": [], "task_complete": True, "execution_trace": []})
+    assert response.answer == "Assessment ended: empty final answer."

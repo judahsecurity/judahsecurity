@@ -76,6 +76,7 @@ class ToolExecution:
     running: asyncio.Event = field(default_factory=asyncio.Event)
     backgrounded: bool = False
     announced: bool = False
+    read: bool = False
 
     @property
     def done(self) -> bool:
@@ -248,6 +249,27 @@ def take_unannounced(run_id: str) -> List[ToolExecution]:
     return finished
 
 
+def completion_blocker(run_id: str) -> Optional[str]:
+    """Why the run cannot complete yet because of background executions.
+
+    A run may not finish while a backgrounded scan is still running, or after
+    one finished without the agent reading its result.
+    """
+    rows = [e for e in run_executions(run_id) if e.backgrounded]
+    running = [e for e in rows if not e.done]
+    unread = [e for e in rows if e.done and not e.read and e.status != "cancelled"]
+    if not running and not unread:
+        return None
+    lines = ["Cannot complete yet - background tool executions are unresolved."]
+    for e in running:
+        lines.append(f"- {e.id} {e.tool_name}: still {e.status}. "
+                     "wait_tool_execution or cancel_tool_execution it.")
+    for e in unread:
+        lines.append(f"- {e.id} {e.tool_name}: {e.status}, result not read yet. "
+                     "Read it with wait_tool_execution and act on it.")
+    return "\n".join(lines)
+
+
 def format_result(execution: ToolExecution, max_chars: int = MAX_RESULT_CHARS_DEFAULT) -> str:
     result = execution.result or {}
     output = result.get("output")
@@ -259,6 +281,7 @@ def format_result(execution: ToolExecution, max_chars: int = MAX_RESULT_CHARS_DE
         except (TypeError, ValueError):
             output = str(output)
     body = output or result.get("error") or ""
+    execution.read = True
     header = (f"Execution {execution.id} ({execution.tool_name}) {execution.status} "
               f"after {execution.summary()['elapsed_seconds']}s.")
     if result.get("error") and output:
