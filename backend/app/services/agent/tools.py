@@ -537,6 +537,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _fallback_target = SessionValue(lambda: "")
     _credential_testing_allowed = SessionValue(lambda: False)
     _oob_callbacks_allowed = SessionValue(lambda: False)
+    # Explorer sandbox workspace and egress token for this assessment session.
+    _explorer_sandbox = SessionValue(dict)
 
     def __init__(self):
         self.tools = self._register_tools()
@@ -776,6 +778,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "mcp_disconnect": self.mcp_disconnect,
             "run_custom_probe": self.run_custom_probe,
             "run_poc_python": self.run_custom_probe,
+            "sandbox_exec": self.sandbox_exec,
+            "sandbox_python": self.sandbox_python,
+            "sandbox_write_file": self.sandbox_write_file,
             "list_captured_requests": self.list_captured_requests,
             "plan_intruder_mutations": self.plan_intruder_mutations,
             "run_intruder_batch": self.run_intruder_batch,
@@ -6988,6 +6993,42 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "localhost — Lictor blocks those. Print JSON proof to stdout."
         )
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    async def sandbox_exec(self, command: str, timeout_sec: int = 120, **kwargs: Any) -> str:
+        """Run a shell command in the explorer sandbox (deep assessments only).
+
+        A real bash shell in an isolated container with common HTTP and
+        scripting tools. All traffic goes through an egress proxy that admits
+        only this assessment's scoped hosts and records every exchange as
+        evidence. Args: command (bash), timeout_sec (default 120).
+        """
+        from app.services.agent.explorer_sandbox import run_in_sandbox
+
+        result = await run_in_sandbox(self, kind="shell", source=str(command or ""),
+                                      timeout_sec=timeout_sec)
+        return json.dumps(result, default=str)[:_tool_output_max_chars()]
+
+    async def sandbox_python(self, source: str, timeout_sec: int = 120, **kwargs: Any) -> str:
+        """Run Python 3 in the explorer sandbox with requests/httpx/bs4/pyjwt.
+
+        Same isolation and recorded, scope-limited egress as sandbox_exec.
+        Args: source (Python), timeout_sec (default 120).
+        """
+        from app.services.agent.explorer_sandbox import run_in_sandbox
+
+        result = await run_in_sandbox(self, kind="python", source=str(source or ""),
+                                      timeout_sec=timeout_sec)
+        return json.dumps(result, default=str)[:_tool_output_max_chars()]
+
+    async def sandbox_write_file(self, path: str, content: str, **kwargs: Any) -> str:
+        """Write a file (wordlist, script, payload list) into the sandbox workspace.
+
+        Args: path (relative to the workspace), content (text, under 4 MiB).
+        """
+        from app.services.agent.explorer_sandbox import write_sandbox_file
+
+        result = await write_sandbox_file(self, path=str(path or ""), content=str(content or ""))
+        return json.dumps(result, default=str)
 
     async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:
         """Index captured XHR/API samples from the capability map for mutate_captured_request."""

@@ -1139,6 +1139,29 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "Call record_verify_verdict only; never create_finding or submit_finding_candidate."
         ),
     ),
+    # Deep mode only (needs the explorer sandbox): open-ended testing with a
+    # real shell for bugs the fixed-payload probes cannot reach.
+    SpecialistProfile(
+        name="explorer",
+        role="Open-ended application tester with a scoped shell and Python sandbox",
+        allowed_tools=[
+            "sandbox_exec", "sandbox_python", "sandbox_write_file",
+            "read_evidence", "search_evidence", "list_test_identities",
+            "submit_finding_candidate", "record_surface_coverage", "update_hypothesis",
+        ],
+        max_iterations=12,
+        max_tools_per_iteration=3,
+        system_prompt_suffix=(
+            "You have a bash shell and Python in an isolated sandbox. Its traffic can reach "
+            "only this assessment's scoped hosts, and every exchange is recorded as evidence. "
+            "Work one hypothesis at a time: script the requests, vary the technique when one "
+            "fails (encoding, content type, parameter location, method, identity, ordering), "
+            "and chain what you learn. Prefer reproducible scripts over one-off commands. "
+            "Submit a candidate only with cited http_exchanges evidence_ids and a clear "
+            "reproduction; verification decides what is published. Record coverage for what "
+            "you ruled out, with evidence."
+        ),
+    ),
 ]
 
 _SPECIALISTS_BY_NAME: dict[str, SpecialistProfile] = {s.name: s for s in DEFAULT_SPECIALISTS}

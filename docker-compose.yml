@@ -54,6 +54,8 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-["https://aegis.theforcesecurity.io","https://aegis.judahsecurity.io","http://localhost","http://localhost:80","http://localhost:3000","http://localhost:8000","http://frontend:3000"]}
       - REDIS_URL=redis://redis:6379/0
       - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
+      - PROWL_SANDBOX_URL=${PROWL_SANDBOX_URL:-}
+      - PROWL_SANDBOX_TOKEN=${PROWL_SANDBOX_TOKEN:-}
       - AEGIS_INTERACTSH_RPC_ENABLED=${AEGIS_INTERACTSH_RPC_ENABLED:-true}
       - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
@@ -301,6 +303,43 @@ services:
       - prowl_assessment_data:/data
     networks:
       - asm_network
+
+  # Explorer sandbox (deep assessment mode). Opt-in: profile "explorer-sandbox".
+  # A real shell/Python in an isolated container whose only network path is the
+  # recording egress proxy. Holds no platform credentials.
+  prowl-sandbox-egress:
+    build:
+      context: ./backend/sandbox
+      dockerfile: egress/Dockerfile
+    image: ${PROWL_SANDBOX_EGRESS_IMAGE:-prowl-sandbox-egress:latest}
+    restart: unless-stopped
+    profiles: ["explorer-sandbox"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - SANDBOX_RECORD_BODY_LIMIT=${PROWL_SANDBOX_BODY_LIMIT:-262144}
+    volumes:
+      - prowl_sandbox_ca:/ca-public
+    networks: [asm_network]
+    depends_on: [redis]
+
+  prowl-sandbox:
+    build:
+      context: ./backend/sandbox
+      dockerfile: runner/Dockerfile
+    image: ${PROWL_SANDBOX_RUNNER_IMAGE:-prowl-sandbox-runner:latest}
+    restart: unless-stopped
+    profiles: ["explorer-sandbox"]
+    # CAP_NET_ADMIN installs the per-uid egress firewall; the runner refuses to
+    # start without it.
+    cap_add: [NET_ADMIN]
+    environment:
+      - PROWL_SANDBOX_TOKEN=${PROWL_SANDBOX_TOKEN:-}
+      - SANDBOX_EGRESS_PROXY=prowl-sandbox-egress:8080
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - prowl_sandbox_ca:/etc/prowl-sandbox:ro
+    networks: [asm_network]
+    depends_on: [prowl-sandbox-egress]
 
   # Scanner Worker for async scan tasks
   scanner:
@@ -766,6 +805,8 @@ networks:
 
 volumes:
   prowl_assessment_data:
+    driver: local
+  prowl_sandbox_ca:
     driver: local
   postgres_data:
     driver: local

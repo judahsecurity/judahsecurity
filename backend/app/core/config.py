@@ -198,6 +198,13 @@ class Settings(BaseSettings):
     # emitted (so the UI never dangles on a tool_start).
     AGENT_TOOL_HARD_TIMEOUT_SECONDS: int = 600
 
+    # Explorer sandbox (deep mode): runner API and its bearer token. Empty
+    # disables the sandbox tools. See backend/sandbox/ and explorer_sandbox.py.
+    PROWL_SANDBOX_URL: str = ""
+    PROWL_SANDBOX_TOKEN: str = ""
+    PROWL_SANDBOX_MAX_REQUESTS: int = 2000
+    PROWL_SANDBOX_EXEC_TIMEOUT_SECONDS: int = 300
+
     # Private scoped-assessment executor. Aegis remains the agent/model runtime.
     PROWL_ASSESSMENT_URL: str = ""
     PROWL_ADMIN_TOKEN: str = ""

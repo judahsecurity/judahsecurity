@@ -1680,6 +1680,19 @@ class AgentOrchestrator:
             objective_history_formatted = format_objective_history(state.get("objective_history") or [])
             available_tools = get_phase_tools(phase)
             available_tools += self._unavailable_tools_note()
+            try:
+                from app.services.agent.explorer_sandbox import sandbox_unavailable_reason
+                if not sandbox_unavailable_reason(self.tool_manager):
+                    available_tools += (
+                        "\n\n### Explorer sandbox (deep assessment)\n"
+                        "- **sandbox_exec**(command, timeout_sec?) / **sandbox_python**(source, timeout_sec?) / "
+                        "**sandbox_write_file**(path, content): a real shell and Python in an isolated "
+                        "container. Egress reaches only scoped hosts and every exchange is recorded "
+                        "evidence. Use it for custom scripts and multi-step tests the fixed probes "
+                        "cannot express, or dispatch the `explorer` specialist."
+                    )
+            except Exception:
+                logger.debug("sandbox tool note skipped", exc_info=True)
             if state.get("mode") == "pilot":
                 from app.services.agent.pilot_policy import (
                     PILOT_ALLOWED_TOOLS, current_pilot, pilot_tool_guidance,

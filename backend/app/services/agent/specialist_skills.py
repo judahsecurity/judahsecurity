@@ -197,6 +197,24 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- You do not create_finding. Independent verifier (Deborah) re-derives proofs; "
         "Joshua publishes after confirmed."
     ),
+    "explorer": (
+        "SKILL PACK — explorer (free-form testing with a scoped sandbox):\n"
+        "- You have a bash shell (sandbox_exec) and Python (sandbox_python) with "
+        "requests, httpx, bs4 and pyjwt. Egress reaches only in-scope hosts and "
+        "every HTTP exchange is recorded as evidence.\n"
+        "- Take ONE hypothesis at a time. Script the requests so a result is "
+        "reproducible, read the full response, and adapt: vary encoding, content "
+        "type, parameter location, HTTP method, identity, and request ordering "
+        "before concluding a technique does not work.\n"
+        "- Chain findings: a reflected value, a leaked id, an error message, or a "
+        "token format is a lead to the next request, not an endpoint.\n"
+        "- Use sandbox_write_file for payload lists or helper scripts. Keep each "
+        "command bounded; the request budget is shared across the assessment.\n"
+        "- submit_finding_candidate ONLY with cited http_exchanges evidence_ids and "
+        "a clear reproduction. Independent verification decides publication.\n"
+        "- record_surface_coverage for what you ruled out, with evidence. Missing "
+        "information is not proof of safety.\n"
+    ),
     "risk_assessor": (
         "SKILL PACK — risk assessor (Leo):\n"
         "- Score published findings from the demonstrated packet. No live retest.\n"
