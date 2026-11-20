@@ -162,12 +162,13 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 # Code lives in aegis-vanguard/. See aegis-vanguard/DEPLOYMENT.md.
 # =============================================================================
 # How the scanner worker revalidates findings:
-#   native (default) — replay original detector / steps_to_reproduce on the
+#   native           — replay original detector / steps_to_reproduce on the
 #                      scanner (nuclei template, TCP/HTTP probes). No Docker.
 #   docker           — `docker run aegis-vanguard:latest` (needs CLI + sock)
 #   subprocess       — run aegis-vanguard/validate_finding.py in-process
-#   auto             — native first; escalate to docker/subprocess if inconclusive
-AEGIS_VALIDATOR_MODE=native
+#   auto (default)   — native first; escalate to docker/subprocess if inconclusive.
+#                      Agent findings are never re-confirmed by reachability alone.
+AEGIS_VALIDATOR_MODE=auto
 AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # AEGIS_VANGUARD_PATH=/path/to/aegis-vanguard   # only for subprocess mode
 # AEGIS_VALIDATE_MAX_TURNS=20

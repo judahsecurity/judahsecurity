@@ -407,7 +407,7 @@ services:
       # Finding validation — native replay of the original detector / steps
       # on this scanner (no Docker). Override with docker|subprocess|auto if needed.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - AEGIS_VALIDATOR_MODE=${AEGIS_VALIDATOR_MODE:-native}
+      - AEGIS_VALIDATOR_MODE=${AEGIS_VALIDATOR_MODE:-auto}
       - AEGIS_VANGUARD_IMAGE=${AEGIS_VANGUARD_IMAGE:-aegis-vanguard:latest}
       - AEGIS_VANGUARD_PATH=${AEGIS_VANGUARD_PATH:-}
       - AEGIS_MODEL=${AEGIS_MODEL:-claude-sonnet-4-6}
