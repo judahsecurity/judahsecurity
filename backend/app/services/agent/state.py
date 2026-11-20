@@ -485,3 +485,33 @@ def migrate_legacy_objective(state: AgentState) -> AgentState:
         state["objective_history"] = []
     
     return state
+
+
+def cap_trace_step(step: Any, max_chars: int) -> Any:
+    """Return the step as persisted: tool output capped to what the model saw.
+
+    The full raw output stays in the evidence store (``artifact_id``); the
+    checkpointed trace and anything replayed on resume carry only the capped
+    text, so stored rows and resumed context cannot grow without bound.
+    """
+    if not isinstance(step, dict) or max_chars <= 0:
+        return step
+    output = step.get("tool_output")
+    if not isinstance(output, str) or len(output) <= max_chars:
+        return step
+    capped = dict(step)
+    pointer = (f" Full output: read_evidence('{step['artifact_id']}')."
+               if step.get("artifact_id") else "")
+    capped["tool_output"] = (
+        output[:max_chars]
+        + f"\n...[truncated {len(output) - max_chars} of {len(output)} chars.{pointer}]"
+    )
+    capped["tool_output_chars"] = len(output)
+    capped["tool_output_truncated"] = True
+    return capped
+
+
+def cap_trace(trace: Any, max_chars: int) -> Any:
+    if not isinstance(trace, list):
+        return trace
+    return [cap_trace_step(step, max_chars) for step in trace]

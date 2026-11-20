@@ -21,6 +21,52 @@ export function resolveAxiosRequestUrl(error: { config?: { baseURL?: string; url
  * Handles FastAPI's validation error format (detail as array of objects)
  * as well as simple string detail messages.
  */
+export interface AssetImportResult {
+  created: number;
+  updated: number;
+  skipped: number;
+  invalid: number;
+  dry_run: boolean;
+  errors: { line: number; error: string }[];
+}
+
+export interface SavedListView {
+  id: number;
+  page: string;
+  name: string;
+  filters: Record<string, unknown>;
+  shared: boolean;
+  mine: boolean;
+}
+
+export interface CustomRole {
+  id: number;
+  name: string;
+  description: string;
+  permissions: string[];
+  members: number;
+}
+
+export interface RoleCatalog {
+  permissions: { name: string; description: string }[];
+  builtin: Record<string, string[]>;
+  roles: CustomRole[];
+}
+
+export interface AuditLogEntry {
+  id: number;
+  created_at: string;
+  organization_id: number | null;
+  user_id: number | null;
+  actor: string;
+  action: string;
+  target: string;
+  outcome: string;
+  ip: string;
+  user_agent: string;
+  detail: Record<string, unknown>;
+}
+
 export function getApiErrorMessage(error: any, fallback: string = 'An error occurred'): string {
   const detail = error?.response?.data?.detail;
   const status = error?.response?.status;
@@ -1034,13 +1080,105 @@ class ApiClient {
     return response.data;
   }
 
+  // ETag of each settings module as last loaded, sent back as If-Match so a
+  // save cannot silently overwrite someone else's newer save (409 instead).
+  private settingsEtags = new Map<string, string>();
+
   async getProjectSettings(organizationId: number, module: string) {
     const response = await this.client.get(`/organizations/${organizationId}/settings/${module}`);
+    const etag = response.headers?.etag;
+    if (etag) this.settingsEtags.set(`${organizationId}:${module}`, etag);
     return response.data;
   }
 
   async updateProjectSettingsModule(organizationId: number, module: string, config: Record<string, any>) {
-    const response = await this.client.put(`/organizations/${organizationId}/settings/${module}`, { config });
+    const key = `${organizationId}:${module}`;
+    const etag = this.settingsEtags.get(key);
+    const response = await this.client.put(
+      `/organizations/${organizationId}/settings/${module}`,
+      { config },
+      etag ? { headers: { 'If-Match': etag } } : undefined,
+    );
+    const next = response.headers?.etag;
+    if (next) this.settingsEtags.set(key, next);
+    return response.data;
+  }
+
+  async exportAssetInventory(params: { format: 'csv' | 'xlsx'; organization_id?: number; asset_type?: string; search?: string }): Promise<ArrayBuffer> {
+    const response = await this.client.get('/asset-inventory/export', { params, responseType: 'arraybuffer' });
+    return response.data;
+  }
+
+  async importAssetInventory(file: File, options: { organization_id?: number; mode: 'skip' | 'update'; dry_run: boolean }): Promise<AssetImportResult> {
+    const form = new FormData();
+    form.append('file', file);
+    if (options.organization_id) form.append('organization_id', String(options.organization_id));
+    form.append('mode', options.mode);
+    form.append('dry_run', String(options.dry_run));
+    const response = await this.client.post('/asset-inventory/import', form);
+    return response.data;
+  }
+
+  async getAssetImportTemplate(): Promise<string> {
+    const response = await this.client.get('/asset-inventory/template', { responseType: 'text' });
+    return response.data;
+  }
+
+  async bulkUpdateAssets(body: { organization_id?: number; asset_ids: number[]; changes: Record<string, unknown> }): Promise<{ updated: number }> {
+    const response = await this.client.post('/asset-inventory/bulk-update', body);
+    return response.data;
+  }
+
+  async getSavedViews(page: 'assets' | 'findings'): Promise<SavedListView[]> {
+    const response = await this.client.get('/saved-views', { params: { page } });
+    return response.data;
+  }
+
+  async createSavedView(body: { page: 'assets' | 'findings'; name: string; filters: Record<string, unknown>; shared: boolean }) {
+    const response = await this.client.post('/saved-views', body);
+    return response.data;
+  }
+
+  async deleteSavedView(id: number) {
+    await this.client.delete(`/saved-views/${id}`);
+  }
+
+  async getRoles(): Promise<RoleCatalog> {
+    const response = await this.client.get('/roles');
+    return response.data;
+  }
+
+  async createRole(body: { name: string; description: string; permissions: string[] }) {
+    const response = await this.client.post('/roles', body);
+    return response.data;
+  }
+
+  async updateRole(id: number, body: { name: string; description: string; permissions: string[] }) {
+    const response = await this.client.put(`/roles/${id}`, body);
+    return response.data;
+  }
+
+  async deleteRole(id: number) {
+    await this.client.delete(`/roles/${id}`);
+  }
+
+  async assignRole(userId: number, roleId: number | null) {
+    const response = await this.client.put('/roles/assign', { user_id: userId, role_id: roleId });
+    return response.data;
+  }
+
+  async getAuditLogs(params: { action?: string; outcome?: string; actor?: string; limit?: number; offset?: number }): Promise<{ total: number; items: AuditLogEntry[] }> {
+    const response = await this.client.get('/audit/logs', { params });
+    return response.data;
+  }
+
+  async exportAuditLogs(params: { action?: string; outcome?: string; actor?: string }): Promise<string> {
+    const response = await this.client.get('/audit/logs/export', { params, responseType: 'text' });
+    return response.data;
+  }
+
+  async sendTestNotification(organizationId: number): Promise<{ results: Record<string, string> }> {
+    const response = await this.client.post(`/organizations/${organizationId}/notifications/test`);
     return response.data;
   }
 
@@ -2806,7 +2944,7 @@ class ApiClient {
 
   async generateAssetReport(
     assetId: number,
-    options?: { format?: 'pdf' | 'html'; include_info?: boolean }
+    options?: { format?: 'pdf' | 'html' | 'docx'; include_info?: boolean }
   ): Promise<ArrayBuffer> {
     const params: any = {};
     if (options?.format) params.format = options.format;
@@ -2821,7 +2959,7 @@ class ApiClient {
 
   async generateFindingsReport(
     findingIds: number[],
-    options?: { format?: 'pdf' | 'html'; report_title?: string; organization_name?: string }
+    options?: { format?: 'pdf' | 'html' | 'docx'; report_title?: string; organization_name?: string }
   ): Promise<ArrayBuffer> {
     const response = await this.client.post(
       '/reports/findings/report',

@@ -46,6 +46,7 @@ type PendingToolConfirmation = {
   tool_args?: Record<string, unknown>;
   expires_at?: number;
   message?: string;
+  ai_review?: { decision: string; reason: string } | null;
 };
 
 // ═══════════════════════════════════════════════════════
@@ -834,13 +835,17 @@ function AgentPageContent() {
           const next = Array.isArray(items) ? items.find(item => item.token) : undefined;
           setPendingConfirmation(previous => {
             if (!next) return null;
-            if (previous?.token === next.token) return previous;
+            if (previous?.token === next.token) {
+              if (!next.ai_review || previous.ai_review?.reason === next.ai_review.reason) return previous;
+              return { ...previous, ai_review: next.ai_review };
+            }
             lastAgentActivityRef.current = Date.now();
             return {
               token: next.token,
               tool_name: next.tool_name,
               tool_args: next.tool_args || {},
               message: `Tool '${next.tool_name}' requires operator approval before continuing.`,
+              ai_review: next.ai_review,
             };
           });
         })
@@ -1972,6 +1977,11 @@ function AgentPageContent() {
                               Tool
                             </p>
                             <p className="text-sm font-mono text-foreground/90">{pendingConfirmation.tool_name}</p>
+                            {pendingConfirmation.ai_review && (
+                              <p className="mt-1 text-xs text-orange-200/90">
+                                AI reviewer passed this to you: {pendingConfirmation.ai_review.reason}
+                              </p>
+                            )}
                             {pendingConfirmation.tool_args && (
                               <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs text-muted-foreground">
                                 {JSON.stringify(pendingConfirmation.tool_args, null, 2).slice(0, 2500)}

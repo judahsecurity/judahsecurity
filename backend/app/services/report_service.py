@@ -132,33 +132,54 @@ class ReportService:
         Returns:
             HTML string of the rendered report
         """
+        context = self._asset_report_context(
+            asset_id, include_info_findings, organization_name)
+        template = self.jinja_env.get_template("asset_findings_report.html")
+        return template.render(**context)
+
+    def _asset_report_context(
+        self,
+        asset_id: int,
+        include_info_findings: bool = False,
+        organization_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         asset = self.db.query(Asset).filter(Asset.id == asset_id).first()
         if not asset:
             raise ValueError(f"Asset with ID {asset_id} not found")
-        
+
         query = self.db.query(Vulnerability).filter(Vulnerability.asset_id == asset_id)
-        
         if not include_info_findings:
             query = query.filter(Vulnerability.severity != Severity.INFO)
-        
-        findings_raw = query.all()
-        
-        findings = [self._prepare_finding_data(f) for f in findings_raw]
+
+        findings = [self._prepare_finding_data(f) for f in query.all()]
         findings = self._sort_findings_by_severity(findings)
-        
-        asset_data = self._prepare_asset_data(asset)
-        severity_counts = self._count_severities(findings)
-        
-        template = self.jinja_env.get_template("asset_findings_report.html")
-        html = template.render(
-            asset=asset_data,
-            findings=findings,
-            severity_counts=severity_counts,
-            generated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        return {
+            "asset": self._prepare_asset_data(asset),
+            "findings": findings,
+            "severity_counts": self._count_severities(findings),
+            "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "organization_name": organization_name,
+        }
+
+    def generate_asset_report_docx(
+        self,
+        asset_id: int,
+        include_info_findings: bool = False,
+        organization_name: Optional[str] = None,
+    ) -> bytes:
+        """Generate an editable Word report for all findings on an asset."""
+        from app.services.report_docx import build_findings_docx
+
+        context = self._asset_report_context(
+            asset_id, include_info_findings, organization_name)
+        return build_findings_docx(
+            findings=context["findings"],
+            severity_counts=context["severity_counts"],
+            generated_at=context["generated_at"],
             organization_name=organization_name,
+            asset=context["asset"],
+            report_title=f"Security Findings Report: {context['asset']['value']}",
         )
-        
-        return html
     
     def generate_asset_report_pdf(
         self,
@@ -212,37 +233,64 @@ class ReportService:
         Returns:
             HTML string of the rendered report
         """
+        context = self._findings_report_context(finding_ids, report_title, organization_name)
+        template = self.jinja_env.get_template("asset_findings_report.html")
+        return template.render(**context)
+
+    def _findings_report_context(
+        self,
+        finding_ids: List[int],
+        report_title: Optional[str] = None,
+        organization_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         findings_raw = self.db.query(Vulnerability).filter(
             Vulnerability.id.in_(finding_ids)
         ).all()
-        
         if not findings_raw:
             raise ValueError("No findings found with the provided IDs")
-        
-        findings = [self._prepare_finding_data(f) for f in findings_raw]
-        findings = self._sort_findings_by_severity(findings)
-        
+
         asset_ids = list(set(f.asset_id for f in findings_raw))
         assets = self.db.query(Asset).filter(Asset.id.in_(asset_ids)).all()
         asset_map = {a.id: self._prepare_asset_data(a) for a in assets}
-        
-        for finding, finding_raw in zip(findings, findings_raw):
+
+        # Attach each finding's asset before sorting: zipping sorted findings
+        # against the unsorted rows used to label findings with the wrong asset.
+        findings = []
+        for finding_raw in findings_raw:
+            finding = self._prepare_finding_data(finding_raw)
             finding["asset"] = asset_map.get(finding_raw.asset_id, {})
-        
+            findings.append(finding)
+        findings = self._sort_findings_by_severity(findings)
+
         first_asset = asset_map.get(findings_raw[0].asset_id, {"value": "Multiple Assets"})
-        severity_counts = self._count_severities(findings)
-        
-        template = self.jinja_env.get_template("asset_findings_report.html")
-        html = template.render(
-            asset=first_asset,
-            findings=findings,
-            severity_counts=severity_counts,
-            generated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        return {
+            "asset": first_asset,
+            "findings": findings,
+            "severity_counts": self._count_severities(findings),
+            "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "organization_name": organization_name,
+            "report_title": report_title or "Security Findings Report",
+        }
+
+    def generate_findings_report_docx(
+        self,
+        finding_ids: List[int],
+        report_title: Optional[str] = None,
+        organization_name: Optional[str] = None,
+    ) -> bytes:
+        """Generate an editable Word report for selected findings."""
+        from app.services.report_docx import build_findings_docx
+
+        context = self._findings_report_context(finding_ids, report_title, organization_name)
+        multi_asset = len({(f.get("asset") or {}).get("id") for f in context["findings"]}) > 1
+        return build_findings_docx(
+            findings=context["findings"],
+            severity_counts=context["severity_counts"],
+            generated_at=context["generated_at"],
             organization_name=organization_name,
-            report_title=report_title or "Security Findings Report",
+            asset=None if multi_asset else context["asset"],
+            report_title=context["report_title"],
         )
-        
-        return html
     
     def generate_findings_report_pdf(
         self,

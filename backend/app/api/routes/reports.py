@@ -13,6 +13,13 @@ from app.models.user import User
 from app.api.deps import get_current_active_user
 from app.services.report_service import get_report_service
 
+
+def _audit_export(user, *, organization_id, target, fmt, detail=None):
+    from app.services.platform_audit import record as audit
+
+    audit("report.export", user=user, organization_id=organization_id, target=target,
+          detail={"format": fmt, **(detail or {})})
+
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
 
@@ -44,7 +51,7 @@ def check_asset_access(db: Session, user: User, asset_id: int) -> Asset:
 @router.get("/assets/{asset_id}/report")
 def generate_asset_report(
     asset_id: int,
-    format: str = Query("pdf", description="Output format: pdf or html"),
+    format: str = Query("pdf", description="Output format: pdf, html or docx"),
     include_info: bool = Query(False, description="Include informational findings"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -62,8 +69,25 @@ def generate_asset_report(
         org_name = asset.organization.name
     
     report_service = get_report_service(db)
+    _audit_export(current_user, organization_id=asset.organization_id,
+                  target=f"asset:{asset.value}", fmt=format.lower(),
+                  detail={"include_info": include_info})
     
     try:
+        if format.lower() == "docx":
+            docx_bytes = report_service.generate_asset_report_docx(
+                asset_id=asset_id,
+                include_info_findings=include_info,
+                organization_name=org_name
+            )
+            safe_filename = asset.value.replace("/", "_").replace("\\", "_").replace(":", "_")
+            return Response(
+                content=docx_bytes,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": f'attachment; filename="findings_report_{safe_filename}.docx"'
+                }
+            )
         if format.lower() == "html":
             html_content = report_service.generate_asset_report_html(
                 asset_id=asset_id,
@@ -96,7 +120,7 @@ def generate_asset_report(
     except ImportError as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"PDF generation not available: {str(e)}"
+            detail=f"Report generation not available: {str(e)}"
         )
     except ValueError as e:
         raise HTTPException(
@@ -113,7 +137,7 @@ def generate_asset_report(
 @router.post("/findings/report")
 def generate_findings_report(
     request: FindingsReportRequest,
-    format: str = Query("pdf", description="Output format: pdf or html"),
+    format: str = Query("pdf", description="Output format: pdf, html or docx"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -149,8 +173,24 @@ def generate_findings_report(
                 )
     
     report_service = get_report_service(db)
+    _audit_export(current_user, organization_id=current_user.organization_id,
+                  target="findings", fmt=format.lower(),
+                  detail={"finding_ids": request.finding_ids[:200]})
     
     try:
+        if format.lower() == "docx":
+            docx_bytes = report_service.generate_findings_report_docx(
+                finding_ids=request.finding_ids,
+                report_title=request.report_title,
+                organization_name=request.organization_name
+            )
+            return Response(
+                content=docx_bytes,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": 'attachment; filename="findings_report.docx"'
+                }
+            )
         if format.lower() == "html":
             html_content = report_service.generate_findings_report_html(
                 finding_ids=request.finding_ids,
@@ -180,7 +220,7 @@ def generate_findings_report(
     except ImportError as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"PDF generation not available: {str(e)}"
+            detail=f"Report generation not available: {str(e)}"
         )
     except ValueError as e:
         raise HTTPException(

@@ -189,10 +189,42 @@ class Settings(BaseSettings):
     AGENT_COMPACT_TRACE_STEPS: int = 24
     # Timeout for attaching an external MCP server (Burp/Caido).
     AGENT_MCP_CONNECT_TIMEOUT_SECONDS: float = 8.0
+    # External MCP isolation (mcp_client.py): concurrency limits, the bounded
+    # wait for a free slot, and a per-server circuit breaker on transport
+    # failures (N consecutive failures -> stop sending for the cooldown).
+    AGENT_MCP_MAX_CONCURRENT_PER_SERVER: int = 4
+    AGENT_MCP_MAX_CONCURRENT_TOTAL: int = 16
+    AGENT_MCP_QUEUE_TIMEOUT_SECONDS: float = 30.0
+    AGENT_MCP_BREAKER_FAILURES: int = 5
+    AGENT_MCP_BREAKER_COOLDOWN_SECONDS: float = 60.0
     # Node-level ceiling for a single tool call. Bounds any one tool so a hung
     # tool can never block the turn, and guarantees a tool_complete event is
     # emitted (so the UI never dangles on a tool_start).
     AGENT_TOOL_HARD_TIMEOUT_SECONDS: int = 600
+    # Long scanners (tool_executions.BACKGROUND_TOOLS) are waited on this many
+    # seconds once running; if still running they continue in the background
+    # under the hard cap and the agent gets an execution_id. 0 disables.
+    AGENT_TOOL_WAIT_SECONDS: int = 120
+    # Tool docs in the planner prompt: "full" (every tool's full description,
+    # ~15k tokens) or "index" (one line per tool, ~3.6k tokens; the agent calls
+    # describe_tools for full docs). Benchmark "index" before making it default.
+    AGENT_TOOL_DOCS_MODE: str = "full"
+    # Tool guard (tool_guard.py): regex block-list checked before any tool
+    # runs, on top of the scope allow-list. The default rule blocks
+    # government/military domains; disable it only for engagements that are
+    # authorized against them. AGENT_TOOL_GUARD_RULES is a JSON list of
+    # {"name", "pattern", "reminder", "enabled"} objects.
+    # Chat notifications (chat_notifier.py). The bot token is a platform secret;
+    # each org opts in and lists its own chat IDs in the notifications module.
+    # Platform audit log (platform_audit.py): who did what. 0 keeps rows forever.
+    AUDIT_ENABLED: bool = True
+    AUDIT_RETENTION_DAYS: int = 365
+    TELEGRAM_BOT_TOKEN: str = ""
+    # Base URL of the web app, used for links in notifications (optional).
+    PUBLIC_APP_URL: str = ""
+    AGENT_TOOL_GUARD_ENABLED: bool = True
+    AGENT_TOOL_GUARD_DEFAULT_RULES: bool = True
+    AGENT_TOOL_GUARD_RULES: str = ""
 
     # Private scoped-assessment executor. Aegis remains the agent/model runtime.
     PROWL_ASSESSMENT_URL: str = ""

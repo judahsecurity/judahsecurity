@@ -1,0 +1,30 @@
+:root { color-scheme: light dark; --fg: #1f2328; --muted: #656d76; --line: #d0d7de; --bg: #fff; --sel: #ddf4ff; --accent: #0969da; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --muted: #8d96a0; --line: #30363d; --bg: #0d1117; --sel: #1f3a5f; --accent: #4493f8; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 12px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+header { display: flex; gap: 12px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+header button { margin-left: auto; }
+main { display: grid; grid-template-columns: minmax(260px, 2fr) 3fr; height: calc(100vh - 34px); }
+#requests { border-right: 1px solid var(--line); overflow: auto; padding: 8px; }
+#send, #settings { padding: 10px; overflow: auto; }
+#settings { border-bottom: 1px solid var(--line); max-width: 520px; }
+label { display: block; margin: 6px 0; }
+label input, label select, label textarea { display: block; width: 100%; margin-top: 2px; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+label.check { display: flex; gap: 6px; align-items: center; }
+label.check input { width: auto; display: inline; }
+.row { display: flex; gap: 8px; align-items: end; }
+.row > * { flex: 1; }
+.row > button { flex: 0 0 auto; }
+button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+#submit { background: var(--accent); border-color: var(--accent); color: #fff; }
+#filter { flex: 1; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: inherit; }
+ul { list-style: none; margin: 8px 0 0; padding: 0; }
+li { padding: 4px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+li:hover, li[aria-selected="true"] { background: var(--sel); }
+li .method { font-weight: 600; margin-right: 6px; }
+li .status { color: var(--muted); margin-right: 6px; }
+h2 { font-size: 13px; margin: 0 0 6px; word-break: break-all; }
+pre { white-space: pre-wrap; word-break: break-all; background: color-mix(in srgb, var(--line) 30%, transparent); padding: 6px; border-radius: 4px; max-height: 240px; overflow: auto; }
+.muted { color: var(--muted); }
+#result.ok { color: #1a7f37; }
+#result.err { color: #cf222e; }

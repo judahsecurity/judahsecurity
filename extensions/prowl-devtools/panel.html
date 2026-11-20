@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Prowl</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header>
+    <strong>Prowl</strong>
+    <span id="auth-state" class="muted">Not signed in</span>
+    <button id="toggle-settings" type="button">Settings</button>
+  </header>
+
+  <section id="settings" hidden>
+    <label>API base <input id="api-base" placeholder="https://prowl.example.com/api/v1" autocomplete="off"></label>
+    <label>Username or email <input id="username" autocomplete="username"></label>
+    <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+    <div class="row">
+      <button id="sign-in" type="button">Sign in</button>
+      <button id="sign-out" type="button">Sign out</button>
+    </div>
+    <p class="muted">The access token is kept in session storage and cleared when the browser closes. The password is never stored.</p>
+  </section>
+
+  <main>
+    <section id="requests">
+      <div class="row">
+        <input id="filter" placeholder="Filter by URL or method">
+        <button id="clear" type="button">Clear</button>
+      </div>
+      <ul id="request-list" aria-label="Captured requests"></ul>
+      <p id="empty" class="muted">Requests made while DevTools is open appear here.</p>
+    </section>
+
+    <section id="send" hidden>
+      <h2 id="selected-line"></h2>
+      <label>Session <select id="session"></select></label>
+      <label>Class <select id="vclass"></select></label>
+      <label>Title <input id="title" maxlength="200"></label>
+      <div class="row">
+        <label>Severity
+          <select id="severity">
+            <option>info</option><option>low</option><option selected>medium</option>
+            <option>high</option><option>critical</option>
+          </select>
+        </label>
+        <label>Parameter <input id="parameter" maxlength="128"></label>
+      </div>
+      <label>Why it looks interesting <textarea id="description" maxlength="2000" rows="3"></textarea></label>
+      <label>Note <textarea id="note" maxlength="1000" rows="2"></textarea></label>
+      <label class="check"><input id="include-creds" type="checkbox"> Include Cookie/Authorization header values</label>
+      <details><summary>Request that will be sent</summary><pre id="preview"></pre></details>
+      <div class="row">
+        <button id="submit" type="button">Send to Prowl as a lead</button>
+        <button id="refresh" type="button">Reload sessions</button>
+      </div>
+      <p id="result" role="status"></p>
+      <p class="muted">Prowl treats this as an unverified lead. The session's own verifier must reproduce it before anything is filed.</p>
+    </section>
+  </main>
+  <script src="lib.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

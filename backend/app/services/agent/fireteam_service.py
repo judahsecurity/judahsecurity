@@ -1532,6 +1532,7 @@ async def _wrap_up_specialist(
             model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
             report.reported_spend_usd += estimate_cost_usd(
                 model, usage["input_tokens"], usage["output_tokens"],
+                usage.get("cache_read_tokens", 0), usage.get("cache_write_tokens", 0),
             )
         text = getattr(response, "content", "") or ""
         messages.append(AIMessage(content=text))
@@ -1798,6 +1799,7 @@ async def _run_specialist(
                 model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
                 report.reported_spend_usd += estimate_cost_usd(
                     model, usage["input_tokens"], usage["output_tokens"],
+                usage.get("cache_read_tokens", 0), usage.get("cache_write_tokens", 0),
                 )
                 if report.reported_spend_usd >= directive.max_spend_usd:
                     report.verdict = "inconclusive"

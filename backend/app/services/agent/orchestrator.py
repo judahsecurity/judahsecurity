@@ -49,6 +49,7 @@ from app.services.agent.state import (
 )
 from app.services.agent.prompts import (
     render_system_prompt,
+    render_system_prompt_parts,
     OUTPUT_ANALYSIS_PROMPT,
     PHASE_TRANSITION_MESSAGE,
     USER_QUESTION_MESSAGE,
@@ -272,6 +273,32 @@ async def _bounded_planning_call(llm, messages, *, target: str, phase: str):
         label = labels[0] if labels else "configured alternate provider"
         note_llm_degraded(f"Planner provider timed out. Continuing with {label}.")
         return response, alternate
+
+
+def _cap_persisted_tool_output(updates: dict) -> dict:
+    """Cap tool output in the trace/current step written to the checkpoint.
+
+    The node has already parsed the full output; what persists (and is
+    replayed on resume) is the same capped text the model was given.
+    """
+    from app.services.agent.state import cap_trace, cap_trace_step
+
+    max_chars = int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)
+    if "execution_trace" in updates:
+        updates["execution_trace"] = cap_trace(updates["execution_trace"], max_chars)
+    if "_current_step" in updates:
+        updates["_current_step"] = cap_trace_step(updates["_current_step"], max_chars)
+    return updates
+
+
+async def _cancel_background_executions(run_id: str) -> None:
+    """Stop background tool executions that outlive their agent run."""
+    try:
+        from app.services.agent.tool_executions import cancel_run
+
+        await cancel_run(run_id)
+    except Exception:
+        logger.exception("Could not cancel background tool executions")
 
 
 class AgentOrchestrator:
@@ -1661,6 +1688,10 @@ class AgentOrchestrator:
             qa_history_formatted = format_qa_history(state.get("qa_history") or [])
             objective_history_formatted = format_objective_history(state.get("objective_history") or [])
             available_tools = get_phase_tools(phase)
+            if str(getattr(settings, "AGENT_TOOL_DOCS_MODE", "full")).lower() == "index":
+                from app.services.agent.prompts import tool_index
+
+                available_tools = tool_index(available_tools)
             available_tools += self._unavailable_tools_note()
             if state.get("mode") == "pilot":
                 from app.services.agent.pilot_policy import (
@@ -1801,7 +1832,7 @@ class AgentOrchestrator:
                 state.get("engagement_brain")
             )
 
-            system_prompt = render_system_prompt(
+            prompt_static, prompt_tools, prompt_dynamic = render_system_prompt_parts(
                 mode=state.get("mode") or "assist",
                 current_phase=phase,
                 available_tools=available_tools,
@@ -1830,12 +1861,13 @@ class AgentOrchestrator:
                     + "\n\n"
                     + steer_prompt
                 )
+            llm = self._resolve_llm(state, LLMTask.REASONING)
+            from app.services.agent.prompt_cache import system_message_for
+
             messages = [
-                SystemMessage(content=system_prompt),
+                system_message_for(llm, prompt_static, prompt_tools, prompt_dynamic),
                 HumanMessage(content=steer_prompt),
             ]
-
-            llm = self._resolve_llm(state, LLMTask.REASONING)
             try:
                 response, llm = await _bounded_planning_call(
                     llm, messages,
@@ -1978,6 +2010,26 @@ class AgentOrchestrator:
         
         # Handle actions
         if decision.action == "complete":
+            # A run cannot finish while a background scan it started is still
+            # running or its result was never read. No override: cancel it.
+            try:
+                from app.services.agent.action_ledger import active_run_id as _run_var
+                from app.services.agent.tool_executions import completion_blocker
+
+                bg_block = completion_blocker(_run_var.get() or "")
+            except Exception:
+                logger.exception("background execution complete-gate failed")
+                bg_block = None
+            if bg_block:
+                step.thought = (step.thought or "") + " | Complete blocked — background executions."
+                step.tool_name = None
+                blocked = decision.model_dump()
+                blocked["action"] = "use_tool"
+                blocked["tool_name"] = None
+                updates["_decision"] = blocked
+                updates["_current_step"] = step.model_dump()
+                updates["messages"] = [AIMessage(content=bg_block)]
+                return updates
             from app.services.agent.tester_loop import (
                 complete_blocked_reason,
                 completion_override_allowed,
@@ -2454,6 +2506,7 @@ class AgentOrchestrator:
             "compare_requests",
             "update_hypothesis",
             "queue_finding_followups",
+            "suggest_capability_chains",
             "add_engagement_credential",
             "log_engagement_approach",
             "get_engagement_brain",
@@ -2653,10 +2706,44 @@ class AgentOrchestrator:
             else float(tool_cap)
         )
         try:
-            result = await asyncio.wait_for(
-                self.tool_manager.execute(tool_name, tool_args),
-                timeout=tool_timeout,
-            )
+            from app.services.agent import tool_executions
+
+            if tool_executions.background_enabled(tool_name):
+                # Long scanners: wait a bounded time once the tool is actually
+                # running (after any approval), then let it continue in the
+                # background under the same hard cap and hand the agent an
+                # execution_id instead of killing it.
+                from app.services.agent.action_ledger import active_run_id
+
+                run_id = active_run_id.get() or ""
+                if tool_executions.active_count(run_id) < tool_executions.MAX_PER_RUN:
+                    execution = tool_executions.start(
+                        run_id=run_id,
+                        session_id=str(session_id or ""),
+                        tool_name=tool_name,
+                        factory=lambda: self.tool_manager.execute(tool_name, tool_args),
+                        hard_timeout=tool_timeout,
+                    )
+                    wait = tool_executions.wait_seconds()
+                    finished = await tool_executions.wait_until_settled(
+                        execution, budget=tool_timeout, wait=wait,
+                    )
+                    if finished:
+                        execution.announced = True
+                        result = dict(execution.result or {})
+                    else:
+                        execution.backgrounded = True
+                        result = tool_executions.background_notice(execution, wait)
+                else:
+                    result = await asyncio.wait_for(
+                        self.tool_manager.execute(tool_name, tool_args),
+                        timeout=tool_timeout,
+                    )
+            else:
+                result = await asyncio.wait_for(
+                    self.tool_manager.execute(tool_name, tool_args),
+                    timeout=tool_timeout,
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 "[%s] Tool %s exceeded node cap of %.0fs — aborted",
@@ -2679,6 +2766,21 @@ class AgentOrchestrator:
             }
 
         raw_output = result.get("output") or result.get("error") or ""
+        try:
+            from app.services.agent import tool_executions
+            from app.services.agent.action_ledger import active_run_id
+
+            finished_bg = tool_executions.take_unannounced(active_run_id.get() or "")
+            if finished_bg and tool_name not in {"wait_tool_execution", "get_tool_execution"}:
+                notes = "; ".join(
+                    f"{e.tool_name} {e.status} (execution_id={e.id})" for e in finished_bg
+                )
+                note = (f"\n\n[background] Finished: {notes}. "
+                        "Read results with wait_tool_execution(execution_id=...).")
+                if isinstance(raw_output, str):
+                    raw_output = raw_output + note
+        except Exception:
+            logger.debug("background execution notice skipped", exc_info=True)
         if isinstance(raw_output, str):
             step_data["tool_output"] = raw_output
         else:
@@ -2688,6 +2790,8 @@ class AgentOrchestrator:
                 step_data["tool_output"] = str(raw_output)
         step_data["success"] = result.get("success", False)
         step_data["error_message"] = result.get("error")
+        if result.get("artifact_id"):
+            step_data["artifact_id"] = result["artifact_id"]
         # WPScan exit 5 / findings-in-stdout must never land as a failed step.
         if tool_name == "execute_wpscan":
             from app.services.mcp.cli_results import (
@@ -2821,7 +2925,7 @@ class AgentOrchestrator:
         error_code = str(step_data.get("error_message") or "")
         if state.get("mode") == "pilot" and error_code in pilot_stop_errors:
             reason = f"Pilot stopped after {tool_name}: {error_code}"
-            return {
+            return _cap_persisted_tool_output({
                 "_current_step": step_data,
                 "execution_trace": (state.get("execution_trace") or []) + [step_data],
                 "task_complete": True,
@@ -2830,7 +2934,7 @@ class AgentOrchestrator:
                     f"{reason}. {str(tool_output)[:300]} "
                     "No further target actions were attempted; coverage is incomplete."
                 ))],
-            }
+            })
         
         if not tool_output:
             tool_output = step_data.get("error_message") or "No output"
@@ -3025,6 +3129,7 @@ class AgentOrchestrator:
             "sync_engagement_brain",
             "update_hypothesis",
             "queue_finding_followups",
+            "suggest_capability_chains",
             "add_engagement_credential",
             "log_engagement_approach",
             "compare_requests",
@@ -3136,7 +3241,7 @@ class AgentOrchestrator:
                 "next_steps": (brain_update.get("next_steps") or [])[:5],
             })
 
-        return updates
+        return _cap_persisted_tool_output(updates)
 
     @staticmethod
     def _inject_auth_session(
@@ -3845,6 +3950,7 @@ class AgentOrchestrator:
             return InvokeResponse(error=str(e))
         finally:
             reset_pilot(pilot_token)
+            await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
@@ -3955,6 +4061,7 @@ class AgentOrchestrator:
             if pilot_token is not None:
                 from app.services.agent.pilot_policy import reset_pilot
                 reset_pilot(pilot_token)
+            await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
@@ -4026,6 +4133,7 @@ class AgentOrchestrator:
             if pilot_token is not None:
                 from app.services.agent.pilot_policy import reset_pilot
                 reset_pilot(pilot_token)
+            await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
@@ -4073,6 +4181,20 @@ class AgentOrchestrator:
                 break
         
         step = state.get("_current_step", {})
+        if state.get("task_complete") and not str(final_answer or "").strip():
+            # Never report a finished run with an empty answer: fall back to
+            # the ledger's evidence-backed partial report.
+            try:
+                from app.services.agent.action_ledger import active_run_id, partial_report
+
+                final_answer = partial_report(active_run_id.get(), "empty final answer")
+            except Exception:
+                logger.exception("partial report for empty answer failed")
+            if not str(final_answer or "").strip():
+                final_answer = (
+                    "The run ended without a written answer. See the execution "
+                    "trace and findings for what was done."
+                )
 
         from app.services.agent.model_router import consume_llm_degrade_notice
         from app.services.agent.observability import replay_from_execution_trace

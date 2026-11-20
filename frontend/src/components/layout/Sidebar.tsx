@@ -30,6 +30,8 @@ import {
   FileCode,
   ShieldOff,
   Workflow,
+  ScrollText,
+  KeyRound,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/store/auth';
@@ -76,6 +78,8 @@ const navigationGroups = [
 
 const adminNavigation = [
   { name: 'Users', href: '/users', icon: Users },
+  { name: 'Roles', href: '/roles', icon: KeyRound },
+  { name: 'Audit Log', href: '/audit', icon: ScrollText },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];
 

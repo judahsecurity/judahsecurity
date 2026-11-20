@@ -34,6 +34,8 @@ class User(Base):
     
     # Organization membership
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    # Optional custom role (app.core.permissions): narrows the built-in role.
+    custom_role_id = Column(Integer, ForeignKey("org_roles.id", ondelete="SET NULL"), nullable=True)
     organization = relationship("Organization", back_populates="users")
     
     # Timestamps
