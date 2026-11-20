@@ -80,6 +80,7 @@ class LLMTask:
     OFFENSIVE = "offensive"   # exploit agents, pentest, red-team (Claude-leaning)
     REPORT = "report"         # findings write-up / summarization
     RECON = "recon"           # fireteam recon/coverage — cheaper model
+    VISION = "vision"         # screenshot -> text summary (image never reaches the agent)
 
 ALL_TASKS = (LLMTask.REASONING, LLMTask.OFFENSIVE, LLMTask.REPORT, LLMTask.RECON)
 

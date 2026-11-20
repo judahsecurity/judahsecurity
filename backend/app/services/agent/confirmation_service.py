@@ -92,6 +92,7 @@ READONLY_TOOLS = {
     "plan_intruder_mutations",
     # Brain-only bookkeeping (no target traffic).
     "suggest_capability_chains",
+    "analyze_screenshot",  # reads a local screenshot; no target traffic
     # Background tool execution control: reads, waits and cancels only.
     "get_tool_execution",
     "wait_tool_execution",

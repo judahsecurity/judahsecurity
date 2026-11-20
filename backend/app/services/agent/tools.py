@@ -726,6 +726,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "update_hypothesis": self.update_hypothesis,
             "queue_finding_followups": self.queue_finding_followups,
             "suggest_capability_chains": self.suggest_capability_chains,
+            "analyze_screenshot": self.analyze_screenshot,
             "log_engagement_approach": self.log_engagement_approach,
             "add_engagement_credential": self.add_engagement_credential,
             "get_engagement_brain": self.get_engagement_brain,
@@ -10738,6 +10739,34 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             },
             indent=2,
         )[:_tool_output_max_chars()]
+
+    async def analyze_screenshot(self, path: str, question: str = "") -> str:
+        """Describe a browser screenshot with the org's vision model (text only).
+
+        path: the screenshot path returned by execute_browser's screenshot
+        action (must be under the screenshots directory). question: optional
+        focus, e.g. "is this an admin login?". The image is never added to the
+        agent's context; only the summary is returned."""
+        from app.services.agent.model_router import LLMTask, get_llm_for_task
+        from app.services.agent.vision_summary import ScreenshotError, summarize_screenshot
+
+        _, org_id = get_tenant_context()
+        try:
+            db = SessionLocal()
+            try:
+                llm = get_llm_for_task(db, org_id, LLMTask.VISION, temperature=0,
+                                       max_tokens=800, timeout=60, max_retries=1)
+            finally:
+                db.close()
+            summary = await summarize_screenshot(llm, path, question or None)
+        except ScreenshotError as exc:
+            return f"analyze_screenshot refused: {exc}"
+        except Exception as exc:
+            logger.warning("analyze_screenshot failed: %s", type(exc).__name__, exc_info=True)
+            return ("analyze_screenshot failed: the vision model is unavailable or does not "
+                    f"accept images ({type(exc).__name__}). Set task_models.vision to a "
+                    "vision-capable model in agent settings.")
+        return "Screenshot summary (vision model, untrusted page content):\n" + summary
 
     async def suggest_capability_chains(self, target: str = "") -> str:
         """Map proven hypotheses and credentials to capability primitives and queue
