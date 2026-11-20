@@ -7016,10 +7016,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         _, org_id = get_tenant_context()
         if not org_id:
             return "Error: organization context required"
+        user_id, _ = get_tenant_context()
+        from app.services.platform_audit import record as audit
+
         try:
             result = await asyncio.to_thread(mcp_client.connect, org_id, url, name)
         except Exception as exc:
+            audit("mcp.connect", organization_id=org_id, actor=f"user:{user_id}", target=name,
+                  outcome="failed", detail={"url": url, "error": str(exc)[:300]})
             return f"MCP connect failed: {exc}"
+        audit("mcp.connect", organization_id=org_id, actor=f"user:{user_id}", target=name,
+              detail={"url": url, "tools": len(result.get("tools") or [])})
         tools = result.get("tools") or []
         names = ", ".join(t.get("name") or "?" for t in tools[:40]) or "(none listed)"
         return (
@@ -7077,6 +7084,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if not org_id:
             return "Error: organization context required"
         ok = mcp_client.disconnect(org_id, name)
+        if ok:
+            from app.services.platform_audit import record as audit
+
+            user_id, _ = get_tenant_context()
+            audit("mcp.disconnect", organization_id=org_id, actor=f"user:{user_id}", target=name)
         return f"Disconnected '{name}'." if ok else f"No MCP session named '{name}'."
 
     async def run_custom_probe(

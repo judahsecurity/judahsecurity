@@ -21,6 +21,20 @@ export function resolveAxiosRequestUrl(error: { config?: { baseURL?: string; url
  * Handles FastAPI's validation error format (detail as array of objects)
  * as well as simple string detail messages.
  */
+export interface AuditLogEntry {
+  id: number;
+  created_at: string;
+  organization_id: number | null;
+  user_id: number | null;
+  actor: string;
+  action: string;
+  target: string;
+  outcome: string;
+  ip: string;
+  user_agent: string;
+  detail: Record<string, unknown>;
+}
+
 export function getApiErrorMessage(error: any, fallback: string = 'An error occurred'): string {
   const detail = error?.response?.data?.detail;
   const status = error?.response?.status;
@@ -1055,6 +1069,16 @@ class ApiClient {
     );
     const next = response.headers?.etag;
     if (next) this.settingsEtags.set(key, next);
+    return response.data;
+  }
+
+  async getAuditLogs(params: { action?: string; outcome?: string; actor?: string; limit?: number; offset?: number }): Promise<{ total: number; items: AuditLogEntry[] }> {
+    const response = await this.client.get('/audit/logs', { params });
+    return response.data;
+  }
+
+  async exportAuditLogs(params: { action?: string; outcome?: string; actor?: string }): Promise<string> {
+    const response = await this.client.get('/audit/logs/export', { params, responseType: 'text' });
     return response.data;
   }
 

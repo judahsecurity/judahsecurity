@@ -75,6 +75,11 @@ def decide_confirmation(
     )
     if not decided:
         raise HTTPException(status_code=409, detail="Confirmation is no longer pending; refresh the approval queue")
+    from app.services.platform_audit import record as audit
+
+    audit("agent.confirmation_" + ("approve" if payload.approved else "deny"), user=current_user,
+          organization_id=pc.organization_id, target=getattr(pc, "tool_name", "") or "",
+          detail={"session_id": getattr(pc, "session_id", ""), "reason": payload.reason or ""})
     return {
         "token": decided.token,
         "status": decided.status,

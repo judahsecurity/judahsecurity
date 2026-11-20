@@ -298,6 +298,10 @@ def update_discovery_settings(
     
     db.commit()
     db.refresh(org)
+    from app.services.platform_audit import record as audit
+
+    audit("settings.update", user=current_user, organization_id=org_id, target="discovery",
+          detail={"changed": settings.model_dump(exclude_none=True)})
     
     return DiscoverySettingsResponse(
         organization_id=org.id,
@@ -388,12 +392,20 @@ def update_project_settings_module(
             )
     ProjectSettings.set_config(db, org_id, module, body.config)
     db.commit()
+    from app.services.platform_audit import record as audit
+
+    audit("settings.update", user=current_user, organization_id=org_id, target=module,
+          detail={"changed": body.config})
     response.headers["ETag"] = ProjectSettings.config_version(db, org_id, module)
     return ProjectSettings.get_config(db, org_id, module)
 
 
 def _require_org_admin(user: User) -> None:
     if not (getattr(user, "is_superuser", False) or getattr(user, "role", None) == UserRole.ADMIN):
+        from app.services.platform_audit import record as audit
+
+        audit("settings.update", user=user, target=MODULE_NOTIFICATIONS, outcome="denied",
+              detail={"reason": "admin role required"})
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="Only organization admins can change notification settings")
 
@@ -433,6 +445,10 @@ def send_test_notification(
         raise HTTPException(status_code=409, detail="Enable Telegram and add at least one chat ID first")
     results = dispatch(org_id, "test", "Prowl notifications are connected for this organization.",
                        background=False, config={**config, "notify_test": True})
+    from app.services.platform_audit import record as audit
+
+    audit("notifications.test", user=current_user, organization_id=org_id, target="telegram",
+          detail={"results": results or {}})
     return {"results": results or {}}
 
 

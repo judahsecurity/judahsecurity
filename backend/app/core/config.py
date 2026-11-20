@@ -216,6 +216,9 @@ class Settings(BaseSettings):
     # {"name", "pattern", "reminder", "enabled"} objects.
     # Chat notifications (chat_notifier.py). The bot token is a platform secret;
     # each org opts in and lists its own chat IDs in the notifications module.
+    # Platform audit log (platform_audit.py): who did what. 0 keeps rows forever.
+    AUDIT_ENABLED: bool = True
+    AUDIT_RETENTION_DAYS: int = 365
     TELEGRAM_BOT_TOKEN: str = ""
     # Base URL of the web app, used for links in notifications (optional).
     PUBLIC_APP_URL: str = ""

@@ -72,7 +72,11 @@ def create_user(
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-    
+    from app.services.platform_audit import record as audit
+
+    audit("user.create", user=current_user, organization_id=new_user.organization_id,
+          target=new_user.email or new_user.username or str(new_user.id),
+          detail={"user_id": new_user.id, "role": getattr(new_user.role, "value", new_user.role)})
     return new_user
 
 
@@ -155,6 +159,15 @@ def update_user(
 
     db.commit()
     db.refresh(user)
+    from app.services.platform_audit import record as audit
+
+    changed = {k: getattr(v, "value", v) for k, v in update_data.items()
+               if k not in ("password", "hashed_password")}
+    if "hashed_password" in update_data or "password" in getattr(user_data, "model_fields_set", set()):
+        changed["password"] = "changed"
+    audit("user.update", user=current_user, organization_id=user.organization_id,
+          target=user.email or user.username or str(user.id),
+          detail={"user_id": user.id, "changed": changed})
     return user
 
 
@@ -183,6 +196,10 @@ def force_password_reset(
     db.add(user)
     db.commit()
     db.refresh(user)
+    from app.services.platform_audit import record as audit
+
+    audit("user.force_password_reset", user=current_user, organization_id=user.organization_id,
+          target=user.email or user.username or str(user.id), detail={"user_id": user.id})
     return user
 
 
@@ -207,9 +224,14 @@ def delete_user(
             detail="User not found"
         )
     
+    target = user.email or user.username or str(user.id)
+    org_id = user.organization_id
     db.delete(user)
     db.commit()
-    
+    from app.services.platform_audit import record as audit
+
+    audit("user.delete", user=current_user, organization_id=org_id, target=target,
+          detail={"user_id": user_id})
     return None
 
 

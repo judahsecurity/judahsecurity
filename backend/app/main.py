@@ -66,6 +66,7 @@ from app.models.agent_run_ledger import AgentRunLedger, AgentActionReceipt, Agen
 from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot  # noqa: F401 — scheduled continuation queue
 from app.models.scoped_assessment_run import ScopedAssessmentRun  # noqa: F401 — private service capabilities
 from app.models.prowl_publication import ProwlPublication  # noqa: F401 — finding idempotency
+from app.models.platform_audit import PlatformAuditLog  # noqa: F401 — platform audit log
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
     Workflow,
     WorkflowVersion,
@@ -222,6 +223,8 @@ app.include_router(pentest_router.router, prefix=settings.API_PREFIX)
 app.include_router(app_structure_router.router, prefix=settings.API_PREFIX)
 app.include_router(mcp_router.router, prefix=settings.API_PREFIX)
 app.include_router(prowl_router.router, prefix=settings.API_PREFIX)
+from app.api.routes import audit as audit_router
+app.include_router(audit_router.router, prefix=settings.API_PREFIX)
 app.include_router(mitre_router.router, prefix=settings.API_PREFIX)
 app.include_router(llm_red_team_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)
