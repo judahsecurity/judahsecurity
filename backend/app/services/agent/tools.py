@@ -3217,7 +3217,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         referenced = result.get("evidence_ids")
         evidence_ids = referenced if isinstance(referenced, list) else []
         failure_code = str(result.get("error") or "")
-        if failure_code in {"assessment_scope_denied", "invalid_browser_args"}:
+        if failure_code in {"assessment_scope_denied", "invalid_browser_args",
+                            "blocked_by_guard"}:
             # The action ledger excludes raw arguments and output. A stable
             # reason code distinguishes bad browser args from a true host deny.
             failure_code += f":{str(result.get('reason') or 'unspecified')[:40]}"
@@ -3447,6 +3448,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 tool_args["args"] = json.dumps(spec)
             except (ValueError, TypeError) as exc:
                 return {"success": False, "output": str(exc), "error": "invalid_scoped_browser_args"}
+
+        # -- Tool guard -------------------------------------------------------
+        # Never-touch destinations (government/military domains by default,
+        # plus operator rules) are refused before approval or execution. This
+        # sits on top of the scope allow-list; a blocked call is not a failure.
+        from app.services.agent.tool_guard import check_tool_call
+
+        guard = check_tool_call(tool_name, tool_args)
+        if guard.blocked:
+            logger.warning("Tool guard blocked %s (rule=%s)", tool_name, guard.rule)
+            return guard.to_result(tool_name)
 
         # -- Per-tool confirmation gate ---------------------------------------
         # Consult the org's agent confirmation policy. Dangerous tools
@@ -6914,10 +6926,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         sessions = mcp_client.list_sessions(org_id)
         if not sessions:
             return "No external MCP servers attached. Use mcp_connect(url, name)."
+        health = {row["name"]: row for row in mcp_client.server_health(org_id)}
         lines = []
         for s in sessions:
             tools = ", ".join(s.get("tools") or []) or "(no tools)"
-            lines.append(f"- {s.get('name')} [{s.get('transport')}] {s.get('url')}: {tools}")
+            state = health.get(s.get("name"), {}).get("state", "closed")
+            breaker = "" if state == "closed" else f" (circuit {state})"
+            lines.append(f"- {s.get('name')} [{s.get('transport')}] {s.get('url')}{breaker}: {tools}")
         return "\n".join(lines)
 
     async def mcp_call(

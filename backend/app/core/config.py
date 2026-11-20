@@ -189,10 +189,26 @@ class Settings(BaseSettings):
     AGENT_COMPACT_TRACE_STEPS: int = 24
     # Timeout for attaching an external MCP server (Burp/Caido).
     AGENT_MCP_CONNECT_TIMEOUT_SECONDS: float = 8.0
+    # External MCP isolation (mcp_client.py): concurrency limits, the bounded
+    # wait for a free slot, and a per-server circuit breaker on transport
+    # failures (N consecutive failures -> stop sending for the cooldown).
+    AGENT_MCP_MAX_CONCURRENT_PER_SERVER: int = 4
+    AGENT_MCP_MAX_CONCURRENT_TOTAL: int = 16
+    AGENT_MCP_QUEUE_TIMEOUT_SECONDS: float = 30.0
+    AGENT_MCP_BREAKER_FAILURES: int = 5
+    AGENT_MCP_BREAKER_COOLDOWN_SECONDS: float = 60.0
     # Node-level ceiling for a single tool call. Bounds any one tool so a hung
     # tool can never block the turn, and guarantees a tool_complete event is
     # emitted (so the UI never dangles on a tool_start).
     AGENT_TOOL_HARD_TIMEOUT_SECONDS: int = 600
+    # Tool guard (tool_guard.py): regex block-list checked before any tool
+    # runs, on top of the scope allow-list. The default rule blocks
+    # government/military domains; disable it only for engagements that are
+    # authorized against them. AGENT_TOOL_GUARD_RULES is a JSON list of
+    # {"name", "pattern", "reminder", "enabled"} objects.
+    AGENT_TOOL_GUARD_ENABLED: bool = True
+    AGENT_TOOL_GUARD_DEFAULT_RULES: bool = True
+    AGENT_TOOL_GUARD_RULES: str = ""
 
     # Private scoped-assessment executor. Aegis remains the agent/model runtime.
     PROWL_ASSESSMENT_URL: str = ""
