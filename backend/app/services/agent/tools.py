@@ -505,6 +505,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
     _scoped_sweep_responses = SessionValue(dict)
     _scoped_link_baselines = SessionValue(dict)
     _scoped_get_count = SessionValue(lambda: 0)
+    _compacted_archive = SessionValue(dict)
     _scoped_verify_get_count = SessionValue(lambda: 0)
     _scoped_post_count = SessionValue(lambda: 0)
     _scoped_verifier_post_count = SessionValue(lambda: 0)
@@ -584,6 +585,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
             # Session notes and findings
             "save_note": self.save_note,
             "record_fact": self.record_fact,
+            "expand_compacted": self.expand_compacted,
             "derive_engagement_goals": self.derive_engagement_goals,
             "list_engagement_goals": self.list_engagement_goals,
             "prove_goal": self.prove_goal,
@@ -6317,6 +6319,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
         if len(report) > max_chars:
             report = report[:max_chars] + "\n\n... (truncated)"
         return report
+
+    async def expand_compacted(self, thread_id: str, limit: int = 10) -> str:
+        """Bring back folded steps of a finished thread (hypothesis, coverage cell, candidate or goal id; 'unthreaded' for the rest) after context compaction."""
+        archive = self._compacted_archive or {}
+        steps = list(archive.get(str(thread_id or "").strip()) or [])
+        if not steps:
+            return json.dumps({"thread_id": thread_id, "steps": [],
+                               "available": sorted(archive)[:40]})
+        limit = max(1, min(int(limit or 10), 40))
+        return json.dumps({"thread_id": thread_id, "total": len(steps),
+                           "steps": steps[-limit:]}, default=str)
 
     async def derive_engagement_goals(self, objective: str) -> str:
         """Read the operator's objective into end-result goals and stated allow/deny constraints (once per engagement)."""

@@ -81,21 +81,68 @@ def _passive_browser_signature(tool_args: Dict[str, Any]) -> str:
         return ""
 
 
+_THREAD_KEYS = ("hypothesis_id", "coverage_cell_id", "candidate_id", "goal_id", "lease_id")
+_MAX_KEPT_ACTIVE = 12
+_MAX_ARCHIVED_PER_THREAD = 40
+
+
+def step_thread(step: Dict[str, Any]) -> str:
+    """The unit of work a step belongs to, from its arguments ("" if none)."""
+    args = step.get("tool_args")
+    if isinstance(args, dict):
+        for key in _THREAD_KEYS:
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:96]
+    return ""
+
+
+def _archived(step: Dict[str, Any]) -> Dict[str, Any]:
+    args = step.get("tool_args") if isinstance(step.get("tool_args"), dict) else {}
+    return {
+        "iteration": step.get("iteration"),
+        "tool_name": step.get("tool_name"),
+        "args": {k: redact_string(str(v))[:200] for k, v in list(args.items())[:12]},
+        "success": step.get("success"),
+        "thought": redact_string(str(step.get("thought") or ""))[:300],
+        "output": redact_string(str(step.get("tool_output") or ""))[:1200],
+        "actionable_findings": [redact_string(str(f))[:240]
+                                for f in (step.get("actionable_findings") or [])[:5]],
+    }
+
+
 def compact_execution_trace(
     trace: List[Dict[str, Any]],
     *,
     keep_recent: int = _KEEP_RECENT,
+    active_threads: Optional[set] = None,
+    archive: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
-    """Collapse older steps into one summary step. Returns (new_trace, brief)."""
+    """Collapse older steps into one summary step. Returns (new_trace, brief).
+
+    With ``active_threads`` (ids of hypotheses, coverage cells, candidates or
+    goals still being worked), older steps of those threads are kept verbatim
+    and only finished threads are folded, one digest line each. Folded steps
+    go to ``archive`` (thread id -> step summaries) so ``expand_compacted``
+    can bring them back.
+    """
     steps = [s for s in (trace or []) if isinstance(s, dict)]
     if len(steps) <= keep_recent + 4:
         return steps, ""
 
     older, recent = steps[:-keep_recent], steps[-keep_recent:]
+    active = {str(t) for t in (active_threads or set()) if t}
+    kept_active = [step for step in older
+                   if step.get("tool_name") != "compact_context"
+                   and step_thread(step) in active][-_MAX_KEPT_ACTIVE:]
+    kept_ids = {id(step) for step in kept_active}
+    folded = [step for step in older if id(step) not in kept_ids]
+
     tools = Counter()
     findings: List[str] = []
     passive_signatures: set[str] = set()
-    for step in older:
+    threads: Dict[str, Dict[str, Any]] = {}
+    for step in folded:
         passive_signatures.update(step.get("passive_browser_signatures") or [])
         if step.get("tool_name") == "execute_browser" and step.get("success"):
             signature = _passive_browser_signature(step.get("tool_args") or {})
@@ -108,26 +155,66 @@ def compact_execution_trace(
             text = redact_string(str(finding))[:240]
             if text and text not in findings:
                 findings.append(text)
+        thread = step_thread(step)
+        if thread and step.get("tool_name") != "compact_context":
+            row = threads.setdefault(thread, {"steps": 0, "tools": Counter(), "last": ""})
+            row["steps"] += 1
+            row["tools"][str(name or "?")] += 1
+            row["last"] = redact_string(str(step.get("thought") or step.get("tool_output") or ""))[:120]
+        if archive is not None and step.get("tool_name") != "compact_context":
+            bucket = archive.setdefault(thread or "unthreaded", [])
+            bucket.append(_archived(step))
+            del bucket[:-_MAX_ARCHIVED_PER_THREAD]
 
     tool_line = ", ".join(f"{n}×{c}" for n, c in tools.most_common(16)) or "none"
     finding_line = "; ".join(findings[:12]) or "none recorded"
+    thread_lines = [
+        f"{thread}: {row['steps']} step(s) ("
+        + ", ".join(f"{n}×{c}" for n, c in row["tools"].most_common(4))
+        + f"); last: {row['last']}"
+        for thread, row in list(threads.items())[-20:]
+    ]
     brief = (
-        f"Compacted {len(older)} earlier steps. Tools: {tool_line}. "
+        f"Compacted {len(folded)} earlier steps. Tools: {tool_line}. "
         f"Actionable notes: {finding_line}."
+        + (" Finished threads (expand_compacted(thread_id) restores them): "
+           + " | ".join(thread_lines) if thread_lines else "")
+        + (f" Kept {len(kept_active)} older step(s) of active work verbatim." if kept_active else "")
     )[:_MAX_BRIEF]
 
     compact_step = {
         "iteration": older[-1].get("iteration") or 0,
         "phase": older[-1].get("phase") or "informational",
         "thought": "Context compacted to keep the hunt in-window",
-        "reasoning": "CAI-style /compact — older tool output dropped, summary retained",
+        "reasoning": "CAI-style /compact — finished threads folded, active work kept",
         "tool_name": "compact_context",
         "tool_output": brief,
         "success": True,
         "actionable_findings": findings[:8],
         "passive_browser_signatures": sorted(passive_signatures)[:100],
+        "folded_threads": sorted(threads)[:50],
     }
-    return [compact_step, *recent], brief
+    return [compact_step, *kept_active, *recent], brief
+
+
+def active_threads_from_brain(brain: Any) -> set:
+    """Ids of work still in progress: compaction keeps their steps verbatim."""
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    if isinstance(brain, dict) or brain is None:
+        brain = engagement_brain_from_dict(brain)
+    active: set = set()
+    active.update(h.id for h in brain.hypotheses if h.status in ("open", "in_progress"))
+    for cell in brain.coverage_cells or []:
+        if isinstance(cell, dict) and cell.get("status") == "leased":
+            active.update(filter(None, (cell.get("id"), cell.get("lease_id"))))
+    for row in brain.candidates or []:
+        if isinstance(row, dict) and row.get("status") in ("pending", "inconclusive"):
+            active.add(row.get("id"))
+    for goal in brain.engagement_goals or []:
+        if isinstance(goal, dict) and goal.get("status") == "open":
+            active.add(goal.get("id"))
+    return {str(value) for value in active if value}
 
 
 def should_auto_compact(trace: List[Any], threshold: Optional[int] = None) -> bool:

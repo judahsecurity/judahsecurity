@@ -1338,10 +1338,31 @@ class AgentOrchestrator:
         except Exception:
             logger.exception("external candidate inbox drain failed")
 
+        # Set tenant context for tools (including session_id for save_note/get_notes)
+        if org_id:
+            set_tenant_context(
+                int(user_id) if user_id.isdigit() else 0,
+                org_id,
+                session_id=session_id,
+            )
+
         compacted_brief = (state.get("compacted_brief") or "").strip()
         compacted_trace = list(state.get("execution_trace", []) or [])
         if consume_compact(session_id) or should_auto_compact(compacted_trace):
-            compacted_trace, compact_note = compact_execution_trace(compacted_trace)
+            from app.services.agent.session_ops import active_threads_from_brain
+
+            try:
+                active_threads = active_threads_from_brain(
+                    getattr(self.tool_manager, "_engagement_brain", None)
+                    or state.get("engagement_brain")
+                )
+            except Exception:
+                active_threads = set()
+            compacted_trace, compact_note = compact_execution_trace(
+                compacted_trace,
+                active_threads=active_threads,
+                archive=getattr(self.tool_manager, "_compacted_archive", None),
+            )
             if compact_note:
                 compacted_brief = compact_note
                 await self._emit_status({
@@ -1350,13 +1371,6 @@ class AgentOrchestrator:
                     "kept_steps": len(compacted_trace),
                 })
 
-        # Set tenant context for tools (including session_id for save_note/get_notes)
-        if org_id:
-            set_tenant_context(
-                int(user_id) if user_id.isdigit() else 0,
-                org_id,
-                session_id=session_id,
-            )
 
         # Drain completed parallel recon streams into state before the LLM thinks
         # (non-blocking collect; soft 1.5s join so fast httpx/waf results land early).
