@@ -862,6 +862,28 @@ class AgentOrchestrator:
                 except Exception:
                     pass
 
+                # Read-only: what the previous engagement on this target found
+                # and tested clean, so a repeat run starts from it.
+                try:
+                    prior_raw = json.loads(await self.tool_manager.prior_engagement("brief"))
+                except Exception:
+                    prior_raw = {}
+                if prior_raw.get("found"):
+                    pnote = "\n  Previous engagement on this target (read-only; prior_engagement for detail): "
+                    summary = prior_raw.get("summary") or {}
+                    bits = []
+                    if prior_raw.get("findings"):
+                        bits.append("findings " + "; ".join(
+                            f"{f.get('title')} [{f.get('status')}]"
+                            for f in prior_raw["findings"][:5]))
+                    if summary.get("tested_clean"):
+                        bits.append(f"{len(summary['tested_clean'])} checks tested clean")
+                    if summary.get("auth_gated_surfaces"):
+                        bits.append("guarded: " + ", ".join(summary["auth_gated_surfaces"][:5]))
+                    pnote += ". ".join(bits) or "saved state with no findings"
+                    pnote += ". Retest open or resolved findings; skip clean checks unless the app changed."
+                    kickoff_brief = (kickoff_brief + pnote) if kickoff_brief else pnote.strip()
+
                 if kickoff_brief:
                     if acr_seed:
                         next_steps = [

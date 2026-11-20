@@ -290,3 +290,24 @@ resolve it:
 
 `list_engagement_goals` shows the current state. Goal fields are written to
 the brain snapshot only when set.
+
+## Context compaction by thread
+
+When the execution trace reaches `AGENT_COMPACT_TRACE_STEPS`, compaction
+reads which work is still active from the engagement brain: open
+hypotheses, leased coverage cells, pending or inconclusive candidates, and
+open goals. Older steps of active threads stay verbatim (up to twelve). Each
+finished thread folds into one digest line in the compaction note (steps,
+tools, last result). Folded steps go to a per-session archive, and
+`expand_compacted(thread_id)` restores them (`unthreaded` holds steps without
+a hypothesis, cell, candidate or goal id).
+
+## Previous engagement on the same target
+
+At kickoff, Prowl looks for the most recent saved run of the same
+organization against the same origin, from snapshot files or the scheduled
+run table, and adds a short read-only summary to the kickoff brief: findings
+already filed on the asset with their status, checks that tested clean,
+guarded surfaces, and earlier goals. `prior_engagement(detail)` returns the
+brief, the findings, or the earlier surface URLs (for `ingest_urls_into_map`).
+It reads one level deep and never writes to the current run.

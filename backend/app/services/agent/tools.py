@@ -586,6 +586,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
             "save_note": self.save_note,
             "record_fact": self.record_fact,
             "expand_compacted": self.expand_compacted,
+            "prior_engagement": self.prior_engagement,
             "derive_engagement_goals": self.derive_engagement_goals,
             "list_engagement_goals": self.list_engagement_goals,
             "prove_goal": self.prove_goal,
@@ -6319,6 +6320,40 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
         if len(report) > max_chars:
             report = report[:max_chars] + "\n\n... (truncated)"
         return report
+
+    async def prior_engagement(self, detail: str = "brief") -> str:
+        """Read-only results of the previous engagement against this same target (detail: brief|surfaces|findings): findings filed, what was proven or tested clean, guarded surfaces, earlier goals."""
+        import asyncio as _asyncio
+
+        from app.services.agent import prior_engagement as prior
+
+        _, org_id = get_tenant_context()
+        session_id = current_session_id.get() or ""
+        cmap = getattr(self, "_capability_map", None) or {}
+        target = (current_seed_target.get() or getattr(self, "_fallback_target", "")
+                  or cmap.get("scope") or cmap.get("target") or "")
+        if not org_id or not target:
+            return json.dumps({"found": False, "reason": "no organization or target in context"})
+        prior_session, snapshot = await _asyncio.to_thread(
+            prior.find_prior_snapshot, int(org_id), session_id, target,
+        )
+        findings = await _asyncio.to_thread(prior.prior_findings, int(org_id), target)
+        if not snapshot and not findings:
+            return json.dumps({"found": False, "target": target})
+        detail = str(detail or "brief").lower()
+        out: dict = {"found": True, "target": target, "prior_session": prior_session[:24],
+                     "read_only": True}
+        if detail == "surfaces":
+            out["surfaces"] = prior.surfaces(snapshot, prior._origin(target)) if snapshot else []
+            out["next"] = "ingest_urls_into_map(urls, source='prior_engagement') to add any you want"
+        elif detail == "findings":
+            out["findings"] = findings
+        else:
+            out["findings"] = findings[:10]
+            out["summary"] = prior.summarize(snapshot) if snapshot else {}
+            out["guidance"] = ("Retest earlier findings that are still open or resolved; do not "
+                               "re-run checks that tested clean unless the app changed.")
+        return json.dumps(out, default=str)[:_tool_output_max_chars()]
 
     async def expand_compacted(self, thread_id: str, limit: int = 10) -> str:
         """Bring back folded steps of a finished thread (hypothesis, coverage cell, candidate or goal id; 'unthreaded' for the rest) after context compaction."""
