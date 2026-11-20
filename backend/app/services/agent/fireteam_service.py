@@ -1248,15 +1248,66 @@ _MAX_LEADS = 5
 
 
 def _scaled_turns(turns: int) -> int:
-    """Apply AGENT_SPECIALIST_TURN_MULTIPLIER to a specialist's turn limit."""
+    """Apply AGENT_SPECIALIST_TURN_MULTIPLIER and the assessment depth to a turn limit."""
     from app.core.config import settings
+
+    from app.services.agent.assessment_depth import assessment_depth
 
     try:
         factor = float(getattr(settings, "AGENT_SPECIALIST_TURN_MULTIPLIER", 1.0) or 1.0)
     except (TypeError, ValueError):
         factor = 1.0
-    factor = min(4.0, max(0.5, factor))
+    depth = assessment_depth()
+    factor = min(depth.specialist_turn_cap, max(0.5, factor * depth.specialist_turn_factor))
     return max(1, round(int(turns or 1) * factor))
+
+
+_OPENING_BRAIN_CHARS = 6000
+_OPENING_PEER_ROWS = 12
+
+
+def _specialist_opening(tools_manager: Any, specialist: str) -> str:
+    """First user turn for a specialist.
+
+    Standard mode keeps the bare "Begin." so runs stay comparable. Deep mode
+    hands the specialist what the team already knows (hypotheses, coverage,
+    candidates, and recent peer results) so it does not rediscover the
+    surface with a fraction of its budget. The text comes from the same
+    engagement brain and peer board the orchestrator already trusts.
+    """
+    from app.services.agent.assessment_depth import assessment_depth
+
+    if not assessment_depth().seed_specialist_context:
+        return "Begin."
+    parts: list[str] = []
+    try:
+        from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
+
+        brain = getattr(tools_manager, "_engagement_brain", None)
+        if isinstance(brain, dict) and brain:
+            text = format_engagement_brain_for_prompt(brain) or ""
+            if text.strip():
+                parts.append("## Shared engagement state\n" + text[:_OPENING_BRAIN_CHARS])
+    except Exception:
+        logger.debug("specialist brain seed skipped", exc_info=True)
+    try:
+        board = _peer_board(tools_manager)
+        if board is not None:
+            rows = board.recent(limit=_OPENING_PEER_ROWS, exclude=specialist)
+            if rows:
+                parts.append("## Recent teammate results (search_peer_traces for detail)\n"
+                             + "\n".join(f"- {row}" for row in rows))
+    except Exception:
+        logger.debug("specialist peer seed skipped", exc_info=True)
+    if not parts:
+        return "Begin."
+    return (
+        "\n\n".join(parts)
+        + "\n\nThis is a deep assessment: you have a large budget. Build on what the team "
+        "already learned rather than repeating it. When a technique fails, vary it "
+        "(encoding, content type, parameter location, HTTP method, identity) before "
+        "concluding. Begin."
+    )
 
 
 def validated_leads(report: "SpecialistReport", scope_hosts: Iterable[str]) -> list[dict]:
@@ -1432,6 +1483,19 @@ class PeerTraceBoard:
             })
         if len(self._entries) > _PEER_BOARD_MAX:
             del self._entries[: len(self._entries) - _PEER_BOARD_MAX]
+
+    def recent(self, *, limit: int, exclude: str = "") -> list[str]:
+        """One-line summaries of the newest successful results from other specialists."""
+        rows: list[str] = []
+        for entry in reversed(self._entries):
+            if len(rows) >= limit:
+                break
+            if entry["specialist"] == exclude or not entry["success"]:
+                continue
+            summary = " ".join((entry["summary"] or "").split())[:200]
+            if summary:
+                rows.append(f"{entry['specialist']} {entry['tool']}: {summary}")
+        return rows
 
     def search(self, query: str, *, exclude_run: str) -> list[dict]:
         terms = [t for t in str(query or "").lower().split() if t][:8]
@@ -1746,7 +1810,7 @@ async def _run_specialist(
     )
 
     messages: list = [SystemMessage(content=sys_prompt)]
-    messages.append(HumanMessage(content="Begin."))
+    messages.append(HumanMessage(content=_specialist_opening(tools_manager, profile.name)))
 
     iteration = 0
     max_tool_calls = directive.max_tool_calls if isinstance(directive, OperationDirective) else 0

@@ -15,6 +15,7 @@ from collections import Counter
 from typing import Any
 from urllib.parse import urlsplit
 
+from app.services.agent.assessment_depth import hunter_budget
 from app.services.agent.coverage_cells import (
     CELL_OPEN,
     claim_coverage_cell_leases,
@@ -366,7 +367,7 @@ async def run_observed_input_batch(
         specialist = str(selected["specialist"])
         if (specialist == "sqli"
                 and str(selected.get("method") or "").upper() == "GET"
-                and int(getattr(manager, "_scoped_get_count", 0) or 0) >= HUNTER_GET_BUDGET):
+                and int(getattr(manager, "_scoped_get_count", 0) or 0) >= hunter_budget(HUNTER_GET_BUDGET)):
             # No SQLi control can issue another GET. Close this scheduling
             # attempt as budget-blocked so the queue can still reach XSS and
             # other inputs instead of repeating the same failed proof call.

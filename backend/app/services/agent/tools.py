@@ -11761,7 +11761,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # The orchestrator has a hard per-tool deadline. Keep the entire
         # specialist wave, optional rewrite, and final verification inside it
         # so completed reports and leases are reconciled before returning.
-        outer_cap = max(1.0, float(getattr(settings, "AGENT_TOOL_HARD_TIMEOUT_SECONDS", 600) or 600))
+        from app.services.agent.assessment_depth import assessment_depth, fireteam_dispatch_cap
+        outer_cap = fireteam_dispatch_cap(
+            max(1.0, float(getattr(settings, "AGENT_TOOL_HARD_TIMEOUT_SECONDS", 600) or 600))
+        )
+        depth = assessment_depth()
+        if depth.max_parallel_specialists > int(max_parallel or 0):
+            max_parallel = depth.max_parallel_specialists
         autonomy_limits = current_autonomy_limits.get()
         if autonomy_limits:
             max_parallel = min(max(1, int(max_parallel)), autonomy_limits.max_parallel_specialists)
@@ -12293,8 +12299,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ]
             if bounded_first_pass else chosen
         )
+        # Deep waves may use the longer dispatch cap; the bounded observed-input
+        # first pass stays a quick fixed-payload sweep in every mode.
+        attack_wave_cap = 420.0 if depth.fireteam_timeout_seconds <= 0 else max(
+            420.0, outer_cap - outer_margin - reserve,
+        )
         first_wave_timeout = min(
-            150.0 if bounded_first_pass else 420.0,
+            150.0 if bounded_first_pass else attack_wave_cap,
             max(1.0, _remaining_dispatch_time() - reserve),
         )
         result = await run_fireteam(

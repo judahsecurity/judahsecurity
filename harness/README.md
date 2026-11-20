@@ -84,6 +84,19 @@ python -m local_harness.product_class_benchmark runs/class_lab/corpus.json \
   --out runs/class_lab/report.json
 ```
 
+Each failed case carries a `miss_reason` naming the earliest stage that lost
+the bug: `surface_not_reached`, `skipped_by_budget`, `blocked`, `not_attempted`,
+`interrupted`, `found_not_published`, `tested_no_signal`, `false_positive`,
+`negative_not_evidenced`, or `incomplete_run`. The report totals them per class
+and overall. Use them to tell a coverage gap from a budget gap, a payload gap,
+or a publication-gate gap before tuning the agent.
+
+Pass `--assessment-mode deep` to the product-agent adapter to run Prowl's deep
+mode (model-led after recon, larger budgets, identical scope and publication
+gates; see `backend/app/services/agent/assessment_depth.py`). The mode is part
+of the budget comparison, so a standard run and a deep run never count as
+equal-budget.
+
 Repeat the lab server and agent command for each manifest case, changing
 `--class`, `--polarity`, and the sink directory. For `jwt-positive` and
 `jwt-negative`, use `--identities runs/class_lab/class_lab_jwt_identities.json`. For the SSRF positive, add

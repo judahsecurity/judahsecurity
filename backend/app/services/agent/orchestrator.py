@@ -937,9 +937,18 @@ class AgentOrchestrator:
                 "recon, or fireteam dispatch unless the saved evidence is insufficient."
             )
 
+        from app.services.agent.assessment_depth import assessment_depth
+        depth = assessment_depth()
         out = {
             "current_iteration": 0,
-            "max_iterations": _max_iterations_var.get(None) or settings.AGENT_MAX_ITERATIONS,
+            # Deep mode raises the floor; an explicit lower cap from a caller
+            # (e.g. a scheduled hunt) is already excluded by assessment_depth().
+            "max_iterations": max(
+                _max_iterations_var.get(None) or settings.AGENT_MAX_ITERATIONS,
+                depth.main_iterations,
+            ),
+            "assessment_mode": depth.name,
+            "pipeline_advisory_declines": 0,
             "task_complete": False,
             "current_phase": "informational",
             "phase_history": [PhaseHistoryEntry(phase="informational").model_dump()],
@@ -1574,6 +1583,8 @@ class AgentOrchestrator:
         # Do not spend a reasoning turn asking Joshua whether to assess.
         forced = None
         forced_complete = False
+        # Deep mode offers post-recon pipeline steps instead of forcing them.
+        advisory_step = None
         # A fresh steer gets one planning turn so the model can apply it. Saved
         # operator constraints remain in the prompt, but must not disable the
         # deterministic input queue for the rest of the assessment.
@@ -1590,7 +1601,14 @@ class AgentOrchestrator:
                 })
             except Exception:
                 logger.exception("forced assessment step failed")
-            if not forced:
+            if forced:
+                from app.services.agent.assessment_depth import pipeline_step_is_advisory
+                if pipeline_step_is_advisory(
+                    str(forced.get("tool_name") or ""),
+                    int(state.get("pipeline_advisory_declines") or 0),
+                ):
+                    advisory_step, forced = forced, None
+            if not forced and not advisory_step:
                 try:
                     from app.services.agent.cve_applicability import (
                         cve_applicability_should_complete,
@@ -1791,6 +1809,11 @@ class AgentOrchestrator:
                         tool_recommendations = loop_txt + "\n\n" + tool_recommendations
                 except Exception:
                     logger.debug("tester loop prompt injection skipped", exc_info=True)
+            if advisory_step:
+                from app.services.agent.assessment_depth import format_pipeline_advisory
+                tool_recommendations = format_pipeline_advisory(
+                    advisory_step, int(state.get("pipeline_advisory_declines") or 0),
+                ) + "\n\n" + tool_recommendations
 
             from app.services.agent.capability_map import format_capability_map_for_prompt
             from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
@@ -1955,8 +1978,18 @@ class AgentOrchestrator:
         # Update todo list
         todo_list = [item.model_dump() for item in decision.updated_todo_list] if decision.updated_todo_list else state.get("todo_list", [])
         
+        # A declined suggestion counts toward the forced fallback; following
+        # it, or a forced pipeline step, resets the count.
+        advisory_declines = int(state.get("pipeline_advisory_declines") or 0)
+        if advisory_step:
+            followed = (decision.action == "use_tool"
+                        and decision.tool_name == advisory_step.get("tool_name"))
+            advisory_declines = 0 if followed else advisory_declines + 1
+        elif forced:
+            advisory_declines = 0
         updates = {
             "current_iteration": iteration,
+            "pipeline_advisory_declines": advisory_declines,
             "todo_list": todo_list,
             "_current_step": step.model_dump(),
             "_decision": decision.model_dump(),
@@ -2646,6 +2679,9 @@ class AgentOrchestrator:
         # in every path (success, failure, timeout, raise), so the tool_complete
         # emit below always fires and the UI never dangles on the tool_start.
         tool_cap = getattr(settings, "AGENT_TOOL_HARD_TIMEOUT_SECONDS", 600) or 600
+        if tool_name == "fireteam_dispatch":
+            from app.services.agent.assessment_depth import fireteam_dispatch_cap
+            tool_cap = fireteam_dispatch_cap(float(tool_cap))
         remaining = self._turn_time_remaining()
         tool_timeout = (
             max(1.0, min(float(tool_cap), remaining))
@@ -3657,6 +3693,7 @@ class AgentOrchestrator:
         price_limit_usd: Optional[float] = None,
         assessment_policy: Optional[Dict[str, Any]] = None,
         pilot_config: Optional[Dict[str, Any]] = None,
+        assessment_mode: Optional[str] = None,
     ) -> InvokeResponse:
         """Main entry point for agent invocation.
         
@@ -3667,6 +3704,8 @@ class AgentOrchestrator:
             load_session_id: Inject a compact brief from a prior conversation
                 (CAI /load analog).
             price_limit_usd: Per-run spend cap override (0 = unlimited).
+            assessment_mode: ``standard`` or ``deep`` (see assessment_depth.py);
+                None uses AGENT_ASSESSMENT_MODE.
         """
         from app.services.agent.run_control import (
             clear_stop,
@@ -3692,6 +3731,10 @@ class AgentOrchestrator:
             PilotDenied, PilotPolicy, reset_pilot, set_pilot,
         )
         pilot_token = set_pilot(None)
+        from app.services.agent.assessment_depth import (
+            current_assessment_depth, set_assessment_depth,
+        )
+        depth_token = set_assessment_depth(assessment_mode)
         register_run(session_id, this_task)
         try:
             pilot_policy = None
@@ -3731,7 +3774,7 @@ class AgentOrchestrator:
             _max_iterations_var.set(max_iterations)
             self._start_turn_deadline()
             set_autonomous_mode(mode in ("agent", "pilot"))
-            logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'})")
+            logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'}, depth={current_assessment_depth.get().name})")
             if price_limit_usd is not None:
                 set_price_limit(session_id, float(price_limit_usd))
             if load_session_id:
@@ -3845,6 +3888,7 @@ class AgentOrchestrator:
             return InvokeResponse(error=str(e))
         finally:
             reset_pilot(pilot_token)
+            current_assessment_depth.reset(depth_token)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
@@ -3885,6 +3929,10 @@ class AgentOrchestrator:
             )
         token = set_pilot(policy)
         set_autonomous_mode(mode in ("agent", "pilot"))
+        # Keep the depth the run started with; a resume must not silently
+        # switch a deep assessment back to standard budgets or vice versa.
+        from app.services.agent.assessment_depth import set_assessment_depth
+        set_assessment_depth(values.get("assessment_mode") or "standard")
         return token
 
     async def resume_after_approval(

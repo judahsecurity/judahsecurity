@@ -326,6 +326,10 @@ class AgentState(TypedDict, total=False):
     recon_worker_briefs: Optional[List[str]]
     # Kickoff saw 404/empty root — directory brute-force is mandatory
     needs_dir_brute: Optional[bool]
+    # "standard" | "deep" (assessment_depth.py); restored on resume.
+    assessment_mode: Optional[str]
+    # Consecutive deep-mode pipeline suggestions the model declined.
+    pipeline_advisory_declines: Optional[int]
     
     # Internal state
     _current_step: Optional[Dict[str, Any]]

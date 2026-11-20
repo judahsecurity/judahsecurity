@@ -170,6 +170,10 @@ class Settings(BaseSettings):
     # Scales every specialist's turn limit (bounded 0.5-4). Use for equal-budget
     # benchmark runs of bigger budgets without editing specialist profiles.
     AGENT_SPECIALIST_TURN_MULTIPLIER: float = 1.0
+    # Default assessment depth when a request does not choose one: "standard"
+    # (deterministic pipeline) or "deep" (model-led after recon, larger budgets;
+    # same scope and publication gates). See services/agent/assessment_depth.py.
+    AGENT_ASSESSMENT_MODE: str = "standard"
     AGENT_MAX_OUTPUT_TOKENS: int = 4096  # Max tokens for LLM response (Claude/OpenAI); increase for long answers (e.g. 8192, 16384, 64000)
     AGENT_TOOL_OUTPUT_MAX_CHARS: int = 20000  # RedAmon-style default; truncation for LLM context
     AGENT_ANALYZE_TIMEOUT_SECONDS: int = 90  # Optional tool-output analysis must not stall an assessment.

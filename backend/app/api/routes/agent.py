@@ -156,6 +156,9 @@ class AgentQueryRequest(BaseModel):
     load_session_id: Optional[str] = None
     price_limit_usd: Optional[float] = None
     assessment_policy: Optional[AgentAssessmentPolicy] = None
+    # "deep" lets the model choose steps after recon with larger budgets.
+    # Scope and publication gates are identical in both modes.
+    assessment_mode: Optional[Literal["standard", "deep"]] = None
 
     @field_validator("question")
     @classmethod
@@ -600,6 +603,7 @@ async def query_agent(
     user_id = current_user.id
     load_session_id = request.load_session_id
     price_limit_usd = request.price_limit_usd
+    assessment_mode = request.assessment_mode
     todos = initial_todos
 
     async def _run_rest_query() -> None:
@@ -621,6 +625,7 @@ async def query_agent(
                     price_limit_usd=price_limit_usd,
                     assessment_policy=assessment_policy,
                     pilot_config=pilot_config,
+                    assessment_mode=assessment_mode,
                 )
             )
             register_run(session_id, invoke_task)
@@ -1558,6 +1563,14 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         })
                         continue
 
+                assessment_mode = data.get("assessment_mode") or None
+                if assessment_mode not in (None, "standard", "deep"):
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "assessment_mode must be 'standard' or 'deep'",
+                    })
+                    continue
+
                 initial_todos = None
                 if playbook_id:
                     objective, initial_todos = build_initial_objective(playbook_id, target)
@@ -1587,6 +1600,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     limit=price_limit_usd,
                     policy=assessment_policy,
                     pilot=pilot_config,
+                    depth=assessment_mode,
                 ):
                     try:
                         orchestrator = await get_agent_orchestrator(initialize=False)
@@ -1604,6 +1618,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                                 price_limit_usd=limit,
                                 assessment_policy=policy,
                                 pilot_config=pilot,
+                                assessment_mode=depth,
                             ),
                             timeout=_run_timeout_s(),
                         )

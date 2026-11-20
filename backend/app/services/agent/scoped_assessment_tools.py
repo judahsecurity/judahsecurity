@@ -15,6 +15,7 @@ import secrets
 from contextvars import ContextVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
+from app.services.agent.assessment_depth import hunter_budget
 from app.services.agent.assessment_scope import assert_url_in_scope
 from app.services.agent.assessment_sessions import browser_storage_state, identity_registry
 from app.services.agent.evidence_store import evidence_store, verification_run
@@ -44,6 +45,8 @@ SCOPED_ASSESSMENT_TOOLS = (
 
 # Exploratory probes cannot consume the capacity needed to give observed
 # SQLi/XSS inputs a first pass. The total cap still bounds target traffic.
+# Hunter budgets scale with assessment depth (hunter_budget); verifier
+# budgets never do, so a deep run cannot buy a looser proof.
 HUNTER_GET_BUDGET = 1024
 HUNTER_GENERAL_GET_BUDGET = 256
 VERIFIER_GET_BUDGET = 80
@@ -333,13 +336,13 @@ class ScopedAssessmentTools:
             raise ValueError("Invalid assessment request reservation")
         verifier = verification_run.get() is not None
         counter = "_scoped_verify_get_count" if verifier else "_scoped_get_count"
-        limit = VERIFIER_GET_BUDGET if verifier else HUNTER_GET_BUDGET
+        limit = VERIFIER_GET_BUDGET if verifier else hunter_budget(HUNTER_GET_BUDGET)
         used = int(getattr(self, counter, 0) or 0)
         if used + count > limit:
             raise ValueError("Scoped HTTP GET budget exhausted for this assessment session")
         if not verifier and not first_pass_get_context.get():
             general_used = int(getattr(self, "_scoped_general_get_count", 0) or 0)
-            if general_used + count > HUNTER_GENERAL_GET_BUDGET:
+            if general_used + count > hunter_budget(HUNTER_GENERAL_GET_BUDGET):
                 raise ValueError(
                     "Exploratory HTTP GET budget exhausted; observed-input first passes remain reserved"
                 )
@@ -358,7 +361,7 @@ class ScopedAssessmentTools:
         """Charge actual POST probe requests to the hunter or verifier budget."""
         verifier = verification_run.get() is not None
         counter = "_scoped_verifier_post_count" if verifier else "_scoped_post_count"
-        limit = VERIFIER_POST_BUDGET if verifier else HUNTER_POST_BUDGET
+        limit = VERIFIER_POST_BUDGET if verifier else hunter_budget(HUNTER_POST_BUDGET)
         used = int(getattr(self, counter, 0) or 0)
         if used + count > limit:
             raise ValueError("Scoped POST request budget exhausted for this assessment session")
@@ -368,7 +371,7 @@ class ScopedAssessmentTools:
         """Reserve one bounded concurrency burst for the hunter or verifier."""
         verifier = verification_run.get() is not None
         counter = "_scoped_verifier_race_count" if verifier else "_scoped_race_count"
-        limit = VERIFIER_RACE_BUDGET if verifier else HUNTER_RACE_BUDGET
+        limit = VERIFIER_RACE_BUDGET if verifier else hunter_budget(HUNTER_RACE_BUDGET)
         used = int(getattr(self, counter, 0) or 0)
         if used + 1 > limit:
             raise ValueError("Scoped race-burst budget exhausted for this assessment session")
