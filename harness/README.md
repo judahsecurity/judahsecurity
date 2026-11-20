@@ -84,6 +84,24 @@ python -m local_harness.product_class_benchmark runs/class_lab/corpus.json \
   --out runs/class_lab/report.json
 ```
 
+**A/B in one command.** `local_harness.benchmark.ab_matrix` runs every case
+under several agent configurations at the same budget, scores each with this
+scorer, and prints a per-class comparison against the first configuration.
+Presets set every flag explicitly: `strict` (previous behavior), `model_led`
+(advisory steering, hunting rules, self-challenge, weak-negative re-check) and
+`model_led_sandbox` (plus `sandbox_shell`; needs the probe sandbox running).
+
+```bash
+python -m local_harness.benchmark.ab_matrix --out-dir runs/ab \
+  --organization-id "$LAB_ORG_ID" --user-id "$LAB_USER_ID" \
+  --configs strict,model_led --max-iterations 80 --price-limit-usd 4 \
+  --callback-suffix YOUR_CONTROLLED_OAST_SUFFIX   # optional; else SSRF positive is skipped
+```
+
+Results land in `runs/ab/<config>/report.json` and `runs/ab/comparison.json`.
+Re-running skips cases that already have findings; `--score-only` rescores and
+`--dry-run` prints the plan.
+
 Repeat the lab server and agent command for each manifest case, changing
 `--class`, `--polarity`, and the sink directory. For `jwt-positive` and
 `jwt-negative`, use `--identities runs/class_lab/class_lab_jwt_identities.json`. For the SSRF positive, add
