@@ -491,9 +491,10 @@ from app.services.agent.session_runtime import SessionValue
 
 from app.services.agent.assessment_capabilities import AssessmentCapabilities, CAPABILITY_TOOLS
 from app.services.agent.scoped_assessment_tools import ScopedAssessmentTools
+from app.services.agent.fact_sharing import FactSharingTools
 
 
-class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
+class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharingTools):
     """Manager for ASM platform tools accessible by the AI agent."""
     
     _proof_plans = SessionValue(dict)
@@ -582,6 +583,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "create_scan": self.create_scan,
             # Session notes and findings
             "save_note": self.save_note,
+            "record_fact": self.record_fact,
             "derive_engagement_goals": self.derive_engagement_goals,
             "list_engagement_goals": self.list_engagement_goals,
             "prove_goal": self.prove_goal,
@@ -12278,6 +12280,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "application_operations", "authorization_matrix", "proof_receipts",
                 "candidates", "coverage", "coverage_cells", "proof_escalations",
                 "verification_receipts",
+                # Follow-up ledgers: rolling dispatch records leads and facts and
+                # claims follow-ups on the live brain while the wave runs.
+                "observation_events", "followup_proposals", "assignment_chains",
+                "recon_observations",
             ):
                 value = getattr(live, field_name, None)
                 if value:
@@ -12378,9 +12384,112 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         early_rewrites: dict = {}
         mid_wave_lease_ids: set = set()
         mid_wave_starts: list = []
+        early_leads_done: set = set()
+        early_leads_recorded = 0
+        dynamic_followups: dict = {}
+        finished_followups: set = set()
+        from urllib.parse import urlsplit as _urlsplit
+
+        lead_hosts = {
+            _urlsplit(t if "://" in t else f"https://{t}").hostname or ""
+            for t in [*target_list, default_target or ""] if t
+        }
+
+        def _followup_policy(live):
+            from app.services.agent.followup_runtime import policy_for
+
+            return followup_policy or policy_for(self, live)
+
+        def _record_leads_live(report) -> None:
+            """Commit a finished member's leads now, on the brain specialists share."""
+            nonlocal early_leads_recorded
+            from app.services.agent.fireteam_service import validated_leads
+            from app.services.agent.observation_followups import capture_facts
+
+            early_leads_done.add(id(report))
+            leads = validated_leads(report, lead_hosts)
+            if not leads:
+                return
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            for lead in leads:
+                if self._record_followup_event(
+                    live, kind="capture", identity="anonymous",
+                    evidence_ids=lead["evidence_ids"],
+                    facts=capture_facts(lead["method"], lead["url"]),
+                ) is not None:
+                    early_leads_recorded += 1
+                    self._schedule_endpoint_enrichment(lead["method"], lead["url"])
+            self._engagement_brain = live.to_dict()
+
+        def _finish_followup_live(report) -> None:
+            """Close a follow-up lease as soon as its member reports, so its
+            result can produce the next follow-up during this wave."""
+            from app.services.agent.followup_runtime import finish_followup
+
+            lease_id = str(getattr(report, "coverage_lease_id", "") or "")
+            lease = dynamic_followups.get(lease_id) or next(
+                (row for row in followup_leases.values() if row.id == lease_id), None,
+            )
+            if lease is None or lease_id in finished_followups:
+                return
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            finish_followup(
+                live, lease, [report], run_id=_followup_policy(live).run_id,
+                candidate_id=next((
+                    str(raw.get("id") or "") for raw in (live.candidates or [])
+                    if isinstance(raw, dict)
+                    and raw.get("coverage_cell_id") == lease.coverage_cell_id
+                ), ""),
+            )
+            finished_followups.add(lease_id)
+            self._engagement_brain = live.to_dict()
+
+        def _claim_followups_live(free: int) -> list:
+            """Follow-up cells the planner has accepted, started in free slots."""
+            from app.services.agent.followup_runtime import (
+                claim_for_specialists, followups_enabled, required_identities,
+                specialists_with_followups,
+            )
+
+            if free <= 0 or mode in _FOLLOWUP_EXCLUDED_MODES or not followups_enabled():
+                return []
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            self._refresh_followups(live)  # apply planning that finished; queue new
+            policy = _followup_policy(live)
+            names = permitted_specialists(
+                [name for name in specialists_with_followups(live, policy) if get_specialist(name)],
+                allow_credential_testing=bool(self._credential_testing_allowed),
+            )[:free]
+            leases = claim_for_specialists(live, names, policy) if names else {}
+            out = []
+            if leases:
+                new_profiles = {name: get_specialist(name) for name in leases}
+                new_directives = directives_from_hypotheses(
+                    brain=live, profiles_by_name=new_profiles, specialists=list(leases),
+                    default_target=default_target or "", task_leases={}, coverage_leases=leases,
+                )
+                for name, lease in leases.items():
+                    directive = new_directives.get(name)
+                    if directive is None:
+                        continue
+                    needed = required_identities(live, lease)
+                    if needed:
+                        allowed = set(directive.allowed_identities or needed)
+                        directive.allowed_identities = [i for i in needed if i in allowed]
+                    dynamic_followups[lease.id] = lease
+                    out.append((new_profiles[name], directive))
+                    mid_wave_starts.append({"specialist": name, "reason": "followup",
+                                            "coverage_cell_id": lease.coverage_cell_id})
+            self._engagement_brain = live.to_dict()
+            return out
 
         async def _next_work(report, slots: int, window: float) -> list:
             nonlocal graph
+            if report is None:
+                # Woken by a fact a running specialist recorded: only the
+                # follow-up path can have new work.
+                return _claim_followups_live(slots)
+            _record_leads_live(report)
             summary = parse_executor_summary(report)
             early_summaries[id(report)] = summary
             ready_before = {nid for nid, node in graph.nodes.items() if node.status == NODE_READY}
@@ -12416,6 +12525,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         ))
                         mid_wave_starts.append({"specialist": rewrite.specialist,
                                                 "reason": "retry"})
+            retried_now = any(
+                getattr(directive, "coverage_lease_id", "") == getattr(report, "coverage_lease_id", "")
+                for _profile, directive in additions
+            ) and bool(getattr(report, "coverage_lease_id", ""))
+            if not retried_now and (
+                str(getattr(report, "coverage_lease_id", "") or "") in dynamic_followups
+                or (report.specialist not in early_rewrites and (
+                    summary.rewrite_hint.startswith("execution_timeout")
+                    or not should_rewrite(graph, summary, report)
+                ))
+            ):
+                # Not being retried with this lease: close it now so its result
+                # can produce the next follow-up during this wave. (A wave-start
+                # follow-up that the retry wave may re-run stays open.)
+                _finish_followup_live(report)
             # Rule 2: hypotheses this result made ready (spawned, or a chain
             # step whose prerequisite it proved) start now, one per specialist.
             free = slots - len(additions)
@@ -12451,10 +12575,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                             "hypothesis_id": getattr(lease, "hypothesis_id", ""),
                             "reason": "spawned" if name in (spawn_names or []) else "unblocked",
                         })
+            # Rule 3: follow-up cells (from leads, facts, and finished follow-ups).
+            additions.extend(_claim_followups_live(slots - len(additions)))
             persist_graph(brain, graph)
             _checkpoint_task_graph()
             return additions
 
+        self._fact_wake = asyncio.Event() if rolling else None
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
@@ -12470,7 +12597,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             wave_timeout_sec=first_wave_timeout,
             next_work=_next_work if rolling else None,
             max_dynamic_members=max(0, int(getattr(settings, "FIRETEAM_MAX_MID_WAVE_STARTS", 6))),
+            wake_event=self._fact_wake,
         )
+        self._fact_wake = None
 
         executor_summaries = [
             early_summaries.get(id(r)) or parse_executor_summary(r) for r in result.reports
@@ -12585,7 +12714,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 continue  # a mid-wave hypothesis run holds no coverage lease
             reports_by_specialist.setdefault(report.specialist, []).append(report)
         for specialist, lease in coverage_leases.items():
-            reports = reports_by_specialist.get(specialist, [])
+            # A specialist may hold this lease and a mid-wave follow-up lease.
+            reports = [r for r in reports_by_specialist.get(specialist, [])
+                       if not getattr(r, "coverage_lease_id", "")
+                       or r.coverage_lease_id == lease.id]
             if specialist in followup_leases:
                 from app.services.agent.followup_runtime import finish_followup
 
@@ -12628,19 +12760,27 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     else "Specialist did not return a coverage receipt"
                 ),
             )
+        # Mid-wave follow-ups cut off by the wave deadline close here.
+        if dynamic_followups:
+            from app.services.agent.followup_runtime import finish_followup
+
+            for lease_id, lease in dynamic_followups.items():
+                if lease_id in finished_followups:
+                    continue
+                finish_followup(
+                    brain, lease,
+                    [r for r in result.reports if getattr(r, "coverage_lease_id", "") == lease_id],
+                    run_id=_followup_policy(brain).run_id,
+                )
         # Endpoints a specialist saw outside its lane become capture events,
         # so the follow-up planner validates and assigns them like any capture.
-        from urllib.parse import urlsplit
-
         from app.services.agent.fireteam_service import validated_leads
         from app.services.agent.observation_followups import capture_facts
 
-        lead_hosts = {
-            urlsplit(t if "://" in t else f"https://{t}").hostname or ""
-            for t in [*target_list, default_target or ""] if t
-        }
-        leads_recorded = 0
+        leads_recorded = early_leads_recorded
         for report in result.reports:
+            if id(report) in early_leads_done:
+                continue
             for lead in validated_leads(report, lead_hosts):
                 if self._record_followup_event(
                     brain, kind="capture", identity="anonymous",

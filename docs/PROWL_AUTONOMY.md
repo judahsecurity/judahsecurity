@@ -191,9 +191,39 @@ Work that finds no free slot or time is left for the post-round retry wave or
 the next dispatch, as before. `started_mid_wave` in the dispatch result lists
 what started and why.
 
-Out-of-lane leads and observation follow-ups are still applied after the
-round. Assigning them mid-round needs the follow-up planner's coverage-cell
-writes to merge with the cells specialists update while they run.
+3. a follow-up cell the follow-up planner has accepted (from a lead, a fact,
+   or a finished follow-up), one lease per specialist, with the identities
+   it was approved for.
+
+Leads are recorded the moment their specialist finishes, and follow-up leases
+close as soon as their member reports, so a result can produce the next
+follow-up within the same round. Lead recording, follow-up claims and closes
+happen on the live engagement brain that specialists write to while they run,
+and the follow-up ledgers (`observation_events`, `followup_proposals`,
+`assignment_chains`) and `recon_observations` are carried into the round's
+result afterwards. A wave-start follow-up that the auto-prompter will retry
+stays open for the retry. Coverage receipts are matched to each report's own
+lease, so a specialist holding two leases cannot close the wrong cell.
+
+### Facts shared mid-run
+
+Specialists can call `record_fact(kind, value, evidence_id, note)` while they
+work. `kind` is one of endpoint, parameter, technology, error_leak, auth_hint
+or note, and `evidence_id` must be a successful tool result from this session.
+Facts go to `recon_observations` (de-duplicated, at most 200), where the
+planner and peer search see them. An in-scope endpoint fact also becomes a
+capture event for the follow-up planner and wakes the rolling dispatcher. It
+plans on facts after a one-second batch window, without waiting for any
+specialist to finish.
+
+### Endpoint checks in code
+
+New in-scope endpoints from facts and leads get one anonymous GET of the bare
+path (query values dropped) without a model turn: at most 15 per session,
+three at a time, never for paths that look state-changing. The status,
+content type and size are attached to the engagement surface (`probe`), and a
+401 or 403 marks it `auth_gated`. These GETs count against the session's
+scoped GET budget.
 
 To compare, run the same lab cases with the flag off and on and compare with
 `python -m local_harness.ledger_compare`. The follow-up chain timings in

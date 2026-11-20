@@ -1339,6 +1339,10 @@ INSTRUCTIONS:
    leads: endpoints outside your lane that a tool result revealed (a path in an
    error, a hidden API, a linked admin route). Do not test them; hand them off.
    A lead without your own evidence_id is dropped.
+   Better: call record_fact(kind, value, evidence_id) the moment a tool result
+   shows something another specialist could use (an endpoint, a parameter, a
+   version, an error leaking internals). It is shared and acted on while you
+   keep working; leads in the final JSON wait until you finish.
 
 6. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
    Write demonstrated-compromise reports (description + impact + assets + remediation),
@@ -1677,7 +1681,8 @@ async def _run_specialist(
             if tool not in {"scoped_assessment_probe_assigned", "scoped_assessment_candidate"}
         ]
     allowed_tools.extend(
-        t for t in ("read_evidence", "search_evidence", "list_test_identities") if t not in allowed_tools
+        t for t in ("read_evidence", "search_evidence", "list_test_identities", "record_fact")
+        if t not in allowed_tools
     )
     if profile.name in ("auth_logic", "independent_verifier", "api_logic", "coverage"):
         allowed_tools.extend(
@@ -2169,6 +2174,8 @@ def _extract_json(text: str) -> Optional[dict]:
 
 # A member started mid-wave needs at least this long to do useful work.
 _MIN_DYNAMIC_MEMBER_SECONDS = 60.0
+# Facts recorded within this many seconds are planned on together.
+_FACT_BATCH_SECONDS = 1.0
 
 
 async def run_fireteam(
@@ -2184,8 +2191,9 @@ async def run_fireteam(
     llm_for_specialist: Optional[Callable[[SpecialistProfile], Any]] = None,
     member_timeout_sec: float = 600.0,
     wave_timeout_sec: float = 1200.0,
-    next_work: Optional[Callable[[SpecialistReport, int, float], Awaitable[list]]] = None,
+    next_work: Optional[Callable[[Optional[SpecialistReport], int, float], Awaitable[list]]] = None,
     max_dynamic_members: int = 0,
+    wake_event: Optional[asyncio.Event] = None,
 ) -> FireteamResult:
     """Run a bounded fireteam and return completed and interrupted receipts.
 
@@ -2201,6 +2209,8 @@ async def run_fireteam(
     and the next planner turn. ``slots`` is 0 once ``max_dynamic_members``
     have started or too little wave time is left; it is still called then so
     the caller can record the result. All members share the wave deadline.
+    When ``wake_event`` is set (a running member recorded a fact), it is
+    called as ``next_work(None, slots, window)`` without waiting for a member.
     """
     start = datetime.utcnow()
     directives = directives or {}
@@ -2364,43 +2374,72 @@ async def run_fireteam(
             )
         else:
             pending = set(tasks)
-            while pending:
-                remaining = wave_deadline - loop.time()
-                if remaining <= 0:
-                    break
-                done, pending = await asyncio.wait(
-                    pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
-                )
-                for finished in done:
-                    if finished.cancelled() or finished.exception() is not None:
-                        continue
-                    # A new member needs room to work and to wrap up. With no
-                    # room, next_work still records the result (slots=0).
-                    window = wave_deadline - loop.time() - min(5.0, wave_timeout_sec * 0.1)
-                    budget_left = max(0, int(max_dynamic_members) - dynamic_started)
-                    if window < _MIN_DYNAMIC_MEMBER_SECONDS:
-                        budget_left = 0
-                    try:
-                        additions = await next_work(
-                            finished.result(), budget_left, window,
-                        ) or []
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        logger.exception("Fireteam next_work failed; continuing the wave")
-                        additions = []
-                    for profile, directive in list(additions)[:budget_left]:
-                        progress = {"tool_inflight": False, "completed_calls": []}
-                        resolved.append(profile)
-                        execution_progress.append(progress)
-                        member_directives.append(directive)
-                        task = asyncio.create_task(_run(
-                            profile, progress, member_directive=directive,
-                            member_timeout=min(member_timeout_sec, window),
-                        ))
-                        tasks.append(task)
-                        pending.add(task)
-                        dynamic_started += 1
+            waiter: Optional[asyncio.Task] = None
+
+            async def start_members(additions: list, budget_left: int, window: float) -> None:
+                nonlocal dynamic_started
+                for profile, directive in list(additions)[:budget_left]:
+                    progress = {"tool_inflight": False, "completed_calls": []}
+                    resolved.append(profile)
+                    execution_progress.append(progress)
+                    member_directives.append(directive)
+                    task = asyncio.create_task(_run(
+                        profile, progress, member_directive=directive,
+                        member_timeout=min(member_timeout_sec, window),
+                    ))
+                    tasks.append(task)
+                    pending.add(task)
+                    dynamic_started += 1
+
+            def capacity() -> tuple[int, float]:
+                # A new member needs room to work and to wrap up. With no
+                # room, next_work still records the result (slots=0).
+                window = wave_deadline - loop.time() - min(5.0, wave_timeout_sec * 0.1)
+                budget_left = max(0, int(max_dynamic_members) - dynamic_started)
+                if window < _MIN_DYNAMIC_MEMBER_SECONDS:
+                    budget_left = 0
+                return budget_left, window
+
+            async def ask(report: Optional[SpecialistReport]) -> None:
+                budget_left, window = capacity()
+                try:
+                    additions = await next_work(report, budget_left, window) or []
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Fireteam next_work failed; continuing the wave")
+                    additions = []
+                await start_members(additions, budget_left, window)
+
+            try:
+                while pending:
+                    remaining = wave_deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    wait_set = set(pending)
+                    if wake_event is not None:
+                        if waiter is None or waiter.done():
+                            waiter = asyncio.create_task(wake_event.wait())
+                        wait_set.add(waiter)
+                    done, _ = await asyncio.wait(
+                        wait_set, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    pending -= done
+                    for finished in done:
+                        if finished is waiter:
+                            continue
+                        if finished.cancelled() or finished.exception() is not None:
+                            continue
+                        await ask(finished.result())
+                    if waiter is not None and waiter in done:
+                        # Batch a burst of facts before planning on them.
+                        await asyncio.sleep(min(_FACT_BATCH_SECONDS, max(0.0, remaining)))
+                        wake_event.clear()
+                        waiter = None
+                        await ask(None)
+            finally:
+                if waiter is not None and not waiter.done():
+                    waiter.cancel()
     except BaseException:
         for task in tasks:
             task.cancel()
