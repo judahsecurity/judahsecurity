@@ -31,6 +31,7 @@ import json
 import os
 import secrets
 import socket
+import socketserver
 import ssl
 import sys
 import tempfile
@@ -53,6 +54,9 @@ ALLOW_PRIVATE = os.environ.get("PROBE_ALLOW_PRIVATE_TARGETS", "").lower() in ("1
 # Lab only: accept self-signed or mismatched upstream certificates.
 UPSTREAM_VERIFY = os.environ.get("PROBE_UPSTREAM_VERIFY_TLS", "true").lower() not in ("0", "false", "no")
 MAX_REQUESTS_PER_JOB = int(os.environ.get("PROBE_MAX_REQUESTS_PER_JOB", "300"))
+SOCKS_PORT = int(os.environ.get("PROBE_SOCKS_PORT", "1080"))
+# Raw TCP connections (port scans) per job, logged but counted separately.
+MAX_TCP_PER_JOB = int(os.environ.get("PROBE_MAX_TCP_PER_JOB", "4000"))
 MAX_SCRIPT_BYTES = 200_000
 MAX_TIMEOUT = 45.0
 MAX_SHELL_TIMEOUT = 120.0
@@ -573,6 +577,140 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 # --------------------------------------------------------------------------
+# SOCKS5 (raw TCP: nmap -sT, netcat, protocol clients via proxychains)
+# --------------------------------------------------------------------------
+
+def _tcp_summary(job: dict) -> dict:
+    """Per-destination connection counts; a port scan would flood the log."""
+    rows = sorted(job["tcp"].values(), key=lambda r: (-r["allowed"], r["host"], r["port"]))
+    return {"connections": job["tcp_count"], "destinations": rows[:300],
+            "truncated": len(rows) > 300}
+
+
+def _tcp_note(job: dict, host: str, port: int, allowed: bool, reason: str = "") -> None:
+    key = f"{host}:{port}"
+    with _jobs_lock:
+        row = job["tcp"].setdefault(key, {"host": host, "port": port, "allowed": allowed,
+                                          "count": 0, "reason": reason})
+        row["count"] += 1
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise OSError("client closed")
+        data += chunk
+    return data
+
+
+def _relay_tcp(a: socket.socket, b: socket.socket, idle: float = 60.0) -> None:
+    import select
+
+    sockets = [a, b]
+    last = time.monotonic()
+    while time.monotonic() - last < idle:
+        readable, _, errored = select.select(sockets, [], sockets, 5)
+        if errored:
+            return
+        for sock in readable:
+            data = sock.recv(65536)
+            if not data:
+                return
+            (b if sock is a else a).sendall(data)
+            last = time.monotonic()
+
+
+def _socks_reply(code: int) -> bytes:
+    return bytes([5, code, 0, 1, 0, 0, 0, 0, 0, 0])
+
+
+class SocksHandler(socketserver.BaseRequestHandler):
+    """RFC 1928 CONNECT with RFC 1929 username/password = job/<token>."""
+
+    def handle(self) -> None:
+        client = self.request
+        client.settimeout(SOCKET_TIMEOUT)
+        try:
+            version, count = _recv_exact(client, 2)
+            methods = _recv_exact(client, count)
+            if version != 5 or 2 not in methods:
+                client.sendall(b"\x05\xff")
+                return
+            client.sendall(b"\x05\x02")
+            _ver, ulen = _recv_exact(client, 2)
+            user = _recv_exact(client, ulen).decode("latin-1")
+            plen = _recv_exact(client, 1)[0]
+            token = _recv_exact(client, plen).decode("latin-1")
+            with _jobs_lock:
+                job = _jobs.get(token) if user == "job" else None
+            if job is None:
+                client.sendall(b"\x01\x01")
+                return
+            client.sendall(b"\x01\x00")
+            _ver, cmd, _rsv, atyp = _recv_exact(client, 4)
+            if atyp == 1:
+                host = socket.inet_ntoa(_recv_exact(client, 4))
+            elif atyp == 3:
+                raw_name = _recv_exact(client, _recv_exact(client, 1)[0])
+                try:
+                    host = raw_name.decode("ascii")
+                except UnicodeDecodeError:
+                    client.sendall(_socks_reply(8))
+                    return
+            elif atyp == 4:
+                host = socket.inet_ntop(socket.AF_INET6, _recv_exact(client, 16))
+            else:
+                client.sendall(_socks_reply(8))
+                return
+            port = int.from_bytes(_recv_exact(client, 2), "big")
+            host = _norm_host(host)
+            if cmd != 1:
+                client.sendall(_socks_reply(7))  # only CONNECT; no BIND/UDP
+                return
+            with _jobs_lock:
+                job["tcp_count"] += 1
+                over = job["tcp_count"] > MAX_TCP_PER_JOB
+            if over:
+                _tcp_note(job, host, port, False, "connection budget exhausted")
+                client.sendall(_socks_reply(2))
+                return
+            if not host_in_scope(host, job["allowed"], job["oob"]):
+                _tcp_note(job, host, port, False, "host not in scope")
+                client.sendall(_socks_reply(2))
+                return
+            ip, reason = resolve_checked(host, port, job["allowed"])
+            if ip is None:
+                _tcp_note(job, host, port, False, reason)
+                client.sendall(_socks_reply(2))
+                return
+            try:
+                upstream = socket.create_connection((ip, port), timeout=10)
+            except ConnectionRefusedError:
+                _tcp_note(job, host, port, True, "refused")
+                client.sendall(_socks_reply(5))
+                return
+            except OSError:
+                _tcp_note(job, host, port, True, "unreachable")
+                client.sendall(_socks_reply(4))
+                return
+            _tcp_note(job, host, port, True, "open")
+            client.sendall(_socks_reply(0))
+            try:
+                _relay_tcp(client, upstream)
+            finally:
+                upstream.close()
+        except (OSError, ValueError, IndexError):
+            return
+
+
+class _SocksServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+# --------------------------------------------------------------------------
 # relay
 # --------------------------------------------------------------------------
 
@@ -624,13 +762,14 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
         token = secrets.token_urlsafe(24)
         job = {"allowed": allowed, "oob": oob, "log": [], "exchanges": [],
-               "recorded_bytes": 0, "dropped": 0}
+               "recorded_bytes": 0, "dropped": 0, "tcp": {}, "tcp_count": 0}
         with _jobs_lock:
             _jobs[token] = job
         try:
             result = _run_on_runner(
                 script, timeout, f"http://job:{token}@{PROXY_HOST}:{PROXY_PORT}",
                 certificate_authority().cert_pem, command=command,
+                socks_url=f"socks5://job:{token}@{PROXY_HOST}:{SOCKS_PORT}",
             )
         finally:
             with _jobs_lock:
@@ -638,13 +777,15 @@ class RelayHandler(BaseHTTPRequestHandler):
         result["egress"] = job["log"]
         result["exchanges"] = job["exchanges"]
         result["exchanges_dropped"] = job["dropped"]
+        result["tcp"] = _tcp_summary(job)
         self._json(200, result)
 
 
 def _run_on_runner(script: str, timeout: float, proxy_url: str, ca_pem: str,
-                   *, command: str = "") -> dict:
+                   *, command: str = "", socks_url: str = "") -> dict:
     payload = json.dumps({"script": script, "command": command, "timeout_sec": timeout,
-                          "proxy_url": proxy_url, "ca_pem": ca_pem}).encode()
+                          "proxy_url": proxy_url, "ca_pem": ca_pem,
+                          "socks_url": socks_url}).encode()
     request = urllib.request.Request(
         f"{RUNNER_URL}/run", data=payload, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {RUNNER_TOKEN}"},
@@ -665,6 +806,8 @@ def main() -> None:
     proxy = ThreadingHTTPServer(("0.0.0.0", PROXY_PORT), ProxyHandler)
     proxy.daemon_threads = True
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    socks = _SocksServer(("0.0.0.0", SOCKS_PORT), SocksHandler)
+    threading.Thread(target=socks.serve_forever, daemon=True).start()
     relay = ThreadingHTTPServer(("0.0.0.0", RELAY_PORT), RelayHandler)
     relay.daemon_threads = True
     relay.serve_forever()

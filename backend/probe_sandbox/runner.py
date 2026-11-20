@@ -54,8 +54,27 @@ def _drop_privileges() -> None:
         os.setuid(PROBE_UID)
 
 
+def _proxychains_conf(socks_url: str) -> str:
+    """proxychains-ng config for socks5://job:token@host:port (host as an IP)."""
+    from urllib.parse import urlsplit
+    import socket
+
+    parts = urlsplit(socks_url)
+    if parts.scheme != "socks5" or not parts.hostname or not parts.port:
+        return ""
+    try:
+        ip = socket.gethostbyname(parts.hostname)
+    except OSError:
+        return ""
+    return (
+        "strict_chain\nproxy_dns\nquiet_mode\ntcp_read_time_out 15000\n"
+        "tcp_connect_time_out 8000\n[ProxyList]\n"
+        f"socks5 {ip} {parts.port} {parts.username or ''} {parts.password or ''}\n"
+    )
+
+
 def run_script(script: str, timeout: float, proxy_url: str, ca_pem: str = "",
-               *, command: str = "") -> dict:
+               *, command: str = "", socks_url: str = "") -> dict:
     """Run a Python probe (script) or a shell command (command) as PROBE_UID."""
     workdir = tempfile.mkdtemp(prefix="probe-")
     try:
@@ -65,8 +84,12 @@ def run_script(script: str, timeout: float, proxy_url: str, ca_pem: str = "",
         ca_path = os.path.join(workdir, "proxy-ca.pem")
         with open(ca_path, "w", encoding="ascii") as handle:
             handle.write(ca_pem)
+        chains_path = os.path.join(workdir, "proxychains.conf")
+        chains = _proxychains_conf(socks_url) if socks_url else ""
+        with open(chains_path, "w", encoding="ascii") as handle:
+            handle.write(chains)
         if os.getuid() == 0:
-            for item in (workdir, path, ca_path):
+            for item in (workdir, path, ca_path, chains_path):
                 os.chown(item, PROBE_UID, PROBE_GID)
         # All TLS goes through probe-egress, which re-signs with its CA, so the
         # proxy CA is the only trust root a script needs. Each toolchain reads
@@ -85,6 +108,8 @@ def run_script(script: str, timeout: float, proxy_url: str, ca_pem: str = "",
             "NO_PROXY": "", "no_proxy": "",
             # For tools that ignore the proxy variables (ffuf -x, sqlmap --proxy).
             "PROBE_PROXY": proxy_url,
+            # Raw TCP (nmap -sT -Pn, nc, protocol clients): prefix with proxychains4.
+            **({"PROBE_SOCKS": socks_url, "PROXYCHAINS_CONF_FILE": chains_path} if chains else {}),
             "TERM": "dumb",
         }
         argv = [SHELL, "-c", command] if command else [sys.executable, "-I", path]
@@ -148,6 +173,7 @@ class Handler(BaseHTTPRequestHandler):
             ceiling = MAX_SHELL_TIMEOUT if command else MAX_TIMEOUT
             timeout = max(3.0, min(float(req.get("timeout_sec") or 20), ceiling))
             ca_pem = str(req.get("ca_pem") or "")
+            socks_url = str(req.get("socks_url") or "")
         except (ValueError, KeyError, TypeError):
             self._json(400, {"error": "invalid job"})
             return
@@ -161,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(503, {"error": "runner busy"})
             return
         try:
-            self._json(200, run_script(script, timeout, proxy_url, ca_pem, command=command))
+            self._json(200, run_script(script, timeout, proxy_url, ca_pem, command=command, socks_url=socks_url))
         finally:
             _slots.release()
 

@@ -309,3 +309,99 @@ def test_sandbox_shell_refuses_guarded_command_before_network(monkeypatch):
     monkeypatch.setattr(custom_probe, "_post_to_relay", boom)
     out = json.loads(asyncio.run(_shell_manager().sandbox_shell("sqlmap -u x --os-shell")))
     assert out["error"] == "Sandbox rejected command"
+
+
+# --- SOCKS5 lane for raw TCP ------------------------------------------------------
+
+import struct
+
+
+def _socks_connect(port, token, host, dest_port, user="job"):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.sendall(b"\x05\x01\x02")
+    assert sock.recv(2) == b"\x05\x02"
+    sock.sendall(bytes([1, len(user)]) + user.encode() + bytes([len(token)]) + token.encode())
+    if sock.recv(2) != b"\x01\x00":
+        sock.close()
+        return None, "auth"
+    name = host.encode()
+    sock.sendall(b"\x05\x01\x00\x03" + bytes([len(name)]) + name + struct.pack(">H", dest_port))
+    reply = sock.recv(10)
+    return sock, reply[1]
+
+
+@pytest.fixture
+def socks(monkeypatch):
+    monkeypatch.setattr(egress, "ALLOW_PRIVATE", True)
+    server = egress._SocksServer(("127.0.0.1", 0), egress.SocksHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    target = socket.socket()
+    target.bind(("127.0.0.1", 0))
+    target.listen(4)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = target.accept()
+            except OSError:
+                return
+            conn.sendall(b"SSH-2.0-test\r\n")
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    job = {"allowed": ["127.0.0.1"], "oob": [], "log": [], "exchanges": [],
+           "recorded_bytes": 0, "dropped": 0, "tcp": {}, "tcp_count": 0}
+    egress._jobs["socks-token"] = job
+    yield server.server_address[1], target.getsockname()[1], job
+    egress._jobs.pop("socks-token", None)
+    server.shutdown()
+    target.close()
+
+
+def test_socks_connects_in_scope_and_logs(socks):
+    port, target_port, job = socks
+    sock, code = _socks_connect(port, "socks-token", "127.0.0.1", target_port)
+    assert code == 0
+    assert sock.recv(64).startswith(b"SSH-2.0")
+    sock.close()
+    summary = egress._tcp_summary(job)
+    assert summary["connections"] == 1
+    assert summary["destinations"][0]["reason"] == "open"
+
+
+def test_socks_refuses_out_of_scope_and_bad_token(socks):
+    port, target_port, job = socks
+    _sock, code = _socks_connect(port, "socks-token", "127.0.0.2", target_port)
+    assert code == 2
+    assert job["tcp"]["127.0.0.2:%d" % target_port]["reason"] == "host not in scope"
+    assert _socks_connect(port, "wrong", "127.0.0.1", target_port) == (None, "auth")
+
+
+def test_socks_connection_budget(socks, monkeypatch):
+    port, target_port, job = socks
+    monkeypatch.setattr(egress, "MAX_TCP_PER_JOB", 1)
+    assert _socks_connect(port, "socks-token", "127.0.0.1", target_port)[1] == 0
+    assert _socks_connect(port, "socks-token", "127.0.0.1", target_port)[1] == 2
+
+
+@pytest.mark.parametrize("command,ok", [
+    ("proxychains4 nmap -sT -Pn -sV -p 22,6379 app.example.com", True),
+    ("proxychains4 nmap -sT -Pn --script=http-title app.example.com", True),
+    ("nmap -sS app.example.com", False),
+    ("nmap -sU -p 53 app.example.com", False),
+    ("nmap -sT -O app.example.com", False),
+    ("masscan -p1-65535 1.2.3.4", False),
+    ("proxychains4 nmap -sT --script ssh-brute app.example.com", False),
+])
+def test_tcp_command_guard(command, ok):
+    assert (not shell_command_violations(command)) is ok
+
+
+def test_socks_resolves_in_scope_hostname(socks):
+    port, target_port, job = socks
+    job["allowed"].append("localhost")
+    sock, code = _socks_connect(port, "socks-token", "localhost", target_port)
+    assert code == 0 and sock.recv(64).startswith(b"SSH-2.0")
+    sock.close()
+    _sock, code = _socks_connect(port, "socks-token", "other.example.net", target_port)
+    assert code == 2

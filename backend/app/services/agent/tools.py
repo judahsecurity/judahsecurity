@@ -7040,11 +7040,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         **kwargs: Any,
     ) -> str:
         """Run a shell command in the isolated probe runner (bash, curl, jq,
-        sqlmap, ffuf, python with requests/httpx/pyjwt). Network leaves only
-        through the scope proxy: in-scope hosts and OAST, HTTP(S) only, every
-        exchange recorded as evidence. curl, wget and python honor the proxy
-        automatically; pass ffuf -x "$PROBE_PROXY" and
-        sqlmap --proxy="$PROBE_PROXY". Nothing persists between calls.
+        sqlmap, ffuf, nmap, nc, python with requests/httpx/pyjwt). Network
+        leaves only through scope-checked proxies, to in-scope hosts and OAST.
+        HTTP(S): curl, wget and python use the recording proxy automatically
+        (every exchange becomes evidence); pass ffuf -x "$PROBE_PROXY" and
+        sqlmap --proxy="$PROBE_PROXY". Other TCP: prefix with proxychains4,
+        e.g. proxychains4 nmap -sT -Pn -sV -p 22,3306,6379 host (connect scans
+        only; SYN/UDP/OS detection are unavailable); connections are logged in
+        tcp. Nothing persists between calls.
         """
         from app.services.agent.custom_probe import custom_probe_mode, run_sandbox_shell
 

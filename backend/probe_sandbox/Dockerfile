@@ -16,6 +16,7 @@ CMD ["python", "-I", "/app/egress.py"]
 FROM base AS runner
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash curl wget jq ca-certificates \
+       nmap proxychains4 netcat-openbsd \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir httpx==0.25.2 requests==2.31.0 pyjwt==2.8.0 sqlmap==1.9.12
 ARG FFUF_VERSION=2.1.0

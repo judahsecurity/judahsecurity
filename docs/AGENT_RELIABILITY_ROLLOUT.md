@@ -164,3 +164,16 @@ Batches are AES-GCM encrypted under `AEGIS_EVIDENCE_DIR/operator_captures/`
 are dropped, the identity's cookies and auth headers are registered, each
 exchange becomes redacted `http_exchange` evidence (`test_type=operator_capture`),
 and requests are mapped into operations.
+
+### Non-HTTP TCP from sandbox_shell
+
+`probe-egress` also runs a SOCKS5 listener (port 1080) with the same per-job
+credential and scope checks. The runner writes a per-job `proxychains4` config
+(`PROXYCHAINS_CONF_FILE`), so `proxychains4 nmap -sT -Pn -sV -p 22,6379 host`,
+`proxychains4 nc host 25` and other TCP clients reach in-scope hosts only.
+CONNECT only: SYN/UDP scans, OS detection and raw-packet scanners (masscan,
+zmap, hping) are refused with an alternative, and brute/dos/exploit/intrusive
+NSE scripts are blocked. Each job allows up to `PROBE_MAX_TCP_PER_JOB` (4000)
+connections; the result's `tcp` field lists per-destination counts and verdicts.
+Raw TCP is logged, not recorded byte-for-byte; use the HTTP proxy for web traffic
+so it becomes evidence.

@@ -399,6 +399,14 @@ SHELL_DENY_PATTERNS = (
     r"--dump-all\b",
     r"--risk[ =]?3\b",
     r"\bhydra\b|\bmedusa\b|\bpatator\b",
+    r"--script[ =][^\s]*(?:brute|dos|exploit|intrusive|fuzzer|malware)",
+)
+# Raw-socket work cannot leave the sandbox (no route; SOCKS carries TCP CONNECT
+# only), so refuse it with a usable alternative instead of a silent failure.
+SHELL_UNSUPPORTED_PATTERNS = (
+    (r"\bnmap\b[^|;&]*\s-s[SUANFXWMYZO]\b", "nmap raw scan types are unavailable; use proxychains4 nmap -sT -Pn"),
+    (r"\bnmap\b[^|;&]*\s-O\b", "nmap OS detection needs raw sockets; use -sT -sV -Pn"),
+    (r"\b(?:masscan|zmap|hping3?)\b", "raw-packet scanners are unavailable; use proxychains4 nmap -sT -Pn"),
 )
 MAX_SHELL_TIMEOUT_SEC = 120.0
 
@@ -411,9 +419,12 @@ def shell_command_violations(command: str) -> List[str]:
         return ["command is empty"]
     if len(text.encode()) > 8000:
         return ["command exceeds 8000 bytes"]
-    return [f"blocked flag or tool: {match.group(0)}"
-            for pattern in SHELL_DENY_PATTERNS
-            for match in [re.search(pattern, text, re.IGNORECASE)] if match]
+    violations = [f"blocked flag or tool: {match.group(0)}"
+                  for pattern in SHELL_DENY_PATTERNS
+                  for match in [re.search(pattern, text, re.IGNORECASE)] if match]
+    violations += [hint for pattern, hint in SHELL_UNSUPPORTED_PATTERNS
+                   if re.search(pattern, text)]
+    return violations
 
 
 async def run_sandbox_shell(
@@ -475,5 +486,6 @@ async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: flo
         "exchanges": [item for item in (result.get("exchanges") or [])[:200]
                       if isinstance(item, dict)],
         "exchanges_dropped": int(result.get("exchanges_dropped") or 0),
+        "tcp": result.get("tcp") if isinstance(result.get("tcp"), dict) else {},
         "allowed_hosts": hosts,
     }
