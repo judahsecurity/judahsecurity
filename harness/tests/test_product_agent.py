@@ -33,6 +33,7 @@ def test_adapter_drives_product_invocation_and_stops_on_user_input(
     assert asyncio.run(assess(args, orch)) == 3
     assert len(calls) == 1
     assert calls[0]["organization_id"] == 2
+    assert calls[0]["assessment_mode"] == "standard"
     assert "Scope: app.test" in calls[0]["question"]
     assert (tmp_path / "product_assessment.json").exists()
 

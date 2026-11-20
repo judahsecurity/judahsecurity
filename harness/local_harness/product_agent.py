@@ -90,6 +90,7 @@ async def assess(args, orchestrator=None):
             mode="agent",
             max_iterations=args.max_iterations,
             price_limit_usd=args.price_limit_usd,
+            assessment_mode=getattr(args, "assessment_mode", None) or "standard",
         )
         if real_runtime:
             try:
@@ -129,6 +130,7 @@ async def assess(args, orchestrator=None):
         "max_turns": args.max_turns,
         "max_iterations": args.max_iterations,
         "price_limit_usd": args.price_limit_usd,
+        "assessment_mode": getattr(args, "assessment_mode", None) or "standard",
         "complete": assessment_complete,
         "final_run_status": final_run_status,
         "error": response.error if response else "No response",
@@ -165,6 +167,13 @@ def main(argv=None):
     parser.add_argument("--max-turns", type=int, default=4)
     parser.add_argument("--max-iterations", type=int, default=30)
     parser.add_argument("--price-limit-usd", type=float, default=5.0)
+    parser.add_argument(
+        "--assessment-mode",
+        choices=("standard", "deep"),
+        default="standard",
+        help="standard keeps the deterministic pipeline; deep gives the model larger "
+             "budgets and lets it choose steps after recon. Publication gates are unchanged.",
+    )
     parser.add_argument(
         "--require-oast",
         action="store_true",

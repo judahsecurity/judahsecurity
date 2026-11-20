@@ -142,3 +142,75 @@ def test_known_gap_class_is_reported_but_does_not_gate_exit(tmp_path):
     cases[-2].pop("known_gap")
     path.write_text(json.dumps({"cases": cases}))
     assert main([str(path)]) == 2
+
+
+def _positive(tmp_path, name, hypotheses, *, complete=True):
+    directory = tmp_path / name
+    _run(tmp_path, name, target=f"https://{name}.test", specialist="api_authz",
+         state="negative_with_evidence", attempts=1, complete=complete)
+    ledger_path = directory / "agent_ledger.json"
+    ledger = json.loads(ledger_path.read_text())
+    ledger[-1]["hypotheses"] = hypotheses
+    ledger_path.write_text(json.dumps(ledger))
+    return _case(name, "positive", expected=[
+        {"id": "owner-read", "category": "idor", "endpoint": "/private/1"}])
+
+
+def test_miss_reason_names_the_stage_that_lost_the_bug(tmp_path):
+    def hyp(state, attempts):
+        return {"specialist": "api_authz", "state": state, "attempts": attempts,
+                "evidence_ids": ["e"] if attempts else []}
+
+    cases = [
+        _positive(tmp_path, "unreached", []),
+        _positive(tmp_path, "budget", [hyp("skipped_by_budget", 0)]),
+        _positive(tmp_path, "blocked", [hyp("blocked", 0)]),
+        _positive(tmp_path, "idle", [hyp("not_attempted", 0)]),
+        _positive(tmp_path, "gated", [hyp("proven_with_evidence", 2)]),
+        _positive(tmp_path, "nosignal", [hyp("negative_with_evidence", 3)]),
+        _positive(tmp_path, "cut", [hyp("interrupted", 1)]),
+        _positive(tmp_path, "crashed", [hyp("proven_with_evidence", 1)], complete=False),
+    ]
+    path = tmp_path / "corpus.json"
+    path.write_text(json.dumps({"cases": cases}))
+
+    report = score_corpus(path)
+    reasons = {row["id"]: row["miss_reason"] for row in report["cases"]}
+    assert reasons == {
+        "unreached": "surface_not_reached",
+        "budget": "skipped_by_budget",
+        "blocked": "blocked",
+        "idle": "not_attempted",
+        "gated": "found_not_published",
+        "nosignal": "tested_no_signal",
+        "cut": "interrupted",
+        "crashed": "incomplete_run",
+    }
+    assert report["miss_reasons"]["surface_not_reached"] == 1
+    assert report["by_class"]["idor"]["miss_reasons"]["found_not_published"] == 1
+
+
+def test_passing_cases_have_no_miss_reason_and_mode_breaks_comparability(tmp_path):
+    expected = [{"id": "owner-read", "category": "idor", "endpoint": "/private/1"}]
+    finding = {
+        "type": "vulnerability", "title": "IDOR in private object",
+        "url": "https://positive.test/private/1", "confidence": "confirmed",
+        "raw_data": {"poc": {"confirmed": True, "endpoint": "https://positive.test/private/1",
+                             "response_snippet": "verified owner record"}},
+    }
+    _run(tmp_path, "positive", target="https://positive.test", specialist="api_authz",
+         state="proven_with_evidence", attempts=1, finding=finding)
+    _run(tmp_path, "negative", target="https://negative.test", specialist="api_authz",
+         state="negative_with_evidence", attempts=1)
+    path = tmp_path / "corpus.json"
+    path.write_text(json.dumps({"cases": [_case("positive", "positive", expected=expected),
+                                          _case("negative", "negative", expected=[])]}))
+    report = score_corpus(path)
+    assert [row["miss_reason"] for row in report["cases"]] == [None, None]
+    assert report["miss_reasons"] == {}
+
+    assessment_path = tmp_path / "negative" / "product_assessment.json"
+    assessment = json.loads(assessment_path.read_text())
+    assessment["assessment_mode"] = "deep"
+    assessment_path.write_text(json.dumps(assessment))
+    assert score_corpus(path)["by_class"]["idor"]["comparable_runs"] is False

@@ -38,6 +38,53 @@ def _validate_case(case: dict, seen: set[str]) -> None:
             raise ValueError(f"{name}: expected findings need id, category, and endpoint")
 
 
+# Why a case did not pass, ordered from earliest pipeline stage to latest. The
+# reason points at the fix: reach the surface, spend more budget, try better
+# payloads, or publish what was already proven.
+MISS_REASONS = (
+    "incomplete_run",          # the assessment never reached a completed ledger
+    "surface_not_reached",     # no hypothesis for the class was ever created
+    "skipped_by_budget",       # hypotheses queued but the run's budget ran out
+    "blocked",                 # hypotheses blocked by policy or a missing prerequisite
+    "interrupted",             # a test started but its run stopped mid-way
+    "not_attempted",           # hypotheses existed but nothing was tried
+    "found_not_published",     # a hypothesis was proven but no verified finding shipped
+    "tested_no_signal",        # tests ran and found nothing (probe/payload gap)
+    "false_positive",          # an unexpected finding was published
+    "negative_not_evidenced",  # a safe twin was not rejected with evidence
+)
+
+
+def miss_reason(*, polarity: str, completed: bool, hypotheses: list[dict],
+                metrics: dict, expected_count: int) -> str | None:
+    """Attribute a failed case to the earliest stage that lost the bug."""
+    if not completed:
+        return "incomplete_run"
+    if polarity == "negative":
+        if metrics["false_positives"]:
+            return "false_positive"
+        if not any(h.get("state") == "negative_with_evidence" for h in hypotheses):
+            return "negative_not_evidenced"
+        return None
+    if metrics["verified_true_positives"] == expected_count and not metrics["false_positives"]:
+        return None
+    if metrics["verified_true_positives"] == expected_count:
+        return "false_positive"
+    if not hypotheses:
+        return "surface_not_reached"
+    states = {str(h.get("state") or "") for h in hypotheses}
+    if states & {"proven_with_evidence", "proven_unverified"}:
+        return "found_not_published"
+    if not any(int(h.get("attempts") or 0) > 0 for h in hypotheses):
+        for state in ("skipped_by_budget", "blocked", "interrupted"):
+            if state in states:
+                return state
+        return "not_attempted"
+    if "interrupted" in states:
+        return "interrupted"
+    return "tested_no_signal"
+
+
 def score_case(case: dict, root: Path) -> dict:
     run_dir = (root / case["run_dir"]).resolve()
     assessment = _read_json(run_dir / "product_assessment.json")
@@ -75,6 +122,10 @@ def score_case(case: dict, root: Path) -> dict:
         )
     else:
         quality_pass = negative_proven and metrics["false_positives"] == 0
+    reason = miss_reason(
+        polarity=case["polarity"], completed=completed, hypotheses=hypotheses,
+        metrics=metrics, expected_count=len(case["expected_findings"]),
+    )
 
     return {
         "id": case["id"],
@@ -94,8 +145,9 @@ def score_case(case: dict, root: Path) -> dict:
         "cost_usd": assessment.get("cost_usd"),
         "duration_seconds": (assessment.get("ledger_metrics") or {}).get("duration_seconds"),
         "test_actions": (assessment.get("ledger_metrics") or {}).get("test_actions"),
+        "miss_reason": reason,
         "budget": {key: assessment.get(key) for key in
-                   ("max_turns", "max_iterations", "price_limit_usd")},
+                   ("max_turns", "max_iterations", "price_limit_usd", "assessment_mode")},
         "model_routes": {
             str(task): sorted({str(call.get("model")) for call in
                                ((assessment.get("token_usage") or {}).get("calls") or [])
@@ -148,6 +200,10 @@ def score_corpus(corpus_path: Path) -> dict:
             len({tuple(r["model_routes"][task]) for r in rows}) == 1
             for task in common_tasks
         )
+        reasons: dict[str, int] = defaultdict(int)
+        for r in rows:
+            if r.get("status") != "pass" and r.get("miss_reason"):
+                reasons[r["miss_reason"]] += 1
         known_gaps = sorted({str(r["known_gap"]) for r in rows if r.get("known_gap")})
         by_class[name] = {
             "known_gap": known_gaps[0] if len(known_gaps) == 1 else "; ".join(known_gaps) or None,
@@ -168,12 +224,18 @@ def score_corpus(corpus_path: Path) -> dict:
             "precision": round(tp / (tp + fp), 4) if tp + fp else 0.0,
             "recall": round(tp / (tp + fn), 4) if tp + fn else 0.0,
             "verified_recall": round(verified_tp / (tp + fn), 4) if tp + fn else 0.0,
+            "miss_reasons": dict(sorted(reasons.items())),
             "comparable_runs": budgets_match and model_routes_match,
             "pass": len(rows) >= 2 and {r["polarity"] for r in rows} == {"positive", "negative"}
                     and budgets_match and model_routes_match
                     and all(r["status"] == "pass" for r in rows),
         }
-    return {"cases": cases, "by_class": by_class}
+    totals: dict[str, int] = defaultdict(int)
+    for row in by_class.values():
+        for reason, count in row["miss_reasons"].items():
+            totals[reason] += count
+    return {"cases": cases, "by_class": by_class,
+            "miss_reasons": {r: totals[r] for r in MISS_REASONS if totals.get(r)}}
 
 
 def main(argv: list[str] | None = None) -> int:
