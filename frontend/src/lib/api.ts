@@ -2676,6 +2676,7 @@ class ApiClient {
       playbookId?: string;
       target?: string;
       mode?: 'assist' | 'agent' | 'pilot';
+      assessmentMode?: 'standard' | 'deep';
       pilot?: { target: string };
       loadSessionId?: string;
       priceLimitUsd?: number;
@@ -2693,6 +2694,7 @@ class ApiClient {
       playbook_id: options?.playbookId ?? undefined,
       target: options?.target ?? undefined,
       mode: options?.mode ?? 'assist',
+      assessment_mode: options?.assessmentMode ?? undefined,
       pilot: options?.pilot,
       load_session_id: options?.loadSessionId ?? undefined,
       price_limit_usd: options?.priceLimitUsd ?? undefined,

@@ -91,6 +91,26 @@ def resolve_assessment_depth(mode: str | None) -> AssessmentDepth:
     return _DEPTHS.get(name, STANDARD)
 
 
+def resolve_org_default_mode(organization_id: int | None) -> str | None:
+    """A per-org default assessment mode from project_settings.agent, if set.
+
+    Returns None when there is no org, no setting, or the value is invalid, so
+    the caller falls back to the global AGENT_ASSESSMENT_MODE default.
+    """
+    if organization_id is None:
+        return None
+    try:
+        from app.db.database import SessionLocal
+        from app.models.project_settings import MODULE_AGENT, ProjectSettings
+
+        with SessionLocal() as db:
+            config = ProjectSettings.get_config(db, organization_id, MODULE_AGENT) or {}
+    except Exception:
+        return None
+    mode = str(config.get("assessment_mode") or "").strip().lower()
+    return mode if mode in _DEPTHS else None
+
+
 def set_assessment_depth(mode: str | None) -> Token:
     return current_assessment_depth.set(resolve_assessment_depth(mode))
 

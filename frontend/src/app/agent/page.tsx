@@ -696,6 +696,10 @@ function AgentPageContent() {
   const [ownerOnlyText, setOwnerOnlyText] = useState('');
   const [authLoginPath, setAuthLoginPath] = useState('');
   const [mode, setMode] = useState<'assist' | 'agent' | 'pilot'>('agent');
+  // Assessment depth for Prowl mode: 'standard' keeps the deterministic
+  // pipeline; 'deep' lets the model choose steps after recon on larger
+  // budgets (scope and publication gates unchanged).
+  const [assessmentMode, setAssessmentMode] = useState<'standard' | 'deep'>('standard');
   const [pilotStatus, setPilotStatus] = useState<{ ready: boolean; egress_ready: boolean; redis_ready: boolean } | null>(null);
   const [urlPrefilled, setUrlPrefilled] = useState(false);
   const [pendingAutostart, setPendingAutostart] = useState(false);
@@ -1321,6 +1325,7 @@ function AgentPageContent() {
       } else {
         const wsMsg: Record<string, unknown> = { type: 'query', question: mode === 'pilot' ? displayContent : (usePreset ? displayContent : q), mode };
         if (mode === 'pilot') wsMsg.pilot = { target: target.trim() };
+        if (mode === 'agent' && assessmentMode === 'deep') wsMsg.assessment_mode = 'deep';
         if (mode !== 'pilot' && assessmentPolicy) wsMsg.assessment_policy = assessmentPolicy;
         if (mode !== 'pilot' && target.trim()) wsMsg.target = target.trim();
         if (usePreset) wsMsg.playbook_id = selectedPlaybookId;
@@ -1335,6 +1340,7 @@ function AgentPageContent() {
             ...(usePreset ? { playbookId: selectedPlaybookId } : {}),
             ...(mode !== 'pilot' && target.trim() ? { target: target.trim() } : {}),
             mode,
+            ...(mode === 'agent' && assessmentMode === 'deep' ? { assessmentMode: 'deep' as const } : {}),
             ...(mode === 'pilot' ? { pilot: { target: target.trim() } } : {}),
             ...(mode !== 'pilot' ? { assessmentPolicy } : {}),
             ...(pendingLoadSessionId ? { loadSessionId: pendingLoadSessionId } : {}),
@@ -2119,6 +2125,21 @@ function AgentPageContent() {
                           <SelectItem value="pilot">Bounded pilot</SelectItem>
                         </SelectContent>
                       </Select>
+
+                      {mode === 'agent' && (
+                        <Select value={assessmentMode} onValueChange={(v) => setAssessmentMode(v as 'standard' | 'deep')} disabled={loading}>
+                          <SelectTrigger
+                            className="h-7 text-xs w-auto min-w-[95px] border-dashed bg-transparent"
+                            title="Deep: the model chooses steps after recon on larger budgets. Same scope and publication gates."
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="standard">Standard depth</SelectItem>
+                            <SelectItem value="deep">Deep depth</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      )}
 
                       <Select value={selectedPlaybookId} onValueChange={setSelectedPlaybookId} disabled={mode === 'pilot'}>
                         <SelectTrigger className="h-7 text-xs w-auto min-w-[100px] border-dashed bg-transparent">

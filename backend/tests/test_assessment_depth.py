@@ -224,6 +224,46 @@ async def test_deep_mode_following_the_suggestion_resets_declines(monkeypatch, d
     assert result["pipeline_advisory_declines"] == 0
 
 
+def test_org_default_mode_reads_project_settings(monkeypatch):
+    from app.services.agent import assessment_depth as mod
+
+    class FakeSettings:
+        @staticmethod
+        def get_config(db, org_id, module):
+            return {"assessment_mode": "deep"} if org_id == 7 else {}
+
+    class FakeSession:
+        def __enter__(self): return object()
+        def __exit__(self, *a): return False
+
+    monkeypatch.setitem(__import__("sys").modules, "app.models.project_settings",
+                        type("M", (), {"MODULE_AGENT": "agent", "ProjectSettings": FakeSettings}))
+    monkeypatch.setitem(__import__("sys").modules, "app.db.database",
+                        type("M", (), {"SessionLocal": FakeSession}))
+    assert mod.resolve_org_default_mode(7) == "deep"
+    assert mod.resolve_org_default_mode(1) is None       # no setting
+    assert mod.resolve_org_default_mode(None) is None     # no org
+
+
+def test_org_default_mode_ignores_invalid_values(monkeypatch):
+    from app.services.agent import assessment_depth as mod
+
+    class FakeSettings:
+        @staticmethod
+        def get_config(db, org_id, module):
+            return {"assessment_mode": "turbo"}
+
+    class FakeSession:
+        def __enter__(self): return object()
+        def __exit__(self, *a): return False
+
+    monkeypatch.setitem(__import__("sys").modules, "app.models.project_settings",
+                        type("M", (), {"MODULE_AGENT": "agent", "ProjectSettings": FakeSettings}))
+    monkeypatch.setitem(__import__("sys").modules, "app.db.database",
+                        type("M", (), {"SessionLocal": FakeSession}))
+    assert mod.resolve_org_default_mode(7) is None
+
+
 def test_depth_module_documents_unchanged_gates():
     doc = depth_module.__doc__ or ""
     for phrase in ("scope enforcement", "proof policy", "pilot mode"):

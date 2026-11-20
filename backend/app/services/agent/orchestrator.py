@@ -3745,9 +3745,12 @@ class AgentOrchestrator:
         )
         pilot_token = set_pilot(None)
         from app.services.agent.assessment_depth import (
-            current_assessment_depth, set_assessment_depth,
+            current_assessment_depth, resolve_org_default_mode, set_assessment_depth,
         )
-        depth_token = set_assessment_depth(assessment_mode)
+        # An explicit request wins; otherwise an org may default to deep via
+        # project_settings.agent.assessment_mode, else the global env default.
+        effective_mode = assessment_mode or resolve_org_default_mode(organization_id)
+        depth_token = set_assessment_depth(effective_mode)
         register_run(session_id, this_task)
         try:
             pilot_policy = None
@@ -3807,6 +3810,27 @@ class AgentOrchestrator:
 
             if status_callback:
                 self.set_status_callback(status_callback)
+
+            # Tell the operator when a run is deep, and whether the explorer
+            # sandbox is actually wired up, so the mode is never silently off.
+            if mode in ("agent", "pilot") and current_assessment_depth.get().name == "deep":
+                from app.services.agent.explorer_sandbox import sandbox_configured
+
+                # Scope is registered later in the run, so only report whether
+                # the sandbox is wired up at all here; per-call availability is
+                # enforced when a sandbox tool actually runs.
+                has_sandbox = sandbox_configured()
+                await self._emit_status({
+                    "type": "assessment_mode",
+                    "mode": "deep",
+                    "sandbox_configured": has_sandbox,
+                    "note": (
+                        "Deep assessment: the model chooses steps after recon with larger "
+                        "budgets. Scope and publication gates are unchanged."
+                        + ("" if has_sandbox else " Explorer sandbox is not configured; "
+                           "deep mode runs without a shell.")
+                    ),
+                })
 
             evograph.record_chain_start(
                 session_id=session_id,
