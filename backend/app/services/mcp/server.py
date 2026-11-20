@@ -1689,6 +1689,10 @@ class MCPServer:
         """
         ok_codes = success_exit_codes or {0}
         process = None
+        # A background tool execution keeps a bounded live tail of output.
+        from app.services.agent.tool_executions import output_tail_sink
+
+        sink = output_tail_sink()
 
         async def drain_discovery(stream):
             """Bound memory while retaining endpoint observations past output truncation."""
@@ -1699,6 +1703,8 @@ class MCPServer:
             seen: set[str] = set()
             while chunk := await stream.read(65536):
                 total += len(chunk)
+                if sink:
+                    sink(chunk)
                 if len(preview) < max_output_chars:
                     preview.extend(chunk[: max_output_chars - len(preview)])
                 searchable = tail + chunk
@@ -1713,6 +1719,8 @@ class MCPServer:
         async def drain_stderr(stream):
             preview = bytearray()
             while chunk := await stream.read(65536):
+                if sink:
+                    sink(chunk)
                 if len(preview) < max_output_chars:
                     preview.extend(chunk[: max_output_chars - len(preview)])
             return bytes(preview)
@@ -1721,6 +1729,8 @@ class MCPServer:
             total = 0
             while chunk := await stream.read(65536):
                 total += len(chunk)
+                if sink:
+                    sink(chunk)
                 if len(preview) < max_output_chars:
                     preview.extend(chunk[: max_output_chars - len(preview)])
             return total
@@ -1781,6 +1791,19 @@ class MCPServer:
                     )
                     stdout = bytes(partial_stdout)
                     stderr = bytes(partial_stderr)
+                    discovered = []
+                elif sink:
+                    stderr_buf = bytearray()
+                    stdout_bytes, _, _ = await asyncio.wait_for(
+                        asyncio.gather(
+                            drain_preview(process.stdout, partial_stdout),
+                            drain_preview(process.stderr, stderr_buf),
+                            process.wait(),
+                        ),
+                        timeout=timeout,
+                    )
+                    stdout = bytes(partial_stdout)
+                    stderr = bytes(stderr_buf)
                     discovered = []
                 else:
                     stdout, stderr = await asyncio.wait_for(

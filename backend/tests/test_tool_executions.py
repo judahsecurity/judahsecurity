@@ -264,3 +264,53 @@ def test_empty_final_answer_falls_back_to_report(monkeypatch):
     response = AgentOrchestrator()._build_response(
         {"messages": [], "task_complete": True, "execution_trace": []})
     assert response.answer == "Assessment ended: empty final answer."
+
+
+@pytest.mark.asyncio
+async def test_live_output_tail_from_real_command(monkeypatch):
+    import sys
+
+    from app.services.agent.action_ledger import active_run_id
+    from app.services.agent.tools import ASMToolsManager
+    from app.services.mcp.server import get_mcp_server
+
+    server = get_mcp_server()
+    script = ("import sys,time\n"
+              "print('line-1', flush=True)\n"
+              "time.sleep(0.6)\n"
+              "print('line-2', flush=True)\n")
+
+    async def run():
+        mark_running()
+        return await server._run_command([sys.executable, "-c", script], timeout=10)
+
+    manager = ASMToolsManager()
+    token = active_run_id.set("r-tail")
+    try:
+        execution = start(run_id="r-tail", session_id="s", tool_name="execute_nmap",
+                          factory=run, hard_timeout=10)
+        for _ in range(50):
+            if execution.output_bytes:
+                break
+            await asyncio.sleep(0.02)
+        status = await manager.get_tool_execution(execution.id)
+        assert "Live output tail" in status and "line-1" in status
+        assert "line-2" not in status
+        assert "Live output tail" not in await manager.get_tool_execution(
+            execution.id, include_partial_output=False)
+        done = await manager.wait_tool_execution(execution.id, timeout_seconds=5)
+        assert "completed" in done and "line-1" in done and "line-2" in done
+    finally:
+        active_run_id.reset(token)
+        await cancel_run("r-tail")
+
+
+def test_tail_is_bounded():
+    from app.services.agent.tool_executions import TAIL_MAX_BYTES, ToolExecution
+
+    execution = ToolExecution(id="x", run_id="r", session_id="s", tool_name="t")
+    execution.append_output(b"a" * TAIL_MAX_BYTES)
+    execution.append_output(b"END")
+    assert len(execution.tail) == TAIL_MAX_BYTES
+    assert execution.output_tail(3) == "END"
+    assert execution.output_bytes == TAIL_MAX_BYTES + 3

@@ -6912,8 +6912,24 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             session_id=str(current_session_id.get() or ""),
         )
 
-    async def get_tool_execution(self, execution_id: str) -> str:
-        """Status of a background tool execution; the result if it has finished."""
+    @staticmethod
+    def _execution_progress(execution, include_partial_output: bool,
+                            partial_output_max_bytes: int) -> str:
+        summary = execution.summary()
+        text = (f"Execution {summary['execution_id']} ({summary['tool']}) is still "
+                f"{summary['status']} after {summary['elapsed_seconds']}s "
+                f"({execution.output_bytes} output bytes so far).")
+        if include_partial_output and execution.output_bytes:
+            tail = execution.output_tail(partial_output_max_bytes)
+            text += ("\nLive output tail (partial, not the final result):\n" + tail)
+        return text
+
+    async def get_tool_execution(self, execution_id: str, include_partial_output: bool = True,
+                                 partial_output_max_bytes: int = 4096) -> str:
+        """Status of a background tool execution; the result if it has finished.
+
+        While running, includes a bounded live tail of output (default 4096
+        bytes, max 65536). The tail is a preview, not the final result."""
         from app.services.agent import tool_executions
 
         execution = self._lookup_execution(execution_id)
@@ -6922,11 +6938,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if execution.done:
             execution.announced = True
             return tool_executions.format_result(execution, _tool_output_max_chars())
-        summary = execution.summary()
-        return (f"Execution {summary['execution_id']} ({summary['tool']}) is {summary['status']} "
-                f"after {summary['elapsed_seconds']}s. Call wait_tool_execution to wait for it.")
+        return (self._execution_progress(execution, include_partial_output,
+                                         partial_output_max_bytes)
+                + "\nCall wait_tool_execution to wait for it.")
 
-    async def wait_tool_execution(self, execution_id: str, timeout_seconds: float = 120) -> str:
+    async def wait_tool_execution(self, execution_id: str, timeout_seconds: float = 120,
+                                  include_partial_output: bool = True,
+                                  partial_output_max_bytes: int = 4096) -> str:
         """Wait up to timeout_seconds (max 600) for a background execution and return its result.
 
         Reaching the timeout is not a failure: the execution keeps running and
@@ -6945,10 +6963,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if execution.done:
             execution.announced = True
             return tool_executions.format_result(execution, _tool_output_max_chars())
-        summary = execution.summary()
-        return (f"Execution {summary['execution_id']} ({summary['tool']}) is still "
-                f"{summary['status']} after {summary['elapsed_seconds']}s. Do other work and "
-                "wait again later, or cancel_tool_execution if it is no longer needed.")
+        return (self._execution_progress(execution, include_partial_output,
+                                         partial_output_max_bytes)
+                + "\nDo other work and wait again later, or cancel_tool_execution "
+                "if it is no longer needed.")
 
     async def cancel_tool_execution(self, execution_id: str) -> str:
         """Cancel a background tool execution started in this run."""

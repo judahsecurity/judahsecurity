@@ -55,6 +55,8 @@ BACKGROUND_TOOLS = frozenset({
 })
 
 MAX_PER_RUN = 4
+# Live output kept per execution (last N bytes of stdout+stderr).
+TAIL_MAX_BYTES = 65536
 MAX_RESULT_CHARS_DEFAULT = 20000
 
 _current_execution: ContextVar[Optional["ToolExecution"]] = ContextVar(
@@ -77,6 +79,18 @@ class ToolExecution:
     backgrounded: bool = False
     announced: bool = False
     read: bool = False
+    tail: bytearray = field(default_factory=bytearray)
+    output_bytes: int = 0
+
+    def append_output(self, chunk: bytes) -> None:
+        self.output_bytes += len(chunk)
+        self.tail.extend(chunk)
+        if len(self.tail) > TAIL_MAX_BYTES:
+            del self.tail[: len(self.tail) - TAIL_MAX_BYTES]
+
+    def output_tail(self, max_bytes: int = 4096) -> str:
+        limit = max(1, min(int(max_bytes), TAIL_MAX_BYTES))
+        return bytes(self.tail[-limit:]).decode("utf-8", errors="replace")
 
     @property
     def done(self) -> bool:
@@ -93,6 +107,12 @@ class ToolExecution:
 
 
 _executions: Dict[str, ToolExecution] = {}
+
+
+def output_tail_sink() -> Optional[Callable[[bytes], None]]:
+    """Chunk callback for the running command, when it is a tool execution."""
+    execution = _current_execution.get()
+    return execution.append_output if execution is not None else None
 
 
 def mark_running() -> None:
