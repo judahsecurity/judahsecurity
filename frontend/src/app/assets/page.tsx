@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
+import { AssetInventoryToolbar, BulkEditButton } from '@/components/assets/AssetInventoryToolbar';
 import { useRouter } from 'next/navigation';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { Header } from '@/components/layout/Header';
@@ -643,6 +644,23 @@ export default function AssetsPage() {
           </Card>
         </div>
 
+        <AssetInventoryToolbar
+          organizationId={orgFilter !== 'all' ? parseInt(orgFilter) : undefined}
+          filters={{
+            search: search || undefined,
+            asset_type: typeFilter !== 'all' ? typeFilter : undefined,
+            status: statusFilter !== 'all' ? statusFilter : undefined,
+            organization: orgFilter !== 'all' ? orgFilter : undefined,
+          }}
+          onApplyView={(view) => {
+            setSearch(view.search || '');
+            setTypeFilter(view.asset_type || 'all');
+            setStatusFilter(view.status || 'all');
+            setOrgFilter(view.organization || 'all');
+          }}
+          onImported={() => fetchData(1)}
+        />
+
         {/* Bulk Action Bar */}
         {selectedAssets.size > 0 && (
           <Card className="p-4 bg-primary/5 border-primary/20">
@@ -677,6 +695,11 @@ export default function AssetsPage() {
                     <Trash2 className="h-4 w-4 mr-1" />
                     Delete Selected
                   </Button>
+                  <BulkEditButton
+                    assetIds={Array.from(selectedAssets)}
+                    organizationId={orgFilter !== 'all' ? parseInt(orgFilter) : undefined}
+                    onDone={() => fetchData(currentPage)}
+                  />
                 </div>
               </div>
               <Button size="sm" variant="ghost" onClick={deselectAll}>

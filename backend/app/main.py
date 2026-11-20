@@ -70,6 +70,7 @@ from app.models.scoped_assessment_run import ScopedAssessmentRun  # noqa: F401 �
 from app.models.prowl_publication import ProwlPublication  # noqa: F401 — finding idempotency
 from app.models.platform_audit import PlatformAuditLog  # noqa: F401 — platform audit log
 from app.models.org_role import OrgRole  # noqa: F401 — custom roles
+from app.models.saved_view import SavedView  # noqa: F401 — saved list views
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
     Workflow,
     WorkflowVersion,
@@ -231,6 +232,8 @@ from app.api.routes import audit as audit_router
 app.include_router(audit_router.router, prefix=settings.API_PREFIX)
 from app.api.routes import roles as roles_router
 app.include_router(roles_router.router, prefix=settings.API_PREFIX)
+from app.api.routes import asset_inventory as asset_inventory_router
+app.include_router(asset_inventory_router.router, prefix=settings.API_PREFIX)
 app.include_router(mitre_router.router, prefix=settings.API_PREFIX)
 app.include_router(llm_red_team_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)

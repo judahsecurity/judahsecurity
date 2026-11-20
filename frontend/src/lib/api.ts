@@ -21,6 +21,24 @@ export function resolveAxiosRequestUrl(error: { config?: { baseURL?: string; url
  * Handles FastAPI's validation error format (detail as array of objects)
  * as well as simple string detail messages.
  */
+export interface AssetImportResult {
+  created: number;
+  updated: number;
+  skipped: number;
+  invalid: number;
+  dry_run: boolean;
+  errors: { line: number; error: string }[];
+}
+
+export interface SavedListView {
+  id: number;
+  page: string;
+  name: string;
+  filters: Record<string, unknown>;
+  shared: boolean;
+  mine: boolean;
+}
+
 export interface CustomRole {
   id: number;
   name: string;
@@ -1084,6 +1102,45 @@ class ApiClient {
     const next = response.headers?.etag;
     if (next) this.settingsEtags.set(key, next);
     return response.data;
+  }
+
+  async exportAssetInventory(params: { format: 'csv' | 'xlsx'; organization_id?: number; asset_type?: string; search?: string }): Promise<ArrayBuffer> {
+    const response = await this.client.get('/asset-inventory/export', { params, responseType: 'arraybuffer' });
+    return response.data;
+  }
+
+  async importAssetInventory(file: File, options: { organization_id?: number; mode: 'skip' | 'update'; dry_run: boolean }): Promise<AssetImportResult> {
+    const form = new FormData();
+    form.append('file', file);
+    if (options.organization_id) form.append('organization_id', String(options.organization_id));
+    form.append('mode', options.mode);
+    form.append('dry_run', String(options.dry_run));
+    const response = await this.client.post('/asset-inventory/import', form);
+    return response.data;
+  }
+
+  async getAssetImportTemplate(): Promise<string> {
+    const response = await this.client.get('/asset-inventory/template', { responseType: 'text' });
+    return response.data;
+  }
+
+  async bulkUpdateAssets(body: { organization_id?: number; asset_ids: number[]; changes: Record<string, unknown> }): Promise<{ updated: number }> {
+    const response = await this.client.post('/asset-inventory/bulk-update', body);
+    return response.data;
+  }
+
+  async getSavedViews(page: 'assets' | 'findings'): Promise<SavedListView[]> {
+    const response = await this.client.get('/saved-views', { params: { page } });
+    return response.data;
+  }
+
+  async createSavedView(body: { page: 'assets' | 'findings'; name: string; filters: Record<string, unknown>; shared: boolean }) {
+    const response = await this.client.post('/saved-views', body);
+    return response.data;
+  }
+
+  async deleteSavedView(id: number) {
+    await this.client.delete(`/saved-views/${id}`);
   }
 
   async getRoles(): Promise<RoleCatalog> {
