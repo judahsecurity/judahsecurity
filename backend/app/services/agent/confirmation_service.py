@@ -90,6 +90,8 @@ READONLY_TOOLS = {
     "get_engagement_brain",
     "get_methodology_progress",
     "plan_intruder_mutations",
+    # Brain-only bookkeeping (no target traffic).
+    "suggest_capability_chains",
     # Background tool execution control: reads, waits and cancels only.
     "get_tool_execution",
     "wait_tool_execution",

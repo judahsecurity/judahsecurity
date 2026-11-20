@@ -725,6 +725,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "sync_engagement_brain": self.sync_engagement_brain,
             "update_hypothesis": self.update_hypothesis,
             "queue_finding_followups": self.queue_finding_followups,
+            "suggest_capability_chains": self.suggest_capability_chains,
             "log_engagement_approach": self.log_engagement_approach,
             "add_engagement_credential": self.add_engagement_credential,
             "get_engagement_brain": self.get_engagement_brain,
@@ -10715,6 +10716,27 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "boosted_methodologies": [h.to_dict() for h in boosted],
                 "suggested_specialists": specialists_from_open_hypotheses(brain),
                 "next_steps": brain.next_steps,
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def suggest_capability_chains(self, target: str = "") -> str:
+        """Map proven hypotheses and credentials to capability primitives and queue
+        chain cards for combinations that add up to impact. Also lists patterns
+        one primitive away. Chains are hypotheses until each step is proven."""
+        from app.services.agent.capability_primitives import queue_chain_hypotheses
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        outcome = queue_chain_hypotheses(
+            brain, target=target or getattr(self, "_fallback_target", "") or "")
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "primitives": outcome["primitives"],
+                "queued": [h.to_dict() for h in outcome["queued"]],
+                "one_step_away": outcome["one_step_away"],
                 "engagement_brain": self._engagement_brain,
             },
             indent=2,
