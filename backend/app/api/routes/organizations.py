@@ -376,8 +376,14 @@ def update_project_settings_module(
     if module not in ALL_MODULES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown module: {module}")
     if module == MODULE_NOTIFICATIONS:
-        _require_org_admin(current_user)
+        _require_org_admin(current_user, target=module)
         _validate_notifications_config(body.config)
+    if module == "agent" and any(key.startswith(_APPROVAL_POLICY_PREFIXES) for key in body.config):
+        # Approval policy decides what the agent may run without a person.
+        _require_org_admin(current_user, target="agent.approval_policy")
+        reviewer = body.config.get("tool_confirmation_reviewer")
+        if reviewer is not None and reviewer not in ("human", "ai"):
+            raise HTTPException(status_code=422, detail="tool_confirmation_reviewer must be 'human' or 'ai'")
     if if_match and if_match.strip() != "*":
         current = ProjectSettings.config_version(db, org_id, module, lock=True)
         expected = {tag.strip() for tag in if_match.split(",")}
@@ -400,11 +406,14 @@ def update_project_settings_module(
     return ProjectSettings.get_config(db, org_id, module)
 
 
-def _require_org_admin(user: User) -> None:
+_APPROVAL_POLICY_PREFIXES = ("tool_confirmation", "ai_reviewer", "agent_autonomous_auto_approve")
+
+
+def _require_org_admin(user: User, target: str = MODULE_NOTIFICATIONS) -> None:
     if not (getattr(user, "is_superuser", False) or getattr(user, "role", None) == UserRole.ADMIN):
         from app.services.platform_audit import record as audit
 
-        audit("settings.update", user=user, target=MODULE_NOTIFICATIONS, outcome="denied",
+        audit("settings.update", user=user, target=target, outcome="denied",
               detail={"reason": "admin role required"})
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="Only organization admins can change notification settings")
@@ -435,7 +444,7 @@ def send_test_notification(
 ):
     """Send a test message to this org's configured chats; returns per-chat results."""
     _check_org_access(db, org_id, current_user)
-    _require_org_admin(current_user)
+    _require_org_admin(current_user, target="notifications.test")
     from app.services.chat_notifier import default_notifier, dispatch, valid_chat_ids
 
     if default_notifier() is None:

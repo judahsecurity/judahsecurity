@@ -115,3 +115,15 @@ def test_test_notification_endpoint(client, monkeypatch):
     client.put(NOTIFY, json={"config": {"telegram_enabled": True, "telegram_chat_ids": ["42"]}})
     response = client.post("/organizations/1/notifications/test")
     assert response.status_code == 200 and response.json() == {"results": {"42": "sent"}}
+
+
+def test_approval_policy_keys_are_admin_only(client):
+    _as(client, "ANALYST")
+    url = "/organizations/1/settings/agent"
+    assert client.put(url, json={"config": {"tool_confirmation_reviewer": "ai"}}).status_code == 403
+    assert client.put(url, json={"config": {"agent_autonomous_auto_approve": True}}).status_code == 403
+    assert client.put(url, json={"config": {"llm_model": "x"}}).status_code == 200
+    _as(client, "ADMIN")
+    assert client.put(url, json={"config": {"tool_confirmation_reviewer": "robot"}}).status_code == 422
+    ok = client.put(url, json={"config": {"tool_confirmation_reviewer": "ai"}})
+    assert ok.status_code == 200 and ok.json()["tool_confirmation_reviewer"] == "ai"

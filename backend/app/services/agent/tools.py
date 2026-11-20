@@ -3504,8 +3504,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         })
                 except Exception as emit_err:
                     logger.debug("Could not emit pending_confirmation: %s", emit_err)
+                review_task = None
+                if gate_result.get("ai_review"):
+                    review_task = self._start_ai_review(token, tool_name, tool_args, org_id)
                 from app.services.agent.confirmation_service import wait_for_decision
-                approved = await wait_for_decision(token)
+                try:
+                    approved = await wait_for_decision(token)
+                finally:
+                    if review_task is not None and not review_task.done():
+                        review_task.cancel()
                 if not approved:
                     from app.services.agent.confirmation_service import get_store
                     confirmation = get_store().get(token)
@@ -6913,6 +6920,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             max_findings=max_findings,
             max_failures=max_failures,
         ) or ""
+
+    def _start_ai_review(self, token: str, tool_name: str, tool_args: Dict[str, Any],
+                         org_id: Optional[int]):
+        """Ask the AI reviewer to approve a routine call; humans can still decide."""
+        from app.services.agent.approval_reviewer import review_and_decide
+        from app.services.agent.confirmation_service import preview_tool_args
+        from app.services.agent.model_router import LLMTask, get_llm_for_task
+
+        def llm_factory():
+            db = SessionLocal()
+            try:
+                return get_llm_for_task(db, org_id, LLMTask.RECON, temperature=0,
+                                        max_tokens=300, timeout=45, max_retries=1)
+            finally:
+                db.close()
+
+        return asyncio.create_task(review_and_decide(
+            token, llm_factory=llm_factory, tool_name=tool_name,
+            tool_args=preview_tool_args(tool_args or {}),
+            scope=sorted(getattr(self, "_assessment_scope", set()) or []),
+            objective=current_seed_target.get() or getattr(self, "_fallback_target", "") or "",
+            organization_id=org_id,
+        ))
 
     def _lookup_execution(self, execution_id: str):
         from app.services.agent import tool_executions

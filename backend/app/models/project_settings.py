@@ -317,6 +317,13 @@ def default_agent_config():
         "agent_autonomous_auto_approve": False,
         # Auto-allow *read-only* tools regardless of the pattern above.
         "tool_confirmation_readonly_auto_allow": True,
+        # Who reviews "confirm" requests: "human" (default) or "ai". The AI
+        # reviewer (approval_reviewer.py) may only approve routine tools or
+        # pass them to a human; it never denies, and RoE/pilot/risky-tool
+        # approvals always go to a human.
+        "tool_confirmation_reviewer": "human",
+        # Tools the AI reviewer may approve; empty uses its default list.
+        "ai_reviewer_tools": [],
     }
 
 

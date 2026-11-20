@@ -51,6 +51,8 @@ def list_confirmations(
             "created_at": pc.created_at,
             "timeout_seconds": pc.timeout_seconds,
             "status": pc.status,
+            # Set when the AI reviewer passed this call to a human, with its reason.
+            "ai_review": pc.ai_review,
         }
         for pc in pending
     ]
