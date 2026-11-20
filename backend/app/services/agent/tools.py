@@ -770,6 +770,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "test_authorization_boundary": self.test_authorization_boundary,
             "record_surface_coverage": self.record_surface_coverage,
             "get_coverage": self.get_coverage,
+            "get_tool_execution": self.get_tool_execution,
+            "wait_tool_execution": self.wait_tool_execution,
+            "cancel_tool_execution": self.cancel_tool_execution,
+            "list_tool_executions": self.list_tool_executions,
             "mcp_connect": self.mcp_connect,
             "mcp_list": self.mcp_list,
             "mcp_call": self.mcp_call,
@@ -3525,6 +3529,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "output": "Tool execution blocked because confirmation policy could not be evaluated.",
                     "error": "confirmation_policy_unavailable",
                 }
+
+        # Approval gates have passed; a background execution's bounded wait
+        # starts now (tool_executions.wait_until_settled).
+        from app.services.agent.tool_executions import mark_running
+
+        mark_running()
 
         # Route MCP tools: execute_* and *_help (dynamic CLI + help)
         if tool_name.startswith("execute_") or tool_name.endswith("_help"):
@@ -6891,6 +6901,78 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             max_findings=max_findings,
             max_failures=max_failures,
         ) or ""
+
+    def _lookup_execution(self, execution_id: str):
+        from app.services.agent import tool_executions
+        from app.services.agent.action_ledger import active_run_id
+
+        return tool_executions.get(
+            execution_id, run_id=active_run_id.get() or "",
+            session_id=str(current_session_id.get() or ""),
+        )
+
+    async def get_tool_execution(self, execution_id: str) -> str:
+        """Status of a background tool execution; the result if it has finished."""
+        from app.services.agent import tool_executions
+
+        execution = self._lookup_execution(execution_id)
+        if execution is None:
+            return f"No background execution '{execution_id}' in this run."
+        if execution.done:
+            execution.announced = True
+            return tool_executions.format_result(execution, _tool_output_max_chars())
+        summary = execution.summary()
+        return (f"Execution {summary['execution_id']} ({summary['tool']}) is {summary['status']} "
+                f"after {summary['elapsed_seconds']}s. Call wait_tool_execution to wait for it.")
+
+    async def wait_tool_execution(self, execution_id: str, timeout_seconds: float = 120) -> str:
+        """Wait up to timeout_seconds (max 600) for a background execution and return its result.
+
+        Reaching the timeout is not a failure: the execution keeps running and
+        can be waited on again or cancelled.
+        """
+        from app.services.agent import tool_executions
+
+        execution = self._lookup_execution(execution_id)
+        if execution is None:
+            return f"No background execution '{execution_id}' in this run."
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = 120.0
+        await tool_executions.wait(execution, min(max(timeout, 0.0), 600.0))
+        if execution.done:
+            execution.announced = True
+            return tool_executions.format_result(execution, _tool_output_max_chars())
+        summary = execution.summary()
+        return (f"Execution {summary['execution_id']} ({summary['tool']}) is still "
+                f"{summary['status']} after {summary['elapsed_seconds']}s. Do other work and "
+                "wait again later, or cancel_tool_execution if it is no longer needed.")
+
+    async def cancel_tool_execution(self, execution_id: str) -> str:
+        """Cancel a background tool execution started in this run."""
+        from app.services.agent import tool_executions
+
+        execution = self._lookup_execution(execution_id)
+        if execution is None:
+            return f"No background execution '{execution_id}' in this run."
+        if not tool_executions.cancel(execution):
+            return f"Execution {execution.id} already {execution.status}; nothing to cancel."
+        await tool_executions.wait(execution, 5)
+        return f"Execution {execution.id} ({execution.tool_name}) {execution.status}."
+
+    async def list_tool_executions(self) -> str:
+        """List background tool executions of this run and their status."""
+        from app.services.agent import tool_executions
+        from app.services.agent.action_ledger import active_run_id
+
+        rows = tool_executions.run_executions(active_run_id.get() or "")
+        if not rows:
+            return "No background tool executions in this run."
+        return "\n".join(
+            "- {execution_id} {tool}: {status} ({elapsed_seconds}s)".format(**e.summary())
+            for e in rows
+        )
 
     async def mcp_connect(self, url: str, name: str = "burp") -> str:
         """Attach an external MCP server (Burp, Caido, custom) as agent tools.

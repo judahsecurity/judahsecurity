@@ -274,6 +274,16 @@ async def _bounded_planning_call(llm, messages, *, target: str, phase: str):
         return response, alternate
 
 
+async def _cancel_background_executions(run_id: str) -> None:
+    """Stop background tool executions that outlive their agent run."""
+    try:
+        from app.services.agent.tool_executions import cancel_run
+
+        await cancel_run(run_id)
+    except Exception:
+        logger.exception("Could not cancel background tool executions")
+
+
 class AgentOrchestrator:
     """
     ReAct-style agent orchestrator for security analysis.
@@ -2653,10 +2663,44 @@ class AgentOrchestrator:
             else float(tool_cap)
         )
         try:
-            result = await asyncio.wait_for(
-                self.tool_manager.execute(tool_name, tool_args),
-                timeout=tool_timeout,
-            )
+            from app.services.agent import tool_executions
+
+            if tool_executions.background_enabled(tool_name):
+                # Long scanners: wait a bounded time once the tool is actually
+                # running (after any approval), then let it continue in the
+                # background under the same hard cap and hand the agent an
+                # execution_id instead of killing it.
+                from app.services.agent.action_ledger import active_run_id
+
+                run_id = active_run_id.get() or ""
+                if tool_executions.active_count(run_id) < tool_executions.MAX_PER_RUN:
+                    execution = tool_executions.start(
+                        run_id=run_id,
+                        session_id=str(session_id or ""),
+                        tool_name=tool_name,
+                        factory=lambda: self.tool_manager.execute(tool_name, tool_args),
+                        hard_timeout=tool_timeout,
+                    )
+                    wait = tool_executions.wait_seconds()
+                    finished = await tool_executions.wait_until_settled(
+                        execution, budget=tool_timeout, wait=wait,
+                    )
+                    if finished:
+                        execution.announced = True
+                        result = dict(execution.result or {})
+                    else:
+                        execution.backgrounded = True
+                        result = tool_executions.background_notice(execution, wait)
+                else:
+                    result = await asyncio.wait_for(
+                        self.tool_manager.execute(tool_name, tool_args),
+                        timeout=tool_timeout,
+                    )
+            else:
+                result = await asyncio.wait_for(
+                    self.tool_manager.execute(tool_name, tool_args),
+                    timeout=tool_timeout,
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 "[%s] Tool %s exceeded node cap of %.0fs — aborted",
@@ -2679,6 +2723,21 @@ class AgentOrchestrator:
             }
 
         raw_output = result.get("output") or result.get("error") or ""
+        try:
+            from app.services.agent import tool_executions
+            from app.services.agent.action_ledger import active_run_id
+
+            finished_bg = tool_executions.take_unannounced(active_run_id.get() or "")
+            if finished_bg and tool_name not in {"wait_tool_execution", "get_tool_execution"}:
+                notes = "; ".join(
+                    f"{e.tool_name} {e.status} (execution_id={e.id})" for e in finished_bg
+                )
+                note = (f"\n\n[background] Finished: {notes}. "
+                        "Read results with wait_tool_execution(execution_id=...).")
+                if isinstance(raw_output, str):
+                    raw_output = raw_output + note
+        except Exception:
+            logger.debug("background execution notice skipped", exc_info=True)
         if isinstance(raw_output, str):
             step_data["tool_output"] = raw_output
         else:
@@ -3845,6 +3904,7 @@ class AgentOrchestrator:
             return InvokeResponse(error=str(e))
         finally:
             reset_pilot(pilot_token)
+            await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
@@ -3955,6 +4015,7 @@ class AgentOrchestrator:
             if pilot_token is not None:
                 from app.services.agent.pilot_policy import reset_pilot
                 reset_pilot(pilot_token)
+            await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
@@ -4026,6 +4087,7 @@ class AgentOrchestrator:
             if pilot_token is not None:
                 from app.services.agent.pilot_policy import reset_pilot
                 reset_pilot(pilot_token)
+            await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:

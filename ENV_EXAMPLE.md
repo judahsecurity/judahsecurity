@@ -242,6 +242,27 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # Agent tool output truncation (chars passed to LLM; default 20000)
 # AGENT_TOOL_OUTPUT_MAX_CHARS=20000
 
+# Long scanners (nuclei, nmap, ffuf, sqlmap, ...) are waited on this many seconds
+# once running; still running -> they continue in the background (same hard cap)
+# and the agent gets an execution_id for wait/cancel_tool_execution. 0 disables.
+# AGENT_TOOL_WAIT_SECONDS=120
+
+# Tool guard: regex block-list checked before any agent tool runs, on top of
+# scope. The default rule blocks government/military domains (.gov, .mil,
+# gov.<cc>); set DEFAULT_RULES=false only for engagements authorized against them.
+# Extra rules: JSON list of {"name","pattern","reminder","enabled"}.
+# AGENT_TOOL_GUARD_ENABLED=true
+# AGENT_TOOL_GUARD_DEFAULT_RULES=true
+# AGENT_TOOL_GUARD_RULES=[{"name":"no-prod","pattern":"prod\\.example\\.com"}]
+
+# External MCP (Burp/Caido) isolation: concurrency limits, slot wait, and a
+# per-server circuit breaker on transport failures.
+# AGENT_MCP_MAX_CONCURRENT_PER_SERVER=4
+# AGENT_MCP_MAX_CONCURRENT_TOTAL=16
+# AGENT_MCP_QUEUE_TIMEOUT_SECONDS=30
+# AGENT_MCP_BREAKER_FAILURES=5
+# AGENT_MCP_BREAKER_COOLDOWN_SECONDS=60
+
 # Agent request timeout in seconds (default 3600). WebSocket hunts use this too —
 # 11 minutes is too short for crawl + fireteam on a live app.
 # AGENT_REQUEST_TIMEOUT_SECONDS=3600

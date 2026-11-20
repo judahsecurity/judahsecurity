@@ -394,6 +394,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **validate_js_secret_candidate**: Operator-enabled provider hook; candidates never auto-publish.
 - **run_oob_callback_workflow**: Nuclei-style correlated OAST for one custom in-scope HTTP probe. It creates a fresh Interactsh session, injects the callback into one query/header/JSON/form/raw field, polls with a bounded cooldown, and returns execution-owned `evidence_ids` plus an `oob_callback` proof object for `record_verify_verdict`. Prefer this during independent verification. Raw bodies use `{{callback_url}}`. For **blind out-of-band SQLi** on an observed GET query field (no reflection, error, or timing signal), pass `sql_family` (mysql|postgresql|oracle|sqlserver) and `field=<parameter>`: the server builds a server-owned SQL payload embedding `{{callback_host}}` and injects it via `query_template`. Only when the run authorizes callbacks (operator grant); otherwise it returns `oob_callbacks_not_authorized`.
 - **replay_http_request**: Replay/tamper a captured XHR/API request from the capability map (like Burp Repeater-lite). Args: method, url, headers (dict), body (optional), sample_index (optional int into capability_map.api_samples), use_auth_session (default true — attaches cookies from deep_crawl login). Example: replay_http_request(sample_index=0) or replay_http_request(method="GET", url="https://target.com/api/users?id=1")
+- **wait_tool_execution** / **get_tool_execution** / **cancel_tool_execution** / **list_tool_executions**: Long scanners (nuclei, nmap, naabu, masscan, ffuf, katana, sqlmap, nikto, testssl, ...) that are still running after a bounded wait continue in the background and return an execution_id instead of output. Keep working, then wait_tool_execution(execution_id, timeout_seconds=120) to read the result (a timeout is not a failure; wait again or cancel_tool_execution). Never re-launch a scan that is still running. Unfinished executions are cancelled when the run ends.
 - **mcp_connect**: Attach an external MCP server the operator already runs (Burp/Caido). Args: **url** (e.g. http://127.0.0.1:9876/sse), **name** (default burp). Then mcp_call.
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
 - **mcp_call**: Invoke a tool on an attached MCP server. Args: **server**, **tool**, **arguments** (object).
@@ -804,6 +805,10 @@ TOOL_PHASE_MAP = {
     "list_recon_workers": ["informational", "exploitation", "post_exploitation"],
     "replay_http_request": ["informational", "exploitation", "post_exploitation"],
     "run_oob_callback_workflow": ["informational", "exploitation", "post_exploitation"],
+    "get_tool_execution": ["informational", "exploitation", "post_exploitation"],
+    "wait_tool_execution": ["informational", "exploitation", "post_exploitation"],
+    "cancel_tool_execution": ["informational", "exploitation", "post_exploitation"],
+    "list_tool_executions": ["informational", "exploitation", "post_exploitation"],
     "mcp_connect": ["informational", "exploitation", "post_exploitation"],
     "mcp_list": ["informational", "exploitation", "post_exploitation"],
     "mcp_call": ["informational", "exploitation", "post_exploitation"],

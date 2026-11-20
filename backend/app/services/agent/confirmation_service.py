@@ -90,6 +90,11 @@ READONLY_TOOLS = {
     "get_engagement_brain",
     "get_methodology_progress",
     "plan_intruder_mutations",
+    # Background tool execution control: reads, waits and cancels only.
+    "get_tool_execution",
+    "wait_tool_execution",
+    "cancel_tool_execution",
+    "list_tool_executions",
 }
 
 # Passive / light recon: always auto-allow unless explicitly denied.
