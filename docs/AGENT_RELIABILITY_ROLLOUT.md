@@ -98,10 +98,23 @@ is now controlled by `AGENT_CUSTOM_PROBE_MODE`:
   runner's environment.
 - `probe-egress` bridges `asm_network` and `probe_net`. Its relay (port 9000)
   accepts jobs from the backend, registers that job's scope, and hands the
-  runner a one-job proxy credential. Its proxy (port 3128) allows only
-  in-scope hosts plus OAST suffixes, refuses names that resolve only to
-  private, loopback, link-local or metadata addresses, connects to the address
-  it checked, caps requests per job, and returns an egress log with the result.
+  runner a one-job proxy credential plus the proxy's CA certificate. Its proxy
+  (port 3128) allows only in-scope hosts plus OAST suffixes, refuses names that
+  resolve only to private, loopback, link-local or metadata addresses, connects
+  to the address it checked, and caps requests per job.
+- HTTPS is intercepted. `probe-egress` generates an ephemeral CA at startup
+  (the private key never leaves that process), issues a certificate per host,
+  and verifies the real server's certificate upstream. The runner points every
+  toolchain at the proxy CA (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+  `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`), so scripts need
+  no proxy or `-k` flags. HTTP/1.1 is forced through ALPN and one request is
+  served per connection, so each exchange parses exactly.
+- Each request/response (headers and bodies, gzip/deflate decoded, 256 KB per
+  body, 8 MB per job) is returned to the backend and stored as redacted
+  `http_exchange` evidence with `test_type=custom_probe`. The tool result lists
+  `exchanges[].evidence_id`; specialists read bodies with `read_evidence`,
+  search them with `search_evidence`, and cite the IDs in
+  `submit_finding_candidate`.
 
 Enable:
 
@@ -112,7 +125,9 @@ echo "AGENT_CUSTOM_PROBE_MODE=isolated" >> .env
 docker compose --profile probe-sandbox up -d --build probe-egress probe-runner backend autonomy-worker
 ```
 
-Known limits: HTTPS through the proxy is tunneled, so request/response bodies
-are not recorded (the egress log has host, port, method and verdict). DNS
-queries from the runner go to Docker's embedded resolver. Lab targets on
-private addresses need `PROBE_ALLOW_PRIVATE_TARGETS=true` on `probe-egress`.
+Known limits: WebSocket upgrades and HTTP/2 are not supported through the
+proxy (HTTP/1.1 only). Brotli bodies are stored still encoded. DNS queries
+from the runner go to Docker's embedded resolver. Lab targets on private
+addresses need `PROBE_ALLOW_PRIVATE_TARGETS=true` on `probe-egress`, and
+self-signed lab certificates need `PROBE_UPSTREAM_VERIFY_TLS=false`; never set
+either for customer targets.

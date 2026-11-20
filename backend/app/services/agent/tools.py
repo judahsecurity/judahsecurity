@@ -6952,6 +6952,35 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         ok = mcp_client.disconnect(org_id, name)
         return f"Disconnected '{name}'." if ok else f"No MCP session named '{name}'."
 
+    def _record_probe_exchanges(self, exchanges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Store probe-egress recordings as redacted http_exchange evidence.
+
+        The model gets evidence IDs and a one-line index; bodies stay in the
+        evidence store, readable with read_evidence/search_evidence.
+        """
+        from app.services.agent.evidence_store import evidence_store
+
+        store = evidence_store(self)
+        index: List[Dict[str, Any]] = []
+        for exchange in exchanges:
+            request = exchange.get("request") if isinstance(exchange.get("request"), dict) else {}
+            response = exchange.get("response") if isinstance(exchange.get("response"), dict) else {}
+            url = str(request.get("url") or "")
+            body = str(response.get("body") or "")
+            payload = {
+                "request": {**request, "body_len": request.get("length", 0)},
+                "response": {**response, "body_preview": body[:4000]},
+                "source": "custom_probe",
+            }
+            status = response.get("status") or 0
+            evidence_id = store.record(
+                "http_exchange", payload, target=url, test_type="custom_probe",
+                success=isinstance(status, int) and 0 < status < 400,
+            )
+            index.append({"evidence_id": evidence_id, "method": request.get("method"),
+                          "url": url, "status": status, "length": response.get("length")})
+        return index
+
     async def run_custom_probe(
         self,
         source: str,
@@ -6997,11 +7026,20 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         runner = run_custom_probe_isolated if mode == "isolated" else run_custom_probe_async
         result = await runner(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
         result["execution"] = mode
+        if result.get("exchanges"):
+            result["exchanges"] = self._record_probe_exchanges(result["exchanges"])
         result["oob_allowed"] = True
         result["hint"] = (
             "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
             "localhost — Lictor blocks those. Print JSON proof to stdout."
         )
+        if result.get("exchanges"):
+            result["hint"] += (
+                " Every request this probe sent is recorded under exchanges[].evidence_id "
+                "(full redacted request/response). Read one with read_evidence, search "
+                "bodies with search_evidence, and cite the evidence_id in "
+                "submit_finding_candidate instead of pasting stdout."
+            )
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
 
     async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:

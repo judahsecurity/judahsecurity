@@ -2,7 +2,7 @@
 # Build context: backend/. Neither service gets backend code, secrets or volumes.
 FROM python:3.11-slim
 
-RUN pip install --no-cache-dir httpx==0.25.2 \
+RUN pip install --no-cache-dir httpx==0.25.2 cryptography==41.0.7 \
     && useradd --system --no-create-home --uid 10001 egress
 
 COPY probe_sandbox/egress.py probe_sandbox/runner.py /app/

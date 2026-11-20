@@ -51,16 +51,27 @@ def _drop_privileges() -> None:
         os.setuid(PROBE_UID)
 
 
-def run_script(script: str, timeout: float, proxy_url: str) -> dict:
+def run_script(script: str, timeout: float, proxy_url: str, ca_pem: str = "") -> dict:
     workdir = tempfile.mkdtemp(prefix="probe-")
     try:
         path = os.path.join(workdir, "probe.py")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(script)
+        ca_path = os.path.join(workdir, "proxy-ca.pem")
+        with open(ca_path, "w", encoding="ascii") as handle:
+            handle.write(ca_pem)
         if os.getuid() == 0:
-            os.chown(workdir, PROBE_UID, PROBE_GID)
-            os.chown(path, PROBE_UID, PROBE_GID)
-        env = {
+            for item in (workdir, path, ca_path):
+                os.chown(item, PROBE_UID, PROBE_GID)
+        # All TLS goes through probe-egress, which re-signs with its CA, so the
+        # proxy CA is the only trust root a script needs. Each toolchain reads
+        # a different variable.
+        trust = {
+            "SSL_CERT_FILE": ca_path, "REQUESTS_CA_BUNDLE": ca_path,
+            "CURL_CA_BUNDLE": ca_path, "NODE_EXTRA_CA_CERTS": ca_path,
+            "GIT_SSL_CAINFO": ca_path,
+        } if ca_pem else {}
+        env = {**trust,
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "HOME": workdir,
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -125,14 +136,18 @@ class Handler(BaseHTTPRequestHandler):
             script = str(req["script"])
             proxy_url = str(req["proxy_url"])
             timeout = max(3.0, min(float(req.get("timeout_sec") or 20), MAX_TIMEOUT))
+            ca_pem = str(req.get("ca_pem") or "")
         except (ValueError, KeyError, TypeError):
             self._json(400, {"error": "invalid job"})
+            return
+        if ca_pem and not ca_pem.startswith("-----BEGIN CERTIFICATE-----"):
+            self._json(400, {"error": "invalid CA certificate"})
             return
         if not _slots.acquire(timeout=30):
             self._json(503, {"error": "runner busy"})
             return
         try:
-            self._json(200, run_script(script, timeout, proxy_url))
+            self._json(200, run_script(script, timeout, proxy_url, ca_pem))
         finally:
             _slots.release()
 

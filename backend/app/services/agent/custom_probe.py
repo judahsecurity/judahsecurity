@@ -425,5 +425,8 @@ async def run_custom_probe_isolated(
         "stderr": str(result.get("stderr") or "")[:2000],
         "error": result.get("error"),
         "egress": (result.get("egress") or [])[:200],
+        "exchanges": [item for item in (result.get("exchanges") or [])[:200]
+                      if isinstance(item, dict)],
+        "exchanges_dropped": int(result.get("exchanges_dropped") or 0),
         "allowed_hosts": hosts,
     }
