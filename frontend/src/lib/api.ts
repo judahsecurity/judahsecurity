@@ -2820,7 +2820,7 @@ class ApiClient {
 
   async generateAssetReport(
     assetId: number,
-    options?: { format?: 'pdf' | 'html'; include_info?: boolean }
+    options?: { format?: 'pdf' | 'html' | 'docx'; include_info?: boolean }
   ): Promise<ArrayBuffer> {
     const params: any = {};
     if (options?.format) params.format = options.format;
@@ -2835,7 +2835,7 @@ class ApiClient {
 
   async generateFindingsReport(
     findingIds: number[],
-    options?: { format?: 'pdf' | 'html'; report_title?: string; organization_name?: string }
+    options?: { format?: 'pdf' | 'html' | 'docx'; report_title?: string; organization_name?: string }
   ): Promise<ArrayBuffer> {
     const response = await this.client.post(
       '/reports/findings/report',
