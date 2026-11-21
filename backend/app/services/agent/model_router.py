@@ -80,6 +80,7 @@ class LLMTask:
     OFFENSIVE = "offensive"   # exploit agents, pentest, red-team (Claude-leaning)
     REPORT = "report"         # findings write-up / summarization
     RECON = "recon"           # fireteam recon/coverage — cheaper model
+    VISION = "vision"         # screenshot -> text summary (image never reaches the agent)
 
 ALL_TASKS = (LLMTask.REASONING, LLMTask.OFFENSIVE, LLMTask.REPORT, LLMTask.RECON)
 
@@ -411,6 +412,13 @@ def reset_provider_breakers() -> None:
     _PROVIDER_BREAKERS.clear()
 
 
+def adapt_messages(llm, messages):
+    """Per-provider message shape (prompt-cache blocks only for Anthropic)."""
+    from app.services.agent.prompt_cache import adapt_messages as _adapt
+
+    return _adapt(llm, messages)
+
+
 class ResilientFallbackChatModel(BaseChatModel):
     """Try ``primary``, then each ``fallbacks`` entry on credit/quota/auth errors.
 
@@ -515,7 +523,7 @@ class ResilientFallbackChatModel(BaseChatModel):
                 llm = chain[i]
                 try:
                     result = llm._generate(
-                        messages, stop=stop, run_manager=run_manager, **kwargs
+                        adapt_messages(llm, messages), stop=stop, run_manager=run_manager, **kwargs
                     )
                     _PROVIDER_BREAKERS.reset(keys[i])
                     return result
@@ -568,7 +576,7 @@ class ResilientFallbackChatModel(BaseChatModel):
                 llm = chain[i]
                 try:
                     result = await llm._agenerate(
-                        messages, stop=stop, run_manager=run_manager, **kwargs
+                        adapt_messages(llm, messages), stop=stop, run_manager=run_manager, **kwargs
                     )
                     _PROVIDER_BREAKERS.reset(keys[i])
                     return result

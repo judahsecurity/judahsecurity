@@ -109,6 +109,11 @@ def login(
     ).first()
     
     if not user or not verify_password(form_data.password, user.hashed_password):
+        from app.services.platform_audit import record as audit
+
+        audit("auth.login_failed", actor=str(form_data.username or "")[:255],
+              organization_id=getattr(user, "organization_id", None),
+              outcome="denied", request=request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -116,6 +121,10 @@ def login(
         )
     
     if not user.is_active:
+        from app.services.platform_audit import record as audit
+
+        audit("auth.login_failed", user=user, outcome="denied", request=request,
+              detail={"reason": "account disabled"})
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is disabled"
@@ -132,6 +141,9 @@ def login(
     # Update last login
     user.last_login = datetime.utcnow()
     db.commit()
+    from app.services.platform_audit import record as audit
+
+    audit("auth.login", user=user, request=request)
     
     # Create tokens
     subject = user.username or user.email
@@ -201,6 +213,10 @@ def change_password(
     which is exactly the flow that lifts the gate.
     """
     if not verify_password(payload.current_password, current_user.hashed_password):
+        from app.services.platform_audit import record as audit
+
+        audit("auth.password_change", user=current_user, outcome="denied",
+              detail={"reason": "current password incorrect"})
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
@@ -216,6 +232,9 @@ def change_password(
     db.add(current_user)
     db.commit()
     db.refresh(current_user)
+    from app.services.platform_audit import record as audit
+
+    audit("auth.password_change", user=current_user)
     return current_user
 
 

@@ -29,6 +29,7 @@ MODULE_AGENT = "agent"
 MODULE_SCAN_TOGGLES = "scan_toggles"
 MODULE_RULES_OF_ENGAGEMENT = "rules_of_engagement"
 MODULE_COMMONCRAWL = "commoncrawl"
+MODULE_NOTIFICATIONS = "notifications"
 
 ALL_MODULES = [
     MODULE_TARGET,
@@ -47,6 +48,7 @@ ALL_MODULES = [
     MODULE_SCAN_TOGGLES,
     MODULE_RULES_OF_ENGAGEMENT,
     MODULE_COMMONCRAWL,
+    MODULE_NOTIFICATIONS,
 ]
 
 
@@ -315,6 +317,13 @@ def default_agent_config():
         "agent_autonomous_auto_approve": False,
         # Auto-allow *read-only* tools regardless of the pattern above.
         "tool_confirmation_readonly_auto_allow": True,
+        # Who reviews "confirm" requests: "human" (default) or "ai". The AI
+        # reviewer (approval_reviewer.py) may only approve routine tools or
+        # pass them to a human; it never denies, and RoE/pilot/risky-tool
+        # approvals always go to a human.
+        "tool_confirmation_reviewer": "human",
+        # Tools the AI reviewer may approve; empty uses its default list.
+        "ai_reviewer_tools": [],
     }
 
 
@@ -401,6 +410,21 @@ def default_commoncrawl_config():
     }
 
 
+def default_notifications_config():
+    """Chat notifications (chat_notifier.py). Summaries only, never evidence.
+
+    telegram_chat_ids: numeric chat IDs (groups are negative) or @channel names.
+    Only org admins can change this module (it routes the org's findings).
+    """
+    return {
+        "telegram_enabled": False,
+        "telegram_chat_ids": [],
+        "notify_findings": True,
+        "notify_run_finished": True,
+        "min_severity": "high",
+    }
+
+
 def get_default_config(module: str) -> dict:
     """Return default config for a module."""
     defaults = {
@@ -420,6 +444,7 @@ def get_default_config(module: str) -> dict:
         MODULE_SCAN_TOGGLES: default_scan_toggles_config,
         MODULE_RULES_OF_ENGAGEMENT: default_rules_of_engagement_config,
         MODULE_COMMONCRAWL: default_commoncrawl_config,
+        MODULE_NOTIFICATIONS: default_notifications_config,
     }
     fn = defaults.get(module)
     return fn() if fn else {}
@@ -458,6 +483,26 @@ class ProjectSettings(Base):
         for k, v in row.config.items():
             merged[k] = v
         return merged
+
+    @classmethod
+    def config_version(cls, db, organization_id: int, module: str, *, lock: bool = False) -> str:
+        """Opaque version of the stored config (content hash), for If-Match saves.
+
+        ``lock`` takes a row lock so a compare-and-save is atomic on PostgreSQL.
+        """
+        import hashlib
+        import json as _json
+
+        query = db.query(cls).filter(
+            cls.organization_id == organization_id,
+            cls.module == module,
+        )
+        if lock:
+            query = query.with_for_update()
+        row = query.first()
+        stored = row.config if row and row.config else None
+        blob = _json.dumps(stored, sort_keys=True, default=str)
+        return '"' + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32] + '"'
 
     @classmethod
     def set_config(cls, db, organization_id: int, module: str, config: dict) -> "ProjectSettings":
