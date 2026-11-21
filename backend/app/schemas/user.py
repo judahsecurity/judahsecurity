@@ -55,6 +55,7 @@ class UserResponse(UserBase):
     is_superuser: bool
     must_change_password: bool = False
     organization_id: Optional[int] = None
+    custom_role_id: Optional[int] = None
     created_at: datetime
     last_login: Optional[datetime] = None
     

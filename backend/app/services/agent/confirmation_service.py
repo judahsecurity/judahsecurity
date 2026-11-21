@@ -90,6 +90,15 @@ READONLY_TOOLS = {
     "get_engagement_brain",
     "get_methodology_progress",
     "plan_intruder_mutations",
+    # Brain-only bookkeeping (no target traffic).
+    "suggest_capability_chains",
+    "analyze_screenshot",  # reads a local screenshot; no target traffic
+    "describe_tools",
+    # Background tool execution control: reads, waits and cancels only.
+    "get_tool_execution",
+    "wait_tool_execution",
+    "cancel_tool_execution",
+    "list_tool_executions",
 }
 
 # Passive / light recon: always auto-allow unless explicitly denied.
@@ -154,6 +163,7 @@ class PendingConfirmation:
     reason: Optional[str] = None
     timeout_seconds: int = 300
     waiters: list[asyncio.Future] = field(default_factory=list)
+    ai_review: Optional[dict] = None
 
 
 def preview_tool_args(tool_args: dict) -> dict:
@@ -497,12 +507,17 @@ async def gate(
         "Agent confirmation requested: tool=%s org=%s session=%s token=%s",
         tool_name, organization_id, session_id, pc.token,
     )
+    from app.services.agent.approval_reviewer import eligible as ai_eligible
+
     return {
         "decision": "confirm",
         "token": pc.token,
         "tool_name": tool_name,
         "tool_args": sanitized,
         "expires_at": pc.created_at + pc.timeout_seconds,
+        # RoE-mandated, login-crawl and pilot approvals always go to a human.
+        "ai_review": (not roe_escalated and not pilot_network_action and not login_crawl
+                      and ai_eligible(tool_name, policy_cfg)),
     }
 
 

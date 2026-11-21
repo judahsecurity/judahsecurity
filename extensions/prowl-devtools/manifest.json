@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Prowl DevTools Sender",
+  "version": "0.1.0",
+  "description": "Send a request from the DevTools Network panel to a Prowl session as a pending lead.",
+  "devtools_page": "devtools.html",
+  "permissions": ["storage"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "minimum_chrome_version": "110"
+}

@@ -602,18 +602,22 @@ export default function AssetDetailPage() {
     fetchAsset();
   };
 
-  const handleExportReport = async () => {
+  const handleExportReport = async (format: 'pdf' | 'docx' = 'pdf') => {
     if (!asset) return;
-    
+    const label = format === 'docx' ? 'Word' : 'PDF';
+    const mime = format === 'docx'
+      ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      : 'application/pdf';
+
     setExportingReport(true);
     try {
-      const response = await api.generateAssetReport(parseInt(assetId), { format: 'pdf', include_info: false });
-      
-      const blob = new Blob([response], { type: 'application/pdf' });
+      const response = await api.generateAssetReport(parseInt(assetId), { format, include_info: false });
+
+      const blob = new Blob([response], { type: mime });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `findings_report_${asset.value.replace(/[^a-zA-Z0-9.-]/g, '_')}.pdf`;
+      a.download = `findings_report_${asset.value.replace(/[^a-zA-Z0-9.-]/g, '_')}.${format}`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -621,12 +625,12 @@ export default function AssetDetailPage() {
       
       toast({
         title: 'Report Downloaded',
-        description: 'PDF report has been downloaded successfully.',
+        description: `${label} report has been downloaded successfully.`,
       });
     } catch (error) {
       toast({
         title: 'Export Failed',
-        description: getApiErrorMessage(error, 'Failed to generate PDF report'),
+        description: getApiErrorMessage(error, `Failed to generate ${label} report`),
         variant: 'destructive',
       });
     } finally {
@@ -1745,7 +1749,7 @@ export default function AssetDetailPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={handleExportReport}
+                    onClick={() => handleExportReport('pdf')}
                     disabled={exportingReport || vulnerabilities.length === 0}
                   >
                     {exportingReport ? (
@@ -1754,6 +1758,15 @@ export default function AssetDetailPage() {
                       <FileDown className="h-4 w-4 mr-1" />
                     )}
                     Export PDF
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleExportReport('docx')}
+                    disabled={exportingReport || vulnerabilities.length === 0}
+                  >
+                    <FileDown className="h-4 w-4 mr-1" />
+                    Export Word
                   </Button>
                 </div>
               </div>

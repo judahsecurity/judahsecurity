@@ -3,6 +3,13 @@
 The platform already *exposes* an MCP server of our scanners. CAI's edge is
 consuming the tester's proxy as tools. This module is process-local: connect
 during a hunt, call tools, disconnect. No generic shell.
+
+Calls are isolated per server so one slow or broken proxy cannot stall a run:
+a per-server and a process-wide concurrency limit (callers wait a bounded time
+for a slot), and a per-server circuit breaker that stops sending calls after
+repeated transport failures, then lets one trial call through after a cooldown.
+Errors the server reports for a tool (JSON-RPC ``error``) do not trip the
+breaker; only failures to reach the server do.
 """
 
 from __future__ import annotations
@@ -10,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
@@ -29,6 +37,97 @@ class McpError(RuntimeError):
     pass
 
 
+class McpTransportError(McpError):
+    """The server could not be reached or answered with an HTTP error."""
+
+
+class McpUnavailable(McpError):
+    """The call was not sent: breaker open or no concurrency slot in time."""
+
+
+def _setting(name: str, default: float) -> float:
+    try:
+        value = float(getattr(settings, name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+class CircuitBreaker:
+    """closed -> open after N consecutive failures -> half_open after cooldown."""
+
+    def __init__(self, threshold: int, cooldown: float, clock=time.monotonic):
+        self.threshold = max(1, int(threshold))
+        self.cooldown = float(cooldown)
+        self._clock = clock
+        self._lock = threading.Lock()
+        self.failures = 0
+        self.opened_at: Optional[float] = None
+        self._trial_in_flight = False
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            return self._state_locked()
+
+    def _state_locked(self) -> str:
+        if self.opened_at is None:
+            return "closed"
+        if self._clock() - self.opened_at >= self.cooldown:
+            return "half_open"
+        return "open"
+
+    def before_call(self) -> None:
+        with self._lock:
+            state = self._state_locked()
+            if state == "closed":
+                return
+            if state == "half_open" and not self._trial_in_flight:
+                self._trial_in_flight = True
+                return
+            retry_in = max(0.0, self.cooldown - (self._clock() - (self.opened_at or 0)))
+            raise McpUnavailable(
+                f"circuit open after {self.failures} consecutive transport failures; "
+                f"retry in {retry_in:.0f}s or reconnect with mcp_connect"
+            )
+
+    def record_success(self) -> None:
+        with self._lock:
+            self.failures = 0
+            self.opened_at = None
+            self._trial_in_flight = False
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self.failures += 1
+            if self._trial_in_flight or self.failures >= self.threshold:
+                self.opened_at = self._clock()
+            self._trial_in_flight = False
+
+    def release_trial(self) -> None:
+        """A half-open trial ended without a transport verdict."""
+        with self._lock:
+            self._trial_in_flight = False
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return {"state": self._state_locked(), "consecutive_failures": self.failures}
+
+
+_global_slots_lock = threading.Lock()
+_global_slots: Optional[threading.BoundedSemaphore] = None
+_global_slots_size = 0
+
+
+def _global_semaphore() -> threading.BoundedSemaphore:
+    global _global_slots, _global_slots_size
+    size = int(_setting("AGENT_MCP_MAX_CONCURRENT_TOTAL", 16))
+    with _global_slots_lock:
+        if _global_slots is None or _global_slots_size != size:
+            _global_slots, _global_slots_size = threading.BoundedSemaphore(size), size
+        return _global_slots
+
+
 class McpSession:
     def __init__(self, name: str, url: str, transport: str):
         self.name = name
@@ -38,6 +137,14 @@ class McpSession:
         self.session_id = ""
         self.tools: List[Dict[str, Any]] = []
         self._id = 0
+        self._id_lock = threading.Lock()
+        self.slots = threading.BoundedSemaphore(
+            int(_setting("AGENT_MCP_MAX_CONCURRENT_PER_SERVER", 4))
+        )
+        self.breaker = CircuitBreaker(
+            int(_setting("AGENT_MCP_BREAKER_FAILURES", 5)),
+            _setting("AGENT_MCP_BREAKER_COOLDOWN_SECONDS", 60),
+        )
         self._client = httpx.Client(
             timeout=float(getattr(settings, "AGENT_MCP_CONNECT_TIMEOUT_SECONDS", 8) or 8),
             follow_redirects=True,
@@ -50,8 +157,9 @@ class McpSession:
             pass
 
     def _next_id(self) -> int:
-        self._id += 1
-        return self._id
+        with self._id_lock:
+            self._id += 1
+            return self._id
 
     def _rpc(self, method: str, params: Optional[dict] = None, *, notify: bool = False) -> Any:
         payload: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
@@ -65,9 +173,12 @@ class McpSession:
         }
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
-        resp = self._client.post(self.message_url, json=payload, headers=headers)
+        try:
+            resp = self._client.post(self.message_url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            raise McpTransportError(f"{method} transport error: {type(exc).__name__}: {exc}") from exc
         if resp.status_code >= 400:
-            raise McpError(f"{method} HTTP {resp.status_code}: {resp.text[:400]}")
+            raise McpTransportError(f"{method} HTTP {resp.status_code}: {resp.text[:400]}")
         sid = resp.headers.get("mcp-session-id") or resp.headers.get("Mcp-Session-Id")
         if sid:
             self.session_id = sid
@@ -252,4 +363,40 @@ def call_tool(org_id: int, server: str, tool_name: str, arguments: Optional[dict
         session = _sessions.get(_key(org_id, server))
     if not session:
         raise McpError(f"not connected: {server}. Call mcp_connect first.")
-    return session.call_tool(tool_name, arguments)
+    session.breaker.before_call()
+    wait = _setting("AGENT_MCP_QUEUE_TIMEOUT_SECONDS", 30)
+    verdict = False
+    try:
+        if not session.slots.acquire(timeout=wait):
+            raise McpUnavailable(
+                f"{server}: all per-server MCP slots busy for {wait:.0f}s; call not sent"
+            )
+        try:
+            shared = _global_semaphore()
+            if not shared.acquire(timeout=wait):
+                raise McpUnavailable(f"all MCP slots busy for {wait:.0f}s; call not sent")
+            try:
+                try:
+                    result = session.call_tool(tool_name, arguments)
+                except McpTransportError:
+                    verdict = True
+                    session.breaker.record_failure()
+                    raise
+                verdict = True
+                session.breaker.record_success()
+                return result
+            finally:
+                shared.release()
+        finally:
+            session.slots.release()
+    finally:
+        if not verdict:
+            session.breaker.release_trial()
+
+
+def server_health(org_id: int) -> List[Dict[str, Any]]:
+    """Breaker state per attached server, for mcp_list and the UI."""
+    prefix = f"{int(org_id)}:"
+    with _lock:
+        items = [s for k, s in _sessions.items() if k.startswith(prefix)]
+    return [{"name": s.name, **s.breaker.snapshot()} for s in items]

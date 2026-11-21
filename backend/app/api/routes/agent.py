@@ -1548,6 +1548,12 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
             await websocket.send_json({"type": "error", "message": "Authentication failed"})
             await websocket.close(code=4003)
             return
+        from app.core.permissions import user_can
+
+        if not user_can(user, "agent.run"):
+            await websocket.send_json({"type": "error", "message": "Your role does not include 'agent.run'"})
+            await websocket.close(code=4003)
+            return
         db = SessionLocal()
         try:
             existing = db.query(AgentConversation).filter_by(session_id=session_id).first()

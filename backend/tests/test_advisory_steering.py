@@ -74,9 +74,14 @@ def test_suggestion_names_the_step_and_the_deadline():
 
 
 def test_hunt_discipline_prompt_is_flagged(monkeypatch):
+    from app.services.agent.prompts import render_system_prompt_parts
+
     assert HUNT_DISCIPLINE_GUIDANCE not in render_system_prompt(mode="agent", **CONTEXT)
+    assert HUNT_DISCIPLINE_GUIDANCE not in render_system_prompt_parts(mode="agent", **CONTEXT)[0]
     monkeypatch.setattr(settings, "AGENT_HUNT_DISCIPLINE_PROMPT", True)
     assert HUNT_DISCIPLINE_GUIDANCE in render_system_prompt(mode="agent", **CONTEXT)
+    # The orchestrator renders with the parts API; guidance sits in the cached static block.
+    assert HUNT_DISCIPLINE_GUIDANCE in render_system_prompt_parts(mode="agent", **CONTEXT)[0]
     assert HUNT_DISCIPLINE_GUIDANCE not in render_system_prompt(mode="pilot", **CONTEXT)
 
 
@@ -138,13 +143,14 @@ def test_think_node_advisory_hands_turn_to_model(monkeypatch):
 
     monkeypatch.setattr(settings, "AGENT_STEERING_MODE", "advisory")
     prompts = []
-    real_render = orchestrator.render_system_prompt
+    real_render = orchestrator.render_system_prompt_parts
 
     def capture(**kwargs):
-        prompts.append(kwargs.get("available_tools", ""))
+        prompts.append(kwargs.get("tool_recommendations", ""))
+        assert "Suggested pipeline step" not in str(kwargs.get("available_tools", ""))
         return real_render(**kwargs)
 
-    monkeypatch.setattr(orchestrator, "render_system_prompt", capture)
+    monkeypatch.setattr(orchestrator, "render_system_prompt_parts", capture)
     _, model_called = _think(monkeypatch, trace=_trace("forced"))
     assert model_called
     assert "Suggested pipeline step (advisory)" in prompts[-1]

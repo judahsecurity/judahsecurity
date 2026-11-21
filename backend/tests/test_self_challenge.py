@@ -142,3 +142,6 @@ def test_self_challenge_prompt_follows_flag(monkeypatch):
     assert SELF_CHALLENGE_GUIDANCE not in render_system_prompt(mode="agent", **CONTEXT)
     monkeypatch.setattr(settings, "AGENT_SELF_CHALLENGE", True)
     assert SELF_CHALLENGE_GUIDANCE in render_system_prompt(mode="agent", **CONTEXT)
+    from app.services.agent.prompts import render_system_prompt_parts
+
+    assert SELF_CHALLENGE_GUIDANCE in render_system_prompt_parts(mode="agent", **CONTEXT)[0]

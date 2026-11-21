@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import re as _re
 import signal
 from collections import deque
@@ -725,6 +726,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "sync_engagement_brain": self.sync_engagement_brain,
             "update_hypothesis": self.update_hypothesis,
             "queue_finding_followups": self.queue_finding_followups,
+            "suggest_capability_chains": self.suggest_capability_chains,
+            "analyze_screenshot": self.analyze_screenshot,
+            "describe_tools": self.describe_tools,
             "log_engagement_approach": self.log_engagement_approach,
             "add_engagement_credential": self.add_engagement_credential,
             "get_engagement_brain": self.get_engagement_brain,
@@ -770,6 +774,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "test_authorization_boundary": self.test_authorization_boundary,
             "record_surface_coverage": self.record_surface_coverage,
             "get_coverage": self.get_coverage,
+            "get_tool_execution": self.get_tool_execution,
+            "wait_tool_execution": self.wait_tool_execution,
+            "cancel_tool_execution": self.cancel_tool_execution,
+            "list_tool_executions": self.list_tool_executions,
             "mcp_connect": self.mcp_connect,
             "mcp_list": self.mcp_list,
             "mcp_call": self.mcp_call,
@@ -3218,7 +3226,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         referenced = result.get("evidence_ids")
         evidence_ids = referenced if isinstance(referenced, list) else []
         failure_code = str(result.get("error") or "")
-        if failure_code in {"assessment_scope_denied", "invalid_browser_args"}:
+        if failure_code in {"assessment_scope_denied", "invalid_browser_args",
+                            "blocked_by_guard"}:
             # The action ledger excludes raw arguments and output. A stable
             # reason code distinguishes bad browser args from a true host deny.
             failure_code += f":{str(result.get('reason') or 'unspecified')[:40]}"
@@ -3449,6 +3458,22 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             except (ValueError, TypeError) as exc:
                 return {"success": False, "output": str(exc), "error": "invalid_scoped_browser_args"}
 
+        # -- Tool guard -------------------------------------------------------
+        # Never-touch destinations (government/military domains by default,
+        # plus operator rules) are refused before approval or execution. This
+        # sits on top of the scope allow-list; a blocked call is not a failure.
+        from app.services.agent.tool_guard import check_tool_call
+
+        guard = check_tool_call(tool_name, tool_args)
+        if guard.blocked:
+            logger.warning("Tool guard blocked %s (rule=%s)", tool_name, guard.rule)
+            return guard.to_result(tool_name)
+
+        # Custom roles can withhold active testing from a user's agent runs.
+        denied = self._active_testing_denied(tool_name)
+        if denied:
+            return denied
+
         # -- Per-tool confirmation gate ---------------------------------------
         # Consult the org's agent confirmation policy. Dangerous tools
         # (execute_*, create_scan, ...) either pause for a human ``approve`` or
@@ -3485,8 +3510,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         })
                 except Exception as emit_err:
                     logger.debug("Could not emit pending_confirmation: %s", emit_err)
+                review_task = None
+                if gate_result.get("ai_review"):
+                    review_task = self._start_ai_review(token, tool_name, tool_args, org_id)
                 from app.services.agent.confirmation_service import wait_for_decision
-                approved = await wait_for_decision(token)
+                try:
+                    approved = await wait_for_decision(token)
+                finally:
+                    if review_task is not None and not review_task.done():
+                        review_task.cancel()
                 if not approved:
                     from app.services.agent.confirmation_service import get_store
                     confirmation = get_store().get(token)
@@ -3514,6 +3546,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "output": "Tool execution blocked because confirmation policy could not be evaluated.",
                     "error": "confirmation_policy_unavailable",
                 }
+
+        # Approval gates have passed; a background execution's bounded wait
+        # starts now (tool_executions.wait_until_settled).
+        from app.services.agent.tool_executions import mark_running
+
+        mark_running()
 
         # Route MCP tools: execute_* and *_help (dynamic CLI + help)
         if tool_name.startswith("execute_") or tool_name.endswith("_help"):
@@ -5678,6 +5716,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 cve_id=cve_id,
                 confirmed=str(gate_msg or "").startswith("verify_ok"),
             )
+            try:
+                from app.services.chat_notifier import notify_finding
+
+                notify_finding(org_id, finding_id=vuln.id, title=vuln.title,
+                               severity=vuln.severity.value, asset=asset.value,
+                               verified=verification_level == "exploit_verified")
+            except Exception:
+                logger.debug("finding notification skipped", exc_info=True)
             chain_n = (agent_detection or {}).get("step_count") or 0
             msg = (
                 f"Finding created: id={vuln.id}, title={vuln.title[:60]}..., "
@@ -6881,6 +6927,141 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             max_failures=max_failures,
         ) or ""
 
+    def _active_testing_denied(self, tool_name: str) -> Optional[Dict[str, Any]]:
+        from app.services.agent.confirmation_service import READONLY_TOOLS, SAFE_RECON_TOOLS
+
+        if tool_name in READONLY_TOOLS or tool_name in SAFE_RECON_TOOLS or tool_name.endswith("_help"):
+            return None
+        user_id, _ = get_tenant_context()
+        if not user_id:
+            return None
+        try:
+            from app.core.permissions import user_id_restricted_from
+
+            if not user_id_restricted_from(int(user_id), "agent.active_testing"):
+                return None
+        except Exception:
+            logger.exception("Permission check failed for %s", tool_name)
+            return {"success": False, "error": "permission_check_failed",
+                    "output": "Tool blocked: the permission check could not be completed."}
+        return {"success": False, "error": "permission_denied",
+                "output": (f"Tool '{tool_name}' needs the 'agent.active_testing' permission, "
+                           "which your role does not include. Use read-only queries and light "
+                           "recon, or ask an admin.")}
+
+    def _start_ai_review(self, token: str, tool_name: str, tool_args: Dict[str, Any],
+                         org_id: Optional[int]):
+        """Ask the AI reviewer to approve a routine call; humans can still decide."""
+        from app.services.agent.approval_reviewer import review_and_decide
+        from app.services.agent.confirmation_service import preview_tool_args
+        from app.services.agent.model_router import LLMTask, get_llm_for_task
+
+        def llm_factory():
+            db = SessionLocal()
+            try:
+                return get_llm_for_task(db, org_id, LLMTask.RECON, temperature=0,
+                                        max_tokens=300, timeout=45, max_retries=1)
+            finally:
+                db.close()
+
+        return asyncio.create_task(review_and_decide(
+            token, llm_factory=llm_factory, tool_name=tool_name,
+            tool_args=preview_tool_args(tool_args or {}),
+            scope=sorted(getattr(self, "_assessment_scope", set()) or []),
+            objective=current_seed_target.get() or getattr(self, "_fallback_target", "") or "",
+            organization_id=org_id,
+        ))
+
+    def _lookup_execution(self, execution_id: str):
+        from app.services.agent import tool_executions
+        from app.services.agent.action_ledger import active_run_id
+
+        return tool_executions.get(
+            execution_id, run_id=active_run_id.get() or "",
+            session_id=str(current_session_id.get() or ""),
+        )
+
+    @staticmethod
+    def _execution_progress(execution, include_partial_output: bool,
+                            partial_output_max_bytes: int) -> str:
+        summary = execution.summary()
+        text = (f"Execution {summary['execution_id']} ({summary['tool']}) is still "
+                f"{summary['status']} after {summary['elapsed_seconds']}s "
+                f"({execution.output_bytes} output bytes so far).")
+        if include_partial_output and execution.output_bytes:
+            tail = execution.output_tail(partial_output_max_bytes)
+            text += ("\nLive output tail (partial, not the final result):\n" + tail)
+        return text
+
+    async def get_tool_execution(self, execution_id: str, include_partial_output: bool = True,
+                                 partial_output_max_bytes: int = 4096) -> str:
+        """Status of a background tool execution; the result if it has finished.
+
+        While running, includes a bounded live tail of output (default 4096
+        bytes, max 65536). The tail is a preview, not the final result."""
+        from app.services.agent import tool_executions
+
+        execution = self._lookup_execution(execution_id)
+        if execution is None:
+            return f"No background execution '{execution_id}' in this run."
+        if execution.done:
+            execution.announced = True
+            return tool_executions.format_result(execution, _tool_output_max_chars())
+        return (self._execution_progress(execution, include_partial_output,
+                                         partial_output_max_bytes)
+                + "\nCall wait_tool_execution to wait for it.")
+
+    async def wait_tool_execution(self, execution_id: str, timeout_seconds: float = 120,
+                                  include_partial_output: bool = True,
+                                  partial_output_max_bytes: int = 4096) -> str:
+        """Wait up to timeout_seconds (max 600) for a background execution and return its result.
+
+        Reaching the timeout is not a failure: the execution keeps running and
+        can be waited on again or cancelled.
+        """
+        from app.services.agent import tool_executions
+
+        execution = self._lookup_execution(execution_id)
+        if execution is None:
+            return f"No background execution '{execution_id}' in this run."
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = 120.0
+        await tool_executions.wait(execution, min(max(timeout, 0.0), 600.0))
+        if execution.done:
+            execution.announced = True
+            return tool_executions.format_result(execution, _tool_output_max_chars())
+        return (self._execution_progress(execution, include_partial_output,
+                                         partial_output_max_bytes)
+                + "\nDo other work and wait again later, or cancel_tool_execution "
+                "if it is no longer needed.")
+
+    async def cancel_tool_execution(self, execution_id: str) -> str:
+        """Cancel a background tool execution started in this run."""
+        from app.services.agent import tool_executions
+
+        execution = self._lookup_execution(execution_id)
+        if execution is None:
+            return f"No background execution '{execution_id}' in this run."
+        if not tool_executions.cancel(execution):
+            return f"Execution {execution.id} already {execution.status}; nothing to cancel."
+        await tool_executions.wait(execution, 5)
+        return f"Execution {execution.id} ({execution.tool_name}) {execution.status}."
+
+    async def list_tool_executions(self) -> str:
+        """List background tool executions of this run and their status."""
+        from app.services.agent import tool_executions
+        from app.services.agent.action_ledger import active_run_id
+
+        rows = tool_executions.run_executions(active_run_id.get() or "")
+        if not rows:
+            return "No background tool executions in this run."
+        return "\n".join(
+            "- {execution_id} {tool}: {status} ({elapsed_seconds}s)".format(**e.summary())
+            for e in rows
+        )
+
     async def mcp_connect(self, url: str, name: str = "burp") -> str:
         """Attach an external MCP server (Burp, Caido, custom) as agent tools.
 
@@ -6893,10 +7074,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         _, org_id = get_tenant_context()
         if not org_id:
             return "Error: organization context required"
+        user_id, _ = get_tenant_context()
+        from app.services.platform_audit import record as audit
+
         try:
             result = await asyncio.to_thread(mcp_client.connect, org_id, url, name)
         except Exception as exc:
+            audit("mcp.connect", organization_id=org_id, actor=f"user:{user_id}", target=name,
+                  outcome="failed", detail={"url": url, "error": str(exc)[:300]})
             return f"MCP connect failed: {exc}"
+        audit("mcp.connect", organization_id=org_id, actor=f"user:{user_id}", target=name,
+              detail={"url": url, "tools": len(result.get("tools") or [])})
         tools = result.get("tools") or []
         names = ", ".join(t.get("name") or "?" for t in tools[:40]) or "(none listed)"
         return (
@@ -6915,10 +7103,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         sessions = mcp_client.list_sessions(org_id)
         if not sessions:
             return "No external MCP servers attached. Use mcp_connect(url, name)."
+        health = {row["name"]: row for row in mcp_client.server_health(org_id)}
         lines = []
         for s in sessions:
             tools = ", ".join(s.get("tools") or []) or "(no tools)"
-            lines.append(f"- {s.get('name')} [{s.get('transport')}] {s.get('url')}: {tools}")
+            state = health.get(s.get("name"), {}).get("state", "closed")
+            breaker = "" if state == "closed" else f" (circuit {state})"
+            lines.append(f"- {s.get('name')} [{s.get('transport')}] {s.get('url')}{breaker}: {tools}")
         return "\n".join(lines)
 
     async def mcp_call(
@@ -6951,6 +7142,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if not org_id:
             return "Error: organization context required"
         ok = mcp_client.disconnect(org_id, name)
+        if ok:
+            from app.services.platform_audit import record as audit
+
+            user_id, _ = get_tenant_context()
+            audit("mcp.disconnect", organization_id=org_id, actor=f"user:{user_id}", target=name)
         return f"Disconnected '{name}'." if ok else f"No MCP session named '{name}'."
 
     def _record_probe_exchanges(self, exchanges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -10714,6 +10910,80 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "boosted_methodologies": [h.to_dict() for h in boosted],
                 "suggested_specialists": specialists_from_open_hypotheses(brain),
                 "next_steps": brain.next_steps,
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def describe_tools(self, names: Any = None) -> str:
+        """Full documentation (arguments, rules, examples) for the named tools.
+
+        names: list of tool names, or a comma/space separated string (max 15)."""
+        from app.services.agent.prompts import all_tool_docs
+
+        if isinstance(names, str):
+            wanted = [n for n in re.split(r"[\s,]+", names) if n]
+        else:
+            wanted = [str(n).strip() for n in (names or []) if str(n).strip()]
+        if not wanted:
+            return "Pass names=[...] with one or more tool names from the tool index."
+        docs = all_tool_docs()
+        lines, unknown = [], []
+        for name in wanted[:15]:
+            if name in docs:
+                lines.append(docs[name])
+            elif name in self.tools:
+                lines.append(f"- **{name}**: {(getattr(self.tools[name], '__doc__', '') or '').strip()[:1500]}")
+            else:
+                unknown.append(name)
+        if unknown:
+            lines.append("Unknown tools: " + ", ".join(unknown))
+        return "\n".join(lines)
+
+    async def analyze_screenshot(self, path: str, question: str = "") -> str:
+        """Describe a browser screenshot with the org's vision model (text only).
+
+        path: the screenshot path returned by execute_browser's screenshot
+        action (must be under the screenshots directory). question: optional
+        focus, e.g. "is this an admin login?". The image is never added to the
+        agent's context; only the summary is returned."""
+        from app.services.agent.model_router import LLMTask, get_llm_for_task
+        from app.services.agent.vision_summary import ScreenshotError, summarize_screenshot
+
+        _, org_id = get_tenant_context()
+        try:
+            db = SessionLocal()
+            try:
+                llm = get_llm_for_task(db, org_id, LLMTask.VISION, temperature=0,
+                                       max_tokens=800, timeout=60, max_retries=1)
+            finally:
+                db.close()
+            summary = await summarize_screenshot(llm, path, question or None)
+        except ScreenshotError as exc:
+            return f"analyze_screenshot refused: {exc}"
+        except Exception as exc:
+            logger.warning("analyze_screenshot failed: %s", type(exc).__name__, exc_info=True)
+            return ("analyze_screenshot failed: the vision model is unavailable or does not "
+                    f"accept images ({type(exc).__name__}). Set task_models.vision to a "
+                    "vision-capable model in agent settings.")
+        return "Screenshot summary (vision model, untrusted page content):\n" + summary
+
+    async def suggest_capability_chains(self, target: str = "") -> str:
+        """Map proven hypotheses and credentials to capability primitives and queue
+        chain cards for combinations that add up to impact. Also lists patterns
+        one primitive away. Chains are hypotheses until each step is proven."""
+        from app.services.agent.capability_primitives import queue_chain_hypotheses
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        outcome = queue_chain_hypotheses(
+            brain, target=target or getattr(self, "_fallback_target", "") or "")
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "primitives": outcome["primitives"],
+                "queued": [h.to_dict() for h in outcome["queued"]],
+                "one_step_away": outcome["one_step_away"],
                 "engagement_brain": self._engagement_brain,
             },
             indent=2,

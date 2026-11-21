@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from sqlalchemy import or_
@@ -33,6 +34,64 @@ def _keywords(query: str, limit: int = 5) -> list[str]:
     ][:limit]
 
 
+# Security vocabulary: abbreviations and their spelled-out / sibling terms.
+# Used to rewrite a query into a few variants (multi-query retrieval) without
+# an extra model call.
+_SYNONYM_GROUPS = (
+    ("sqli", "sql injection", "sql"),
+    ("xss", "cross-site scripting", "cross site scripting"),
+    ("idor", "bola", "insecure direct object reference", "broken object level authorization"),
+    ("ssrf", "server-side request forgery", "server side request forgery"),
+    ("rce", "remote code execution", "command injection"),
+    ("lfi", "path traversal", "directory traversal", "local file inclusion"),
+    ("ssti", "server-side template injection", "template injection"),
+    ("csrf", "cross-site request forgery", "xsrf"),
+    ("jwt", "json web token"),
+    ("xxe", "xml external entity"),
+    ("ato", "account takeover"),
+    ("mfa", "2fa", "multi-factor authentication"),
+    ("cve", "vulnerability", "advisory"),
+    ("waf", "web application firewall"),
+    ("cors", "cross-origin resource sharing"),
+    ("nosqli", "nosql injection"),
+)
+MAX_QUERY_VARIANTS = 3
+
+
+def query_variants(query: str) -> list[str]:
+    """The query plus up to two rewrites that swap security terms for synonyms."""
+    text = " ".join((query or "").lower().split())
+    variants = [text]
+    for group in _SYNONYM_GROUPS:
+        for term in group:
+            pattern = r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])"
+            if re.search(pattern, text):
+                for alt in group:
+                    if alt != term:
+                        candidate = re.sub(pattern, alt, text, count=1)
+                        if candidate not in variants:
+                            variants.append(candidate)
+                break
+        if len(variants) >= MAX_QUERY_VARIANTS:
+            break
+    return variants[:MAX_QUERY_VARIANTS]
+
+
+def intent_terms(query: str) -> list[str]:
+    """Every synonym of the security terms the query mentions."""
+    text = " ".join((query or "").lower().split())
+    terms: list[str] = []
+    for group in _SYNONYM_GROUPS:
+        if any(re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", text) for t in group):
+            terms.extend(group)
+    return terms
+
+
+# A document naming the query's security concept (in any spelling) outranks
+# one that only shares incidental words with it.
+INTENT_BONUS = 0.25
+
+
 def search_knowledge(
     organization_id: int,
     query: str,
@@ -53,8 +112,11 @@ def search_knowledge(
             AgentKnowledge.organization_id.is_(None),
         )
 
-        # Phase 1 - keyword shortlist (wide net)
-        keywords = _keywords(query)
+        # Phase 1 - keyword shortlist (wide net), widened by query rewrites
+        variants = query_variants(query)
+        intents = intent_terms(query)
+        keywords = list(dict.fromkeys(
+            kw for variant in variants for kw in _keywords(variant)))[:10]
         shortlist: list[AgentKnowledge] = []
         if keywords:
             kw_filters = []
@@ -80,15 +142,20 @@ def search_knowledge(
 
         # Phase 2 - embedding rerank (only when the query is long enough for
         # semantic signal to be meaningful)
-        q_vec: Optional[list[float]] = None
+        q_vecs: list[list[float]] = []
         if len(query.strip()) >= 8:
-            q_vec, _ = embed(query)
+            for variant in variants:
+                vec, _ = embed(variant)
+                if vec:
+                    q_vecs.append(vec)
+                if not q_vecs:
+                    break  # embeddings unavailable; don't retry per variant
 
         ranked: list[tuple[float, AgentKnowledge, str]] = []
         for doc in shortlist:
             score = 0.0
             reason = "keyword"
-            if q_vec:
+            if q_vecs:
                 doc_vec = doc.embedding
                 if not doc_vec:
                     doc_vec = reindex_doc(doc)
@@ -97,13 +164,18 @@ def search_knowledge(
                     except Exception:
                         db.rollback()
                 if doc_vec:
-                    score = cosine(q_vec, doc_vec)
+                    # Best match across the original query and its rewrites.
+                    score = max(cosine(vec, doc_vec) for vec in q_vecs)
                     reason = "semantic"
 
             # Keyword score floor so title-hits always surface
             text_lower = f"{doc.title} {doc.content[:2000]}".lower()
             keyword_hits = sum(1 for kw in keywords if kw in text_lower)
             score += 0.05 * keyword_hits
+            if intents and any(
+                    re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", text_lower)
+                    for t in intents):
+                score += INTENT_BONUS
             ranked.append((score, doc, reason))
 
         ranked.sort(key=lambda x: x[0], reverse=True)

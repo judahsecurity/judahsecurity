@@ -108,6 +108,14 @@ def finish_run(run_id: str | None, status: str, reason: str = "") -> None:
         row.reason = reason[:500]
         row.ended_at = datetime.utcnow()
         db.commit()
+        notify = (row.organization_id, row.objective, row.session_id)
+    try:
+        from app.services.chat_notifier import notify_run_finished
+
+        notify_run_finished(notify[0], objective=notify[1], status=status,
+                            reason=reason[:300], session_id=notify[2])
+    except Exception:
+        logger.debug("run-finished notification skipped", exc_info=True)
 
 
 def record_hypotheses(run_id: str | None, snapshot: dict) -> None:

@@ -31,3 +31,12 @@ and agent-steering text unrelated to the vulnerability class. Discipline rules
 Each adapted pack ends with an attribution line naming its source skill.
 Packs not listed here (sqli, xss, ssrf, wordpress, js_analysis, ...) are original
 Judah content.
+
+## CyberStrikeAI
+
+`capability_chains/SKILL.md` and `capability_primitives.py` adapt the
+capability-primitive idea from **CyberStrikeAI**
+(https://github.com/aipentest/cyberstrikeai, `skills/capability-primitive-search/SKILL.md`),
+licensed under the Apache License 2.0. Rewritten in English for Prowl's tools
+and proof rules: the goal is demonstrated impact rather than code execution,
+and persistence, webshell, credential-relay and destructive steps were removed.
