@@ -162,12 +162,13 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 # Code lives in aegis-vanguard/. See aegis-vanguard/DEPLOYMENT.md.
 # =============================================================================
 # How the scanner worker revalidates findings:
-#   native (default) — replay original detector / steps_to_reproduce on the
+#   native           — replay original detector / steps_to_reproduce on the
 #                      scanner (nuclei template, TCP/HTTP probes). No Docker.
 #   docker           — `docker run aegis-vanguard:latest` (needs CLI + sock)
 #   subprocess       — run aegis-vanguard/validate_finding.py in-process
-#   auto             — native first; escalate to docker/subprocess if inconclusive
-AEGIS_VALIDATOR_MODE=native
+#   auto (default)   — native first; escalate to docker/subprocess if inconclusive.
+#                      Agent findings are never re-confirmed by reachability alone.
+AEGIS_VALIDATOR_MODE=auto
 AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # AEGIS_VANGUARD_PATH=/path/to/aegis-vanguard   # only for subprocess mode
 # AEGIS_VALIDATE_MAX_TURNS=20
@@ -286,6 +287,19 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 
 # Agent max iterations per REST request (default 15; increase for longer tool chains)
 # AGENT_REST_MAX_ITERATIONS=15
+
+# Prowl hunting behavior (on by default in docker-compose.yml; see
+# docs/AGENT_RELIABILITY_ROLLOUT.md). Roll back with strict / false.
+# AGENT_STEERING_MODE=advisory
+# AGENT_STEERING_FREE_TURNS=2
+# AGENT_HUNT_DISCIPLINE_PROMPT=true
+
+# Model-written probe scripts: off (default) | isolated | inprocess (lab only).
+# isolated needs `docker compose --profile probe-sandbox` and two random tokens
+# (openssl rand -hex 24). See docs/AGENT_RELIABILITY_ROLLOUT.md.
+# AGENT_CUSTOM_PROBE_MODE=off
+# AGENT_PROBE_RUNNER_TOKEN=
+# PROBE_RUNNER_TOKEN=
 
 # =============================================================================
 # Neo4j Graph Database (optional - for asset relationship modeling)

@@ -1,11 +1,8 @@
 """Deep assessment mode: larger budgets and model-led steps, same gates."""
 
-import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from app.services.agent import assessment_depth as depth_module
 from app.services.agent import orchestrator as orchestrator_module
@@ -16,11 +13,9 @@ from app.services.agent.assessment_depth import (
     current_assessment_depth,
     fireteam_dispatch_cap,
     hunter_budget,
-    pipeline_step_is_advisory,
     resolve_assessment_depth,
     set_assessment_depth,
 )
-from app.services.agent.orchestrator import AgentOrchestrator
 
 
 @pytest.fixture
@@ -46,7 +41,6 @@ def test_standard_mode_keeps_existing_budgets():
     assert assessment_depth() is STANDARD
     assert hunter_budget(64) == 64
     assert fireteam_dispatch_cap(600) == 600
-    assert not pipeline_step_is_advisory("fireteam_dispatch", 0)
 
 
 def test_deep_mode_scales_hunter_budgets_and_dispatch_cap(deep):
@@ -73,16 +67,6 @@ def test_pilot_and_scheduled_autonomy_stay_standard(deep):
         assert assessment_depth() is STANDARD
     finally:
         pilot_policy.current_pilot = original
-
-
-def test_recon_and_publication_steps_are_always_forced(deep):
-    for tool in ("execute_deep_crawl", "sync_engagement_brain", "independent_verify",
-                 "submit_finding_candidate", "create_finding"):
-        assert not pipeline_step_is_advisory(tool, 0), tool
-    assert pipeline_step_is_advisory("fireteam_dispatch", 0)
-    assert pipeline_step_is_advisory("probe_observed_input_batch", DEEP.advisory_decline_limit - 1)
-    # A model that keeps declining gets the pipeline step forced.
-    assert not pipeline_step_is_advisory("fireteam_dispatch", DEEP.advisory_decline_limit)
 
 
 def test_specialist_turns_scale_with_depth(monkeypatch, deep):
@@ -146,82 +130,6 @@ def test_specialist_opening_is_bare_in_standard_and_seeded_in_deep():
         assert "internal_id" not in _specialist_opening(manager, "web_recon")
     finally:
         current_assessment_depth.reset(token)
-
-
-async def _think_with(monkeypatch, *, state_extra, model_tool):
-    from app.services.agent import recon_workers, tester_loop
-
-    async def no_recon(*_args, **_kwargs):
-        return []
-
-    prompts = []
-
-    async def planning_call(llm, messages, **_kwargs):
-        prompts.append(messages[0].content)
-        return AIMessage(content=json.dumps({
-            "thought": "Chase the reflected internal_id first",
-            "reasoning": "A stronger lead than the queued wave",
-            "action": "use_tool",
-            "tool_name": model_tool,
-            "tool_args": {"url": "https://example.test/api/v2/users"},
-        })), llm
-
-    monkeypatch.setattr(recon_workers, "drain_completed", no_recon)
-    monkeypatch.setattr(tester_loop, "forced_next_step", lambda _state: {
-        "tool_name": "fireteam_dispatch",
-        "tool_args": {"mode": "attack"},
-        "thought": "Dispatch the ready hypothesis wave",
-    })
-    monkeypatch.setattr(orchestrator_module, "_bounded_planning_call", planning_call)
-    orchestrator = AgentOrchestrator()
-    orchestrator._emit_status = AsyncMock()
-    orchestrator._resolve_llm = lambda *_args: object()
-    state = {
-        "user_id": "1", "session_id": "deep-advisory",
-        "mode": "agent", "current_iteration": 5,
-        "current_phase": "exploitation", "execution_trace": [],
-        "target_info": {"primary_target": "https://example.test"},
-        **state_extra,
-    }
-    return await orchestrator._think_node(state), prompts
-
-
-@pytest.mark.asyncio
-async def test_standard_mode_forces_the_pipeline_step(monkeypatch):
-    result, prompts = await _think_with(monkeypatch, state_extra={}, model_tool="execute_curl")
-    assert result["_current_step"]["tool_name"] == "fireteam_dispatch"
-    assert result["_current_step"]["decision_source"] == "forced"
-    assert prompts == []
-
-
-@pytest.mark.asyncio
-async def test_deep_mode_lets_the_model_decline_then_forces(monkeypatch, deep):
-    result, prompts = await _think_with(
-        monkeypatch, state_extra={"pipeline_advisory_declines": 0}, model_tool="execute_curl",
-    )
-    assert result["_current_step"]["tool_name"] == "execute_curl"
-    assert result["_current_step"]["decision_source"] == "model"
-    assert result["pipeline_advisory_declines"] == 1
-    assert "you choose the next step" in prompts[0]
-    assert "fireteam_dispatch" in prompts[0]
-
-    result, prompts = await _think_with(
-        monkeypatch,
-        state_extra={"pipeline_advisory_declines": DEEP.advisory_decline_limit},
-        model_tool="execute_curl",
-    )
-    assert result["_current_step"]["tool_name"] == "fireteam_dispatch"
-    assert result["pipeline_advisory_declines"] == 0
-    assert prompts == []
-
-
-@pytest.mark.asyncio
-async def test_deep_mode_following_the_suggestion_resets_declines(monkeypatch, deep):
-    result, _ = await _think_with(
-        monkeypatch, state_extra={"pipeline_advisory_declines": 2}, model_tool="fireteam_dispatch",
-    )
-    assert result["_current_step"]["tool_name"] == "fireteam_dispatch"
-    assert result["pipeline_advisory_declines"] == 0
 
 
 def test_org_default_mode_reads_project_settings(monkeypatch):

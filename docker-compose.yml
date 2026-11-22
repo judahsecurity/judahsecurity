@@ -54,8 +54,6 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-["https://aegis.theforcesecurity.io","https://aegis.judahsecurity.io","http://localhost","http://localhost:80","http://localhost:3000","http://localhost:8000","http://frontend:3000"]}
       - REDIS_URL=redis://redis:6379/0
       - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
-      - PROWL_SANDBOX_URL=${PROWL_SANDBOX_URL:-}
-      - PROWL_SANDBOX_TOKEN=${PROWL_SANDBOX_TOKEN:-}
       - AEGIS_INTERACTSH_RPC_ENABLED=${AEGIS_INTERACTSH_RPC_ENABLED:-true}
       - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
@@ -115,6 +113,18 @@ services:
       - AGENT_WS_MAX_ITERATIONS=${AGENT_WS_MAX_ITERATIONS:-160}
       - AGENT_PRICE_LIMIT_USD=${AGENT_PRICE_LIMIT_USD:-20}
       - AGENT_REST_MAX_ITERATIONS=${AGENT_REST_MAX_ITERATIONS:-15}
+      # Prowl hunting behavior (docs/AGENT_RELIABILITY_ROLLOUT.md). Set
+      # AGENT_STEERING_MODE=strict / AGENT_HUNT_DISCIPLINE_PROMPT=false to roll back.
+      - AGENT_STEERING_MODE=${AGENT_STEERING_MODE:-advisory}
+      - AGENT_STEERING_FREE_TURNS=${AGENT_STEERING_FREE_TURNS:-2}
+      - AGENT_HUNT_DISCIPLINE_PROMPT=${AGENT_HUNT_DISCIPLINE_PROMPT:-true}
+      - AGENT_SELF_CHALLENGE=${AGENT_SELF_CHALLENGE:-true}
+      - AGENT_RECHECK_WEAK_NEGATIVES=${AGENT_RECHECK_WEAK_NEGATIVES:-true}
+      # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
+      - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
+      - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
+      - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
+      - AGENT_SANDBOX_SHELL=${AGENT_SANDBOX_SHELL:-true}
       # Legacy optional executor; normal Prowl mode uses the built-in backend tools.
       - PROWL_ASSESSMENT_URL=${PROWL_ASSESSMENT_URL:-}
       - PROWL_ADMIN_TOKEN=${PROWL_ADMIN_TOKEN:-}
@@ -304,42 +314,61 @@ services:
     networks:
       - asm_network
 
-  # Explorer sandbox (deep assessment mode). Opt-in: profile "explorer-sandbox".
-  # A real shell/Python in an isolated container whose only network path is the
-  # recording egress proxy. Holds no platform credentials.
-  prowl-sandbox-egress:
+  # Isolated execution for model-written probe scripts (run_custom_probe).
+  # Enable with `--profile probe-sandbox` and AGENT_CUSTOM_PROBE_MODE=isolated.
+  # probe-runner sits only on probe_net (internal: no route out); its single
+  # exit is probe-egress's scope-checking proxy, keyed by a per-job credential.
+  probe-egress:
     build:
-      context: ./backend/sandbox
-      dockerfile: egress/Dockerfile
-    image: ${PROWL_SANDBOX_EGRESS_IMAGE:-prowl-sandbox-egress:latest}
+      context: ./backend
+      dockerfile: probe_sandbox/Dockerfile
+      target: egress
+    image: ${PROBE_EGRESS_IMAGE:-asm-probe-egress:latest}
+    command: ["python", "-I", "/app/egress.py"]
     restart: unless-stopped
-    profiles: ["explorer-sandbox"]
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - SANDBOX_RECORD_BODY_LIMIT=${PROWL_SANDBOX_BODY_LIMIT:-262144}
-    volumes:
-      - prowl_sandbox_ca:/ca-public
-    networks: [asm_network]
-    depends_on: [redis]
+      - PROBE_RELAY_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
+      - PROBE_RUNNER_TOKEN=${PROBE_RUNNER_TOKEN:-}
+      - PROBE_RUNNER_URL=http://probe-runner:8000
+      - PROBE_PROXY_HOST=probe-egress
+    networks:
+      - asm_network
+      - probe_net
+    profiles:
+      - probe-sandbox
 
-  prowl-sandbox:
+  probe-runner:
     build:
-      context: ./backend/sandbox
-      dockerfile: runner/Dockerfile
-    image: ${PROWL_SANDBOX_RUNNER_IMAGE:-prowl-sandbox-runner:latest}
+      context: ./backend
+      dockerfile: probe_sandbox/Dockerfile
+      target: runner
+    image: ${PROBE_RUNNER_IMAGE:-asm-probe-runner:latest}
+    command: ["python", "-I", "/app/runner.py"]
     restart: unless-stopped
-    profiles: ["explorer-sandbox"]
-    # CAP_NET_ADMIN installs the per-uid egress firewall; the runner refuses to
-    # start without it.
-    cap_add: [NET_ADMIN]
+    depends_on:
+      - probe-egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # Root only to drop each script to uid 65534; no other capabilities.
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, KILL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
     environment:
-      - PROWL_SANDBOX_TOKEN=${PROWL_SANDBOX_TOKEN:-}
-      - SANDBOX_EGRESS_PROXY=prowl-sandbox-egress:8080
-      - REDIS_URL=redis://redis:6379/0
-    volumes:
-      - prowl_sandbox_ca:/etc/prowl-sandbox:ro
-    networks: [asm_network]
-    depends_on: [prowl-sandbox-egress]
+      - PROBE_RUNNER_TOKEN=${PROBE_RUNNER_TOKEN:-}
+    networks:
+      - probe_net
+    profiles:
+      - probe-sandbox
 
   # Scanner Worker for async scan tasks
   scanner:
@@ -378,7 +407,7 @@ services:
       # Finding validation — native replay of the original detector / steps
       # on this scanner (no Docker). Override with docker|subprocess|auto if needed.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - AEGIS_VALIDATOR_MODE=${AEGIS_VALIDATOR_MODE:-native}
+      - AEGIS_VALIDATOR_MODE=${AEGIS_VALIDATOR_MODE:-auto}
       - AEGIS_VANGUARD_IMAGE=${AEGIS_VANGUARD_IMAGE:-aegis-vanguard:latest}
       - AEGIS_VANGUARD_PATH=${AEGIS_VANGUARD_PATH:-}
       - AEGIS_MODEL=${AEGIS_MODEL:-claude-sonnet-4-6}
@@ -501,6 +530,18 @@ services:
       - AGENT_MAX_OUTPUT_TOKENS=${AGENT_MAX_OUTPUT_TOKENS:-4096}
       - AGENT_TOOL_OUTPUT_MAX_CHARS=${AGENT_TOOL_OUTPUT_MAX_CHARS:-20000}
       - AGENT_TOOL_HARD_TIMEOUT_SECONDS=${AGENT_TOOL_HARD_TIMEOUT_SECONDS:-600}
+      # Prowl hunting behavior (docs/AGENT_RELIABILITY_ROLLOUT.md). Set
+      # AGENT_STEERING_MODE=strict / AGENT_HUNT_DISCIPLINE_PROMPT=false to roll back.
+      - AGENT_STEERING_MODE=${AGENT_STEERING_MODE:-advisory}
+      - AGENT_STEERING_FREE_TURNS=${AGENT_STEERING_FREE_TURNS:-2}
+      - AGENT_HUNT_DISCIPLINE_PROMPT=${AGENT_HUNT_DISCIPLINE_PROMPT:-true}
+      - AGENT_SELF_CHALLENGE=${AGENT_SELF_CHALLENGE:-true}
+      - AGENT_RECHECK_WEAK_NEGATIVES=${AGENT_RECHECK_WEAK_NEGATIVES:-true}
+      # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
+      - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
+      - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
+      - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
+      - AGENT_SANDBOX_SHELL=${AGENT_SANDBOX_SHELL:-true}
       - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
       - AEGIS_ASSESSMENT_PROXY_URL=${AEGIS_ASSESSMENT_PROXY_URL:-}
@@ -802,11 +843,12 @@ services:
 networks:
   asm_network:
     driver: bridge
+  probe_net:
+    driver: bridge
+    internal: true
 
 volumes:
   prowl_assessment_data:
-    driver: local
-  prowl_sandbox_ca:
     driver: local
   postgres_data:
     driver: local

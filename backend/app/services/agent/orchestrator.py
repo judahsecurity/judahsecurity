@@ -975,7 +975,6 @@ class AgentOrchestrator:
                 depth.main_iterations,
             ),
             "assessment_mode": depth.name,
-            "pipeline_advisory_declines": 0,
             "task_complete": False,
             "current_phase": "informational",
             "phase_history": [PhaseHistoryEntry(phase="informational").model_dump()],
@@ -1374,7 +1373,41 @@ class AgentOrchestrator:
         except Exception:
             logger.exception("external candidate inbox drain failed")
 
-        compacted_brief = (state.get("compacted_brief") or "").strip()
+        # Operator-captured logged-in traffic (capture extension / HAR upload).
+        try:
+            from app.services.agent.operator_capture import apply_batches, drain as drain_captures
+
+            capture_batches = drain_captures(org_id, session_id) if org_id and session_id else []
+            if capture_batches and self.tool_manager is not None:
+                if state.get("engagement_brain") is not None:
+                    self.tool_manager._engagement_brain = state.get("engagement_brain")
+                capture_summary = await apply_batches(self.tool_manager, capture_batches)
+                inbox_brain_update = self.tool_manager._engagement_brain
+                state = {**state, "engagement_brain": inbox_brain_update}
+                capture_note = (
+                    f"Operator capture: {capture_summary['recorded']} logged-in exchanges recorded "
+                    f"as evidence for identities {', '.join(capture_summary['identities']) or 'none'}"
+                    f"; {capture_summary['out_of_scope']} out-of-scope exchanges dropped. "
+                    "The identities are registered (credentials hidden); use them with "
+                    "list_test_identities, compare_requests and mutate_captured_request."
+                )
+                inbox_trace.append(
+                    ExecutionStep(
+                        iteration=iteration,
+                        phase=phase,
+                        thought="Analyst-captured logged-in traffic entered the assessment",
+                        reasoning="Captured by a human login; credentials stay in the identity registry",
+                        tool_name="operator_capture_intake",
+                        tool_args={"batches": len(capture_batches)},
+                        tool_output=json.dumps({**capture_summary, "note": capture_note})[:4000],
+                        success=True,
+                    ).model_dump()
+                )
+                await self._emit_status({"type": "captures_ingested", "message": capture_note[:400]})
+        except Exception:
+            logger.exception("operator capture drain failed")
+
+        compacted_brief =(state.get("compacted_brief") or "").strip()
         compacted_trace = list(state.get("execution_trace", []) or [])
         if consume_compact(session_id) or should_auto_compact(compacted_trace):
             compacted_trace, compact_note = compact_execution_trace(compacted_trace)
@@ -1610,8 +1643,6 @@ class AgentOrchestrator:
         # Do not spend a reasoning turn asking Joshua whether to assess.
         forced = None
         forced_complete = False
-        # Deep mode offers post-recon pipeline steps instead of forcing them.
-        advisory_step = None
         # A fresh steer gets one planning turn so the model can apply it. Saved
         # operator constraints remain in the prompt, but must not disable the
         # deterministic input queue for the rest of the assessment.
@@ -1628,14 +1659,7 @@ class AgentOrchestrator:
                 })
             except Exception:
                 logger.exception("forced assessment step failed")
-            if forced:
-                from app.services.agent.assessment_depth import pipeline_step_is_advisory
-                if pipeline_step_is_advisory(
-                    str(forced.get("tool_name") or ""),
-                    int(state.get("pipeline_advisory_declines") or 0),
-                ):
-                    advisory_step, forced = forced, None
-            if not forced and not advisory_step:
+            if not forced:
                 try:
                     from app.services.agent.cve_applicability import (
                         cve_applicability_should_complete,
@@ -1645,6 +1669,33 @@ class AgentOrchestrator:
                     )
                 except Exception:
                     forced_complete = False
+
+        # Advisory steering: once the app is mapped, a pipeline step becomes a
+        # suggestion until the model has had its free turns. Proof bookkeeping,
+        # mapping, CVE and pilot steps stay forced (see model_led.always_forced).
+        pipeline_suggestion = None
+        if forced:
+            try:
+                from app.services.agent.model_led import (
+                    model_turns_since_forced,
+                    pipeline_step_due,
+                    steering_free_turns,
+                )
+                if not pipeline_step_due(
+                    {**state, "execution_trace": merged_trace}, forced,
+                ):
+                    pipeline_suggestion = forced
+                    forced = None
+                    pipeline_suggestion["_free_turns_left"] = (
+                        steering_free_turns()
+                        - model_turns_since_forced(merged_trace)
+                    )
+                    logger.info(
+                        "[%s] Advisory steering: deferring pipeline step %s",
+                        user_id, pipeline_suggestion["tool_name"],
+                    )
+            except Exception:
+                logger.exception("advisory steering check failed")
 
         if forced:
             cve_writeup = forced["tool_name"] in (
@@ -1712,15 +1763,17 @@ class AgentOrchestrator:
                 available_tools = tool_index(available_tools)
             available_tools += self._unavailable_tools_note()
             try:
-                from app.services.agent.explorer_sandbox import sandbox_unavailable_reason
-                if not sandbox_unavailable_reason(self.tool_manager):
+                from app.services.agent.assessment_depth import assessment_depth
+                from app.services.agent.custom_probe import custom_probe_mode
+                if (assessment_depth().name == "deep"
+                        and custom_probe_mode() == "isolated"
+                        and getattr(settings, "AGENT_SANDBOX_SHELL", False)):
                     available_tools += (
-                        "\n\n### Explorer sandbox (deep assessment)\n"
-                        "- **sandbox_exec**(command, timeout_sec?) / **sandbox_python**(source, timeout_sec?) / "
-                        "**sandbox_write_file**(path, content): a real shell and Python in an isolated "
-                        "container. Egress reaches only scoped hosts and every exchange is recorded "
-                        "evidence. Use it for custom scripts and multi-step tests the fixed probes "
-                        "cannot express, or dispatch the `explorer` specialist."
+                        "\n\n### Deep assessment: isolated sandbox shell\n"
+                        "- **sandbox_shell**(command, timeout_sec?): bash with curl, python, sqlmap, "
+                        "ffuf and nmap in an isolated runner. Egress reaches only scoped hosts and "
+                        "every exchange is recorded evidence. Use it for custom scripts and multi-step "
+                        "tests the fixed probes cannot express, or dispatch the `explorer` specialist."
                     )
             except Exception:
                 logger.debug("sandbox tool note skipped", exc_info=True)
@@ -1764,6 +1817,7 @@ class AgentOrchestrator:
                     available_tools += "\n\n" + RECON_REASONING_GUIDANCE
             except Exception:
                 logger.debug("recon guidance skipped", exc_info=True)
+
 
             # Append prior session intelligence to knowledge context
             combined_knowledge = knowledge_context
@@ -1853,12 +1907,6 @@ class AgentOrchestrator:
                         tool_recommendations = loop_txt + "\n\n" + tool_recommendations
                 except Exception:
                     logger.debug("tester loop prompt injection skipped", exc_info=True)
-            if advisory_step:
-                from app.services.agent.assessment_depth import format_pipeline_advisory
-                tool_recommendations = format_pipeline_advisory(
-                    advisory_step, int(state.get("pipeline_advisory_declines") or 0),
-                ) + "\n\n" + tool_recommendations
-
             from app.services.agent.capability_map import format_capability_map_for_prompt
             from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
             capability_map_formatted = format_capability_map_for_prompt(
@@ -1867,6 +1915,14 @@ class AgentOrchestrator:
             engagement_brain_formatted = format_engagement_brain_for_prompt(
                 state.get("engagement_brain")
             )
+
+            if pipeline_suggestion:
+                # Per-turn text: keep it out of the cached tools block.
+                from app.services.agent.model_led import format_pipeline_suggestion
+                tool_recommendations = format_pipeline_suggestion(
+                    pipeline_suggestion,
+                    int(pipeline_suggestion.get("_free_turns_left") or 0),
+                ) + "\n\n" + (tool_recommendations or "")
 
             prompt_static, prompt_tools, prompt_dynamic = render_system_prompt_parts(
                 mode=state.get("mode") or "assist",
@@ -2023,18 +2079,8 @@ class AgentOrchestrator:
         # Update todo list
         todo_list = [item.model_dump() for item in decision.updated_todo_list] if decision.updated_todo_list else state.get("todo_list", [])
         
-        # A declined suggestion counts toward the forced fallback; following
-        # it, or a forced pipeline step, resets the count.
-        advisory_declines = int(state.get("pipeline_advisory_declines") or 0)
-        if advisory_step:
-            followed = (decision.action == "use_tool"
-                        and decision.tool_name == advisory_step.get("tool_name"))
-            advisory_declines = 0 if followed else advisory_declines + 1
-        elif forced:
-            advisory_declines = 0
         updates = {
             "current_iteration": iteration,
-            "pipeline_advisory_declines": advisory_declines,
             "todo_list": todo_list,
             "_current_step": step.model_dump(),
             "_decision": decision.model_dump(),
@@ -3919,21 +3965,20 @@ class AgentOrchestrator:
             # Tell the operator when a run is deep, and whether the explorer
             # sandbox is actually wired up, so the mode is never silently off.
             if mode in ("agent", "pilot") and current_assessment_depth.get().name == "deep":
-                from app.services.agent.explorer_sandbox import sandbox_configured
+                from app.services.agent.custom_probe import custom_probe_mode
 
-                # Scope is registered later in the run, so only report whether
-                # the sandbox is wired up at all here; per-call availability is
-                # enforced when a sandbox tool actually runs.
-                has_sandbox = sandbox_configured()
+                # The sandbox shell is main's isolated probe runner, gated by
+                # AGENT_CUSTOM_PROBE_MODE=isolated + AGENT_SANDBOX_SHELL.
+                has_sandbox = (custom_probe_mode() == "isolated"
+                               and bool(getattr(settings, "AGENT_SANDBOX_SHELL", False)))
                 await self._emit_status({
                     "type": "assessment_mode",
                     "mode": "deep",
-                    "sandbox_configured": has_sandbox,
+                    "sandbox_shell_available": has_sandbox,
                     "note": (
-                        "Deep assessment: the model chooses steps after recon with larger "
-                        "budgets. Scope and publication gates are unchanged."
-                        + ("" if has_sandbox else " Explorer sandbox is not configured; "
-                           "deep mode runs without a shell.")
+                        "Deep assessment: larger budgets and the model chooses steps after recon "
+                        "(advisory steering). Scope and publication gates are unchanged."
+                        + ("" if has_sandbox else " Sandbox shell is off; deep mode runs without it.")
                     ),
                 })
 

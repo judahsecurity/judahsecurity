@@ -1143,23 +1143,24 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
     # real shell for bugs the fixed-payload probes cannot reach.
     SpecialistProfile(
         name="explorer",
-        role="Open-ended application tester with a scoped shell and Python sandbox",
+        role="Open-ended application tester with the isolated probe sandbox shell",
         allowed_tools=[
-            "sandbox_exec", "sandbox_python", "sandbox_write_file",
+            "sandbox_shell",
             "read_evidence", "search_evidence", "list_test_identities",
             "submit_finding_candidate", "record_surface_coverage", "update_hypothesis",
         ],
         max_iterations=12,
         max_tools_per_iteration=3,
         system_prompt_suffix=(
-            "You have a bash shell and Python in an isolated sandbox. Its traffic can reach "
-            "only this assessment's scoped hosts, and every exchange is recorded as evidence. "
-            "Work one hypothesis at a time: script the requests, vary the technique when one "
-            "fails (encoding, content type, parameter location, method, identity, ordering), "
-            "and chain what you learn. Prefer reproducible scripts over one-off commands. "
-            "Submit a candidate only with cited http_exchanges evidence_ids and a clear "
-            "reproduction; verification decides what is published. Record coverage for what "
-            "you ruled out, with evidence."
+            "You have sandbox_shell: bash with curl, python (requests/httpx/pyjwt), sqlmap, "
+            "ffuf and nmap in an isolated runner. Its traffic reaches only this assessment's "
+            "scoped hosts and every exchange is recorded as evidence. Work one hypothesis at "
+            "a time: script the requests, vary the technique when one fails (encoding, content "
+            "type, parameter location, method, identity, ordering), and chain what you learn. "
+            "Prefer reproducible scripts over one-off commands. Submit a candidate only with "
+            "cited exchange evidence_ids and a clear reproduction; verification decides what is "
+            "published. Record coverage for what you ruled out, with evidence. If sandbox_shell "
+            "is disabled, fall back to the scoped probe and replay tools."
         ),
     ),
 ]
@@ -1362,6 +1363,21 @@ def validated_leads(report: "SpecialistReport", scope_hosts: Iterable[str]) -> l
 # ---------------------------------------------------------------------------
 
 
+_STRICT_FINISH_RULE = "If unsure, finish with done=true."
+_HUNT_FINISH_RULE = (
+    "Before finishing with verdict=killed, try the bypasses that fit what you "
+    "observed; one failed technique is inconclusive, not killed. Finish with "
+    "done=true once the lead is proven, killed with evidence, or you are within "
+    "two iterations of the limit."
+)
+
+
+def _specialist_finish_rule() -> str:
+    from app.services.agent.prompts import hunt_discipline_enabled
+
+    return _HUNT_FINISH_RULE if hunt_discipline_enabled() else _STRICT_FINISH_RULE
+
+
 _SPECIALIST_SYSTEM_PROMPT = """\
 You are {epithet}, a specialist sub-agent in Judah Security's Aegis fireteam.
 Other specialists run in parallel. Stay strictly in your lane.
@@ -1423,7 +1439,7 @@ INSTRUCTIONS:
 6. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
-7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
+7. Do not exceed {max_iter} iterations. {finish_rule}
 8. Work only on the single leased hypothesis or exact parameter coverage cell in the directive. Return one hypothesis_results entry when a hypothesis ID is leased; sibling tests stay open. Pass hypothesis_id and coverage_cell_id to replay_http_request/compare_requests when available. A scoped_input_probe_assigned receipt belongs to its exact coverage cell and lease; a negative receipt for one technique is inconclusive for the whole input. Only independent verification marks proven.
 9. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
 9. save_note(category='hunt') with URL/param/hypothesis/next mutation — not raw httpx.
@@ -1699,6 +1715,13 @@ async def _run_specialist(
     suffix_parts.append(PROOF_GUIDANCE)
     from app.services.agent.prompts import APPLICATION_ASSESSMENT_GUIDANCE
     suffix_parts.append(APPLICATION_ASSESSMENT_GUIDANCE)
+    from app.services.agent.prompts import HUNT_DISCIPLINE_GUIDANCE, hunt_discipline_enabled
+    if hunt_discipline_enabled():
+        suffix_parts.append(HUNT_DISCIPLINE_GUIDANCE)
+    from app.services.agent.prompts import self_challenge_guidance
+
+    if self_challenge_guidance():
+        suffix_parts.append(self_challenge_guidance())
     if not getattr(tools_manager, "_credential_testing_allowed", False):
         suffix_parts.append(
             "This run has no operator authorization for credential guessing, default "
@@ -1769,6 +1792,18 @@ async def _run_specialist(
         allowed_tools.extend(t for t in ("check_test_identity", "test_authorization_boundary", "run_assessment_workflow") if t not in allowed_tools)
     if "search_memory" not in allowed_tools:
         allowed_tools.append("search_memory")
+    from app.services.agent.custom_probe import custom_probe_mode
+
+    if custom_probe_mode() == "off":
+        # Model-written Python only runs in the isolated probe runner; keep
+        # specialists from spending turns on a disabled tool.
+        allowed_tools = [name for name in allowed_tools
+                         if name not in ("run_custom_probe", "run_poc_python")]
+    from app.core.config import settings as _settings
+
+    if (custom_probe_mode() == "isolated" and getattr(_settings, "AGENT_SANDBOX_SHELL", False)
+            and "run_custom_probe" in allowed_tools and "sandbox_shell" not in allowed_tools):
+        allowed_tools.append("sandbox_shell")
     from app.services.agent.pilot_policy import current_pilot
 
     pilot = current_pilot()
@@ -1830,6 +1865,7 @@ async def _run_specialist(
         ),
         memory=memory_block,
         max_iter=max_iter,
+        finish_rule=_specialist_finish_rule(),
         suffix=suffix,
     )
 

@@ -461,6 +461,16 @@ async def _revalidate_nuclei(finding: dict) -> Optional[dict[str, Any]]:
     }
 
 
+# Agent and analyst findings are application-behavior claims (IDOR, injection,
+# logic flaws). Scanner exposure findings stay reachability-checkable.
+_APPLICATION_DETECTORS = frozenset({"agent", "llm_red_team", "manual"})
+
+
+def _application_level(detected_by: str, source_kind: str) -> bool:
+    """Findings whose truth depends on application behavior, not reachability."""
+    return detected_by in _APPLICATION_DETECTORS
+
+
 async def revalidate_finding(finding: dict) -> dict[str, Any]:
     """
     Revalidate one finding using scanner-native tools and stored reproduction data.
@@ -494,6 +504,22 @@ async def revalidate_finding(finding: dict) -> dict[str, Any]:
 
     probes = await asyncio.to_thread(_probe_endpoints, endpoints)
     verdict = _verdict_from_probes(finding, probes, method=method)
+    if verdict.get("verdict") == "confirmed" and _application_level(detected_by, source_kind):
+        # A reachable URL says nothing about whether an IDOR, injection or
+        # logic flaw still works. Leave it open for a real retest (auto mode
+        # escalates needs_more_evidence to the Vanguard validator).
+        verdict.update(
+            verdict="needs_more_evidence",
+            confidence="low",
+            still_open=None,
+            reasoning=(
+                "The reproduction endpoints still respond, but reachability does not "
+                "re-prove an application-level vulnerability. "
+                + verdict.get("reasoning", "")
+                + " Re-test the exploit itself (AEGIS_VALIDATOR_MODE=auto escalates "
+                "to the Vanguard validator)."
+            ),
+        )
     verdict["detected_by"] = detected_by
     verdict["source_kind"] = source_kind
     verdict["endpoint_count"] = len(endpoints)

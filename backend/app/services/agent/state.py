@@ -328,8 +328,6 @@ class AgentState(TypedDict, total=False):
     needs_dir_brute: Optional[bool]
     # "standard" | "deep" (assessment_depth.py); restored on resume.
     assessment_mode: Optional[str]
-    # Consecutive deep-mode pipeline suggestions the model declined.
-    pipeline_advisory_declines: Optional[int]
     
     # Internal state
     _current_step: Optional[Dict[str, Any]]

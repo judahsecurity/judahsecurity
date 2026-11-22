@@ -205,6 +205,37 @@ class Settings(BaseSettings):
     # tool can never block the turn, and guarantees a tool_complete event is
     # emitted (so the UI never dangles on a tool_start).
     AGENT_TOOL_HARD_TIMEOUT_SECONDS: int = 600
+    # How the deterministic assessment pipeline (tester_loop.forced_next_step)
+    # drives Joshua once the app is mapped. "strict" forces every pipeline step.
+    # "advisory" shows the pipeline step as a suggestion and gives the model
+    # AGENT_STEERING_FREE_TURNS of its own decisions before the step is forced.
+    # Mapping, proof bookkeeping, CVE applicability and pilot steps are always
+    # forced, and the completion gate is unchanged in both modes.
+    AGENT_STEERING_MODE: str = "strict"
+    AGENT_STEERING_FREE_TURNS: int = 2
+    # Add hunting-discipline rules (exhaust bypasses, depth over breadth,
+    # re-examine negatives, hand off side clues) to Joshua and specialists.
+    AGENT_HUNT_DISCIPLINE_PROMPT: bool = False
+    # Hunters must attach an adversarial self-review (reachability,
+    # preconditions, downstream controls, scope, benign explanation, strongest
+    # objection, disproof test) to submit_finding_candidate. The verifier gets
+    # it as a checklist; inconclusive candidates with hunter evidence and a
+    # challenge are flagged needs_analyst_review instead of disappearing.
+    AGENT_SELF_CHALLENGE: bool = False
+    # A specialist "killed" verdict backed by one evidence receipt or one
+    # testing tool goes back once for a different technique before closing.
+    AGENT_RECHECK_WEAK_NEGATIVES: bool = False
+    # Where run_custom_probe / run_poc_python execute model-written Python.
+    # "off": tool disabled. "isolated": sent to the probe-runner container
+    # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).
+    # "inprocess": legacy subprocess inside this container; its AST checks are
+    # bypassable (shell and file access), so use it only on isolated lab hosts.
+    AGENT_CUSTOM_PROBE_MODE: str = "off"
+    AGENT_PROBE_RUNNER_URL: str = "http://probe-egress:9000"
+    AGENT_PROBE_RUNNER_TOKEN: str = ""
+    # Give specialists sandbox_shell (bash + curl/sqlmap/ffuf/python) inside
+    # probe-runner. Needs AGENT_CUSTOM_PROBE_MODE=isolated; never runs in-process.
+    AGENT_SANDBOX_SHELL: bool = False
     # Long scanners (tool_executions.BACKGROUND_TOOLS) are waited on this many
     # seconds once running; if still running they continue in the background
     # under the hard cap and the agent gets an execution_id. 0 disables.
@@ -229,13 +260,6 @@ class Settings(BaseSettings):
     AGENT_TOOL_GUARD_ENABLED: bool = True
     AGENT_TOOL_GUARD_DEFAULT_RULES: bool = True
     AGENT_TOOL_GUARD_RULES: str = ""
-
-    # Explorer sandbox (deep mode): runner API and its bearer token. Empty
-    # disables the sandbox tools. See backend/sandbox/ and explorer_sandbox.py.
-    PROWL_SANDBOX_URL: str = ""
-    PROWL_SANDBOX_TOKEN: str = ""
-    PROWL_SANDBOX_MAX_REQUESTS: int = 2000
-    PROWL_SANDBOX_EXEC_TIMEOUT_SECONDS: int = 300
 
     # Private scoped-assessment executor. Aegis remains the agent/model runtime.
     PROWL_ASSESSMENT_URL: str = ""

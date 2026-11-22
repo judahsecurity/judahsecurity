@@ -403,6 +403,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
 - **mcp_call**: Invoke a tool on an attached MCP server. Args: **server**, **tool**, **arguments** (object).
 - **run_custom_probe** / **run_poc_python**: Sandboxed Python HTTP PoC (json/re/httpx only). In-scope hosts plus Interactsh/OAST. Never metadata/localhost. Args: **source** (Python that prints results), allowed_hosts (optional), timeout_sec (default 20). Not a shell.
+- **sandbox_shell**: Run a shell command in the isolated probe runner when enabled (bash, curl, jq, sqlmap, ffuf, python with requests/httpx/pyjwt). Args: command, allowed_hosts (optional), timeout_sec (default 60, max 120). Only in-scope hosts and OAST are reachable, over HTTP(S); every exchange is recorded as evidence. Pass ffuf -x "$PROBE_PROXY" and sqlmap --proxy="$PROBE_PROXY". For non-HTTP TCP prefix with proxychains4 (e.g. proxychains4 nmap -sT -Pn -sV -p 22,6379 host; connect scans only, logged under tcp). Destructive flags (--os-shell, --dump-all, --risk=3, brute/dos/exploit NSE scripts, brute-force tools) are refused.
 - **list_captured_requests**: Index XHR/API samples from the crawl map. Use its sample_ref with mutate_captured_request so later map changes cannot switch the request being tested.
 - **plan_intruder_mutations**: Build a dry-run, bounded queue of one-field authorization, boundary, injection-canary, and URL-fetch mutations from captured requests. Read-only methods only by default. Review this before active execution.
 - **run_intruder_batch**: Execute up to 12 planned differential mutations at a bounded rate. Always confirmation-gated; state-changing methods remain excluded unless allow_state_change=true is explicitly approved. A difference is a lead, not a confirmed finding.
@@ -821,9 +822,7 @@ TOOL_PHASE_MAP = {
     "mcp_call": ["informational", "exploitation", "post_exploitation"],
     "mcp_disconnect": ["informational", "exploitation", "post_exploitation"],
     "run_custom_probe": ["informational", "exploitation", "post_exploitation"],
-    "sandbox_exec": ["informational", "exploitation"],
-    "sandbox_python": ["informational", "exploitation"],
-    "sandbox_write_file": ["informational", "exploitation"],
+    "sandbox_shell": ["informational", "exploitation", "post_exploitation"],
     "run_poc_python": ["informational", "exploitation", "post_exploitation"],
     "list_captured_requests": ["informational", "exploitation", "post_exploitation"],
     "plan_intruder_mutations": ["informational", "exploitation", "post_exploitation"],
@@ -1177,6 +1176,63 @@ Output exactly one JSON object and no other text:
 """
 
 
+HUNT_DISCIPLINE_GUIDANCE = """Hunting discipline (applies to Joshua and every specialist):
+- An initial setback is not a verdict. A filtered payload, a 404, a WAF block,
+  or an injection with no echo means the first technique failed, not that the
+  input is clean. Before you record a negative, work through the bypasses that
+  fit the observation: encodings (URL, double-URL, unicode, base64/JSON
+  wrapping), alternate content types and HTTP methods, parameter pollution,
+  case and whitespace variants, blind/out-of-band or timing variants, and a
+  second injection context.
+- Depth over breadth. Once one input shows a real anomaly (an error leaking a
+  query, a path, a stack trace, an object ID that changes the response),
+  drive that route toward demonstrated impact before spreading to shallow
+  checks elsewhere. Coverage is the floor, not the goal.
+- Keep two or three fundamentally different routes alive (for example an
+  authorization route and an injection route) until one produces evidence.
+  Do not pile near-identical attempts onto one entry point.
+- A recorded negative is an observation, not a proof. If it rests on one
+  attempt, one technique, or inference, re-examine it once with a different
+  technique before trusting it. If it stays negative with real evidence,
+  respect it and move on.
+- Hand off side clues. A path in an error, a hidden parameter, a linked admin
+  route, or a token format you noticed outside your lane goes into leads (or
+  save_note) with the evidence_id that revealed it. Reporting one clue too
+  many is better than swallowing it.
+- A precise negative ("class X tested on input Y with techniques A, B, C;
+  clean") is real output. Never weaken the proof standard to produce a finding.
+"""
+
+
+SELF_CHALLENGE_GUIDANCE = """Self-challenge before submit_finding_candidate:
+A candidate is a hypothesis until you have tried to break it. Before submitting,
+argue the opposite case from your own evidence and pass it as challenge={...}:
+reachability (can a real attacker reach this, from where), preconditions (what
+accounts, position or state it needs), downstream_controls (what could block
+the impact after the trigger), scope (why the asset is authorized), and
+benign_explanation (the most plausible harmless reading and why it fails), then
+strongest_objection (the best case that this is not a vulnerability) and
+disproof_test (one concrete request that would refute it). Run the disproof
+test yourself first when you can. If the argument kills the claim, do not
+submit: record the negative with its evidence. Eliminations need evidence at
+the same bar as confirmations; "probably validated server-side" eliminates
+nothing. The independent verifier receives your challenge as a checklist and
+decides; you never confirm your own finding.
+"""
+
+
+def self_challenge_guidance() -> str:
+    from app.services.agent.independent_verify import self_challenge_required
+
+    return SELF_CHALLENGE_GUIDANCE if self_challenge_required() else ""
+
+
+def hunt_discipline_enabled() -> bool:
+    from app.core.config import settings
+
+    return bool(getattr(settings, "AGENT_HUNT_DISCIPLINE_PROMPT", False))
+
+
 _TOOL_LINE = re.compile(r"^- ((?:\*\*[a-z0-9_]+\*\*(?:\s*\([^)]*\))?(?:\s*/\s*|,\s*)?)+):\s*(.*)$")
 _TOOL_NAME = re.compile(r"\*\*([a-z0-9_]+)\*\*")
 TOOL_INDEX_SUMMARY_CHARS = 140
@@ -1263,6 +1319,12 @@ def render_system_prompt_parts(*, mode: str, **context: object) -> tuple:
         return "", "", render_system_prompt(mode=mode, **context)
     static = (_REACT_STATIC.format(**context) + "\n\n" + PROOF_GUIDANCE
               + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE)
+    # Flag-driven guidance is fixed for the process, so it stays in the cached prefix.
+    if hunt_discipline_enabled():
+        static += "\n\n" + HUNT_DISCIPLINE_GUIDANCE
+    challenge = self_challenge_guidance()
+    if challenge:
+        static += "\n\n" + challenge
     tools = "## Available Tools\n" + str(context.get("available_tools") or "")
     dynamic = _REACT_DYNAMIC.format(**context)
     return static, tools, dynamic
@@ -1275,4 +1337,9 @@ def render_system_prompt(*, mode: str, **context: object) -> str:
     rendered = template.format(**context)
     if mode != "pilot":
         rendered += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
+        if hunt_discipline_enabled():
+            rendered += "\n\n" + HUNT_DISCIPLINE_GUIDANCE
+        challenge = self_challenge_guidance()
+        if challenge:
+            rendered += "\n\n" + challenge
     return rendered

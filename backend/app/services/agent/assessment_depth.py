@@ -3,11 +3,15 @@
 ``standard`` is the deterministic pipeline Prowl has always run: the tester
 loop picks most steps and specialists get short, fixed turn budgets.
 
-``deep`` keeps the same recon, scope rules and publication gates, but after
-the surface is mapped it lets the model choose what to test next, and it
-gives specialists, hunters and the main loop much larger budgets. It exists
-because a model with a dozen tool calls can confirm a suspected bug but rarely
-finds a subtle one.
+``deep`` keeps the same recon, scope rules and publication gates, but gives
+specialists, hunters and the main loop much larger budgets and seeds each
+specialist with shared context. It also turns on advisory steering for the
+run (see model_led.steering_mode), so after the surface is mapped the model
+chooses what to test next. It exists because a model with a dozen tool calls
+can confirm a suspected bug but rarely finds a subtle one.
+
+This module owns only the budget/seeding dimension; the advisory-steering
+mechanism itself lives in model_led.py.
 
 What deep mode never changes:
 - scope enforcement, Lictor/Censor checks, method and credential gates;
@@ -39,11 +43,6 @@ class AssessmentDepth:
     hunter_budget_factor: int
     # Per-tool ceiling for fireteam_dispatch, which must fit a whole wave.
     fireteam_timeout_seconds: int
-    # After recon, offer pipeline steps to the model instead of forcing them.
-    advisory_pipeline: bool
-    # Consecutive declined suggestions before the pipeline step is forced, so
-    # a distracted model cannot starve the coverage queue forever.
-    advisory_decline_limit: int
     # Seed each specialist with shared engagement context instead of "Begin."
     seed_specialist_context: bool
 
@@ -56,8 +55,6 @@ STANDARD = AssessmentDepth(
     main_iterations=0,
     hunter_budget_factor=1,
     fireteam_timeout_seconds=0,
-    advisory_pipeline=False,
-    advisory_decline_limit=0,
     seed_specialist_context=False,
 )
 
@@ -69,8 +66,6 @@ DEEP = AssessmentDepth(
     main_iterations=300,
     hunter_budget_factor=4,
     fireteam_timeout_seconds=1800,
-    advisory_pipeline=True,
-    advisory_decline_limit=3,
     seed_specialist_context=True,
 )
 
@@ -137,50 +132,3 @@ def fireteam_dispatch_cap(default_cap: float) -> float:
     """Per-call ceiling for fireteam_dispatch; deep waves get longer."""
     return max(float(default_cap), float(assessment_depth().fireteam_timeout_seconds or 0))
 
-
-# Pipeline steps that stay forced in every mode: mapping the surface first,
-# and moving proven work through candidate, verification and publication.
-# Without these the model can skip recon or leave a proven bug unpublished.
-ALWAYS_FORCED_STEPS = frozenset({
-    "execute_browser",
-    "execute_deep_crawl",
-    "execute_interceptor",
-    "fingerprint_api",
-    "fetch_lazy_chunks",
-    "extract_js_endpoints",
-    "spawn_recon_workers",
-    "wait_recon_workers",
-    "sync_engagement_brain",
-    "probe_pilot_ports",
-    "submit_finding_candidate",
-    "independent_verify",
-    "create_finding",
-    "validate_finding",
-    "check_cve_applicability",
-})
-
-
-def pipeline_step_is_advisory(tool_name: str, declined: int) -> bool:
-    """Whether a forced pipeline step should be offered to the model instead."""
-    depth = assessment_depth()
-    if not depth.advisory_pipeline or tool_name in ALWAYS_FORCED_STEPS:
-        return False
-    return int(declined or 0) < depth.advisory_decline_limit
-
-
-def format_pipeline_advisory(step: dict, declined: int) -> str:
-    depth = assessment_depth()
-    remaining = max(0, depth.advisory_decline_limit - int(declined or 0))
-    args = step.get("tool_args") or {}
-    arg_hint = ", ".join(f"{k}={v!r}" for k, v in list(args.items())[:4] if not isinstance(v, (dict, list)))
-    return (
-        "## Deep assessment: you choose the next step\n"
-        f"The coverage pipeline suggests `{step.get('tool_name')}`"
-        + (f" ({arg_hint})" if arg_hint else "")
-        + f": {str(step.get('thought') or '').strip()[:300]}\n"
-        "Follow it, or pursue a stronger lead you can name from the evidence: chain a "
-        "finding, retry a near-miss with a different technique, test business logic, or "
-        "probe a surface the grid does not cover. Unverified ideas still go through "
-        "submit_finding_candidate; nothing is published without verification.\n"
-        f"If you decline {remaining} more time(s) in a row, the pipeline step runs automatically."
-    )

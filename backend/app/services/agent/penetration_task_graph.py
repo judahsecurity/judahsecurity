@@ -65,6 +65,8 @@ class TaskNode:
     lease_started_at: float = 0.0
     lease_deadline: float = 0.0
     recovery_required: bool = False
+    # Set once a weak negative has been sent back for its one re-check.
+    rechecked: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -514,6 +516,53 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
     )
 
 
+# Tools that read or write notes rather than test the target.
+_BOOKKEEPING_TOOLS = frozenset({
+    "save_note", "search_memory", "store_memory", "read_evidence", "search_evidence",
+    "update_hypothesis", "get_engagement_brain", "list_test_identities",
+    "list_captured_requests", "lookup_methodology_procedure", "validate_finding",
+    "submit_finding_candidate", "record_surface_coverage", "search_peer_traces",
+})
+
+
+def recheck_weak_negatives_enabled() -> bool:
+    from app.core.config import settings
+
+    return bool(getattr(settings, "AGENT_RECHECK_WEAK_NEGATIVES", False))
+
+
+def weak_negative_reason(result: Dict[str, Any], summary: "ExecutorSummary") -> str:
+    """Why a killed verdict is too thin to close the hypothesis, or ""."""
+    evidence_ids = {str(i) for i in result.get("evidence_ids") or [] if i}
+    techniques = {t for t in (summary.tools_run or []) if t and t not in _BOOKKEEPING_TOOLS}
+    if len(evidence_ids) < 2:
+        return f"only {len(evidence_ids)} evidence receipt"
+    if len(techniques) < 2:
+        return f"only one testing tool ({', '.join(sorted(techniques)) or 'none'})"
+    return ""
+
+
+def recheck_instruction(reason: str, summary: "ExecutorSummary") -> str:
+    used = ", ".join(t for t in dict.fromkeys(summary.tools_run or [])
+                     if t not in _BOOKKEEPING_TOOLS)[:200] or "unknown"
+    return (
+        f"RE-CHECK (single attempt): a previous run killed this with {reason}; it used "
+        f"{used}. Re-test with a different technique or tool than those (another "
+        "encoding, content type, HTTP method, blind/timing or out-of-band variant, "
+        "or a second injection context) and cite at least two evidence IDs. Kill it "
+        "only if the different technique is also clean."
+    )
+
+
+def _append_recheck_to_hypothesis(brain: Any, hypothesis_id: str, note: str) -> None:
+    for hypothesis in getattr(brain, "hypotheses", None) or []:
+        if getattr(hypothesis, "id", "") == hypothesis_id:
+            current = str(getattr(hypothesis, "test", "") or "")
+            if "RE-CHECK (single attempt)" not in current:
+                hypothesis.test = f"{current}\n{note}".strip()[:2000]
+            return
+
+
 def apply_executor_summary(
     graph: PenetrationTaskGraph,
     brain: Any,
@@ -556,7 +605,20 @@ def apply_executor_summary(
         verdict = result.get("verdict")
         evidence = str(result.get("evidence") or "")[:2000]
         node.evidence_ids = [str(item) for item in result.get("evidence_ids", [])][:50]
-        if verdict == "killed" and result.get("evidence_ids") and evidence:
+        weak_reason = (
+            weak_negative_reason(result, summary)
+            if verdict == "killed" and recheck_weak_negatives_enabled() else ""
+        )
+        if (weak_reason and not node.rechecked and node.attempts < node.max_attempts
+                and result.get("evidence_ids") and evidence):
+            # One technique or one receipt is an observation, not a proof of
+            # absence. Send it back once for a different technique.
+            node.status, hyp_status = NODE_RETRY, "in_progress"
+            node.rechecked = True
+            node.last_failure = f"Weak negative sent for re-check: {weak_reason}"[:500]
+            node.rewritten_test = recheck_instruction(weak_reason, summary)
+            _append_recheck_to_hypothesis(brain, node.id, node.rewritten_test)
+        elif verdict == "killed" and result.get("evidence_ids") and evidence:
             node.status, hyp_status = NODE_KILLED, "killed"
         elif verdict == "blocked":
             node.status, hyp_status = NODE_BLOCKED, "open"

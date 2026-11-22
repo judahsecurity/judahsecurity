@@ -538,8 +538,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _fallback_target = SessionValue(lambda: "")
     _credential_testing_allowed = SessionValue(lambda: False)
     _oob_callbacks_allowed = SessionValue(lambda: False)
-    # Explorer sandbox workspace and egress token for this assessment session.
-    _explorer_sandbox = SessionValue(dict)
 
     def __init__(self):
         self.tools = self._register_tools()
@@ -786,9 +784,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "mcp_disconnect": self.mcp_disconnect,
             "run_custom_probe": self.run_custom_probe,
             "run_poc_python": self.run_custom_probe,
-            "sandbox_exec": self.sandbox_exec,
-            "sandbox_python": self.sandbox_python,
-            "sandbox_write_file": self.sandbox_write_file,
+            "sandbox_shell": self.sandbox_shell,
             "list_captured_requests": self.list_captured_requests,
             "plan_intruder_mutations": self.plan_intruder_mutations,
             "run_intruder_batch": self.run_intruder_batch,
@@ -7153,6 +7149,35 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             audit("mcp.disconnect", organization_id=org_id, actor=f"user:{user_id}", target=name)
         return f"Disconnected '{name}'." if ok else f"No MCP session named '{name}'."
 
+    def _record_probe_exchanges(self, exchanges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Store probe-egress recordings as redacted http_exchange evidence.
+
+        The model gets evidence IDs and a one-line index; bodies stay in the
+        evidence store, readable with read_evidence/search_evidence.
+        """
+        from app.services.agent.evidence_store import evidence_store
+
+        store = evidence_store(self)
+        index: List[Dict[str, Any]] = []
+        for exchange in exchanges:
+            request = exchange.get("request") if isinstance(exchange.get("request"), dict) else {}
+            response = exchange.get("response") if isinstance(exchange.get("response"), dict) else {}
+            url = str(request.get("url") or "")
+            body = str(response.get("body") or "")
+            payload = {
+                "request": {**request, "body_len": request.get("length", 0)},
+                "response": {**response, "body_preview": body[:4000]},
+                "source": "custom_probe",
+            }
+            status = response.get("status") or 0
+            evidence_id = store.record(
+                "http_exchange", payload, target=url, test_type="custom_probe",
+                success=isinstance(status, int) and 0 < status < 400,
+            )
+            index.append({"evidence_id": evidence_id, "method": request.get("method"),
+                          "url": url, "status": status, "length": response.get("length")})
+        return index
+
     async def run_custom_probe(
         self,
         source: str,
@@ -7164,12 +7189,85 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         Allowed imports: json, re, httpx, hashlib, hmac, base64, time, math,
         datetime, collections, urllib.parse. Hosts must be in engagement scope.
-        Print results to stdout. Not a shell — no os/subprocess/sockets.
+        Print results to stdout. Runs only when AGENT_CUSTOM_PROBE_MODE allows it;
+        "isolated" executes in the probe-runner container behind a scope proxy.
         """
         if self._scoped_policy_applied:
             return json.dumps({"error": "Custom Python HTTP probes cannot enforce operator method and path approvals; use structured replay tools."})
-        from app.services.agent.custom_probe import run_custom_probe_async
+        from app.services.agent.custom_probe import (
+            custom_probe_mode,
+            run_custom_probe_async,
+            run_custom_probe_isolated,
+        )
 
+        mode = custom_probe_mode()
+        if mode == "off":
+            return json.dumps({
+                "error": "custom_probe_disabled",
+                "detail": "Custom Python probes are disabled on this deployment "
+                          "(AGENT_CUSTOM_PROBE_MODE=off). Use mutate_captured_request, "
+                          "replay_http_request, compare_requests, or mutate_list.",
+            })
+        hosts = self._probe_scope_hosts(allowed_hosts)
+        runner = run_custom_probe_isolated if mode == "isolated" else run_custom_probe_async
+        result = await runner(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
+        result["execution"] = mode
+        if result.get("exchanges"):
+            result["exchanges"] = self._record_probe_exchanges(result["exchanges"])
+        result["oob_allowed"] = True
+        result["hint"] = (
+            "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
+            "localhost — Lictor blocks those. Print JSON proof to stdout."
+        )
+        if result.get("exchanges"):
+            result["hint"] += (
+                " Every request this probe sent is recorded under exchanges[].evidence_id "
+                "(full redacted request/response). Read one with read_evidence, search "
+                "bodies with search_evidence, and cite the evidence_id in "
+                "submit_finding_candidate instead of pasting stdout."
+            )
+        return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    async def sandbox_shell(
+        self,
+        command: str,
+        allowed_hosts: Optional[str] = None,
+        timeout_sec: float = 60,
+        **kwargs: Any,
+    ) -> str:
+        """Run a shell command in the isolated probe runner (bash, curl, jq,
+        sqlmap, ffuf, nmap, nc, python with requests/httpx/pyjwt). Network
+        leaves only through scope-checked proxies, to in-scope hosts and OAST.
+        HTTP(S): curl, wget and python use the recording proxy automatically
+        (every exchange becomes evidence); pass ffuf -x "$PROBE_PROXY" and
+        sqlmap --proxy="$PROBE_PROXY". Other TCP: prefix with proxychains4,
+        e.g. proxychains4 nmap -sT -Pn -sV -p 22,3306,6379 host (connect scans
+        only; SYN/UDP/OS detection are unavailable); connections are logged in
+        tcp. Nothing persists between calls.
+        """
+        from app.services.agent.custom_probe import custom_probe_mode, run_sandbox_shell
+
+        if self._scoped_policy_applied:
+            return json.dumps({"error": "Sandbox shell cannot enforce operator method and path approvals; use structured replay tools."})
+        if custom_probe_mode() != "isolated" or not getattr(settings, "AGENT_SANDBOX_SHELL", False):
+            return json.dumps({
+                "error": "sandbox_shell_disabled",
+                "detail": "Requires AGENT_CUSTOM_PROBE_MODE=isolated and AGENT_SANDBOX_SHELL=true.",
+            })
+        result = await run_sandbox_shell(
+            command, allowed_hosts=self._probe_scope_hosts(allowed_hosts), timeout_sec=timeout_sec,
+        )
+        result["execution"] = "isolated"
+        if result.get("exchanges"):
+            result["exchanges"] = self._record_probe_exchanges(result["exchanges"])
+            result["hint"] = (
+                "Every request is recorded under exchanges[].evidence_id. Read bodies "
+                "with read_evidence, search with search_evidence, cite the IDs in "
+                "submit_finding_candidate."
+            )
+        return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    def _probe_scope_hosts(self, allowed_hosts: Optional[str]) -> List[str]:
         hosts: List[str] = []
         if allowed_hosts:
             hosts.extend(
@@ -7181,50 +7279,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         cmap = getattr(self, "_capability_map", None) or {}
         if isinstance(cmap, dict) and cmap.get("target"):
             hosts.append(str(cmap.get("target")))
-
-        result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
-        result["oob_allowed"] = True
-        result["hint"] = (
-            "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
-            "localhost — Lictor blocks those. Print JSON proof to stdout."
-        )
-        return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
-
-    async def sandbox_exec(self, command: str, timeout_sec: int = 120, **kwargs: Any) -> str:
-        """Run a shell command in the explorer sandbox (deep assessments only).
-
-        A real bash shell in an isolated container with common HTTP and
-        scripting tools. All traffic goes through an egress proxy that admits
-        only this assessment's scoped hosts and records every exchange as
-        evidence. Args: command (bash), timeout_sec (default 120).
-        """
-        from app.services.agent.explorer_sandbox import run_in_sandbox
-
-        result = await run_in_sandbox(self, kind="shell", source=str(command or ""),
-                                      timeout_sec=timeout_sec)
-        return json.dumps(result, default=str)[:_tool_output_max_chars()]
-
-    async def sandbox_python(self, source: str, timeout_sec: int = 120, **kwargs: Any) -> str:
-        """Run Python 3 in the explorer sandbox with requests/httpx/bs4/pyjwt.
-
-        Same isolation and recorded, scope-limited egress as sandbox_exec.
-        Args: source (Python), timeout_sec (default 120).
-        """
-        from app.services.agent.explorer_sandbox import run_in_sandbox
-
-        result = await run_in_sandbox(self, kind="python", source=str(source or ""),
-                                      timeout_sec=timeout_sec)
-        return json.dumps(result, default=str)[:_tool_output_max_chars()]
-
-    async def sandbox_write_file(self, path: str, content: str, **kwargs: Any) -> str:
-        """Write a file (wordlist, script, payload list) into the sandbox workspace.
-
-        Args: path (relative to the workspace), content (text, under 4 MiB).
-        """
-        from app.services.agent.explorer_sandbox import write_sandbox_file
-
-        result = await write_sandbox_file(self, path=str(path or ""), content=str(content or ""))
-        return json.dumps(result, default=str)
+        return hosts
 
     async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:
         """Index captured XHR/API samples from the capability map for mutate_captured_request."""
@@ -11425,8 +11480,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         proof_run_id: str = "",
         proof_escalation_id: str = "",
         vulnerability_class: str = "",
+        challenge: Any = None,
     ) -> str:
         """Queue a medium+ finding for independent verification.
+
+        challenge: the hunter's adversarial self-review, an object with
+        reachability, preconditions, downstream_controls, scope,
+        benign_explanation, strongest_objection and disproof_test (one or two
+        sentences each). Required when AGENT_SELF_CHALLENGE is on, except for
+        execution-owned coverage-cell proofs.
 
         Set vulnerability_class to exposure, sql_injection, xss, authorization,
         ssrf, xxe, command_injection, path_traversal, csrf, known_cve, or
@@ -11441,6 +11503,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.proof_policy import inferred_vulnerability_class
         from types import SimpleNamespace
 
+        from app.services.agent.independent_verify import (
+            SELF_CHALLENGE_FIELDS, normalize_challenge, self_challenge_required,
+        )
+
+        clean_challenge, missing_challenge = normalize_challenge(challenge)
+        # Coverage-cell handoffs carry execution-owned proof receipts and come
+        # from the deterministic pipeline; every other claim argues against
+        # itself before it reaches the verifier.
+        if self_challenge_required() and missing_challenge and not (coverage_cell_id and evidence_ids):
+            return json.dumps({
+                "error": "self_challenge_required",
+                "missing": missing_challenge,
+                "detail": (
+                    "Before submitting, argue against your own claim and pass challenge="
+                    "{" + ", ".join(f'"{name}": "..."' for name in SELF_CHALLENGE_FIELDS) + "}. "
+                    "Answer each with what you actually observed. If the argument kills the "
+                    "claim, do not submit: record the negative with evidence instead. "
+                    "disproof_test is one concrete request that would refute it."
+                ),
+            })
         self._require_independent_verify = True
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         trace = {}
@@ -11546,6 +11628,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             proof_run_id=proof_run_id or "",
             proof_escalation_id=proof_escalation_id or "",
             vulnerability_class=vulnerability_class or "",
+            challenge=clean_challenge,
         )
         if coverage_cell_id and evidence_ids:
             for cell in brain.coverage_cells:

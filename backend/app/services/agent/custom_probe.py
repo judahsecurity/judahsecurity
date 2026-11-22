@@ -356,3 +356,136 @@ async def run_custom_probe_async(
         "stderr": stderr.decode("utf-8", errors="replace")[:2000],
         "allowed_hosts": hosts,
     }
+
+
+# --- execution mode / isolated runner client --------------------------------
+
+PROBE_MODES = ("off", "isolated", "inprocess")
+
+
+def custom_probe_mode() -> str:
+    """off | isolated | inprocess. Unknown values fail closed to off."""
+    from app.core.config import settings
+
+    mode = str(getattr(settings, "AGENT_CUSTOM_PROBE_MODE", "off") or "off").strip().lower()
+    return mode if mode in PROBE_MODES else "off"
+
+
+async def run_custom_probe_isolated(
+    source: str,
+    *,
+    allowed_hosts: Sequence[str],
+    timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """Run the probe in the probe-runner container via the probe-egress relay.
+
+    The relay registers the scope for this one job, the runner executes the
+    script as an unprivileged user on a network whose only exit is the relay's
+    scope-enforcing proxy, and the relay returns the result plus its egress log.
+    """
+    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
+    if isinstance(prepared, dict):
+        return prepared
+    hosts, timeout_sec, script, _env = prepared
+    return await _post_to_relay({"script": script}, hosts, timeout_sec)
+
+
+# Flags that turn a sandboxed check into a destructive or exfiltrating action
+# against the customer's systems. The network sandbox bounds where traffic
+# goes; this bounds what in-scope traffic is allowed to do.
+SHELL_DENY_PATTERNS = (
+    r"--os-(?:shell|pwn|cmd|smbrelay|bof)\b",
+    r"--(?:sql-shell|sql-query|file-write|file-dest|reg-add|reg-del|priv-esc)\b",
+    r"--dump-all\b",
+    r"--risk[ =]?3\b",
+    r"\bhydra\b|\bmedusa\b|\bpatator\b",
+    r"--script[ =][^\s]*(?:brute|dos|exploit|intrusive|fuzzer|malware)",
+)
+# Raw-socket work cannot leave the sandbox (no route; SOCKS carries TCP CONNECT
+# only), so refuse it with a usable alternative instead of a silent failure.
+SHELL_UNSUPPORTED_PATTERNS = (
+    (r"\bnmap\b[^|;&]*\s-s[SUANFXWMYZO]\b", "nmap raw scan types are unavailable; use proxychains4 nmap -sT -Pn"),
+    (r"\bnmap\b[^|;&]*\s-O\b", "nmap OS detection needs raw sockets; use -sT -sV -Pn"),
+    (r"\b(?:masscan|zmap|hping3?)\b", "raw-packet scanners are unavailable; use proxychains4 nmap -sT -Pn"),
+)
+MAX_SHELL_TIMEOUT_SEC = 120.0
+
+
+def shell_command_violations(command: str) -> List[str]:
+    import re
+
+    text = command or ""
+    if not text.strip():
+        return ["command is empty"]
+    if len(text.encode()) > 8000:
+        return ["command exceeds 8000 bytes"]
+    violations = [f"blocked flag or tool: {match.group(0)}"
+                  for pattern in SHELL_DENY_PATTERNS
+                  for match in [re.search(pattern, text, re.IGNORECASE)] if match]
+    violations += [hint for pattern, hint in SHELL_UNSUPPORTED_PATTERNS
+                   if re.search(pattern, text)]
+    return violations
+
+
+async def run_sandbox_shell(
+    command: str,
+    *,
+    allowed_hosts: Sequence[str],
+    timeout_sec: float = 60,
+) -> dict[str, Any]:
+    """Run a shell command in probe-runner; network only via probe-egress."""
+    hosts = _normalize_hosts(allowed_hosts)
+    if not hosts:
+        return {"ok": False, "error": "No in-scope hosts. Pass allowed_hosts or set a primary target first."}
+    violations = shell_command_violations(command)
+    if violations:
+        return {"ok": False, "error": "Sandbox rejected command", "violations": violations}
+    timeout_sec = max(3.0, min(float(timeout_sec or 60), MAX_SHELL_TIMEOUT_SEC))
+    return await _post_to_relay({"command": command}, hosts, timeout_sec)
+
+
+async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: float) -> dict[str, Any]:
+    import httpx
+
+    from app.core.config import settings
+
+    url = str(getattr(settings, "AGENT_PROBE_RUNNER_URL", "") or "").rstrip("/")
+    token = str(getattr(settings, "AGENT_PROBE_RUNNER_TOKEN", "") or "")
+    if not url or not token:
+        return {"ok": False, "error": "probe runner is not configured "
+                "(AGENT_PROBE_RUNNER_URL / AGENT_PROBE_RUNNER_TOKEN)"}
+    payload = {
+        **job,
+        "allowed_hosts": hosts,
+        "oob_suffixes": list(OOB_HOST_SUFFIXES),
+        "timeout_sec": timeout_sec,
+    }
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=timeout_sec + 15) as client:
+            response = await client.post(
+                f"{url}/run", json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as exc:
+        return {"ok": False, "error": f"probe runner unreachable: {type(exc).__name__}"}
+    if response.status_code != 200:
+        return {"ok": False, "error": f"probe runner returned HTTP {response.status_code}"}
+    try:
+        result = response.json()
+    except ValueError:
+        return {"ok": False, "error": "probe runner returned invalid JSON"}
+    if not isinstance(result, dict):
+        return {"ok": False, "error": "probe runner returned invalid JSON"}
+    return {
+        "ok": bool(result.get("ok")),
+        "exit_code": result.get("exit_code"),
+        "stdout": str(result.get("stdout") or "")[:MAX_OUTPUT_CHARS],
+        "stderr": str(result.get("stderr") or "")[:2000],
+        "error": result.get("error"),
+        "egress": (result.get("egress") or [])[:200],
+        "exchanges": [item for item in (result.get("exchanges") or [])[:200]
+                      if isinstance(item, dict)],
+        "exchanges_dropped": int(result.get("exchanges_dropped") or 0),
+        "tcp": result.get("tcp") if isinstance(result.get("tcp"), dict) else {},
+        "allowed_hosts": hosts,
+    }

@@ -2898,6 +2898,26 @@ class ApiClient {
     return response.data;
   }
 
+  async createCaptureToken(sessionId: string, body: { identity: string; role?: string; tenant?: string }) {
+    const response = await this.client.post(`/agent/sessions/${sessionId}/capture-token`, body);
+    return response.data as { token: string; expires_at: number; identity: string };
+  }
+
+  async uploadCaptureHar(sessionId: string, body: { identity: string; role?: string; tenant?: string; har: unknown }) {
+    const response = await this.client.post(`/agent/sessions/${sessionId}/har`, body);
+    return response.data as { accepted: number; batches: number; identity: string };
+  }
+
+  async getCaptureStatus(sessionId: string) {
+    const response = await this.client.get(`/agent/sessions/${sessionId}/captures`);
+    return response.data as { pending_batches: number };
+  }
+
+  async listAgentCandidates(sessionId: string) {
+    const response = await this.client.get(`/agent/sessions/${sessionId}/candidates`);
+    return response.data;
+  }
+
   async getAgentRunLedger(sessionId: string) {
     const response = await this.client.get(`/agent/conversations/${sessionId}/ledger`);
     return response.data;
