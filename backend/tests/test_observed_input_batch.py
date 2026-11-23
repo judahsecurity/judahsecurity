@@ -116,6 +116,51 @@ def test_missing_original_query_blocks_once_without_rejected_probe_calls():
     assert len(manager.probe_calls) == 2
 
 
+def test_baseline_blocked_query_reopens_once_a_later_crawl_saves_its_original():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [
+                {"method": "GET", "host": "app.test", "path": "/catalog",
+                 "name": "q", "location": "query", "identity": "anonymous",
+                 "source": "browser_link", "testable": True},
+            ])
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.baseline_saved = False
+            self.probe_calls = []
+
+        def _observed_get_query_sample(self, url, parameter, identity, capture_id):
+            if not self.baseline_saved:
+                raise ValueError("observed_query_baseline_missing")
+            return url + "?q=original", "browser_link", {}
+
+        async def scoped_input_sweep_assigned(self, coverage_cell_id, **_kwargs):
+            self.probe_calls.append(coverage_cell_id)
+            return {"success": True, "first_pass_mode": "sweep",
+                    "evidence_id": "probe-" + coverage_cell_id,
+                    "baseline_evidence_id": "base-" + coverage_cell_id,
+                    "probe_evidence_id": "probe-" + coverage_cell_id,
+                    "proof_confirmed": False, "probe_result": {}}
+
+    manager = Manager()
+    first = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert first["baseline_blocked"] == 2 and not manager.probe_calls
+    unchanged = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert unchanged["baseline_reopened"] == 0 and not manager.probe_calls
+
+    # A working scoped crawl (e.g. after the proxy recovers) saves the link.
+    manager.baseline_saved = True
+    reopened = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert reopened["baseline_reopened"] == 2
+    assert reopened["baseline_blocked"] == 0
+    assert len(manager.probe_calls) == 2
+    cells = [row for row in manager._engagement_brain["coverage_cells"]
+             if row["test_type"] in {"sqli", "xss"}]
+    assert all(row.get("first_pass_blocked_reason") != "observed_query_baseline_missing"
+               for row in cells)
+
+
 def test_original_query_disappearing_after_preflight_is_not_retried():
     class Manager:
         def __init__(self):

@@ -293,10 +293,16 @@ def _format_tech_line(label: str, techs: Sequence[Any], *, with_version: bool) -
     return f"  Tech ({label}): " + ", ".join(names[:24])
 
 
-async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
+async def run_assessment_kickoff(
+    seed_url: str, *, interceptor_allowed: bool = True,
+) -> Dict[str, Any]:
     """
     Fast parallel probes. Always returns a dict with ``brief`` for the LLM.
     Soft-fails — never raises into the agent loop.
+
+    ``interceptor_allowed`` is False under an operator assessment policy:
+    Interceptor workers cannot enforce its method and path approvals, so the
+    brief must route the model to execute_deep_crawl instead.
     """
     base = _normalize_base(seed_url)
     empty = {
@@ -511,12 +517,18 @@ async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
         )
         lines.append(
             "NEXT: spawn_recon_workers(pack='enrich') is already starting (ferox+katana) → "
-            "execute_interceptor/deep_crawl → ingest_urls_into_map → discover_parameters/"
+            f"{'execute_interceptor/deep_crawl' if interceptor_allowed else 'execute_deep_crawl'}"
+            " → ingest_urls_into_map → discover_parameters/"
             "arjun → sync_engagement_brain → fireteam_dispatch(specialists='auto')."
         )
     else:
+        crawl_step = (
+            "execute_interceptor (attaches to early-queued crawl if workers were online)"
+            if interceptor_allowed else
+            "execute_deep_crawl (Interceptor is unavailable under the operator policy)"
+        )
         lines.append(
-            "NEXT: execute_interceptor (attaches to early-queued crawl if workers were online) → "
+            f"NEXT: {crawl_step} → "
             "spawn_recon_workers(pack='enrich') for ferox+katana → ingest_urls_into_map → "
             "discover_parameters on live URLs → sync_engagement_brain → "
             "fireteam_dispatch(specialists='auto'). Do not complete after recon."

@@ -717,7 +717,14 @@ class AgentOrchestrator:
                 append_action(active_run_id.get(), kickoff_action_id, "started",
                               "assessment_kickoff", target=seed)
                 queue_action_id = uuid.uuid4().hex
-                kickoff_coro = run_assessment_kickoff(seed)
+                # Interceptor workers cannot enforce operator method and path
+                # approvals (see execute_interceptor in tools.py). Under that
+                # policy, neither queue an unattended Interceptor crawl nor
+                # point the model at a tool that will be refused.
+                scoped_policy = bool(getattr(self.tool_manager, "_scoped_policy_applied", False))
+                kickoff_coro = run_assessment_kickoff(
+                    seed, interceptor_allowed=not scoped_policy,
+                )
                 acr_seed = False
                 cve_only = False
                 try:
@@ -741,6 +748,28 @@ class AgentOrchestrator:
                 if acr_seed or cve_only or auth_login:
                     kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
                     queued, streams = {}, []
+                elif scoped_policy:
+                    queued = {}
+                    if no_scanners:
+                        kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
+                        streams = []
+                    else:
+                        from app.services.agent.autonomy_limits import current_autonomy_limits
+                        kickoff, streams = await asyncio.wait_for(
+                            asyncio.gather(
+                                kickoff_coro,
+                                recon_workers.spawn_workers(
+                                    url=seed,
+                                    session_id=str(session_id or ""),
+                                    pack="autonomy_early" if current_autonomy_limits.get() else "early",
+                                    tools_manager=self.tool_manager,
+                                    user_id=uid_int,
+                                    organization_id=org_id if isinstance(org_id, int) else None,
+                                ),
+                                return_exceptions=True,
+                            ),
+                            timeout=28.0,
+                        )
                 else:
                     append_action(active_run_id.get(), queue_action_id, "started",
                                   "queue_early_interceptor", target=seed)
@@ -784,7 +813,7 @@ class AgentOrchestrator:
                 if isinstance(queued, Exception):
                     logger.warning("early interceptor queue failed: %s", queued)
                     queued = {}
-                if not acr_seed and not cve_only:
+                if not acr_seed and not cve_only and not scoped_policy:
                     append_action(
                         active_run_id.get(), queue_action_id,
                         "completed" if isinstance(queued, dict) and queued.get("job_id") else "failed",

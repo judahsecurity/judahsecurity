@@ -78,3 +78,21 @@ def assessment_browser_proxy() -> dict | None:
         assessment_ca_bundle(proxy_url)
         return {"server": proxy_url}
     return None
+
+
+# Page titles the assessment proxy uses for the error pages it generates itself.
+_PROXY_ERROR_TITLES = ("caido",)
+
+
+def is_proxy_error_page(status: object, title: object) -> bool:
+    """True when the configured proxy, not the target, produced a 5xx page.
+
+    Caido answers with its own HTTP 500 page when it cannot reach the upstream
+    target. A browser run that rendered that page observed nothing about the
+    target, so it must fail rather than complete with an empty map.
+    """
+    if not assessment_proxy_url():
+        return False
+    if not isinstance(status, int) or status < 500:
+        return False
+    return str(title or "").strip().lower().startswith(_PROXY_ERROR_TITLES)

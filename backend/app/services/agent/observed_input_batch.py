@@ -268,7 +268,35 @@ async def run_observed_input_batch(
     # this preflight blocked, and leave other policy decisions intact.
     identity_reopened = 0
     policy_reopened = 0
+    baseline_reopened = 0
+    sample = getattr(manager, "_observed_get_query_sample", None)
     for cell in brain.coverage_cells:
+        # A later scoped crawl can save the original GET this input needed
+        # (for example after the assessment proxy recovers). Reopen only cells
+        # this preflight blocked, and only once a baseline now resolves.
+        if (callable(sample) and cell.get("status") == "blocked"
+                and cell.get("first_pass_blocked_reason") == "observed_query_baseline_missing"
+                and _origin(f"{urlsplit(active_origin).scheme}://{cell.get('host') or ''}") == active_origin):
+            _location, _, query_name = str(cell.get("parameter") or "").partition(":")
+            try:
+                sample(
+                    f"{active_origin}{cell.get('path') or '/'}", query_name,
+                    str(cell.get("identity") or "anonymous"),
+                    str(cell.get("capture_id") or ""),
+                )
+            except ValueError as exc:
+                if str(exc) != "observed_query_baseline_missing":
+                    raise
+            else:
+                cell["status"] = "untested"
+                baseline_reopened += 1
+                cell.pop("reason", None)
+                for key in (
+                    "first_pass_blocked_reason", "first_pass_outcome", "first_pass_reason",
+                    "first_pass_at", "first_pass_handoff_error", "first_pass_retry_at",
+                    "first_pass_attempts", "triage_pending", "xss_pending_techniques",
+                ):
+                    cell.pop(key, None)
         if (cell.get("status") == "blocked"
                 and cell.get("first_pass_blocked_reason") == "post_path_not_approved"
                 and str(cell.get("path") or "") in approved_post_paths
@@ -321,14 +349,14 @@ async def run_observed_input_batch(
             cell["first_pass_at"] = time.time()
             cell.pop("first_pass_handoff_error", None)
             identity_blocked += 1
-    if policy_blocked or identity_blocked or identity_reopened or policy_reopened:
+    if (policy_blocked or identity_blocked or identity_reopened or policy_reopened
+            or baseline_reopened):
         manager._engagement_brain = brain.to_dict()
 
     # Query-key inventories include forms and discovered endpoints that have
     # never produced a concrete GET request. Resolve a saved original before
     # leasing or submitting a sweep. This lookup is local and sends no traffic.
     baseline_blocked = 0
-    sample = getattr(manager, "_observed_get_query_sample", None)
     if callable(sample):
         for cell in pending_first_pass_cells(brain, target=active_target):
             location, _, parameter = str(cell.get("parameter") or "").partition(":")
@@ -852,6 +880,7 @@ async def run_observed_input_batch(
         "processed": len(results), "policy_blocked": policy_blocked,
         "identity_blocked": identity_blocked,
         "baseline_blocked": baseline_blocked,
+        "baseline_reopened": baseline_reopened,
         "identity_reopened": identity_reopened,
         "policy_reopened": policy_reopened,
         "remaining": len(pending_first_pass_cells(

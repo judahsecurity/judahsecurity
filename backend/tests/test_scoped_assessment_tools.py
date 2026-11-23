@@ -766,3 +766,41 @@ def test_observed_input_get_budget_survives_exploratory_exhaustion():
             manager._scoped_claim_gets(1)
     finally:
         first_pass_get_context.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_proxy_error_page_fails_browser_map_and_saves_no_baselines(monkeypatch, tmp_path):
+    ca = tmp_path / "caido-ca.pem"
+    ca.write_text("test CA")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_PROXY_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CA_BUNDLE", str(ca))
+    monkeypatch.delenv("AEGIS_ALLOW_INSECURE_TLS", raising=False)
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+
+    async def fake_browser(**kwargs):
+        kwargs["link_baselines"].append("https://app.example.test/catalog?q=proxy")
+        return ({"operation": "map", "final_origin": "https://app.example.test",
+                 "final_path": "/", "status": 500, "title": "Caido",
+                 "requests": []}, None)
+
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.browser.check_browser", fake_browser)
+    with pytest.raises(ValueError, match="assessment_proxy_error"):
+        await manager.scoped_browser_assessment("map", "https://app.example.test/")
+    assert not (manager._scoped_link_baselines or {}).get("anonymous")
+
+
+def test_proxy_error_page_needs_configured_proxy_and_5xx(monkeypatch, tmp_path):
+    from app.services.agent.assessment_proxy import is_proxy_error_page
+
+    monkeypatch.delenv("AEGIS_ASSESSMENT_PROXY_URL", raising=False)
+    assert not is_proxy_error_page(500, "Caido")
+    ca = tmp_path / "caido-ca.pem"
+    ca.write_text("test CA")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_PROXY_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CA_BUNDLE", str(ca))
+    monkeypatch.delenv("AEGIS_ALLOW_INSECURE_TLS", raising=False)
+    assert is_proxy_error_page(502, " caido ")
+    assert not is_proxy_error_page(200, "Caido")
+    assert not is_proxy_error_page(500, "Internal Server Error")

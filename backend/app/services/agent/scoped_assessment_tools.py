@@ -569,6 +569,16 @@ class ScopedAssessmentTools:
             readback_url=readback_url, cleanup_url_template=cleanup_url_template,
             client_test_type=client_test_type,
         )
+        from app.services.agent.assessment_proxy import is_proxy_error_page
+
+        if is_proxy_error_page(result.get("status"), result.get("title")):
+            # Keep nothing from a proxy error page: its links, traffic and
+            # surface describe the proxy, and would hide missing baselines.
+            raise ValueError(
+                f"assessment_proxy_error: the assessment proxy returned HTTP "
+                f"{result.get('status')} instead of the target page; check its "
+                "upstream connection to the target"
+            )
         result["identity"] = identity
         if link_baselines:
             private = dict(getattr(self, "_scoped_link_baselines", None) or {})

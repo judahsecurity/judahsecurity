@@ -306,3 +306,20 @@ def test_kickoff_404_flags_dir_brute(monkeypatch):
     assert result["needs_dir_brute"] is True
     assert result["root_status"] == 404
     assert "EMPTY/404" in result["brief"] or "directory brute" in result["brief"].lower()
+
+
+def test_kickoff_brief_routes_scoped_runs_to_deep_crawl(monkeypatch):
+    async def fake_whatruns(base):
+        return []
+
+    monkeypatch.setattr("app.services.agent.assessment_kickoff._run_whatruns", fake_whatruns)
+
+    async def _run(**kwargs):
+        with patch("httpx.AsyncClient", _FakeClient):
+            return await run_assessment_kickoff("https://www.emulate3d.com/", **kwargs)
+
+    default = asyncio.run(_run())
+    scoped = asyncio.run(_run(interceptor_allowed=False))
+    assert "execute_interceptor" in default["brief"]
+    assert "execute_interceptor" not in scoped["brief"]
+    assert "execute_deep_crawl" in scoped["brief"]
