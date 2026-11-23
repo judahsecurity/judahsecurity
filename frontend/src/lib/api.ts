@@ -2819,6 +2819,7 @@ class ApiClient {
       loadSessionId?: string;
       priceLimitUsd?: number;
       assessmentPolicy?: {
+        scoped_autonomous_reads?: boolean;
         body_replay_paths: string[];
         stored_xss_cleanup_paths: string[];
         auth_login_path?: string;

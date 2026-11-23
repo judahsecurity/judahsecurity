@@ -302,6 +302,8 @@ class AgentState(TypedDict, total=False):
     # Mode: assist | agent | pilot (bounded, analyst-supervised)
     mode: Optional[str]
     pilot_policy: Optional[Dict[str, Any]]
+    scoped_browser_reads: Optional[bool]
+    scoped_browser_origin: Optional[str]
     
     # Initial input (playbook)
     initial_todos: Optional[List[Dict[str, Any]]]

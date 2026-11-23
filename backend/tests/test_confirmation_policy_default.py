@@ -70,6 +70,75 @@ async def test_autonomous_mode_waits_for_confirm_by_default(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scoped_browser_read_grant_auto_approves_only_anonymous_observation(monkeypatch):
+    policy = default_agent_config()
+    monkeypatch.setattr(confirmation, "_load_policy", lambda _org_id: policy)
+    monkeypatch.setattr(confirmation, "_roe_requires_confirmation", lambda _org_id: False)
+    monkeypatch.setattr(confirmation, "get_store", lambda: confirmation.ConfirmationStore())
+    token = confirmation.set_autonomous_mode(True)
+    confirmation.set_scoped_browser_reads(True, "https://app.test")
+    try:
+        spec = {
+            "actions": [
+                {"action": "navigate", "url": "https://app.test/catalog"},
+                {"action": "get_source"},
+                {"action": "screenshot", "full_page": True},
+            ],
+            "allowed_origin": "https://app.test/catalog",
+            "allowed_methods": ["GET", "HEAD"],
+            "approved_post_paths": [],
+            "approved_delete_paths": [],
+            "block_web_sockets": True,
+        }
+        assert (await confirmation.gate(
+            "execute_browser", {"args": json.dumps(spec)}, 7, "run",
+        ))["decision"] == "auto"
+
+        for altered in (
+            {**spec, "actions": [{"action": "execute_js", "script": "fetch('/save')"}]},
+            {**spec, "actions": [{"action": "click", "selector": "button"}]},
+            {**spec, "actions": [{"action": "navigate", "url": "https://other.test/"}]},
+            {**spec, "approved_post_paths": ["/save"]},
+            {key: value for key, value in spec.items() if key != "block_web_sockets"},
+            {**spec, "extra_headers": {"Authorization": "secret"}},
+            {**spec, "login": {"url": "https://app.test/login"}},
+        ):
+            assert (await confirmation.gate(
+                "execute_browser", {"args": json.dumps(altered)}, 7, "run",
+            ))["decision"] == "confirm"
+
+        policy["tool_confirmation_policy"]["execute_browser"] = "deny"
+        assert (await confirmation.gate(
+            "execute_browser", {"args": json.dumps(spec)}, 7, "run",
+        ))["decision"] == "deny"
+    finally:
+        confirmation.set_scoped_browser_reads(False)
+        confirmation._autonomous_mode.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_scoped_browser_read_grant_respects_roe_confirmation(monkeypatch):
+    policy = default_agent_config()
+    policy["agent_autonomous_auto_approve"] = True
+    monkeypatch.setattr(confirmation, "_load_policy", lambda _org_id: policy)
+    monkeypatch.setattr(confirmation, "_roe_requires_confirmation", lambda _org_id: True)
+    monkeypatch.setattr(confirmation, "get_store", lambda: confirmation.ConfirmationStore())
+    token = confirmation.set_autonomous_mode(True)
+    confirmation.set_scoped_browser_reads(True, "https://app.test")
+    try:
+        decision = await confirmation.gate("execute_browser", {"args": json.dumps({
+            "actions": [{"action": "navigate", "url": "https://app.test/"}],
+            "allowed_origin": "https://app.test/",
+            "allowed_methods": ["GET", "HEAD"],
+            "block_web_sockets": True,
+        })}, 7, "run")
+        assert decision["decision"] == "confirm"
+    finally:
+        confirmation.set_scoped_browser_reads(False)
+        confirmation._autonomous_mode.reset(token)
+
+
+@pytest.mark.asyncio
 async def test_pilot_network_tool_requires_analyst_even_with_auto_policy(monkeypatch):
     policy_config = default_agent_config()
     policy_config["agent_autonomous_auto_approve"] = True
