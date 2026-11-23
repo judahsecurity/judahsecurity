@@ -3454,6 +3454,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     self._scoped_stored_xss_cleanup_paths | self._scoped_race_cleanup_paths
                     | self._scoped_csrf_cleanup_paths
                 )
+                if tool_name == "execute_browser":
+                    from app.services.agent.confirmation_service import scoped_browser_read_granted
+                    if scoped_browser_read_granted(
+                        {"args": spec}, allow_approved_paths=True,
+                    ):
+                        # A read grant must not inherit write paths that the
+                        # operator approved for separate, reviewed workflows.
+                        spec["approved_post_paths"] = []
+                        spec["approved_delete_paths"] = []
+                        spec["block_web_sockets"] = True
                 tool_args["args"] = json.dumps(spec)
             except (ValueError, TypeError) as exc:
                 return {"success": False, "output": str(exc), "error": "invalid_scoped_browser_args"}

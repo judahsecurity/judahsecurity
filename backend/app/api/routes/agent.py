@@ -104,6 +104,8 @@ class OwnerOnlyResource(BaseModel):
 
 
 class AgentAssessmentPolicy(BaseModel):
+    # Per-run operator grant for anonymous, exact-origin browser observations.
+    scoped_autonomous_reads: bool = False
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
     # Operator-approved state-changing actions for the race and CSRF proofs.
