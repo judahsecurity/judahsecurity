@@ -3239,6 +3239,49 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                     *([result["artifact_id"]] if result.get("artifact_id") else [])])
         return result
 
+    # Crawl options that make the crawl browse as someone other than anonymous.
+    _CRAWL_IDENTITY_OPTIONS = (
+        "cookies", "storage_state", "headers", "basic_auth", "local_storage",
+        "login", "identity",
+    )
+
+    def _store_crawl_link_baselines(
+        self, tool_args: Dict[str, Any], links: Any, *, authenticated: bool = False,
+    ) -> int:
+        """Keep a deep crawl's full link URLs as session-local GET baselines.
+
+        Values never enter the model-visible result, evidence, or ledger; they
+        join the same private store the scoped browser map uses. Only an
+        anonymous, in-scope crawl contributes, because the baseline lookup for
+        the anonymous identity trusts these URLs as ordinary visitor links.
+        """
+        if authenticated or not isinstance(links, list) or not links:
+            return 0
+        try:
+            spec = json.loads(str(tool_args.get("args") or ""))
+        except (TypeError, ValueError):
+            return 0
+        if not isinstance(spec, dict) or any(spec.get(key) for key in self._CRAWL_IDENTITY_OPTIONS):
+            return 0
+        from app.services.agent.assessment_scope import assert_url_in_scope
+
+        kept = []
+        for link in links[:120]:
+            if not isinstance(link, str) or len(link) > 2048:
+                continue
+            try:
+                assert_url_in_scope(self, link)
+            except ValueError:
+                continue
+            kept.append(link)
+        if not kept:
+            return 0
+        private = dict(getattr(self, "_scoped_link_baselines", None) or {})
+        before = list(private.get("anonymous") or [])
+        private["anonymous"] = list(dict.fromkeys([*before, *kept]))[-120:]
+        self._scoped_link_baselines = private
+        return len(set(private["anonymous"]) - set(before))
+
     def _ingest_scanner_leads(self, rows: List[Dict[str, Any]]) -> int:
         """Fold ffuf/sqlmap lead rows into the inventory and re-seed cells.
 
@@ -3444,6 +3487,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     from app.services.agent.assessment_scope import assert_url_in_scope
                     assert_url_in_scope(self, target)
                     spec["allowed_origin"] = target
+                    # Full link URLs come back privately so GET inputs found by
+                    # this crawl have a replayable original even when the
+                    # proxied scoped browser cannot map the target.
+                    spec["collect_link_baselines"] = True
                 spec["allowed_methods"] = ["GET", "HEAD"]
                 spec["approved_post_paths"] = sorted(
                     self._scoped_body_replay_paths | self._scoped_race_action_paths
@@ -3602,6 +3649,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     result = await mcp.call_tool(tool_name, tool_args)
                 from app.services.mcp.cli_results import normalize_cli_result
                 result = normalize_cli_result(tool_name, result)
+                if tool_name == "execute_deep_crawl" and isinstance(result, dict):
+                    self._store_crawl_link_baselines(
+                        tool_args, result.pop("private_link_baselines", None),
+                        authenticated=(isinstance(result.get("auth_session"), dict)
+                                       and result["auth_session"].get("authenticated") is True),
+                    )
 
                 from app.services.agent.evidence_store import evidence_store
                 evidence_ids = []

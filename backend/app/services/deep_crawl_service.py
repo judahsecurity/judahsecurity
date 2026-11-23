@@ -733,6 +733,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
 
     opts = _parse_args(args)
     seed = str(opts.get("url") or opts.get("target") or "").strip()
+    private_link_baselines: List[str] = []
     if not seed:
         return {
             "success": False,
@@ -1002,6 +1003,16 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 queue: List[tuple] = [(-_functionality_score(seed), 0, seed)]
                 seen: Set[str] = set()
                 link_rows: Dict[str, Dict[str, Any]] = {}
+                # Opt-in, session-local replay baselines: full same-origin link
+                # URLs (with query values) for the scoped tool layer, which
+                # strips them from the result before anything is shown or stored.
+                baseline_origins: List[str] = []
+                if opts.get("collect_link_baselines"):
+                    from app.services.agent.scoped_assessment.browser import origin as _origin
+                    try:
+                        baseline_origins = [_origin(str(opts.get("allowed_origin") or seed))]
+                    except ValueError:
+                        baseline_origins = []
                 from app.services.crawl_priority import next_crawl_index
                 visited_families: Dict[tuple[str, tuple[str, ...]], int] = {}
 
@@ -1032,6 +1043,16 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                                 queue, seen, absu, child_depth, max_depth, HARD_MAX_PAGES * 4
                             )
                     result.discovered_links = list(link_rows.values())
+                    if baseline_origins and len(private_link_baselines) < 120:
+                        from app.services.agent.scoped_assessment.browser import (
+                            _private_link_baselines,
+                        )
+                        absolute = [urljoin(page_url, link).split("#")[0] for link in links
+                                    if isinstance(link, str)]
+                        for href in _private_link_baselines(absolute, baseline_origins):
+                            if href not in private_link_baselines:
+                                private_link_baselines.append(href)
+                        del private_link_baselines[120:]
 
                 while queue and len(result.pages_visited) < max_pages:
                     if time.monotonic() >= navigation_deadline:
@@ -1203,6 +1224,8 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
         "network_requests_dropped": result.network_requests_dropped,
         "route_variants_skipped": result.route_variants_skipped,
         "application_operations": result.application_operations,
+        **({"private_link_baselines": private_link_baselines}
+           if opts.get("collect_link_baselines") else {}),
     }
 
 

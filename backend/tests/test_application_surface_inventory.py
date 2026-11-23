@@ -155,3 +155,51 @@ async def test_nested_browser_controls_attribute_request_and_lazy_javascript(mon
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
+                    reason="Opt-in local Chromium fixture")
+async def test_deep_crawl_returns_private_link_baselines_only_when_requested(monkeypatch):
+    from playwright.async_api import BrowserType
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = (b"<html><body><a href='/catalog?category=gin'>Gin</a>"
+                    b"<a href='/account?action=delete&id=1'>Delete</a>"
+                    b"<a href='https://elsewhere.example/?q=1'>Out</a></body></html>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    executable = os.environ.get("ASSESSMENT_TEST_CHROMIUM")
+    if executable:
+        original = BrowserType.launch
+
+        async def launch(self, **kwargs):
+            return await original(self, **dict(kwargs, executable_path=executable))
+
+        monkeypatch.setattr(BrowserType, "launch", launch)
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        options = {"url": base, "allowed_origin": base, "max_pages": 1,
+                   "interact": False, "capture_js": False, "budget_sec": 60}
+        plain = await run_deep_crawl(dict(options))
+        assert plain["success"], plain
+        assert "private_link_baselines" not in plain
+        assert "category=gin" not in json.dumps(plain["capability_map"])
+
+        scoped = await run_deep_crawl(dict(options, collect_link_baselines=True))
+        assert scoped["success"], scoped
+        assert scoped["private_link_baselines"] == [f"{base}/catalog?category=gin"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

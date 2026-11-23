@@ -1925,3 +1925,55 @@ def test_tester_prompt_formats_web_progress_without_undefined_state():
         {"is_web": True, "summary": "Mapped application", "missing": []}
     )
     assert "Mapped application" in text
+
+
+@pytest.mark.parametrize(
+    ("spec_extra", "authenticated", "expected_saved"),
+    [({}, False, True), ({}, True, False),
+     ({"cookies": [{"name": "s", "value": "v", "domain": "app.test"}]}, False, False)],
+)
+@pytest.mark.asyncio
+async def test_crawl_link_baselines_stay_private_and_only_anonymous(
+    manager, monkeypatch, spec_extra, authenticated, expected_saved,
+):
+    import app.services.agent.confirmation_service as confirmation
+
+    async def allow(*_args, **_kwargs):
+        return {"decision": "allow"}
+
+    seen = []
+
+    async def call_tool(_name, args):
+        seen.append(json.loads(args["args"]))
+        return {
+            "success": True,
+            "output": "Crawled",
+            "capability_map": {"target": "https://app.test"},
+            "auth_session": {"target": "https://app.test", "authenticated": authenticated,
+                             "cookies": [], "storage_state": {"cookies": [], "origins": []}},
+            "private_link_baselines": [
+                "https://app.test/catalog?category=gin",
+                "https://other-origin.example/catalog?category=gin",
+            ],
+        }
+
+    monkeypatch.setattr(confirmation, "gate", allow)
+    manager._mcp_server = SimpleNamespace(call_tool=call_tool)
+    manager._fallback_target = "https://app.test"
+    manager.set_scoped_assessment_policy({})
+    result = await manager._execute_impl(
+        "execute_deep_crawl",
+        {"args": json.dumps({"url": "https://app.test", **spec_extra})},
+    )
+
+    assert seen[0]["collect_link_baselines"] is True
+    assert "private_link_baselines" not in result
+    assert "category=gin" not in json.dumps(result, default=str)
+    saved = (manager._scoped_link_baselines or {}).get("anonymous") or []
+    if expected_saved:
+        assert saved == ["https://app.test/catalog?category=gin"]
+        url, source, _headers = manager._observed_get_query_sample(
+            "https://app.test/catalog", "category", "anonymous")
+        assert (url, source) == ("https://app.test/catalog?category=gin", "browser_link")
+    else:
+        assert saved == []
