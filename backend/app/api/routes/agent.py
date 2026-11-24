@@ -784,9 +784,7 @@ async def stop_agent_run(
     """Cancel an in-flight agent run so it stops spending LLM tokens."""
     if not session_id or not session_id.strip():
         raise HTTPException(status_code=400, detail="session_id is required")
-    org_id = _resolve_agent_organization_id(current_user, db)
-    if not org_id:
-        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _owned_conversation(db, session_id, current_user)
     cancelled = _stop_agent_session(session_id)
     logger.info(
         "Agent stop requested by user %s for session %s (task_cancelled=%s)",
@@ -843,9 +841,7 @@ async def load_prior_hunt(
     """Queue a prior conversation brief into this session (CAI /load)."""
     if request.session_id != session_id:
         raise HTTPException(status_code=400, detail="session_id mismatch")
-    org_id = _resolve_agent_organization_id(current_user, db)
-    if not org_id:
-        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
     from app.services.agent.run_control import queue_load_brief
     from app.services.agent.session_ops import load_prior_conversation_brief
 
@@ -1432,7 +1428,7 @@ def _authenticate_ws_token(token: str):
 def _ws_session_owned(session_id: str, user_id: int, org_id: int) -> bool:
     """True only when a conversation row for ``session_id`` belongs to this user and org.
 
-    Checked per steer/compact rather than only at init: the row may not exist
+    Checked per steer/compact/load/stop rather than only at init: the row may not exist
     when the socket connects, and a missing row must not let a caller queue
     instructions that another tenant's later run would drain.
     """
@@ -1879,6 +1875,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         "message": "source_session_id is required",
                     })
                     continue
+                if not _ws_session_owned(session_id, user_id, org_id):
+                    await websocket.send_json({"type": "error", "message": "Agent session not found"})
+                    continue
                 from app.services.agent.run_control import queue_load_brief
                 from app.services.agent.session_ops import load_prior_conversation_brief
 
@@ -1897,6 +1896,16 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 })
 
             elif msg_type == "stop":
+                if not user_id:
+                    await websocket.send_json({"type": "error", "message": "Not authenticated"})
+                    continue
+                own_task = run_holder.get("task")
+                started_here = own_task is not None and not own_task.done()
+                # A run this socket started is the caller's even if persisting
+                # its row failed; anything else must be backed by an owned row.
+                if not started_here and not _ws_session_owned(session_id, user_id, org_id):
+                    await websocket.send_json({"type": "error", "message": "Agent session not found"})
+                    continue
                 logger.info("Agent stop requested via WebSocket for session %s by user %s", session_id, user_id)
                 _stop_agent_session(session_id)
                 await emit_cancelled()
