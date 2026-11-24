@@ -360,6 +360,18 @@ async def get_vulnerability_impact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_CYPHER_WRITE = re.compile(
+    r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD\s+CSV|FOREACH)\b|\bCALL\s+(?!db\.index\.fulltext\.queryNodes\b)",
+    re.I,
+)
+
+
+def _strip_cypher_literals(cypher: str) -> str:
+    """Drop string literals and comments so keywords inside them don't count."""
+    text = re.sub(r"//[^\n]*|/\*.*?\*/", " ", cypher, flags=re.S)
+    return re.sub(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", "''", text)
+
+
 class GraphQueryRequest(BaseModel):
     cypher: str
     params: Optional[Dict[str, Any]] = None
@@ -372,9 +384,10 @@ async def execute_graph_query(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Execute a custom Cypher query (admin only).
-    
-    The query is automatically filtered by organization_id.
+    Execute a read-only custom Cypher query (admin only).
+
+    Send {cypher, params}. The query must filter on $org_id, which the server
+    binds to the caller's organization; write clauses are refused.
     """
     if not current_user.is_superuser:
         raise HTTPException(
@@ -387,16 +400,20 @@ async def execute_graph_query(
     if not cypher.strip():
         raise HTTPException(status_code=422, detail="cypher is required")
 
-    org_id = current_user.organization_id if hasattr(current_user, 'organization_id') else None
+    if _CYPHER_WRITE.search(_strip_cypher_literals(cypher)):
+        raise HTTPException(status_code=422, detail="Custom queries are read-only")
 
-    # Add organization filter for safety
-    if org_id and "organization_id" not in cypher.lower():
-        params["__org_id"] = org_id
-        # Inject org filter into WHERE clause
-        if "WHERE" in cypher.upper():
-            cypher = re.sub(r"\bWHERE\b", "WHERE n.organization_id = $__org_id AND ", cypher, count=1, flags=re.I)
-        elif "RETURN" in cypher.upper():
-            cypher = re.sub(r"\bRETURN\b", "WHERE n.organization_id = $__org_id RETURN", cypher, count=1, flags=re.I)
+    # Scope to the caller's organization. The server binds $org_id; the query
+    # must use it (e.g. WHERE a.organization_id = $org_id). Rewriting the
+    # query text to add a filter only worked when the node was named `n`.
+    org_id = getattr(current_user, "organization_id", None)
+    if org_id:
+        if not re.search(r"\$org_id\b", cypher):
+            raise HTTPException(
+                status_code=422,
+                detail="Query must filter on $org_id, e.g. MATCH (a:Asset) WHERE a.organization_id = $org_id",
+            )
+        params["org_id"] = org_id
 
     try:
         graph = get_graph_service()

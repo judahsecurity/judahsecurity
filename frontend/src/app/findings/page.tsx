@@ -212,7 +212,21 @@ interface Finding {
   exploit_score?: number | null;
   exploit_priority?: number | null;
   exploit_tier?: string | null;
+  exploit?: {
+    exploit_score: number;
+    priority_score: number;
+    tier: string;
+    kev: boolean;
+    drivers: { signal: string; detail: string; informational?: boolean }[];
+  } | null;
 }
+
+const EXPLOIT_TIER_STYLE: Record<string, string> = {
+  critical: 'text-red-400 font-semibold',
+  high: 'text-orange-400',
+  elevated: 'text-amber-300',
+  moderate: 'text-yellow-200',
+};
 
 interface OracleEnrichment {
   mode: 'full' | 'intrinsic' | 'generic_finding';
@@ -2344,6 +2358,7 @@ export default function FindingsPage() {
                 <TableHead>Status</TableHead>
                 <TableHead>Assigned</TableHead>
                 <TableHead>Priority</TableHead>
+                <TableHead title="OPES or Delphi likelihood, floored by VulnCheck/CISA KEV and agent proof">Exploitability</TableHead>
                 <TableHead>OPES level</TableHead>
                 <TableHead>OPES score</TableHead>
                 <TableHead>Risk level</TableHead>
@@ -2370,7 +2385,7 @@ export default function FindingsPage() {
             <TableBody className="[&_td]:px-3 [&_td]:py-3">
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={27} className="text-center !py-12">
+                  <TableCell colSpan={28} className="text-center !py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Loader2 className="h-8 w-8 animate-spin text-primary" />
                       <p className="text-muted-foreground">Loading findings...</p>
@@ -2379,7 +2394,7 @@ export default function FindingsPage() {
                 </TableRow>
               ) : filteredFindings.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={27} className="text-center !py-12">
+                  <TableCell colSpan={28} className="text-center !py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Shield className="h-12 w-12 text-muted-foreground/50" />
                       <p className="text-muted-foreground">
@@ -2467,6 +2482,17 @@ export default function FindingsPage() {
                         const label = priorityBadgeLabel(effectivePriority(finding));
                         return <Badge className={cn('w-fit capitalize', getSeverityBadgeClass(label === 'info' ? 'info' : label))}>{label}</Badge>;
                       })()}
+                    </TableCell>
+                    <TableCell>
+                      {finding.exploit_score != null ? (
+                        <span
+                          className={cn('font-mono tabular-nums', EXPLOIT_TIER_STYLE[finding.exploit_tier || ''] || '')}
+                          title={(finding.exploit?.drivers || []).map((d) => d.detail).join('\n') || undefined}
+                        >
+                          {finding.exploit_score}
+                          {finding.exploit?.kev ? <span className="ml-1 text-[10px] text-red-400">KEV</span> : null}
+                        </span>
+                      ) : <span className="text-muted-foreground">—</span>}
                     </TableCell>
                     <TableCell className="capitalize">
                       {finding.oracle?.opes_category || '—'}

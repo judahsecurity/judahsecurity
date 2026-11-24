@@ -17,6 +17,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/_lib/dedup.py:*)
   - Bash(python3 .claude/skills/_lib/scope.py:*)
   - Bash(python3 prowl_client.py:*)
+  - Bash(python3 .claude/skills/_lib/publish_chains.py:*)
 ---
 
 # /chain
@@ -103,5 +104,13 @@ use beyond showing it exists (redact). Stop at the first proof.
 `CHAINS.md`: one section per chain (links, status, severity, evidence or
 missing step). List confirmed links that belong to no chain under
 "reported separately". Redact secrets.
+
+## Publish (optional)
+
+To send `demonstrated` chains to the ASM platform (each link becomes a step
+anchored to its asset; the platform ranks the path by exploitability), run
+`python3 .claude/skills/_lib/publish_chains.py <run-dir> --dry-run`, show the
+operator the output, and only after AskUserQuestion approval run it again
+without `--dry-run` (needs `ASM_API_URL`, `ASM_API_KEY`).
 
 Stop. Next: report, or `/triage <run-dir>` again after new proof.
