@@ -692,8 +692,8 @@ class AgentOrchestrator:
             }
 
         # Fast parallel probes and recon streams run while the LLM plans.
-        # Scoped Agent mode uses deep crawl; Interceptor workers cannot enforce
-        # its method and path contract and must not be queued in that mode.
+        # The existing operator method-policy check skips Interceptor when its
+        # worker cannot enforce the run's method and path contract.
         execution_trace: list = []
         interceptor_job_id: Optional[str] = None
         recon_worker_briefs: List[str] = []
@@ -741,25 +741,6 @@ class AgentOrchestrator:
                 if acr_seed or cve_only or auth_login:
                     kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
                     queued, streams = {}, []
-                elif mode == "agent":
-                    queued = {}
-                    if no_scanners:
-                        kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
-                        streams = []
-                    else:
-                        from app.services.agent.autonomy_limits import current_autonomy_limits
-                        streams_coro = recon_workers.spawn_workers(
-                            url=seed,
-                            session_id=str(session_id or ""),
-                            pack="autonomy_early" if current_autonomy_limits.get() else "early",
-                            tools_manager=self.tool_manager,
-                            user_id=uid_int,
-                            organization_id=org_id if isinstance(org_id, int) else None,
-                        )
-                        kickoff, streams = await asyncio.wait_for(
-                            asyncio.gather(kickoff_coro, streams_coro, return_exceptions=True),
-                            timeout=28.0,
-                        )
                 else:
                     append_action(active_run_id.get(), queue_action_id, "started",
                                   "queue_early_interceptor", target=seed)
@@ -816,7 +797,7 @@ class AgentOrchestrator:
                 if isinstance(queued, Exception):
                     logger.warning("early interceptor queue failed: %s", queued)
                     queued = {}
-                if mode != "agent" and not acr_seed and not cve_only:
+                if not acr_seed and not cve_only:
                     policy_skip = (isinstance(queued, dict)
                                    and queued.get("note") == "skipped_operator_method_policy")
                     append_action(
