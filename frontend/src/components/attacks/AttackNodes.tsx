@@ -94,7 +94,13 @@ export function VulnerabilityNode({ data }: NodeProps) {
       <Bug className="h-5 w-5 shrink-0" />
       <div className="min-w-0">
         <p className="line-clamp-2 text-[12px] font-semibold leading-snug">{d.title}</p>
-        {d.subtitle ? <p className="mt-0.5 truncate text-[10px] opacity-70">{d.subtitle}</p> : null}
+        {d.subtitle || d.exploit_score != null ? (
+          <p className="mt-0.5 truncate text-[10px] opacity-70">
+            {d.subtitle}
+            {d.exploit_score != null ? `${d.subtitle ? ' · ' : ''}exploit ${d.exploit_score}` : ''}
+            {d.kev ? ' · KEV' : ''}
+          </p>
+        ) : null}
       </div>
     </StatusFrame>
   );

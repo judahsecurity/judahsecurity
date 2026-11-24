@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.models.asset import Asset
 from app.models.organization import Organization
 from app.models.vulnerability import Vulnerability, VulnerabilityStatus
+from app.services.exploit_priority import EXPLOITABLE_THRESHOLD, path_priority, score_vulnerability
 from app.services.mitre_enrichment_service import ATTACK_TECHNIQUES, CWE_TO_CAPEC
 
 STATUSES = (
@@ -100,6 +101,8 @@ class FindingView:
     validation_verdict: Optional[str] = None
     detected_at: Optional[datetime] = None
     assigned_to: Optional[str] = None
+    # exploit_priority.score_vulnerability output; empty when not computed.
+    exploit: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def host_key(self) -> str:
@@ -280,6 +283,11 @@ def _is_terminal(row: FindingView) -> bool:
     return bool(_BRUTE_RE.search(row.title or "") or _BRUTE_RE.search(row.description or ""))
 
 
+def _exploitable(row: FindingView) -> bool:
+    """Known-exploited or high exploitability, whatever the scanner severity."""
+    return bool(row.exploit.get("kev")) or (row.exploit.get("exploit_score") or 0) >= EXPLOITABLE_THRESHOLD
+
+
 def group_findings(rows: Sequence[FindingView]) -> List[List[FindingView]]:
     by_session: Dict[str, List[FindingView]] = defaultdict(list)
     ungrouped: List[FindingView] = []
@@ -294,7 +302,7 @@ def group_findings(rows: Sequence[FindingView]) -> List[List[FindingView]]:
     by_host: Dict[str, List[FindingView]] = defaultdict(list)
     leftover: List[FindingView] = []
     for row in ungrouped:
-        if row.has_chain or row.severity in {"critical", "high"}:
+        if row.has_chain or row.severity in {"critical", "high"} or _exploitable(row):
             by_host[row.host_key].append(row)
         else:
             leftover.append(row)
@@ -314,7 +322,7 @@ def group_findings(rows: Sequence[FindingView]) -> List[List[FindingView]]:
             still.append(row)
 
     for row in still:
-        if row.severity in {"critical", "high"} or row.detected_by == "agent":
+        if row.severity in {"critical", "high"} or row.detected_by == "agent" or _exploitable(row):
             groups.append([row])
 
     def sort_key(group: List[FindingView]) -> Tuple:
@@ -353,6 +361,14 @@ def _node(
         "host": host,
         "env": env,
     }
+
+
+def _attach_exploit(node: Dict[str, Any], row: "FindingView") -> None:
+    if row.exploit:
+        node["exploit_score"] = row.exploit.get("exploit_score")
+        node["priority_score"] = row.exploit.get("priority_score")
+        node["exploit_tier"] = row.exploit.get("tier")
+        node["kev"] = bool(row.exploit.get("kev"))
 
 
 def _edge(source: str, target: str) -> Dict[str, str]:
@@ -480,6 +496,7 @@ def build_graph(group: Sequence[FindingView]) -> Tuple[List[Dict[str, Any]], Lis
                 host=row.host,
                 env=env_label,
             )
+            _attach_exploit(nodes[vuln_id], row)
             edges.append(_edge(prev, vuln_id))
             outlet_ids.append(vuln_id)
             body = row.impact or row.oracle_scenario or row.description or row.title
@@ -554,6 +571,7 @@ def build_graph(group: Sequence[FindingView]) -> Tuple[List[Dict[str, Any]], Lis
             host=term.host,
             env=term.env,
         )
+        _attach_exploit(nodes[term_id], term)
         sources = last_ids or host_ids or [recon_id]
         for src in sources:
             edges.append(_edge(src, term_id))
@@ -618,6 +636,7 @@ def _finding_view(vuln: Vulnerability) -> FindingView:
         validation_verdict=vuln.last_validation_verdict,
         detected_at=vuln.first_detected or vuln.created_at,
         assigned_to=vuln.assigned_to,
+        exploit=score_vulnerability(vuln),
     )
 
 
@@ -653,19 +672,22 @@ def campaigns_from_views(rows: Sequence[FindingView]) -> List[Dict[str, Any]]:
             "session_id": sid,
             "attack_path_class": next((r.attack_path_class for r in ranked if r.attack_path_class), ""),
             "not_demonstrated": next((r.not_demonstrated for r in group if r.not_demonstrated), ""),
+            "priority": path_priority(r.exploit for r in group),
             "nodes": nodes,
             "edges": edges,
             "narrative": narrative,
         })
+    # Most exploitable first; the stable sort keeps the old order on ties.
+    campaigns.sort(key=lambda c: -c["priority"]["priority_score"])
     return campaigns
 
 
 def _juicy(rows: Sequence[FindingView]) -> List[Dict[str, Any]]:
     fruit = []
     for row in rows:
-        if row.severity not in {"critical", "high"}:
+        if row.severity not in {"critical", "high"} and not _exploitable(row):
             continue
-        if not (row.has_chain or row.attack_path_class):
+        if not (row.has_chain or row.attack_path_class or _exploitable(row)):
             continue
         fruit.append({
             "finding_id": row.id,
@@ -675,8 +697,13 @@ def _juicy(rows: Sequence[FindingView]) -> List[Dict[str, Any]]:
             "status": status_for_finding(row),
             "demonstrated": row.has_chain,
             "attack_path_class": row.attack_path_class,
+            "exploit_score": row.exploit.get("exploit_score"),
+            "priority_score": row.exploit.get("priority_score"),
+            "kev": bool(row.exploit.get("kev")),
         })
-    fruit.sort(key=lambda x: (-_SEV_RANK.get(x["severity"], 0), -int(x["demonstrated"])))
+    fruit.sort(key=lambda x: (
+        -(x["priority_score"] or 0), -_SEV_RANK.get(x["severity"], 0), -int(x["demonstrated"]),
+    ))
     return fruit[:40]
 
 

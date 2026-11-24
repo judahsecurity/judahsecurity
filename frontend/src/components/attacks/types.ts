@@ -20,6 +20,11 @@ export interface AttackGraphNode {
   asset_id?: number | null;
   host?: string;
   env?: string;
+  /** Vulnerability nodes only: exploitability-weighted priority. */
+  exploit_score?: number | null;
+  priority_score?: number | null;
+  exploit_tier?: string | null;
+  kev?: boolean;
 }
 
 export interface AttackGraphEdge {
@@ -36,6 +41,15 @@ export interface AttackNarrativeStep {
   finding_id?: number | null;
 }
 
+export interface AttackPathPriority {
+  exploit_score: number;
+  priority_score: number;
+  tier: string;
+  kev: boolean;
+  confidence: string;
+  drivers: { signal: string; detail: string; value?: number; informational?: boolean }[];
+}
+
 export interface AttackPath {
   id: string;
   title: string;
@@ -50,6 +64,7 @@ export interface AttackPath {
   session_id?: string | null;
   attack_path_class?: string;
   not_demonstrated?: string;
+  priority?: AttackPathPriority;
   nodes: AttackGraphNode[];
   edges: AttackGraphEdge[];
   narrative: AttackNarrativeStep[];
@@ -89,6 +104,9 @@ export interface AttackWorkspace {
     status: string;
     demonstrated: boolean;
     attack_path_class?: string;
+    exploit_score?: number | null;
+    priority_score?: number | null;
+    kev?: boolean;
   }[];
 }
 

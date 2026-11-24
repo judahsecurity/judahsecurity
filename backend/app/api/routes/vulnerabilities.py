@@ -200,6 +200,9 @@ def build_vuln_response(
     if not d.get("matched_at"):
         d["matched_at"] = (vuln.evidence[:200] if vuln.evidence else None)
 
+    from app.services.exploit_priority import score_vulnerability
+    d["exploit"] = score_vulnerability(vuln)
+
     from app.services.nuclei_detection import scanner_detection_for_vulnerability
     detection = scanner_detection_for_vulnerability(
         vuln, include_dumps=include_detection_dumps
@@ -313,7 +316,10 @@ def list_vulnerabilities(
     business_app_id: Optional[int] = Query(None, description="Filter by business application"),
     sort: Optional[str] = Query(
         None,
-        description="'risk' orders by severity-evaluation score; default orders by OPES priority",
+        description=(
+            "'risk' orders by severity-evaluation score; 'exploit' by exploitability-weighted "
+            "priority (OPES/Delphi, KEV, agent proof); default orders by OPES priority"
+        ),
     ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -367,7 +373,13 @@ def list_vulnerabilities(
             )
         )
 
-    if sort == "risk":
+    if sort == "exploit":
+        ordering = (
+            Vulnerability.exploit_priority.desc().nullslast(),
+            Vulnerability.exploit_score.desc().nullslast(),
+            Vulnerability.created_at.desc(),
+        )
+    elif sort == "risk":
         ordering = (
             Vulnerability.sev_score.desc().nullslast(),
             Vulnerability.oracle_opes_score.desc().nullslast(),

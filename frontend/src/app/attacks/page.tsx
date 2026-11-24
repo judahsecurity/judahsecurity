@@ -212,6 +212,7 @@ function AttacksPageInner() {
                         <SelectContent>
                           {workspace.paths.map((p) => (
                             <SelectItem key={p.id} value={p.id}>
+                              {p.priority ? `[${p.priority.exploit_score}${p.priority.kev ? ' KEV' : ''}] ` : ''}
                               {p.title}
                             </SelectItem>
                           ))}
@@ -265,6 +266,7 @@ function AttacksPageInner() {
                     ) : (
                       <Badge variant="outline">Inferred</Badge>
                     )}
+                    {path.priority ? <PathPriorityBadge priority={path.priority} /> : null}
                   </div>
                 </div>
 
@@ -387,10 +389,42 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
+const TIER_STYLE: Record<string, string> = {
+  critical: 'border-red-500/50 text-red-300',
+  high: 'border-orange-500/50 text-orange-300',
+  elevated: 'border-amber-500/50 text-amber-300',
+  moderate: 'border-yellow-500/40 text-yellow-200',
+};
+
+function PathPriorityBadge({ priority }: { priority: NonNullable<AttackPath['priority']> }) {
+  const scored = priority.drivers.filter((d) => !d.informational);
+  return (
+    <span
+      className="flex items-center gap-1.5"
+      title={priority.drivers.map((d) => d.detail).join('\n')}
+    >
+      <Badge variant="outline" className={cn('font-mono', TIER_STYLE[priority.tier] || '')}>
+        Exploitability {priority.exploit_score}
+      </Badge>
+      {priority.kev ? <Badge variant="outline" className="border-red-500/50 text-red-300">KEV</Badge> : null}
+      {scored[0] ? <span className="text-[11px] text-muted-foreground">{scored[0].detail}</span> : null}
+    </span>
+  );
+}
+
 function FindingList({
   rows,
 }: {
-  rows: { finding_id: number; title: string; host: string; severity: string; status?: string; demonstrated?: boolean }[];
+  rows: {
+    finding_id: number;
+    title: string;
+    host: string;
+    severity: string;
+    status?: string;
+    demonstrated?: boolean;
+    exploit_score?: number | null;
+    kev?: boolean;
+  }[];
 }) {
   return (
     <div className="space-y-2">
@@ -408,6 +442,8 @@ function FindingList({
           </div>
           <div className="ml-3 flex items-center gap-2">
             {row.demonstrated ? <Badge variant="outline" className="border-red-500/40 text-red-300">shown</Badge> : null}
+            {row.kev ? <Badge variant="outline" className="border-red-500/40 text-red-300">KEV</Badge> : null}
+            {row.exploit_score != null ? <Badge variant="outline" className="font-mono">{row.exploit_score}</Badge> : null}
             <Badge variant="outline">{row.severity}</Badge>
           </div>
         </Link>

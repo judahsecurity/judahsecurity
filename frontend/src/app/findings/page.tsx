@@ -208,6 +208,10 @@ interface Finding {
   sev_status?: 'triaged' | 'needs_analyst' | 'incomplete' | null;
   sev_pending?: number | null;
   business_app?: BusinessAppSummary | null;
+  /** Exploitability-weighted priority: OPES or Delphi, floored by KEV and agent proof. */
+  exploit_score?: number | null;
+  exploit_priority?: number | null;
+  exploit_tier?: string | null;
 }
 
 interface OracleEnrichment {
@@ -288,7 +292,7 @@ interface ContextualAssessment {
   missing_checks?: string[];
 }
 
-type SortMode = 'opes' | 'risk' | 'severity' | 'delphi' | 'recent' | 'cvss';
+type SortMode = 'opes' | 'exploit' | 'risk' | 'severity' | 'delphi' | 'recent' | 'cvss';
 
 const RISK_LEVEL_STYLE: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-400 border-red-500/30',
@@ -1889,6 +1893,14 @@ export default function FindingsPage() {
         const bScore = b.oracle?.opes_score ?? -1;
         if (aScore !== bScore) return bScore - aScore;
       }
+      if (sortMode === 'exploit') {
+        const aP = a.exploit_priority ?? -1;
+        const bP = b.exploit_priority ?? -1;
+        if (aP !== bP) return bP - aP;
+        const aE = a.exploit_score ?? -1;
+        const bE = b.exploit_score ?? -1;
+        if (aE !== bE) return bE - aE;
+      }
       if (sortMode === 'risk') {
         const aS = a.sev_score ?? -1;
         const bS = b.sev_score ?? -1;
@@ -2062,6 +2074,7 @@ export default function FindingsPage() {
                     Sort: OPES priority
                   </span>
                 </SelectItem>
+                <SelectItem value="exploit">Sort: Exploitability (OPES · KEV · proof)</SelectItem>
                 <SelectItem value="risk">Sort: Risk (L × I)</SelectItem>
                 <SelectItem value="severity">Sort: Scanner severity</SelectItem>
                 <SelectItem value="delphi">

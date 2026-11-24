@@ -329,6 +329,7 @@ async def startup_event():
     apply_scan_profile_migrations()
     apply_agent_ledger_migrations()
     apply_rbac_migrations()
+    start_exploit_priority_backfill()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -370,6 +371,27 @@ async def shutdown_event():
     if _evidence_cleanup_task is not None:
         _evidence_cleanup_task.cancel()
     logger.info("Shutting down application")
+
+
+def start_exploit_priority_backfill() -> None:
+    """Score findings that predate the exploit_* columns, off the request path."""
+    import threading
+
+    def _run():
+        from app.db.database import SessionLocal
+        from app.services.exploit_priority import backfill
+        db = SessionLocal()
+        try:
+            n = backfill(db)
+            if n:
+                logger.info("Exploit priority backfilled for %d findings", n)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Exploit priority backfill failed: %s", exc)
+            db.rollback()
+        finally:
+            db.close()
+
+    threading.Thread(target=_run, name="exploit-priority-backfill", daemon=True).start()
 
 
 def apply_oracle_migrations():
@@ -687,6 +709,13 @@ def apply_oracle_migrations():
         "CREATE INDEX IF NOT EXISTS ix_vuln_sev_level  ON vulnerabilities (sev_level)",
         "CREATE INDEX IF NOT EXISTS ix_vuln_sev_status ON vulnerabilities (sev_status)",
         "CREATE INDEX IF NOT EXISTS ix_vuln_business_app ON vulnerabilities (business_app_id)",
+        # ── Exploitability-weighted priority (app.services.exploit_priority) ──
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS exploit_score INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS exploit_priority INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS exploit_tier VARCHAR(20)",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_exploit_score    ON vulnerabilities (exploit_score)",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_exploit_priority ON vulnerabilities (exploit_priority)",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_exploit_tier     ON vulnerabilities (exploit_tier)",
         "CREATE INDEX IF NOT EXISTS ix_assets_business_app ON assets (business_app_id)",
 
         # ── Jira integration schema migrations ────────────────────────────────

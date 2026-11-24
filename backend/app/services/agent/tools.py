@@ -4212,15 +4212,30 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     except (ValueError, AttributeError):
                         pass
             
+            if status:
+                query = query.filter(Vulnerability.status == str(status).lower())
+
             # Apply CVE filter
             if cve_id:
                 query = query.filter(Vulnerability.cve_id.ilike(f"%{cve_id}%"))
             
-            # Limit results
-            vulns = query.limit(limit).all()
+            # Most exploitable first: OPES / Delphi likelihood floored by
+            # VulnCheck/CISA KEV and demonstrated proof (exploit_priority).
+            vulns = (
+                query.order_by(
+                    Vulnerability.exploit_priority.desc().nullslast(),
+                    Vulnerability.exploit_score.desc().nullslast(),
+                    Vulnerability.id.desc(),
+                )
+                .limit(limit)
+                .all()
+            )
             
+            from app.services.exploit_priority import score_vulnerability
+
             result = []
             for vuln in vulns:
+                exploit = score_vulnerability(vuln)
                 result.append({
                     "id": vuln.id,
                     "title": vuln.title,
@@ -4230,11 +4245,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "cwe_id": vuln.cwe_id,
                     "status": vuln.status.value if vuln.status else None,
                     "asset": vuln.asset.value if vuln.asset else None,
+                    "exploit_score": exploit["exploit_score"],
+                    "kev": exploit["kev"],
                 })
-            
-            return f"Found {len(result)} vulnerabilities:\n" + "\n".join(
-                f"- [{v['severity'].upper()}] {v['title']} ({v['cve_id'] or 'No CVE'}) on {v['asset']}"
-                for v in result
+
+            def _line(v):
+                score = f" exploit={v['exploit_score']}" if v["exploit_score"] is not None else ""
+                kev = " KEV" if v["kev"] else ""
+                return (f"- [{(v['severity'] or 'unknown').upper()}{score}{kev}] {v['title']} "
+                        f"({v['cve_id'] or 'No CVE'}) on {v['asset']}")
+
+            return f"Found {len(result)} vulnerabilities (most exploitable first):\n" + "\n".join(
+                _line(v) for v in result
             )
         except Exception as e:
             logger.exception("query_vulnerabilities failed")

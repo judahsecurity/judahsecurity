@@ -164,3 +164,7 @@ __all__ = [
 from app.services.severity_dirty import register as _register_severity_dirty  # noqa: E402
 
 _register_severity_dirty()
+
+from app.services.exploit_priority import register as _register_exploit_priority  # noqa: E402
+
+_register_exploit_priority()

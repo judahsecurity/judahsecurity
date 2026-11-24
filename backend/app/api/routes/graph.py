@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.models.user import User
+from app.services.exploit_priority import EXPLOITABLE_THRESHOLD, tier_for
 from app.services.graph_service import get_graph_service
 from app.core.config import settings
 
@@ -217,6 +218,21 @@ async def get_asset_relationships(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _path_weight(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Exploitability weight of a path from its Vulnerability nodes' scores
+    (written by graph sync from OPES, Delphi/VulnCheck KEV and agent proof)."""
+    vulns = [n.get("properties") or {} for n in nodes if "Vulnerability" in (n.get("labels") or [])]
+    if not vulns:
+        return {"exploit_score": 0, "priority_score": 0, "tier": "none", "kev": False}
+    exploit = max(int(v.get("exploit_score") or 0) for v in vulns)
+    return {
+        "exploit_score": exploit,
+        "priority_score": max(int(v.get("priority_score") or 0) for v in vulns),
+        "tier": tier_for(exploit),
+        "kev": any(bool(v.get("kev")) for v in vulns),
+    }
+
+
 @router.get("/attack-paths")
 async def get_attack_paths(
     source_id: Optional[int] = None,
@@ -263,13 +279,20 @@ async def get_attack_paths(
             # Find paths to vulnerable assets
             query = """
             MATCH path = (entry:Asset {organization_id: $org_id})-[*1..4]->(vuln:Vulnerability)
-            WHERE vuln.severity IN ['critical', 'high']
+            WHERE coalesce(vuln.status, 'open') IN ['open', 'in_progress']
+              AND (vuln.severity IN ['critical', 'high']
+                   OR coalesce(vuln.exploit_score, 0) >= $min_exploit
+                   OR vuln.kev = true)
               AND all(n IN nodes(path) WHERE
                   n.organization_id IS NULL OR n.organization_id = $org_id)
             RETURN path
+            ORDER BY coalesce(vuln.priority_score, 0) DESC,
+                     coalesce(vuln.exploit_score, 0) DESC,
+                     length(path) ASC
             LIMIT $max_paths
             """
-            params = {"org_id": org_id, "max_paths": max_paths}
+            params = {"org_id": org_id, "max_paths": max_paths,
+                      "min_exploit": EXPLOITABLE_THRESHOLD}
         
         results = graph.query(query, params)
         
@@ -300,8 +323,10 @@ async def get_attack_paths(
                 paths.append({
                     "nodes": nodes,
                     "relationships": relationships,
+                    "weight": _path_weight(nodes),
                 })
-        
+
+        paths.sort(key=lambda p: -p["weight"]["priority_score"])
         return {"paths": paths}
     except Exception as e:
         logger.error(f"Attack path query error: {e}")

@@ -26,6 +26,7 @@ from app.models.asset import Asset, AssetType
 from app.models.vulnerability import Vulnerability
 from app.models.port_service import PortService
 from app.models.technology import Technology
+from app.services.exploit_priority import EXPLOITABLE_THRESHOLD, score_vulnerability
 from app.services.graph_identity import canonical_script_url, script_key
 
 logger = logging.getLogger(__name__)
@@ -555,6 +556,7 @@ class GraphService:
         vulnerabilities = getattr(asset, 'vulnerabilities', None) or []
         for vuln in vulnerabilities:
             desc = (vuln.description or getattr(vuln, 'evidence', None) or vuln.title or "")[:2000]
+            exploit = score_vulnerability(vuln)
             session.run("""
                 MATCH (a:Asset {asset_id: $asset_id})
                 MERGE (v:Vulnerability {vuln_id: $vuln_id})
@@ -566,7 +568,13 @@ class GraphService:
                     v.status = $status,
                     v.template_id = $template_id,
                     v.detected_by = $detected_by,
-                    v.organization_id = $org_id
+                    v.organization_id = $org_id,
+                    v.exploit_score = $exploit_score,
+                    v.priority_score = $priority_score,
+                    v.exploit_tier = $exploit_tier,
+                    v.exploit_basis = $exploit_basis,
+                    v.kev = $kev,
+                    v.cve_id = $cve_id
                 MERGE (a)-[:HAS_VULNERABILITY]->(v)
             """, {
                 "asset_id": asset.id,
@@ -579,6 +587,12 @@ class GraphService:
                 "template_id": vuln.template_id,
                 "detected_by": vuln.detected_by,
                 "org_id": org_id,
+                "exploit_score": exploit["exploit_score"],
+                "priority_score": exploit["priority_score"],
+                "exploit_tier": exploit["tier"],
+                "exploit_basis": exploit["basis"],
+                "kev": exploit["kev"],
+                "cve_id": vuln.cve_id,
             })
             if technologies:
                 session.run("""
@@ -1273,7 +1287,7 @@ class GraphService:
         if target_asset_id:
             # Find paths to a specific asset
             cypher = """
-                MATCH path = (start:Asset)-[*1..""" + str(max_depth) + """]->(target:Asset {asset_id: $target_id})
+                MATCH path = (start:Asset)-[*1..""" + str(max(1, min(int(max_depth), 6))) + """]->(target:Asset {asset_id: $target_id})
                 WHERE start.organization_id = $org_id
                   AND target.organization_id = $org_id
                   AND (target)-[:HAS_VULNERABILITY]->(:Vulnerability)
@@ -1286,18 +1300,25 @@ class GraphService:
         else:
             # Find paths to any vulnerable asset
             cypher = """
-                MATCH path = (start:Asset)-[*1..""" + str(max_depth) + """]->(target:Asset)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                MATCH path = (start:Asset)-[*1..""" + str(max(1, min(int(max_depth), 6))) + """]->(target:Asset)-[:HAS_VULNERABILITY]->(v:Vulnerability)
                 WHERE start.organization_id = $org_id
                   AND target.organization_id = $org_id
-                  AND v.severity IN ['critical', 'high']
+                  AND coalesce(v.status, 'open') IN ['open', 'in_progress']
+                  AND (v.severity IN ['critical', 'high']
+                       OR coalesce(v.exploit_score, 0) >= $min_exploit
+                       OR v.kev = true)
                 RETURN path,
                        [node IN nodes(path) | node.value] AS assets,
                        [rel IN relationships(path) | type(rel)] AS relationships,
                        v.cve_id AS target_cve,
-                       v.severity AS severity
+                       v.severity AS severity,
+                       coalesce(v.exploit_score, 0) AS exploit_score,
+                       coalesce(v.priority_score, 0) AS priority_score,
+                       coalesce(v.kev, false) AS kev
+                ORDER BY priority_score DESC, length(path) ASC
                 LIMIT 20
             """
-            params = {"org_id": organization_id}
+            params = {"org_id": organization_id, "min_exploit": EXPLOITABLE_THRESHOLD}
         
         return self.query(cypher, params)
     
