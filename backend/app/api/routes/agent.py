@@ -1348,6 +1348,19 @@ async def get_session_chain(
     return chain
 
 
+@router.get("/sessions/{session_id}/attack-graph")
+async def get_session_attack_graph(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Entity-centric attack path for a session: Internet → host → endpoint →
+    action → capability, with per-node validation status and step evidence."""
+    _owned_conversation(db, session_id, current_user)
+    chain = evograph.get_session_chain(session_id)
+    return chain.get("attack_graph") or {"nodes": [], "edges": [], "meta": {}}
+
+
 # =============================================================================
 # WEBSOCKET ENDPOINT
 # =============================================================================

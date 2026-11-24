@@ -2935,6 +2935,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getAgentAttackGraph(sessionId: string) {
+    const response = await this.client.get(`/agent/sessions/${sessionId}/attack-graph`);
+    return response.data;
+  }
+
   /**
    * Build a WebSocket URL for the agent endpoint.
    * Same-origin through nginx in production; localhost:8000 only for `next dev`.

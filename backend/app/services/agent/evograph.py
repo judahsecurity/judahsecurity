@@ -457,7 +457,7 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
 
                 prev_step_id = step_id
 
-            return {
+            result: Dict[str, Any] = {
                 "nodes": nodes,
                 "edges": edges,
                 "meta": {
@@ -468,6 +468,13 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
                     "final_phase": chain.get("final_phase"),
                 },
             }
+            try:
+                from app.services.agent.attack_graph import build_attack_graph
+
+                result["attack_graph"] = build_attack_graph(result)
+            except Exception as e:
+                logger.debug(f"EvoGraph attack_graph build error: {e}")
+            return result
 
     except Exception as e:
         logger.debug(f"EvoGraph get_session_chain error: {e}")
