@@ -27,6 +27,40 @@ FORM_INVENTORY_JS = """els => els.slice(0, 30).map((form, dom_index) => {
 })"""
 
 
+class AssessmentProxyError(RuntimeError):
+    """The configured assessment proxy answered instead of the target."""
+
+
+def proxy_error_page(status: int | None, title: str, headers: dict | None) -> bool:
+    """True when a 5xx page came from the assessment proxy, not the target.
+
+    Chromium is routed through AEGIS_ASSESSMENT_PROXY_URL (Caido). When the
+    proxy cannot complete the upstream request it serves its own error page.
+    Treating that page as the target's response would record a fake 500 and
+    feed the proxy's own links and forms into the application map.
+    """
+    from app.services.agent.assessment_proxy import assessment_proxy_url
+
+    if status is None or status < 500 or not assessment_proxy_url():
+        return False
+    headers = {str(k).lower(): str(v).lower() for k, v in (headers or {}).items()}
+    return (
+        "caido" in (title or "").lower()
+        or "caido" in headers.get("server", "")
+        or any(name.startswith("x-caido") for name in headers)
+    )
+
+
+def proxy_error_message(status: int | None, url: str) -> str:
+    return (
+        f"The assessment proxy (AEGIS_ASSESSMENT_PROXY_URL) returned its own HTTP {status} "
+        f"page for {urlsplit(url).path or '/'} instead of the target's response. Check that "
+        "the proxy has an active project and can reach the target (DNS, outbound network, "
+        "upstream TLS). Kickoff and execute_deep_crawl connect directly, so they can succeed "
+        "while every proxied browser request fails."
+    )
+
+
 def origin(url: str) -> str:
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
@@ -742,6 +776,10 @@ async def check_browser(
                     try:
                         response = await page.goto(page_url, wait_until="domcontentloaded", timeout=20_000)
                         assert_in_scope(page.url, allowed_origins)
+                        page_title = (await page.title())[:200]
+                        if response is not None and proxy_error_page(
+                                response.status, page_title, response.headers):
+                            raise AssessmentProxyError(proxy_error_message(response.status, page_url))
                         hrefs = await page.locator("a[href]").evaluate_all(
                             f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
                         )
@@ -753,13 +791,17 @@ async def check_browser(
                             "url": page_url,
                             "final_path": urlsplit(page.url).path or "/",
                             "status": response.status if response else None,
-                            "title": (await page.title())[:200],
+                            "title": page_title,
                             "links": links,
                             "link_query_inputs": _link_query_inputs(hrefs, [expected_origin]),
                             "forms": forms,
                             "requests": requests[request_start:],
                         })
                         queue.extend(link for link in links if link not in visited and link not in queue)
+                    except AssessmentProxyError:
+                        # Every later page goes through the same broken proxy;
+                        # fail the operation instead of recording fake pages.
+                        raise
                     except Exception as exc:
                         pages.append({"url": page_url, "error": type(exc).__name__})
                 result = {
@@ -779,6 +821,9 @@ async def check_browser(
                         or not blocked_marker_navigation):
                     raise
                 response = None
+            if response is not None and proxy_error_page(
+                    response.status, await page.title(), response.headers):
+                raise AssessmentProxyError(proxy_error_message(response.status, final_target))
             xhr_actions_replayed = 0
             if operation == "check_xhr_xss" and xhr_actions:
                 from .browser_actions import allowed_discovery_control

@@ -744,11 +744,24 @@ class AgentOrchestrator:
                 else:
                     append_action(active_run_id.get(), queue_action_id, "started",
                                   "queue_early_interceptor", target=seed)
-                    queue_coro = queue_early_pentester_crawl(
-                        seed,
-                        session_id=session_id,
-                        organization_id=org_id,
-                    )
+                    # Under an operator method policy (always on in Prowl mode)
+                    # the remote Interceptor worker cannot enforce GET/HEAD-only
+                    # and approved write paths, and execute_interceptor is
+                    # denied anyway. Queuing it would let a crawl that clicks
+                    # and submits forms run outside the policy, so skip only
+                    # this queue; recon streams below still start, and the
+                    # pipeline uses the policy-aware execute_deep_crawl.
+                    if getattr(self.tool_manager, "_scoped_policy_applied", False):
+                        async def _skipped_interceptor_queue() -> dict:
+                            return {"queued": False, "job_id": None,
+                                    "note": "skipped_operator_method_policy"}
+                        queue_coro = _skipped_interceptor_queue()
+                    else:
+                        queue_coro = queue_early_pentester_crawl(
+                            seed,
+                            session_id=session_id,
+                            organization_id=org_id,
+                        )
                     if no_scanners:
                         kickoff, queued = await asyncio.wait_for(
                             asyncio.gather(kickoff_coro, queue_coro, return_exceptions=True),
@@ -785,8 +798,11 @@ class AgentOrchestrator:
                     logger.warning("early interceptor queue failed: %s", queued)
                     queued = {}
                 if not acr_seed and not cve_only:
+                    policy_skip = (isinstance(queued, dict)
+                                   and queued.get("note") == "skipped_operator_method_policy")
                     append_action(
                         active_run_id.get(), queue_action_id,
+                        "skipped" if policy_skip else
                         "completed" if isinstance(queued, dict) and queued.get("job_id") else "failed",
                         "queue_early_interceptor", target=seed,
                         detail="queued" if isinstance(queued, dict) and queued.get("job_id")
