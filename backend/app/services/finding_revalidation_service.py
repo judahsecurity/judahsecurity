@@ -4,6 +4,8 @@ Native finding revalidation — replay the original detector / reproduction step
 Used by the scanner worker for on-demand "Validate finding" without requiring
 the Aegis Vanguard Docker image. Strategies:
 
+  0. Logical sanity   → deterministic service/port mismatch check (e.g. an LDAP
+                        template that fired on HTTPS:443) before any replay
   1. Nuclei findings  → re-run the matched template against the live target
   2. Port / network   → TCP (and light HTTP) probes of claimed host:ports
   3. Agent / manual   → parse steps_to_reproduce, evidence, and description for
@@ -466,6 +468,26 @@ async def _revalidate_nuclei(finding: dict) -> Optional[dict[str, Any]]:
 _APPLICATION_DETECTORS = frozenset({"agent", "llm_red_team", "manual"})
 
 
+def _logical_sanity_verdict(finding: dict) -> Optional[dict[str, Any]]:
+    from asm_scanner_core.finding_sanity import logical_sanity_check
+
+    # Only template/signature detections: free-text agent, manual and secret
+    # findings often name a service ("Redis password in JS") without claiming
+    # that service listens on the port.
+    detected_by = (finding.get("detected_by") or "").lower()
+    source_kind = (finding.get("source_kind") or "").lower()
+    if (not finding.get("template_id") or detected_by in _APPLICATION_DETECTORS
+            or source_kind in ("secret", "manual")):
+        return None
+    target = str(finding.get("target") or finding.get("asset") or "")
+    if not target:
+        return None
+    verdict = logical_sanity_check(finding, target)
+    if verdict:
+        verdict["method"] = "logical_sanity"
+    return verdict
+
+
 def _application_level(detected_by: str, source_kind: str) -> bool:
     """Findings whose truth depends on application behavior, not reachability."""
     return detected_by in _APPLICATION_DETECTORS
@@ -479,6 +501,13 @@ async def revalidate_finding(finding: dict) -> dict[str, Any]:
     """
     detected_by = (finding.get("detected_by") or "").lower()
     source_kind = (finding.get("source_kind") or "").lower()
+
+    # 0) A non-HTTP service claimed on an HTTP(S) port is a protocol false
+    #    positive no replay can redeem; it also names the template's flaw.
+    sanity = _logical_sanity_verdict(finding)
+    if sanity:
+        sanity.update(detected_by=detected_by, source_kind=source_kind)
+        return sanity
 
     # 1) Nuclei / template-based detectors — replay the exact template when possible.
     if finding.get("template_id") or finding.get("template_yaml"):

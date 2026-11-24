@@ -22,8 +22,15 @@ Gaps (Vanguard `validate_finding.py` / `finding_lifecycle.py` vs Prowl
 `independent_verify.py`, `proof_policy.py`, `finding_gate.py`,
 `external_candidates.py`):
 
-1. Deterministic service/port logical-sanity auto-FP (`_logical_sanity_check`, `sanity_flags`) — **MISSING**.
-2. `template_yaml` → `template_logic_issue` diagnosis that drives `NUCLEI_AUTO_REFINE_ON_FP` and detection feedback in `scanner_worker` — **MISSING**.
+1. Deterministic service/port logical-sanity auto-FP — **closed**: moved to
+   `asm_scanner_core/finding_sanity.py`, used by the native validator
+   (`finding_revalidation_service`, template detections only) and by
+   `validate_finding.py`. It also yields `template_logic_issue` for the
+   protocol-mismatch case, which now reaches detection feedback and
+   `NUCLEI_AUTO_REFINE_ON_FP` without Vanguard.
+2. LLM `template_logic_issue` diagnosis for other template flaws (weak banner or
+   version matchers) — still only in `validate_finding.py`. In `auto` mode it
+   ran only when native replay was inconclusive.
 3. Verification of non-HTTP findings (host:port services, secrets, manual steps) and nuclei re-runs — **MISSING** (pc rejects non-HTTP targets).
 4. `still_open` (remediated vs never real), `confidence`, verifier `recommended_severity`/downgrade — **MISSING** (Prowl only caps severity).
 5. Read-only verification — Prowl intake mutates the session and may publish.
