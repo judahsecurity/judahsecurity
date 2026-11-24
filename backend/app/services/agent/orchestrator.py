@@ -92,9 +92,20 @@ def _operator_forbidden_tools(notes: List[str]) -> frozenset[str]:
     text = " ".join(str(note or "") for note in notes)
     forbidden: set[str] = set()
     scanner_tools = {
-        "execute_nuclei", "execute_httpx", "execute_nikto", "execute_ffuf",
-        "execute_feroxbuster", "execute_katana", "execute_wpscan",
-        "execute_arjun", "execute_cmseek", "execute_xsstrike",
+        "create_scan", "execute_llm_red_team", "execute_garak",
+        "execute_nuclei", "execute_naabu", "execute_httpx", "execute_subfinder",
+        "execute_subfaster", "execute_dnsx", "execute_katana", "execute_tldfinder",
+        "execute_atlas", "execute_argus", "execute_hermes", "execute_themis",
+        "execute_janus", "execute_waybackurls", "execute_nmap", "execute_masscan",
+        "execute_ffuf", "execute_amass", "execute_whatweb", "execute_knockpy",
+        "execute_gau", "execute_kiterunner", "execute_wappalyzer", "execute_crtsh",
+        "execute_crt_name", "execute_schemathesis", "execute_astf", "execute_sqlmap",
+        "execute_nikto", "execute_wafw00f", "execute_testssl", "execute_sslyze",
+        "execute_arjun", "execute_wpscan", "execute_xsstrike", "execute_dalfox",
+        "execute_commix", "execute_hydra", "execute_feroxbuster",
+        "execute_gitleaks", "execute_retirejs", "execute_jwt", "execute_interactsh",
+        "execute_semgrep", "execute_trivy", "execute_cmseek",
+        "scan_js_urls_for_secrets", "scan_assigned_js",
     }
     for match in re.finditer(
         r"\b(?:no|avoid|skip|without|disable|do not|don't)\b\s+([^.;\n]{1,400})",
@@ -659,6 +670,8 @@ class AgentOrchestrator:
         initial_note = _initial_operator_note(str(latest_message or ""))
         no_scanners, no_directories = _operator_recon_limits([str(latest_message or "")])
         forbidden_tools = _operator_forbidden_tools([str(latest_message or "")])
+        no_scanners = no_scanners or "execute_nuclei" in forbidden_tools
+        no_directories = no_directories or no_scanners
         initial_constraints = ([initial_note or str(latest_message)]
                                if initial_note or no_scanners or no_directories else [])
         
