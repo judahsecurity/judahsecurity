@@ -36,6 +36,46 @@ _FOLLOWUP_EXCLUDED_MODES = frozenset({"recon", "coverage_followup", "cms_followu
 def _tool_output_max_chars() -> int:
     return getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000)
 
+
+def _bounded_json(result: Any, limit: Optional[int] = None) -> str:
+    """Serialize a tool result within the output cap and keep it valid JSON.
+
+    Slicing serialized JSON leaves an unparseable fragment. Long strings are
+    shortened instead (marked ``_truncated``) until the document fits.
+    """
+    limit = int(limit or _tool_output_max_chars() or 20000)
+    text = json.dumps(result, default=str)
+    if len(text) <= limit:
+        return text
+
+    def shrink(value: Any, cap: int) -> Any:
+        if isinstance(value, str) and len(value) > cap:
+            return value[:cap] + f"... [{len(value) - cap} chars truncated]"
+        if isinstance(value, dict):
+            return {k: shrink(v, cap) for k, v in value.items()}
+        if isinstance(value, list):
+            items = [shrink(v, cap) for v in value[:200]]
+            if len(value) > 200:
+                items.append(f"... [{len(value) - 200} items truncated]")
+            return items
+        return value
+
+    cap = 4000
+    while cap >= 64:
+        shrunk = shrink(json.loads(text), cap)
+        if isinstance(shrunk, dict):
+            shrunk["_truncated"] = True
+        candidate = json.dumps(shrunk, default=str)
+        if len(candidate) <= limit:
+            return candidate
+        cap //= 2
+    size = max(0, limit - 64)
+    while True:
+        fallback = json.dumps({"_truncated": True, "preview": text[:size]})
+        if len(fallback) <= limit or size == 0:
+            return fallback
+        size = max(0, size - (len(fallback) - limit) - 1)
+
 logger = logging.getLogger(__name__)
 
 
@@ -517,6 +557,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_csrf_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_auth_login_path = SessionValue(lambda: "")
+    # Operator-chosen verification strictness (verification_profile.py).
+    _verification_strictness = SessionValue(lambda: "standard")
+    _auto_approved_body_paths = SessionValue(list)
     _scoped_assessment_started = SessionValue(lambda: False)
     _scoped_assessment_partial_reason = SessionValue(lambda: "")
     _proof_engine = SessionValue(lambda: None)
@@ -4583,11 +4626,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 })
 
             ranked.sort(key=lambda item: item["score"], reverse=True)
-            return json.dumps({
+            return _bounded_json({
                 "target_filter": focus or None,
                 "ranked_count": len(ranked[:limit]),
                 "ranked_assets": ranked[:limit],
-            }, indent=2, default=str)[:_tool_output_max_chars()]
+            })
         except Exception as e:
             logger.exception("rank_attack_surface failed")
             return f"Error ranking attack surface: {e}"
@@ -4836,7 +4879,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
         self._engagement_brain = brain.to_dict()
-        return json.dumps(result, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     async def web_search(self, query: str, max_results: int = 5) -> str:
         """
@@ -5479,8 +5522,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # it reach (and fail) the medium+ proof gate.
         from app.services.agent.finding_gate import cap_version_only_cve_severity
 
-        severity, cve_capped = cap_version_only_cve_severity(
-            f"{title or ''} {cve_id or ''}".strip(), description, severity)
+        # A CVE the verifier confirmed (e.g. through replay_reproduction) is no
+        # longer version-only, so keep the requested severity.
+        from app.services.agent.independent_verify import verify_receipt_key as _vrk
+
+        _confirmed = (getattr(self, "_verify_receipts", None) or {}).get(_vrk(title or "", target or ""))
+        if _confirmed and _confirmed.get("verdict") == "confirmed":
+            cve_capped = False
+        else:
+            severity, cve_capped = cap_version_only_cve_severity(
+                f"{title or ''} {cve_id or ''}".strip(), description, severity)
         if cve_capped and not not_demonstrated:
             not_demonstrated = ("Vulnerable behavior not demonstrated; severity capped "
                                 "at low for a version-range match.")
@@ -5520,6 +5571,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # finding so a SAST lead cannot be filed as high/critical without a
         # runtime proof.
         from app.services.agent.finding_gate import (
+            cap_reproduced_severity,
             cap_source_verified_severity,
             classify_verification_level,
         )
@@ -5530,11 +5582,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             detected_by="agent",
             specialist=kwargs.get("specialist"),
             evidence=evidence,
+            proof_kind=getattr(verified, "confirmed_proof_kind", "") if verified is not None else None,
         )
         requested_severity = (severity or "info").strip().lower()
         severity, severity_capped = cap_source_verified_severity(
             severity, verification_level
         )
+        if not severity_capped:
+            severity, severity_capped = cap_reproduced_severity(severity, verification_level)
 
         # Normalize target for asset lookup: strip scheme and path
         target_clean = (target or "").strip()
@@ -5619,7 +5674,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                            "verification_level": verification_level,
                            "severity_cap": {"requested": requested_severity,
                                             "published": severity,
-                                            "reason": "source_verified findings are "
+                                            "reason": ("reproduced findings are capped at high "
+                                                       "without a class-specific proof")
+                                            if verification_level == "reproduced" else
+                                            "source_verified findings are "
                                             "capped at medium without a runtime proof"}
                            if severity_capped else None,
                            "trace": trace_metadata},
@@ -6156,7 +6214,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         asset_saved = persist_js_review_safe(
             organization_id, current_session_id.get(), url, summary, evidence_id,
         )
-        return json.dumps({
+        return _bounded_json({
             "success": True, "coverage_cell_id": updated["id"],
             "evidence_id": evidence_id, "asset_review_saved": asset_saved,
             "summary": summary,
@@ -6165,7 +6223,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "regex_hints": result.get("regex_hints") or [],
                 "client_signing_findings": result.get("client_signing_findings") or [],
             },
-        }, default=str)[:_tool_output_max_chars()]
+        })
 
     async def scan_assigned_js_dependency(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -6835,7 +6893,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 for h in result.hits[:200]
             ],
         }
-        return json.dumps(payload, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(payload)
 
     async def search_memory(
         self,
@@ -6864,10 +6922,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             target=(target or None),
             limit=max(1, min(int(limit or 5), 10)),
         )
-        return json.dumps(
+        return _bounded_json(
             {"query": query, "target": target, "count": len(rows), "results": rows},
-            indent=2,
-        )[:_tool_output_max_chars()]
+        )
 
     async def store_memory(
         self,
@@ -7231,7 +7288,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "bodies with search_evidence, and cite the evidence_id in "
                 "submit_finding_candidate instead of pasting stdout."
             )
-        return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+        return _bounded_json(result)
 
     async def sandbox_shell(
         self,
@@ -7270,7 +7327,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "with read_evidence, search with search_evidence, cite the IDs in "
                 "submit_finding_candidate."
             )
-        return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+        return _bounded_json(result)
 
     def _probe_scope_hosts(self, allowed_hosts: Optional[str]) -> List[str]:
         hosts: List[str] = []
@@ -7313,7 +7370,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             for row in rows:
                 parts = urlsplit(row["url"])
                 row["url"] = urlunsplit(parts._replace(query="", fragment=""))
-        return json.dumps({
+        return _bounded_json({
             "ok": True,
             "count": len(rows),
             "origin": origin,
@@ -7329,7 +7386,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "No replayable GET/HEAD request was captured. Browser traffic metadata and XHR capture "
                 "are separate inventories; inspect an observed same-origin link or try a different page."
             ),
-        }, indent=2)[:_tool_output_max_chars()]
+        })
 
     async def plan_intruder_mutations(
         self,
@@ -7363,7 +7420,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "Review the queue, then call run_intruder_batch with the same filters. "
             "Execution requires operator confirmation."
         )
-        return json.dumps(plan, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(plan)
 
     async def run_intruder_batch(
         self,
@@ -7417,7 +7474,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             # At most two comparisons per second; scope checks still run per request.
             await asyncio.sleep(0.5)
 
-        return json.dumps({
+        return _bounded_json({
             "ok": True,
             "dry_run": False,
             "executed": len(results),
@@ -7425,7 +7482,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "allow_state_change": bool(allow_state_change),
             "results": results,
             "note": "A response difference is a lead, not a confirmed finding.",
-        }, indent=2, default=str)[:_tool_output_max_chars()]
+        })
 
     async def mutate_captured_request(
         self,
@@ -7544,7 +7601,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     result["source_sample_ref"] = source_ref
                     if source_capture_id:
                         result["source_capture_id"] = source_capture_id
-                    return json.dumps(result, default=str)[:_tool_output_max_chars()]
+                    return _bounded_json(result)
             except (TypeError, ValueError):
                 pass
             return compared
@@ -7561,7 +7618,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 hypothesis_id=hypothesis_id,
             )
             exchange.pop("_body_text", None)
-            return json.dumps({
+            return _bounded_json({
                 "ok": True,
                 "source_sample_ref": source_ref,
                 "source_capture_id": source_capture_id,
@@ -7570,7 +7627,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "sent": mutant,
                 "response": exchange.get("response"),
                 "request": exchange.get("request"),
-            }, indent=2)[:_tool_output_max_chars()]
+            })
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"mutate send failed: {exc}"})
 
@@ -7596,7 +7653,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 )
             blob = blob or (getattr(self, "_fallback_target", None) or "")
         result = generate_mutations(kind, blob, count=count)
-        return json.dumps(result, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     def _js_urls_from_map(self) -> List[str]:
         cmap = getattr(self, "_capability_map", None) or {}
@@ -7662,7 +7719,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 cmap["js_files"] = js[:160]
                 self._capability_map = cmap
                 result["capability_map"] = cmap
-        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     async def extract_js_endpoints(
         self,
@@ -7712,7 +7769,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             self._capability_map = merged
             result["ingested"] = len(to_ingest)
             result["capability_map"] = merged
-        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     async def scan_js_sinks(self, urls: str = "", **kwargs: Any) -> str:
         """Scan first-party JS for DOM sinks (eval, innerHTML, postMessage, location)."""
@@ -7772,7 +7829,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 cell for cell in before.coverage_cells
                 if cell.get("id") not in prior_ids and cell.get("test_type") == "dom_xss"
             ])
-        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     async def fingerprint_api(self, **kwargs: Any) -> str:
         """Fingerprint API hosts/tech from captured Interceptor/crawl samples (no Caido/Codex)."""
@@ -7784,7 +7841,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             target = str(cmap.get("target") or "")
         target = target or (getattr(self, "_fallback_target", None) or "")
         result = fingerprint_from_map(cmap if isinstance(cmap, dict) else {}, target=target)
-        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     async def fingerprint_passive_stack(self, url: str = "", **kwargs: Any) -> str:
         """GET the homepage and extract CMS/plugin/server versions (browser-visible only)."""
@@ -8007,7 +8064,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if not str(raw).strip():
             raw = getattr(self, "_fallback_target", None) or ""
         result = await probe_anonymous_pull(str(raw).strip())
-        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     async def compact_context(self) -> str:
         """Request CAI-style /compact: collapse older execution-trace steps next think."""
@@ -9971,7 +10028,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "success", "error", "callback_observed", "poll_attempts",
                 "evidence_ids", "proof",
             ) if key in result}
-        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     async def read_evidence(self, evidence_id: str, offset: int = 0, limit: int = 6000) -> str:
         """Read a redacted execution artifact without losing text beyond the preview."""
@@ -10110,7 +10167,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 )
                 self._engagement_brain = brain.to_dict()
                 result["engagement_brain"] = self._engagement_brain
-        return json.dumps(result, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(result)
 
     def _resolve_request_cookies(self, headers, cookies, use_auth_session, url: str = ""):
         # Compatibility helper; the live transport uses the jar itself for redirects.
@@ -10383,7 +10440,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "response": exchange["response"],
                 "note": note,
             }
-            return json.dumps(out, indent=2)[:_tool_output_max_chars()]
+            return _bounded_json(out)
         except Exception as exc:
             return f"Error replaying request: {exc}"
 
@@ -13096,7 +13153,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if not output:
             return "Error: provide domain= and/or emails= to check."
 
-        return json.dumps(output, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(output)
 
     # ------------------------------------------------------------------
     # DNS Threat / DNSBL check (Spamhaus + multi-DNSBL, keyless)
@@ -13137,7 +13194,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "listed_targets": listed,
             "details": out,
         }
-        return json.dumps(summary, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(summary)
 
     # ------------------------------------------------------------------
     # URLhaus active lookup (abuse.ch, free key or keyless)
@@ -13186,7 +13243,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "malicious_targets": list(malicious.keys()),
             "details": results,
         }
-        return json.dumps(summary, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(summary)
 
     # ------------------------------------------------------------------
     # BGP / ASN lookup (RIPEstat, keyless)
@@ -13255,4 +13312,4 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "asn_distribution": asn_distribution,
             "details": results,
         }
-        return json.dumps(summary, indent=2)[:_tool_output_max_chars()]
+        return _bounded_json(summary)

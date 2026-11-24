@@ -7,6 +7,7 @@ admin, hunter, verifier, or finding-ingestion credentials.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from urllib.parse import parse_qsl, urlsplit
 
@@ -15,6 +16,8 @@ import httpx
 from app.core.config import settings
 from app.models.asset import Asset, AssetType
 from app.models.scoped_assessment_run import ScopedAssessmentRun
+
+logger = logging.getLogger(__name__)
 
 _RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
 _OPERATIONS = {
@@ -499,6 +502,22 @@ async def verify_candidate_with_fresh_proof(
                                   })
     publication = None
     publication_error = None
+    unverified_finding_id = None
+    if verdict == "inconclusive":
+        from app.services.agent.unverified_findings import publish_external_unverified
+
+        try:
+            unverified_finding_id = publish_external_unverified(
+                db, organization_id=organization_id, asset_id=binding.asset_id,
+                session_id=session_id, run_id=binding.service_run_id, candidate=candidate,
+                recipe=recipe, reason="Fresh service proof did not confirm the claim",
+            )
+        except Exception:  # noqa: BLE001 - never fail the verifier response on this
+            logger.warning("unverified Prowl lead publication failed", exc_info=True)
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
     if verdict == "confirmed":
         try:
             publication = await _request("POST", f"{base}/candidates/{candidate_id}/publish",
@@ -508,7 +527,8 @@ async def verify_candidate_with_fresh_proof(
     return {"candidate_id": candidate_id, "verdict": verdict,
             "verification_id": verification.get("verification_id"),
             "verifier_artifact_id": evidence_ids[0], "publication": publication,
-            "publication_error": publication_error}
+            "publication_error": publication_error,
+            "unverified_finding_id": unverified_finding_id}
 
 
 async def publish_confirmed_candidate(db, *, organization_id: int, user_id: int,

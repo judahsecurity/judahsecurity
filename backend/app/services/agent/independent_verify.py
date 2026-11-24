@@ -21,6 +21,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
+from app.services.agent.generic_reproduction import (
+    GENERIC_KIND, SSRF_READBACK_KIND, VERIFIER_GUIDANCE as GENERIC_GUIDANCE,
+)
+
 
 VERDICTS = ("pending", "confirmed", "refuted", "inconclusive")
 
@@ -70,6 +74,9 @@ class FindingCandidate:
     # Finding id of the "unverified" tier row published for this candidate
     # while it was inconclusive (see unverified_findings.py). 0 = none.
     unverified_finding_id: int = 0
+    # Proof kind of the confirmed verdict (e.g. replay_reproduction), so
+    # publication can label how the finding was verified.
+    confirmed_proof_kind: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     verified_at: str = ""
 
@@ -735,6 +742,7 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "manual execute_interactsh register, replay_http_request, then poll remains available. "
         "proof {kind: oob_callback, register_id, plant_id, poll_id} ties the callback to the sink. "
         "For HTTP evidence use replay_http_request or compare_requests; each response includes evidence_id. "
+        + GENERIC_GUIDANCE +
         "Other scanner output is a lead and cannot issue a confirmation receipt. "
         "Read complete observations with read_evidence(evidence_id, offset). "
         "When done, call record_verify_verdict(candidate_id, verdict, evidence, evidence_ids, proof) "
@@ -2222,6 +2230,12 @@ def apply_verdict(
             if verdict == "confirmed":
                 from app.services.agent.proof_policy import proof_kind_allowed
                 ok, why = proof_kind_allowed(c, proof.get("kind"))
+                if ok and proof.get("kind") == GENERIC_KIND:
+                    from app.services.agent.verification_profile import generic_reproduction_allowed
+
+                    if not generic_reproduction_allowed(tools_manager):
+                        ok, why = False, ("Generic reproduction is off under the conservative "
+                                          "verification profile; use a class-specific proof")
                 matrix_candidate = any(row.get('hypothesis_id') == c.hypothesis_id for row in brain.authorization_matrix)
                 is_workflow = matrix_candidate or (proof or {}).get('kind') == 'workflow'
                 evidence_target = c.target
@@ -2237,6 +2251,7 @@ def apply_verdict(
                     ok, why = evidence_store(tools_manager).validate(
                         evidence_ids or [], candidate_id=c.id, revision=c.revision,
                         run_id=run.id, target=evidence_target,
+                        allow_error_status=proof.get("kind") in (GENERIC_KIND, SSRF_READBACK_KIND),
                     )
                 if ok and not is_workflow:
                     from app.services.agent.proof_policy import validate_proof
@@ -2254,6 +2269,7 @@ def apply_verdict(
                 else:
                     c.counterevidence = counterevidence
             c.status = verdict
+            c.confirmed_proof_kind = str(proof.get("kind") or "") if verdict == "confirmed" else ""
             if verdict != "refuted":
                 c.counterevidence = {}
             c.proof_gap = (

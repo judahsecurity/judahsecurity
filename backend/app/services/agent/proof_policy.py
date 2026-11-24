@@ -18,6 +18,8 @@ Severity follows demonstrated impact and preconditions; do not auto-escalate by 
 Keep observations, candidates, confirmed findings, refutations, and inconclusive tests distinct.
 """
 
+from app.services.agent.generic_reproduction import GENERIC_KIND, SSRF_READBACK_KIND
+
 # A proof recipe demonstrates a particular mechanism. A response containing a
 # marker, for example, cannot establish SQL execution or an authorization bypass.
 # Keep unsupported classes inconclusive until they have their own validator.
@@ -26,7 +28,7 @@ PROOFS_BY_CLASS = {
     "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "oob_callback"}),
     "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
-    "ssrf": frozenset({"oob_callback"}),
+    "ssrf": frozenset({"oob_callback", "scoped_ssrf_readback"}),
     "xxe": frozenset({"oob_callback"}),
     "crlf": frozenset({"scoped_response_crlf"}),
     "open_redirect": frozenset({"scoped_response_redirect"}),
@@ -111,10 +113,14 @@ def inferred_vulnerability_class(candidate) -> str:
 def proof_kind_allowed(candidate, kind: str) -> tuple[bool, str]:
     explicit = str(getattr(candidate, "vulnerability_class", "") or "").strip().lower()
     inferred = inferred_vulnerability_class(candidate)
-    if explicit and explicit not in PROOFS_BY_CLASS:
-        return False, f"Unsupported vulnerability class: {explicit}"
     if explicit and inferred and explicit != inferred:
         return False, f"Vulnerability class {explicit} conflicts with the {inferred} claim"
+    if kind == GENERIC_KIND:
+        # The generic differential proves the behavior reproduces, not its class,
+        # so it serves any claim, including classes with no recipe of their own.
+        return True, ""
+    if explicit and explicit not in PROOFS_BY_CLASS:
+        return False, f"Unsupported vulnerability class: {explicit}"
     claim_class = explicit or inferred
     if not claim_class:
         return False, "Specify a supported vulnerability class or an unambiguous claim"
@@ -222,6 +228,10 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
+    if kind in (GENERIC_KIND, SSRF_READBACK_KIND):
+        from app.services.agent.generic_reproduction import validate_replay_reproduction
+
+        return validate_replay_reproduction(store, candidate, proof, evidence_ids)
     if kind in _SERVER_INJECTION_KINDS or kind in {"scoped_csrf_state_change", "scoped_jwt_forgery",
                                                     "scoped_jwt_key_url_fetch"}:
         ok, why = _validate_hunter_verifier_pair(store, candidate, proof, evidence_ids, kind)

@@ -780,12 +780,16 @@ class RiskDriverService:
     
     def _analyze_vulnerabilities(self, asset: Asset) -> Optional[Dict[str, Any]]:
         """Analyze vulnerabilities for risk factors."""
-        if not asset.vulnerabilities:
+        from app.services.agent.unverified_findings import is_visible
+
+        # Unverified agent leads do not drive asset risk until promoted.
+        visible = [v for v in (asset.vulnerabilities or []) if is_visible(v)]
+        if not visible:
             return None
         
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
         
-        for vuln in asset.vulnerabilities:
+        for vuln in visible:
             severity = (vuln.severity or "info").lower()
             if severity in severity_counts:
                 severity_counts[severity] += 1

@@ -121,6 +121,10 @@ class AgentAssessmentPolicy(BaseModel):
     # objective to match the authorization regex.
     oob_callbacks_allowed: bool = False
     credential_testing_allowed: bool = False
+    # conservative: class-specific proofs only. standard: adds the generic
+    # replay_reproduction proof and the unverified review tier. aggressive:
+    # standard plus auto-approval of observed non-destructive POST paths.
+    verification_strictness: Literal["conservative", "standard", "aggressive"] = "standard"
 
     @field_validator("auth_login_path")
     @classmethod
@@ -1046,6 +1050,28 @@ async def capture_status(
 
     _conv, org_id = _owned_conversation(db, session_id, current_user)
     return {"session_id": session_id, "pending_batches": pending_count(org_id, session_id)}
+
+
+@router.get("/sessions/{session_id}/body-replay-suggestions")
+async def get_body_replay_suggestions(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Observed POST paths body replay is not approved for, from the saved snapshot.
+
+    Approve them by sending them in ``assessment_policy.body_replay_paths`` on
+    the next turn. Destructive-looking paths come back under ``needs_review``.
+    """
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.run_snapshot import load_run_snapshot
+    from app.services.agent.verification_profile import suggest_body_replay_paths
+
+    snapshot = load_run_snapshot(org_id, session_id)
+    brain = engagement_brain_from_dict(snapshot.get("engagement_brain") or {})
+    return {"session_id": session_id, "snapshot_saved_at": snapshot.get("saved_at"),
+            **suggest_body_replay_paths(brain)}
 
 
 @router.get("/sessions/{session_id}/candidates")

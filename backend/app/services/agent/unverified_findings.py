@@ -60,12 +60,21 @@ def candidate_class(candidate: Any) -> str:
         return "unclassified"
 
 
-def exclude_hidden_levels(query, model):
-    """Filter a Vulnerability query down to findings shown by default."""
+def visible_level_clause(model):
+    """SQL condition for findings shown by default (not unverified/superseded)."""
     from sqlalchemy import or_
 
-    return query.filter(or_(model.verification_level.is_(None),
-                            model.verification_level.notin_(HIDDEN_BY_DEFAULT)))
+    return or_(model.verification_level.is_(None),
+               model.verification_level.notin_(HIDDEN_BY_DEFAULT))
+
+
+def exclude_hidden_levels(query, model):
+    """Filter a Vulnerability query down to findings shown by default."""
+    return query.filter(visible_level_clause(model))
+
+
+def is_visible(vuln: Any) -> bool:
+    return getattr(vuln, "verification_level", None) not in HIDDEN_BY_DEFAULT
 
 
 def _org_and_session() -> tuple[Optional[int], str]:
@@ -244,8 +253,10 @@ def after_verdict(tools_manager: Any, brain: Any, candidate: Any, verdict: str, 
                   proof_kind: str = "", hunter_evidence_count: int = 0) -> None:
     """Publish, close and log after apply_verdict settled a candidate."""
     finding_id: Optional[int] = None
+    from app.services.agent.verification_profile import unverified_tier_allowed
+
     if verdict == "inconclusive" and candidate.review_status == "needs_analyst_review" \
-            and unverified_tier_enabled():
+            and unverified_tier_enabled() and unverified_tier_allowed(tools_manager):
         finding_id = publish_unverified_candidate(tools_manager, candidate)
         if finding_id and finding_id != candidate.unverified_finding_id:
             candidate.unverified_finding_id = finding_id
@@ -356,3 +367,53 @@ def verdict_summary(db: Any, organization_id: int, *, days: int = 30,
     return {"days": days, "classes": rows,
             "totals": {k: sum(r[k] for r in rows)
                        for k in ("confirmed", "refuted", "inconclusive", "total")}}
+
+
+def publish_external_unverified(db: Any, *, organization_id: int, asset_id: int,
+                                session_id: str, run_id: str, candidate: Dict[str, Any],
+                                recipe: str, reason: str) -> Optional[int]:
+    """Unverified finding for a Prowl service candidate its verifier did not confirm.
+
+    Deduplicated per service candidate. Hidden from default views like any
+    other unverified finding; the service's own publication stays the only
+    route to exploit_verified.
+    """
+    from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
+
+    candidate_id = str(candidate.get("candidate_id") or "")
+    if not candidate_id or not unverified_tier_enabled():
+        return None
+    title = str(candidate.get("title") or f"Unverified Prowl lead ({recipe})")[:500]
+    existing = (db.query(Vulnerability)
+                .filter(Vulnerability.asset_id == asset_id,
+                        Vulnerability.detected_by == "PROWL",
+                        Vulnerability.title == title,
+                        Vulnerability.verification_level.in_((UNVERIFIED, ANALYST_VERIFIED)))
+                .all())
+    for row in existing:
+        if (row.metadata_ or {}).get("unverified_lead", {}).get("candidate_id") == candidate_id:
+            return row.id
+    requested = str(candidate.get("severity") or "medium").strip().lower()
+    published = cap_unverified_severity(requested)
+    lead = {
+        "candidate_id": candidate_id, "prowl_run_id": run_id, "session_id": session_id,
+        "vulnerability_class": str(candidate.get("vulnerability_class") or recipe)[:64],
+        "verifier_recipe": recipe, "requested_severity": requested,
+        "published_severity": published,
+        "proof_gap": {"reason": reason[:2000],
+                      "next_step": "Retry the service verifier or review the hunter evidence"},
+        "hunter_evidence_ids": [str(x)[:64] for x in (candidate.get("evidence_ids") or [])][:32],
+        "published_at": datetime.utcnow().isoformat(),
+    }
+    vuln = Vulnerability(
+        title=title, severity=Severity(published), asset_id=asset_id, detected_by="PROWL",
+        description=(str(candidate.get("description") or "").strip() + "\n\nNot independently "
+                     "verified: the Prowl service verifier did not reproduce this claim.").strip()[:10000],
+        detection_confidence=UNVERIFIED, verification_level=UNVERIFIED,
+        status=VulnerabilityStatus.OPEN, tags=["unverified"],
+        metadata_={"verification_level": UNVERIFIED, "unverified_lead": lead,
+                   "prowl_run_id": run_id, "prowl_candidate_id": candidate_id},
+    )
+    db.add(vuln)
+    db.commit()
+    return vuln.id

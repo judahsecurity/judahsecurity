@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.db.database import Base
 import app.models  # noqa: F401 - registers model metadata for foreign keys
 from app.models.agent_verdict_log import AgentVerdictLog
-from app.models.asset import Asset
+from app.models.asset import Asset, AssetType
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
 from app.services.agent import tools as tools_module
 from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
@@ -227,3 +227,23 @@ def test_verdict_summary_groups_by_class(db_factory):
     assert by_class["authorization"]["top_inconclusive_reasons"][0]["reason"] == \
         "Second identity unavailable"
     assert out["totals"]["inconclusive"] == 2
+
+
+def test_external_prowl_inconclusive_publishes_once(db_factory):
+    from app.services.agent.unverified_findings import publish_external_unverified
+
+    with db_factory() as db:
+        asset = Asset(organization_id=ORG_ID, name="app.example.com", value="app.example.com",
+                      asset_type=AssetType.DOMAIN)
+        db.add(asset)
+        db.commit()
+        candidate = {"candidate_id": "cand-ext-1", "title": "Reflected XSS on search",
+                     "severity": "high", "evidence_ids": ["hunter-1"]}
+        args = dict(organization_id=ORG_ID, asset_id=asset.id, session_id="s1", run_id="run-1",
+                    candidate=candidate, recipe="browser_xss", reason="No dialog")
+        first = publish_external_unverified(db, **args)
+        assert publish_external_unverified(db, **args) == first
+        vuln = db.get(Vulnerability, first)
+        assert (vuln.detected_by, vuln.verification_level, vuln.severity) == (
+            "PROWL", UNVERIFIED, Severity.MEDIUM)
+        assert vuln.metadata_["unverified_lead"]["verifier_recipe"] == "browser_xss"

@@ -323,6 +323,24 @@ export interface JiraIntegration {
   updated_at: string;
 }
 
+export type VerificationStrictness = 'conservative' | 'standard' | 'aggressive';
+
+export interface BodyReplaySuggestion {
+  path: string;
+  host: string;
+  inputs: number;
+  classes: string[];
+}
+
+export interface BodyReplaySuggestions {
+  session_id: string;
+  snapshot_saved_at?: string | null;
+  suggested: BodyReplaySuggestion[];
+  needs_review: BodyReplaySuggestion[];
+  approved: string[];
+  limit: number;
+}
+
 export interface VerdictClassRow {
   vulnerability_class: string;
   confirmed: number;
@@ -1294,6 +1312,12 @@ class ApiClient {
   /** Promote an unverified agent finding to analyst_verified, or dismiss it. */
   async reviewUnverifiedFinding(id: number, body: { action: 'promote' | 'dismiss'; severity?: string; note?: string }) {
     const response = await this.client.post(`/vulnerabilities/${id}/unverified-review`, body);
+    return response.data;
+  }
+
+  /** Observed POST paths the agent could not body-test because they are not approved. */
+  async getBodyReplaySuggestions(sessionId: string): Promise<BodyReplaySuggestions> {
+    const response = await this.client.get(`/agent/sessions/${encodeURIComponent(sessionId)}/body-replay-suggestions`);
     return response.data;
   }
 
@@ -2856,6 +2880,7 @@ class ApiClient {
         stored_xss_cleanup_paths: string[];
         auth_login_path?: string;
         owner_only_resources: { target: string; owner_identity: string; other_identity: string }[];
+        verification_strictness?: VerificationStrictness;
       };
     }
   ) {

@@ -125,6 +125,55 @@ class, the share not confirmed, and the most common inconclusive reasons. Classe
 with many inconclusive verdicts are where a proof recipe may be stricter than the
 bugs it is meant to confirm.
 
+### Generic reproduction proof
+
+When no class-specific recipe fits but the verifier recreated the behavior, it can
+use proof `{kind: replay_reproduction, hunter_artifact_id, artifact_id, control_id, signal}`
+for any class, including `known_cve`, `account_enumeration` and unclassified claims.
+`generic_reproduction.py` checks it deterministically:
+
+- `hunter_artifact_id` is an HTTP exchange from the candidate's own evidence;
+  `artifact_id` (probe) and `control_id` are fresh exchanges from this verifier run.
+- All three use the same method, origin and path; probe and control use the same
+  identity and differ in the request.
+- `signal` is an 8-500 character literal that appears in the hunter's and the
+  probe's response bodies, not in the control's, and not in either attacking
+  request (echoed input does not count). Status-page phrases are rejected.
+- Non-2xx responses may be cited, since the signal (not the status) is the evidence.
+
+Findings confirmed this way are published as `verification_level="reproduced"`,
+shown in default views, and capped at high. A confirmed CVE claim keeps its
+requested severity instead of the version-only `low` cap.
+
+`ssrf` also accepts `scoped_ssrf_readback`: the same shape, where the hunter's and
+probe's input carry an internal destination (loopback, link-local metadata such as
+`169.254.169.254`, RFC 1918) and the control's does not.
+
+### Verification strictness
+
+`assessment_policy.verification_strictness` (operator-set, never a model tool):
+
+| Profile | Generic reproduction | Unverified tier | POST body replay paths |
+|---|---|---|---|
+| `conservative` | rejected | off (verdicts still logged) | operator list only |
+| `standard` (default) | accepted as `reproduced` | on | operator list only |
+| `aggressive` | accepted as `reproduced` | on | operator list plus observed POST paths that do not look destructive, up to 8 |
+
+Destructive-looking paths (delete, payment, password/email change, admin/role,
+upload, send and similar) are never auto-approved.
+`GET /agent/sessions/{id}/body-replay-suggestions` lists observed POST paths that
+were not body-tested because they were not approved, split into `suggested` and
+`needs_review`; the agent page offers them under Assessment policy.
+
+### Where unverified findings are hidden
+
+Besides the findings list and statistics, asset severity counts, the asset list,
+asset risk drivers, the posture score and remediation work lists ignore
+`unverified` and `superseded` findings. The external Prowl service's deterministic
+verifier also files an `unverified` finding (detected_by `PROWL`) when its fresh
+proof is inconclusive; its own publication remains the only route to
+`exploit_verified` there.
+
 ## Configure two test identities
 
 Register sessions supplied for the engagement using the tool API:

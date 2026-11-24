@@ -438,7 +438,11 @@ class EvidenceStore:
         run_id: str,
         target: str,
         max_age: int = 3600,
+        allow_error_status: bool = False,
     ) -> tuple[bool, str]:
+        """``allow_error_status`` lets a non-2xx response with a body count; only
+        the generic differential proofs pass it, because their signal (absent from
+        a control) is the demonstration rather than the status code."""
         if not ids or not run_id:
             return False, "Fresh verifier execution artifacts are required"
         has_response = False
@@ -546,7 +550,7 @@ class EvidenceStore:
             # Errors and empty successes are observations, not demonstrated impact.
             has_response |= bool(
                 row["success"]
-                and 200 <= response.get("status", 0) < 300
+                and (allow_error_status or 200 <= response.get("status", 0) < 300)
                 and response.get("body")
             )
         if urlsplit(target).path not in ("", "/") and not target_path_seen:

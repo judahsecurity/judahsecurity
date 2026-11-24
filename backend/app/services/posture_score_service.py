@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy.orm import Session, joinedload
 
+from app.services.agent.unverified_findings import visible_level_clause
 from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.scan import Scan, ScanStatus
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
@@ -316,6 +317,7 @@ def build_posture_score(db: Session, organization_id: int, *, now: Optional[date
             Asset.organization_id == organization_id,
             Asset.in_scope.is_(True),
             Asset.is_public.is_(True),
+            visible_level_clause(Vulnerability),
             Asset.is_monitored.is_(True),
             Asset.asset_type.in_(EXTERNAL_ASSET_TYPES),
             Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]),

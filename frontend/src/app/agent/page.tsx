@@ -38,7 +38,8 @@ import {
   CapabilityMapPanel,
   CapabilityMapState,
 } from '@/components/agent/CapabilityMapPanel';
-import { api, getApiErrorMessage } from '@/lib/api';
+import { api, getApiErrorMessage, type VerificationStrictness } from '@/lib/api';
+import { BodyReplaySuggestions } from '@/components/agent/BodyReplaySuggestions';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 
@@ -695,6 +696,7 @@ function AgentPageContent() {
   const [selectedPlaybookId, setSelectedPlaybookId] = useState<string>('custom');
   const [target, setTarget] = useState('');
   const [bodyReplayPathsText, setBodyReplayPathsText] = useState('');
+  const [verificationStrictness, setVerificationStrictness] = useState<VerificationStrictness>('standard');
   const [storedXssCleanupPathsText, setStoredXssCleanupPathsText] = useState('');
   const [ownerOnlyText, setOwnerOnlyText] = useState('');
   const [authLoginPath, setAuthLoginPath] = useState('');
@@ -1295,9 +1297,11 @@ function AgentPageContent() {
       return;
     }
     const assessmentPolicy = bodyReplayPaths.length || storedXssCleanupPaths.length || ownerOnlyResources.length || authLoginPath.trim()
+      || verificationStrictness !== 'standard'
       ? { body_replay_paths: bodyReplayPaths,
           stored_xss_cleanup_paths: storedXssCleanupPaths,
           auth_login_path: authLoginPath.trim() || undefined,
+          verification_strictness: verificationStrictness,
           owner_only_resources: ownerOnlyResources.map((row) => ({
             target: row.target, owner_identity: row.owner_identity, other_identity: row.other_identity,
           })) }
@@ -2186,6 +2190,19 @@ function AgentPageContent() {
                             disabled={loading}
                             className="h-7 text-xs"
                           />
+                          <label className="block">Verification strictness
+                            <select
+                              aria-label="Verification strictness"
+                              value={verificationStrictness}
+                              onChange={(event) => setVerificationStrictness(event.target.value as VerificationStrictness)}
+                              disabled={loading}
+                              className="mt-1 h-7 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground"
+                            >
+                              <option value="conservative">Conservative: class-specific proofs only</option>
+                              <option value="standard">Standard: adds generic reproduction and unverified review</option>
+                              <option value="aggressive">Aggressive: also auto-approves safe observed POST paths (staging/lab)</option>
+                            </select>
+                          </label>
                           <Textarea
                             aria-label="Approved POST replay paths"
                             placeholder="Approved POST test paths, one per line (enables form XSS and captured body checks)"
@@ -2193,6 +2210,12 @@ function AgentPageContent() {
                             onChange={(event) => setBodyReplayPathsText(event.target.value)}
                             disabled={loading}
                             className="text-xs min-h-16"
+                          />
+                          <BodyReplaySuggestions
+                            sessionId={sessionId}
+                            disabled={loading}
+                            approved={bodyReplayPathsText.split(/[\n,]/).map((value) => value.trim()).filter(Boolean)}
+                            onAdd={(path) => setBodyReplayPathsText((text) => (text.trim() ? `${text.trim()}\n${path}` : path))}
                           />
                           <Textarea
                             aria-label="Owner-only resources"

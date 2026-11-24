@@ -4,6 +4,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.services.agent.unverified_findings import visible_level_clause
 from app.db.database import get_db
 from app.models.vulnerability import Vulnerability
 from app.models.user import User
@@ -262,17 +263,19 @@ def get_remediation_stats(
     status_counts = db.query(
         Vulnerability.status,
         func.count(Vulnerability.id)
-    ).group_by(Vulnerability.status).all()
+    ).filter(visible_level_clause(Vulnerability)).group_by(Vulnerability.status).all()
     
     status_dict = {str(s.value): c for s, c in status_counts}
     
     # Count findings with remediation
     with_remediation = db.query(func.count(Vulnerability.id)).filter(
+        visible_level_clause(Vulnerability),
         Vulnerability.remediation.isnot(None),
         Vulnerability.remediation != ""
     ).scalar()
     
-    total_findings = db.query(func.count(Vulnerability.id)).scalar()
+    total_findings = db.query(func.count(Vulnerability.id)).filter(
+        visible_level_clause(Vulnerability)).scalar()
     
     return {
         "total_findings": total_findings,
@@ -333,6 +336,7 @@ def get_remediation_workload(
         query = db.query(Vulnerability).options(
             joinedload(Vulnerability.asset)
         ).filter(
+            visible_level_clause(Vulnerability),
             Vulnerability.status.in_([
                 VulnerabilityStatus.OPEN,
                 VulnerabilityStatus.IN_PROGRESS,
@@ -511,6 +515,7 @@ def get_prioritized_remediation_list(
         query = db.query(Vulnerability).options(
             joinedload(Vulnerability.asset)
         ).filter(
+            visible_level_clause(Vulnerability),
             Vulnerability.status.in_([
                 VulnerabilityStatus.OPEN,
                 VulnerabilityStatus.IN_PROGRESS,

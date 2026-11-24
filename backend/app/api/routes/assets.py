@@ -8,6 +8,7 @@ from fastapi.responses import Response, JSONResponse
 from sqlalchemy.orm import Session, joinedload, selectinload, noload
 from sqlalchemy import func, case, inspect as sa_inspect
 
+from app.services.agent.unverified_findings import is_visible, visible_level_clause
 from app.db.database import get_db
 from app.models.asset import Asset, AssetType, AssetStatus
 from app.models.port_service import PortService, PortState
@@ -153,6 +154,7 @@ def _batch_vuln_counts(db: Session, asset_ids: List[int]) -> Dict[int, Dict[str,
         .filter(
             Vulnerability.asset_id.in_(asset_ids),
             Vulnerability.status != VulnerabilityStatus.RESOLVED,
+            visible_level_clause(Vulnerability),
         )
         .group_by(Vulnerability.asset_id, Vulnerability.severity)
         .all()
@@ -201,6 +203,7 @@ def _close_findings_for_asset(db: Session, asset_id: int) -> int:
     findings = db.query(Vulnerability).filter(
         Vulnerability.asset_id == asset_id,
         Vulnerability.status.in_(open_statuses),
+        visible_level_clause(Vulnerability),
     ).all()
 
     now = datetime.utcnow()
@@ -289,7 +292,8 @@ def build_asset_response(
             # Only walk the relationship when it is already loaded in this session
             if "vulnerabilities" not in insp.unloaded:
                 for vuln in asset.vulnerabilities:
-                    if getattr(vuln.status, "value", str(vuln.status)) != "resolved":
+                    if (getattr(vuln.status, "value", str(vuln.status)) != "resolved"
+                            and is_visible(vuln)):
                         vuln_count += 1
                         if vuln.severity == Severity.CRITICAL:
                             critical_vulns += 1
@@ -809,7 +813,8 @@ def list_geo_assets(
             func.sum(case((Vulnerability.severity == Severity.MEDIUM, 1), else_=0)).label("medium"),
             func.sum(case((Vulnerability.severity == Severity.LOW, 1), else_=0)).label("low"),
         )
-        .filter(Vulnerability.status != VulnerabilityStatus.RESOLVED)
+        .filter(Vulnerability.status != VulnerabilityStatus.RESOLVED,
+                visible_level_clause(Vulnerability))
         .group_by(Vulnerability.asset_id)
         .subquery()
     )

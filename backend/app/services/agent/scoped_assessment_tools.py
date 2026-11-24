@@ -172,6 +172,10 @@ class ScopedAssessmentTools:
         self._scoped_csrf_cleanup_paths = set(csrf_cleanup_paths)
         self._scoped_owner_expectations = approved
         self._scoped_auth_login_path = auth_login_path
+        from app.services.agent.verification_profile import normalize_strictness
+
+        self._verification_strictness = normalize_strictness(policy.get("verification_strictness"))
+        self._auto_approved_body_paths = []
         if (paths or cleanup_paths or race_action_paths or race_cleanup_paths
                 or csrf_action_paths or csrf_cleanup_paths or approved):
             self._scoped_assessment_started = True

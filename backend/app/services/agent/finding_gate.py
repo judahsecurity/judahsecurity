@@ -118,8 +118,13 @@ def classify_verification_level(
     detected_by: Optional[str] = None,
     specialist: Optional[str] = None,
     evidence: Optional[str] = None,
+    proof_kind: Optional[str] = None,
 ) -> Optional[str]:
     """Label how a finding was verified.
+
+    A runtime confirmation through the generic ``replay_reproduction`` proof is
+    ``reproduced``: the verifier recreated the behavior with a differential, but
+    no class-specific recipe established the mechanism.
 
     ``exploit_verified`` means the independent verifier reproduced it against
     the running target. ``source_verified`` means a static / source-only
@@ -129,7 +134,7 @@ def classify_verification_level(
     finding is neither runtime-confirmed nor recognizably source-derived.
     """
     if runtime_confirmed:
-        return "exploit_verified"
+        return "reproduced" if proof_kind == "replay_reproduction" else "exploit_verified"
     if (explicit or "").strip().lower() == "source_verified":
         return "source_verified"
     blob = " ".join(x for x in (detected_by, specialist, evidence) if x).lower()
@@ -152,6 +157,16 @@ def cap_source_verified_severity(
     normalized = (severity or "info").strip().lower()
     if verification_level == "source_verified" and normalized in {"critical", "high"}:
         return "medium", True
+    return normalized, False
+
+
+def cap_reproduced_severity(
+    severity: Optional[str], verification_level: Optional[str]
+) -> Tuple[str, bool]:
+    """A generic reproduction is not filed as critical without a class proof."""
+    normalized = (severity or "info").strip().lower()
+    if verification_level == "reproduced" and normalized == "critical":
+        return "high", True
     return normalized, False
 
 

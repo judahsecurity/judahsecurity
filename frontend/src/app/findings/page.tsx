@@ -175,7 +175,7 @@ interface Finding {
   detection?: ScannerDetection;
   remediation_deadline?: string;
   detected_by?: string;
-  // exploit_verified | source_verified | analyst_verified | unverified | superseded
+  // exploit_verified | reproduced | source_verified | analyst_verified | unverified | superseded
   verification_level?: string | null;
   unverified_lead?: UnverifiedLead | null;
   matcher_name?: string;
@@ -2449,6 +2449,12 @@ export default function FindingsPage() {
                       </button>
                       {finding.verification_level === 'unverified' && (
                         <Badge variant="outline" className="mt-1 border-amber-500/50 text-[10px] text-amber-600 dark:text-amber-400">Unverified</Badge>
+                      )}
+                      {finding.verification_level === 'reproduced' && (
+                        <Badge variant="outline" className="mt-1 text-[10px]" title="The verifier recreated the behavior with a differential replay, but no class-specific proof established the mechanism. Capped at high.">Reproduced</Badge>
+                      )}
+                      {finding.verification_level === 'analyst_verified' && (
+                        <Badge variant="outline" className="mt-1 text-[10px]" title="Promoted by an analyst after the verifier could not confirm it.">Analyst verified</Badge>
                       )}
                     </TableCell>
                     <TableCell>

@@ -263,6 +263,11 @@ async def run_observed_input_batch(
             "funnel": parameter_test_funnel(brain),
         }
     results: list[dict[str, Any]] = []
+    # Aggressive (operator-chosen) profile approves observed, non-destructive
+    # POST paths before the policy check below.
+    from app.services.agent.verification_profile import auto_approve_body_paths
+
+    auto_approve_body_paths(manager, brain)
     approved_post_paths = set(getattr(manager, "_scoped_body_replay_paths", None) or ())
     # Authentication may be established after mapping. Reopen only cells that
     # this preflight blocked, and leave other policy decisions intact.
