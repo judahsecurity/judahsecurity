@@ -979,16 +979,22 @@ class AgentOrchestrator:
                             "create_finding if verdict=SUBMIT (High; Critical only if later secret scan finds ghp_*)",
                         ]
                     else:
-                        next_steps = [
-                            ("Use only the operator-approved manual tools"
-                             if "execute_deep_crawl" in forbidden_tools
-                             and (mode == "agent" or "execute_interceptor" in forbidden_tools)
-                             else "execute_deep_crawl on the primary URL"
-                             if mode == "agent" or "execute_interceptor" in forbidden_tools
-                             else "execute_interceptor (attaches to early job if queued)"),
-                            "ingest_urls_into_map → discover_parameters/arjun",
-                            "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
-                        ]
+                        first_step = (
+                            "Use only the operator-approved manual tools"
+                            if "execute_deep_crawl" in forbidden_tools
+                            and (mode == "agent" or "execute_interceptor" in forbidden_tools)
+                            else "execute_deep_crawl on the primary URL"
+                            if mode == "agent" or "execute_interceptor" in forbidden_tools
+                            else "execute_interceptor (attaches to early job if queued)"
+                        )
+                        next_steps = [first_step]
+                        if no_scanners:
+                            next_steps.extend(["ingest_urls_into_map", "sync_engagement_brain"])
+                        else:
+                            next_steps.extend([
+                                "ingest_urls_into_map → discover_parameters/arjun",
+                                "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
+                            ])
                         if not no_directories and "spawn_recon_workers" not in forbidden_tools:
                             next_steps.insert(1, "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404)")
                     execution_trace.append(
@@ -1856,8 +1862,10 @@ class AgentOrchestrator:
             if state.get("mode") == "agent":
                 available_tools += (
                     "\nScoped Agent mode: execute_interceptor is unavailable because its workers "
-                    "cannot enforce exact method and path approvals. Use execute_deep_crawl "
-                    "for the application walk instead."
+                    "cannot enforce exact method and path approvals. "
+                    + ("Use execute_deep_crawl for the application walk instead."
+                       if "execute_deep_crawl" not in forbidden_tools
+                       else "Follow the operator-approved manual workflow.")
                 )
             excluded_calls = forbidden_tools - {"assessment_kickoff"}
             if excluded_calls:
