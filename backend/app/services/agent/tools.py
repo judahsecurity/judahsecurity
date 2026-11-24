@@ -506,6 +506,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
     _scoped_link_baselines = SessionValue(dict)
     _scoped_get_count = SessionValue(lambda: 0)
     _compacted_archive = SessionValue(dict)
+    _sandbox_runs = SessionValue(lambda: 0)
     _scoped_verify_get_count = SessionValue(lambda: 0)
     _scoped_post_count = SessionValue(lambda: 0)
     _scoped_verifier_post_count = SessionValue(lambda: 0)
@@ -587,6 +588,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
             "record_fact": self.record_fact,
             "expand_compacted": self.expand_compacted,
             "prior_engagement": self.prior_engagement,
+            "run_sandboxed_script": self.run_sandboxed_script,
             "derive_engagement_goals": self.derive_engagement_goals,
             "list_engagement_goals": self.list_engagement_goals,
             "prove_goal": self.prove_goal,
@@ -6354,6 +6356,37 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
             out["guidance"] = ("Retest earlier findings that are still open or resolved; do not "
                                "re-run checks that tested clean unless the app changed.")
         return json.dumps(out, default=str)[:_tool_output_max_chars()]
+
+    async def run_sandboxed_script(self, code: str, input: str = "", timeout: int = 10) -> str:
+        """Run offline Python (stdlib only, no network, no host files) to decode, compute or generate payloads; print results to stdout. Send any request with the probe tools."""
+        import asyncio as _asyncio
+        import hashlib as _hashlib
+
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.script_sandbox import run_python
+
+        if not getattr(settings, "AGENT_SCRIPT_SANDBOX", True):
+            return json.dumps({"success": False, "error": "script sandbox is disabled"})
+        limit = int(getattr(settings, "AGENT_SCRIPT_SANDBOX_MAX_RUNS", 30) or 30)
+        if int(self._sandbox_runs or 0) >= limit:
+            return json.dumps({"success": False, "error": f"script run limit ({limit}) reached"})
+        self._sandbox_runs = int(self._sandbox_runs or 0) + 1
+        try:
+            result = await _asyncio.to_thread(
+                run_python, code, input, timeout,
+                allow_weak_isolation=bool(getattr(settings, "AGENT_SCRIPT_SANDBOX_ALLOW_WEAK", False)),
+            )
+        except (ValueError, RuntimeError) as exc:
+            return json.dumps({"success": False, "error": str(exc)})
+        evidence_id = evidence_store(self).record(
+            "sandbox_script",
+            {"code_sha256": _hashlib.sha256(code.encode()).hexdigest(),
+             "code": code[:4000], **result},
+            target="offline", success=result["exit_code"] == 0 and not result["timed_out"],
+        )
+        return json.dumps({"success": result["exit_code"] == 0 and not result["timed_out"],
+                           "evidence_id": evidence_id, **result,
+                           "note": "Offline computation, not target evidence."})
 
     async def expand_compacted(self, thread_id: str, limit: int = 10) -> str:
         """Bring back folded steps of a finished thread (hypothesis, coverage cell, candidate or goal id; 'unthreaded' for the rest) after context compaction."""

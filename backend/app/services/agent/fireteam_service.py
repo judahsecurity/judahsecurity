@@ -1309,6 +1309,8 @@ INSTRUCTIONS:
 2. Code-first: list_captured_requests → mutate_captured_request using sample_ref (one field) or run_custom_probe.
    JS: fetch_lazy_chunks → extract_js_endpoints → ingest_urls_into_map. API profile: fingerprint_api.
    For lists (paths/params/xss) call mutate_list once — do not ReAct them.
+   Decoding, token or signature maths, encoding chains, payload lists: write it in
+   run_sandboxed_script (offline Python, stdlib only), then send with the probe tools.
 3. Blind SSRF/XXE: execute_interactsh register, plant payload_url. Never 169.254.169.254 or localhost.
 4. Think briefly about which tool(s) will most quickly prove or kill the hypothesis.
    A first block (filtered payload, 404, WAF page, no echo) is not a kill: work
@@ -1685,7 +1687,8 @@ async def _run_specialist(
             if tool not in {"scoped_assessment_probe_assigned", "scoped_assessment_candidate"}
         ]
     allowed_tools.extend(
-        t for t in ("read_evidence", "search_evidence", "list_test_identities", "record_fact")
+        t for t in ("read_evidence", "search_evidence", "list_test_identities", "record_fact",
+                    "run_sandboxed_script")
         if t not in allowed_tools
     )
     if profile.name in ("auth_logic", "independent_verifier", "api_logic", "coverage"):

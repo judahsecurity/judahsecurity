@@ -198,6 +198,12 @@ class Settings(BaseSettings):
     # Render a single-page app's signed-in screens without credentials once,
     # after the anonymous JS inspection, when no login is configured.
     AGENT_SHELL_UNLOCK: bool = True
+    # Offline Python for specialists (script_sandbox.py): unshare + chroot jail,
+    # no network, stdlib only. Refused where the jail is unavailable unless
+    # AGENT_SCRIPT_SANDBOX_ALLOW_WEAK is set.
+    AGENT_SCRIPT_SANDBOX: bool = True
+    AGENT_SCRIPT_SANDBOX_ALLOW_WEAK: bool = False
+    AGENT_SCRIPT_SANDBOX_MAX_RUNS: int = 30
     FIRETEAM_MAX_MID_WAVE_STARTS: int = 6
     # Timeout for attaching an external MCP server (Burp/Caido).
     AGENT_MCP_CONNECT_TIMEOUT_SECONDS: float = 8.0
