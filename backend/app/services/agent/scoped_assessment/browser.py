@@ -222,6 +222,69 @@ def _private_link_baselines(hrefs: list[str], allowed_origins: list[str]) -> lis
     return found
 
 
+MAX_GET_FORM_SUBMISSIONS = 6
+GET_FORM_OBSERVATION_VALUE = "prowltest"
+_FILL_AND_SUBMIT_JS = """(form, value) => {
+  for (const el of form.querySelectorAll('input[name], textarea[name]')) {
+    const type = (el.type || '').toLowerCase();
+    if (['hidden', 'submit', 'button', 'checkbox', 'radio', 'file', 'image', 'reset',
+         'password'].includes(type)) continue;
+    if (!el.value) el.value = value;
+  }
+  if (form.requestSubmit) form.requestSubmit(); else form.submit();
+}"""
+
+
+async def _observe_get_forms(page, forms: list[dict], *, allowed_origins: list[str],
+                             link_baselines: list[str] | None, submitted: set) -> list[dict]:
+    """Submit same-origin GET forms once with a harmless value, as a user would.
+
+    Probes need a baseline: a GET request Prowl actually observed carrying the
+    parameter. Search boxes and other GET forms are inventoried but never
+    submitted by a crawl, so their inputs had no baseline and every check on
+    them was skipped. Submitting the form makes the request real observed
+    traffic (captured like any navigation); nothing is invented. GET only,
+    bounded, and never forms with password fields or state-changing paths.
+    """
+    from .browser_actions import allowed_discovery_path
+
+    observed: list[dict] = []
+    for form in forms:
+        if len(submitted) >= MAX_GET_FORM_SUBMISSIONS:
+            break
+        if str(form.get("method") or "").upper() != "GET":
+            continue
+        fields = [f for f in (form.get("fields") or []) if isinstance(f, dict) and f.get("name")]
+        names = tuple(sorted({str(f["name"]) for f in fields}))
+        path = urlsplit(str(form.get("action") or "")).path or "/"
+        if (not names or not allowed_discovery_path(path)
+                or any(str(f.get("control_type") or "") == "password" for f in fields)
+                or (path, names) in submitted):
+            continue
+        submitted.add((path, names))
+        try:
+            locator = page.locator("form").nth(int(form.get("dom_index") or 0))
+            async with page.expect_navigation(wait_until="domcontentloaded", timeout=15_000):
+                await locator.evaluate(_FILL_AND_SUBMIT_JS, GET_FORM_OBSERVATION_VALUE)
+            assert_in_scope(page.url, allowed_origins)
+        except AssessmentProxyError:
+            raise
+        except Exception:
+            # Script-handled forms or a redirect out of scope: nothing to record.
+            continue
+        result_url = page.url
+        if not urlsplit(result_url).query:
+            continue
+        if link_baselines is not None:
+            link_baselines.extend(_private_link_baselines([result_url], allowed_origins))
+        observed.append({
+            "form_path": path,
+            "observed_path": urlsplit(result_url).path or "/",
+            "fields": list(names),
+        })
+    return observed
+
+
 async def _forms(page, expected_origin: str) -> list[dict]:
     """Return same-origin form input names and control types, never values."""
     rows = await page.locator("form").evaluate_all(FORM_INVENTORY_JS)
@@ -767,6 +830,8 @@ async def check_browser(
                 queue = [final_target]
                 visited: set[str] = set()
                 pages: list[dict] = []
+                submitted_forms: set = set()
+                form_observations: list[dict] = []
                 while queue and len(pages) < max_pages:
                     page_url = queue.pop(0)
                     if page_url in visited:
@@ -798,6 +863,10 @@ async def check_browser(
                             "requests": requests[request_start:],
                         })
                         queue.extend(link for link in links if link not in visited and link not in queue)
+                        form_observations.extend(await _observe_get_forms(
+                            page, forms, allowed_origins=allowed_origins,
+                            link_baselines=link_baselines, submitted=submitted_forms,
+                        ))
                     except AssessmentProxyError:
                         # Every later page goes through the same broken proxy;
                         # fail the operation instead of recording fake pages.
@@ -809,6 +878,7 @@ async def check_browser(
                     "final_origin": expected_origin, "pages": pages,
                     "pages_visited": len(pages), "requests": requests,
                     "blocked_requests": blocked_requests,
+                    "get_form_observations": form_observations,
                 }
                 await settle_capture()
                 await context.unroute_all(behavior="ignoreErrors")
