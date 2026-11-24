@@ -10166,7 +10166,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "a finding candidate."
                 )
                 self._engagement_brain = brain.to_dict()
-                result["engagement_brain"] = self._engagement_brain
+                # Persist the updated brain internally. Returning the entire
+                # graph can push this receipt past the tool-output limit and
+                # cut its JSON in the middle of a string, hiding the proof.
         return json.dumps(result, indent=2)[:_tool_output_max_chars()]
 
     def _resolve_request_cookies(self, headers, cookies, use_auth_session, url: str = ""):
