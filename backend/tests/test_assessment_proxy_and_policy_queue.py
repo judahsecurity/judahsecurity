@@ -49,7 +49,7 @@ def test_proxy_error_message_is_actionable():
     assert "deep_crawl" in message
 
 
-async def _kickoff(monkeypatch, *, policy_applied: bool):
+async def _kickoff(monkeypatch, *, policy_applied: bool, mode: str = "assist"):
     from app.services import interceptor_service
     from app.services.agent import action_ledger, assessment_kickoff, recon_workers
     from app.services.agent.orchestrator import AgentOrchestrator
@@ -79,7 +79,7 @@ async def _kickoff(monkeypatch, *, policy_applied: bool):
     )
     result = await orchestrator._initialize_node({
         "messages": [HumanMessage(content="Assess https://app.test")],
-        "user_id": "1", "session_id": "policy-queue", "mode": "agent",
+        "user_id": "1", "session_id": "policy-queue", "mode": mode,
     })
     return result, queued, streams, events
 
@@ -99,3 +99,14 @@ async def test_unbound_run_still_queues_interceptor(monkeypatch):
     result, queued, streams, events = await _kickoff(monkeypatch, policy_applied=False)
     assert queued, "without a policy the early Interceptor queue is unchanged"
     assert result.get("interceptor_job_id") == "job-1"
+
+
+@pytest.mark.asyncio
+async def test_scoped_agent_mode_never_queues_interceptor(monkeypatch):
+    for policy_applied in (True, False):
+        result, queued, streams, events = await _kickoff(
+            monkeypatch, policy_applied=policy_applied, mode="agent")
+        assert queued == [], "scoped Agent mode uses execute_deep_crawl, not Interceptor"
+        assert streams, "early recon streams must still start"
+        assert result.get("interceptor_job_id") is None
+        assert not [e for tool, e, _ in events if tool == "queue_early_interceptor"]

@@ -1421,7 +1421,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             and step.get("success") is False
             for step in trace
         )
-        if state.get("interceptor_job_id") and not interceptor_failed:
+        if state.get("mode") != "agent" and state.get("interceptor_job_id") and not interceptor_failed:
             return {
                 "tool_name": "execute_interceptor",
                 "tool_args": {

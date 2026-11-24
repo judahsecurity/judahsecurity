@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 # explicitly enable auto-approval of policy "confirm" decisions, but the
 # default is to pause for an analyst.
 _autonomous_mode: ContextVar[bool] = ContextVar("agent_autonomous_mode", default=False)
+_scoped_browser_read_origin: ContextVar[tuple[str, str, int] | None] = ContextVar(
+    "agent_scoped_browser_read_origin", default=None,
+)
 
 
 def set_autonomous_mode(enabled: bool) -> Any:
@@ -60,6 +63,81 @@ def set_autonomous_mode(enabled: bool) -> Any:
 
 def autonomous_mode_enabled() -> bool:
     return bool(_autonomous_mode.get())
+
+
+def set_scoped_browser_reads(enabled: bool, target: str = "") -> None:
+    """Arm an operator-selected, exact-origin browser read grant for this run."""
+    approved_origin = None
+    if enabled and target:
+        from app.services.agent.evidence_store import origin
+
+        try:
+            approved_origin = origin(target)
+        except ValueError:
+            pass
+    _scoped_browser_read_origin.set(approved_origin)
+
+
+def scoped_browser_read_granted(tool_args: dict, *, allow_approved_paths: bool = False) -> bool:
+    """Only simple anonymous browser observations qualify for unattended reads."""
+    approved_origin = _scoped_browser_read_origin.get()
+    if not _autonomous_mode.get() or approved_origin is None:
+        return False
+    raw = tool_args.get("args") if isinstance(tool_args, dict) else None
+    try:
+        spec = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(spec, dict) or not set(spec) <= {
+        "actions", "allowed_origin", "allowed_methods",
+        "approved_post_paths", "approved_delete_paths", "block_web_sockets",
+    }:
+        return False
+    if set(spec.get("allowed_methods") or []) != {"GET", "HEAD"}:
+        return False
+    if not allow_approved_paths and (spec.get("approved_post_paths")
+                                     or spec.get("approved_delete_paths")):
+        return False
+    if not allow_approved_paths and spec.get("block_web_sockets") is not True:
+        return False
+    from app.services.agent.evidence_store import origin
+
+    try:
+        if origin(spec.get("allowed_origin") or "") != approved_origin:
+            return False
+    except (TypeError, ValueError):
+        return False
+    actions = spec.get("actions")
+    if not isinstance(actions, list) or not 1 <= len(actions) <= 10:
+        return False
+    allowed_keys = {
+        "navigate": {"action", "url"},
+        "check_response": {"action", "url", "expected_status", "description"},
+        "get_source": {"action"},
+        "screenshot": {"action", "full_page"},
+        "wait": {"action", "ms"},
+    }
+    has_navigation = False
+    total_wait_ms = 0
+    for action in actions:
+        if not isinstance(action, dict):
+            return False
+        kind = action.get("action")
+        if kind not in allowed_keys or not set(action) <= allowed_keys[kind]:
+            return False
+        if kind in {"navigate", "check_response"}:
+            try:
+                if origin(action.get("url") or "") != approved_origin:
+                    return False
+            except (TypeError, ValueError):
+                return False
+            has_navigation = True
+        if kind == "wait":
+            ms = action.get("ms", 2000)
+            if type(ms) is not int or not 0 <= ms <= 5000:
+                return False
+            total_wait_ms += ms
+    return has_navigation and total_wait_ms <= 10000
 
 
 READONLY_TOOLS = {
@@ -445,6 +523,19 @@ async def gate(
             "reason": f"Tool '{tool_name}' is denied by the organization's agent policy.",
         }
 
+    # An explicit run grant removes repetitive prompts only for anonymous,
+    # same-origin GET/HEAD browser observations. RoE and pilot approvals win.
+    if (
+        tool_name == "execute_browser"
+        and decision == "confirm"
+        and not pilot_network_action
+        and not _roe_requires_confirmation(organization_id)
+        and not (tool_args.get("_confirm_token") if isinstance(tool_args, dict) else None)
+        and scoped_browser_read_granted(tool_args)
+    ):
+        logger.info("Scoped browser read grant: auto-approving exact-origin observation")
+        return {"decision": "auto"}
+
     # Autonomous ("agent") runs auto-approve policy "confirm" decisions so an
     # unattended engagement doesn't stall waiting for an operator who will never
     # answer. Guardrails preserved: explicit "deny" (above) still wins, an
@@ -454,6 +545,7 @@ async def gate(
         decision == "confirm"
         and _autonomous_mode.get()
         and not roe_escalated
+        and not _roe_requires_confirmation(organization_id)
         and tool_name not in {"run_intruder_batch"}
         and policy_cfg.get("agent_autonomous_auto_approve", False)
     ):

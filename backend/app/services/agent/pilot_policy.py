@@ -68,7 +68,8 @@ def pilot_tool_guidance(tools_manager, allowed_tools: frozenset[str]) -> str:
         lines.append(f"  - {name}({', '.join(names)})")
     lines.extend((
         "record_surface_coverage.status must be one of: untested, in_focus, "
-        "inconclusive, finding, tested_clean, skipped. A first-pass pair alone "
+        "inconclusive, blocked, finding, tested_clean, skipped. Blocked needs a reason "
+        "and leaves the surface open. A first-pass pair alone "
         "does not justify tested_clean.",
         "Only the fresh independent verifier calls record_verify_verdict. "
         "The hunter calls independent_verify(candidate_id?) after candidate submission, "
