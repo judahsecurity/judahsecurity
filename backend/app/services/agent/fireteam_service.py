@@ -1994,6 +1994,10 @@ async def _run_specialist(
             # Cancellation while a tool is in flight may leave an unknown
             # effect. Completed batches are safe to resume from the ledger.
             execution_progress["tool_inflight"] = True
+            execution_progress["inflight_calls"] = [
+                {"tool": tc.get("tool", ""), "args": tc.get("args") or {}}
+                for tc in tool_calls
+            ]
         tool_results = await asyncio.gather(*(
             _safe_invoke(
                 tools_manager, tc.get("tool", ""), tc.get("args") or {},
@@ -2004,6 +2008,7 @@ async def _run_specialist(
         ))
         if execution_progress is not None:
             execution_progress["tool_inflight"] = False
+            execution_progress["inflight_calls"] = []
             execution_progress["completed_calls"].extend(tool_results)
 
         for tc, tr in zip(tool_calls, tool_results):
@@ -2146,6 +2151,48 @@ class _SpecialistBudget:
             self.count += 1
             self.next_at = time.monotonic() + max(0, directive.interval_ms) / 1000
         return ""
+
+
+# Tools whose execution never changes target state: local brain/evidence
+# lookups and passive or GET-only observation. A call cancelled mid-flight
+# here is safe to retry without operator review.
+SAFE_READ_TOOLS = frozenset({
+    "analyze_attack_surface", "assess_finding_risk", "build_threat_model",
+    "check_cve_applicability", "execute_crtsh", "execute_dnsx", "execute_gau",
+    "execute_httpx", "execute_retirejs", "execute_subfinder", "execute_wappalyzer",
+    "execute_waybackurls", "execute_whatweb", "extract_js_endpoints", "fetch_lazy_chunks",
+    "fingerprint_api", "fingerprint_passive_stack", "get_api_operation_inventory",
+    "get_asset_details", "get_engagement_brain", "get_notes", "get_parameter_inventory",
+    "get_threat_model", "list_captured_requests", "list_recon_workers",
+    "list_test_identities", "query_assets", "query_ports", "query_technologies",
+    "query_vulnerabilities", "rank_attack_surface", "read_evidence", "scan_assigned_js",
+    "scan_assigned_js_dependency", "scan_js_sinks", "scan_js_urls_for_secrets",
+    "search_cve", "search_evidence", "search_vulnx", "vulnx_query",
+})
+# Tools that send one request whose method the caller names.
+_METHOD_TOOLS = frozenset({"replay_http_request", "compare_requests"})
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_READ_BROWSER_OPERATIONS = frozenset({"map", "crawl", "inspect_js"})
+
+
+def is_safe_read_call(tool: str, args: Dict[str, Any] | None) -> bool:
+    """True when cancelling this call cannot leave an unknown target-side effect."""
+    args = args or {}
+    if tool in SAFE_READ_TOOLS:
+        return True
+    if tool == "scoped_browser_assessment":
+        return str(args.get("operation") or "") in _READ_BROWSER_OPERATIONS
+    if tool in _METHOD_TOOLS:
+        if args.get("body") or args.get("data") or args.get("json"):
+            return False
+        methods = [args.get("method") or "GET"]
+        for key in ("baseline", "mutant"):
+            if isinstance(args.get(key), dict):
+                methods.append(args[key].get("method") or "GET")
+                if args[key].get("body") or args[key].get("json") or args[key].get("data"):
+                    return False
+        return all(str(m).upper() in _READ_METHODS for m in methods)
+    return False
 
 
 async def _safe_invoke(
@@ -2321,22 +2368,32 @@ async def run_fireteam(
     ) -> SpecialistReport:
         directive = directives.get(p.name)
         hypothesis_ids = list(getattr(directive, "hypothesis_ids", None) or [])
+        inflight = bool(execution_progress["tool_inflight"])
+        # A cancelled read has no target-side effect, so the task is simply
+        # retried. A cancelled call that may write stays blocked for review.
+        uncertain = inflight and not all(
+            is_safe_read_call(call.get("tool", ""), call.get("args") or {})
+            for call in execution_progress.get("inflight_calls") or [{}]
+        )
         return SpecialistReport(
             specialist=p.name,
             role=f"{p.epithet}: {p.role}",
             mission=mission,
             summary=(f"Execution interrupted: {reason}. "
                      + ("Reconcile the in-flight tool before retrying."
-                        if execution_progress["tool_inflight"] else
+                        if uncertain else
+                        "The in-flight call was a read; the task can be retried."
+                        if inflight else
                         "No tool call is in flight; the task can be retried.")),
             error=reason,
-            verdict="blocked" if execution_progress["tool_inflight"] else "retry",
-            rewrite_hint=("execution_timeout" if execution_progress["tool_inflight"]
+            verdict="blocked" if uncertain else "retry",
+            rewrite_hint=("execution_timeout" if uncertain
+                          else "execution_timeout_read_inflight" if inflight
                           else "execution_timeout_no_inflight_tool"),
             tool_calls=list(execution_progress["completed_calls"]),
-            # A cancelled in-flight tool has an unknown effect; otherwise the
+            # A cancelled in-flight write has an unknown effect; otherwise the
             # run simply ran out of wall-clock time.
-            stop_reason="blocked" if execution_progress["tool_inflight"] else "exhausted",
+            stop_reason="blocked" if uncertain else "exhausted",
             hypothesis_ids=hypothesis_ids,
             assigned_hypothesis_id=hypothesis_ids[0] if len(hypothesis_ids) == 1 else "",
             lease_id=str(getattr(directive, "lease_id", "") or ""),

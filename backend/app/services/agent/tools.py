@@ -12815,6 +12815,22 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         retry_window = min(180.0, _remaining_dispatch_time() - reserve)
         retry_deferred = bool(rewrites and (bounded_first_pass or retry_window < 90.0))
         if rewrites and retry_window >= 90.0 and not bounded_first_pass:
+            # First-wave receipts clear coverage leases on the live brain.
+            # Pull those writes in, then give each retried specialist a lease
+            # that is still valid instead of reusing a consumed one.
+            from app.services.agent.coverage_cells import renew_coverage_cell_leases
+
+            _preserve_live_execution_state()
+            coverage_leases = {
+                **renew_coverage_cell_leases(
+                    brain,
+                    {name: lease for name, lease in coverage_leases.items()
+                     if name not in followup_leases},
+                    [rewrite.specialist for rewrite in rewrites],
+                ),
+                **{name: lease for name, lease in coverage_leases.items()
+                   if name in followup_leases},
+            }
             retry_leases = claim_task_leases(
                 graph, [rewrite.specialist for rewrite in rewrites]
             )
@@ -12830,14 +12846,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             retry_directives = {}
             for rewrite in rewrites:
                 base = get_specialist(rewrite.specialist)
-                if not base:
+                d = retry_directive_bases.get(rewrite.specialist)
+                # No directive means its hypothesis could not be leased again
+                # (for example, it was proven meanwhile); do not rerun it.
+                if not base or d is None:
                     continue
                 retry_profiles.append(
                     apply_rewrite_to_profile(_dc_replace(base), rewrite)
                 )
-                d = retry_directive_bases.get(rewrite.specialist)
-                if d is not None:
-                    retry_directives[rewrite.specialist] = apply_rewrite_to_directive(d, rewrite)
+                retry_directives[rewrite.specialist] = apply_rewrite_to_directive(d, rewrite)
                 retry_names.append(rewrite.specialist)
             if retry_profiles:
                 _preserve_live_execution_state()

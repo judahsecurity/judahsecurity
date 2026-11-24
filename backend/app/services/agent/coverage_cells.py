@@ -23,6 +23,8 @@ CELL_TERMINAL = frozenset({"finding", "tested_clean", "skipped"})
 CELL_OPEN = frozenset({"untested", "in_focus", "inconclusive"})
 CELL_STATUSES = frozenset({*CELL_TERMINAL, *CELL_OPEN, "leased", "blocked"})
 MAX_COVERAGE_CELLS = 10_000
+# Interrupted read-only attempts on one cell before it stops being rescheduled.
+MAX_RETRY_ATTEMPTS = 3
 
 
 def lead_packet_for_cell(cell: dict[str, Any]) -> dict[str, Any]:
@@ -1431,6 +1433,49 @@ def claim_coverage_cell_leases(
     return leases
 
 
+def renew_coverage_cell_leases(
+    brain: Any,
+    leases: dict[str, CoverageCellLease],
+    specialists: Iterable[str],
+    *,
+    lease_seconds: int = 3600,
+    now: float | None = None,
+) -> dict[str, CoverageCellLease]:
+    """Keep each retried specialist on its own cell with a lease that is valid.
+
+    A first-wave receipt or expiry clears the lease, so a retry wave that
+    reused the old lease ID would only fail with an invalid-lease error.
+    A still-held lease is kept; an open, unleased cell is leased again; a
+    cell that reached a terminal or blocked state is not retried.
+    """
+    current = time.time() if now is None else float(now)
+    recover_expired_coverage_leases(brain, now=current)
+    renewed = dict(leases)
+    for specialist in dict.fromkeys(_text(item) for item in specialists):
+        lease = renewed.get(specialist)
+        if lease is None:
+            continue
+        cell = next((c for c in getattr(brain, "coverage_cells", None) or []
+                     if c.get("id") == lease.coverage_cell_id), None)
+        if (cell and cell.get("status") == "leased"
+                and cell.get("lease_id") == lease.id
+                and float(cell.get("lease_deadline") or 0) > current):
+            continue
+        renewed.pop(specialist)
+        if not cell or cell.get("status") not in CELL_OPEN or cell.get("lease_id"):
+            continue
+        claimed = claim_coverage_cell_leases(
+            brain, [specialist],
+            task_leases={specialist: {"id": lease.task_lease_id,
+                                      "hypothesis_id": lease.hypothesis_id}},
+            allowed_cell_ids=frozenset({lease.coverage_cell_id}),
+            lease_seconds=lease_seconds, now=current,
+        )
+        if specialist in claimed:
+            renewed[specialist] = claimed[specialist]
+    return renewed
+
+
 def release_coverage_cell_lease(
     brain: Any,
     lease: CoverageCellLease | dict[str, Any],
@@ -1463,14 +1508,30 @@ def release_coverage_cell_lease(
         # A report can cite unrelated discovery evidence. Only the explicit
         # record_surface_coverage tool validates a negative receipt and closes
         # a cell; a summary alone cannot claim that this input was tested.
-        if _text(verdict).lower() == "proven":
+        verdict_key = _text(verdict).lower()
+        if verdict_key == "proven":
             cell["status"] = "in_focus"
+        elif verdict_key == "blocked":
+            # The executor stopped during a call that may have changed target
+            # state. Keep the cell out of automatic scheduling until an
+            # analyst reconciles the effect.
+            cell["status"] = "blocked"
+            cell["review_required"] = True
+        elif (verdict_key == "retry"
+              and int(cell.get("attempts") or 0) >= MAX_RETRY_ATTEMPTS):
+            cell["status"] = "blocked"
+            cell["retry_exhausted"] = True
         else:
             cell["status"] = "inconclusive"
         cell["reason"] = (
             _text(reason)[:500]
             or f"executor verdict={_text(verdict) or 'inconclusive'}"
         )
+        if cell.get("retry_exhausted"):
+            cell["reason"] = (
+                f"Stopped after {cell.get('attempts')} interrupted attempts: "
+                + cell["reason"]
+            )[:500]
     cell.update(
         lease_id="",
         lease_owner="",
