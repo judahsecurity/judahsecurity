@@ -806,7 +806,13 @@ async def steer_agent_run(
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
     from app.services.agent.run_control import has_running_task, queue_steer
+    from app.services.agent.specialist_supervision import route_operator_message
 
+    routed = route_operator_message(session_id, request.message, organization_id=org_id)
+    if routed:
+        # "@<specialist> ..." or "@stop <specialist>" reached a running specialist.
+        return {"ok": True, "session_id": session_id, "queued": True,
+                "run_in_progress": True, "specialist": routed}
     in_flight = queue_steer(session_id, request.message)
     return {
         "ok": True,
@@ -814,6 +820,22 @@ async def steer_agent_run(
         "queued": True,
         "run_in_progress": in_flight or has_running_task(session_id),
     }
+
+
+@router.get("/sessions/{session_id}/specialists")
+async def running_specialists(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Specialists running now in this session; steer one with '@<name> ...'."""
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    from app.services.agent.specialist_supervision import running_members
+
+    return {"session_id": session_id,
+            "specialists": running_members(session_id, organization_id=org_id)}
 
 
 @router.post("/sessions/{session_id}/compact")
@@ -1716,7 +1738,15 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     })
                     continue
                 from app.services.agent.run_control import has_running_task, queue_steer
+                from app.services.agent.specialist_supervision import route_operator_message
 
+                routed = route_operator_message(session_id, message, organization_id=org_id)
+                if routed:
+                    await websocket.send_json({
+                        "type": "steer_queued", "queued": True,
+                        "run_in_progress": True, "specialist": routed,
+                    })
+                    continue
                 in_flight = queue_steer(session_id, message)
                 await websocket.send_json({
                     "type": "steer_queued",

@@ -49,6 +49,8 @@ def classify_failure(summary: ExecutorSummary, report: Any) -> Optional[str]:
     """Return a failure class to rewrite, or None if the run should stand."""
     if summary.verdict in ("proven", "killed"):
         return None
+    if (summary.rewrite_hint or "").startswith("operator_stopped"):
+        return None  # the operator ended it on purpose
     if getattr(report, "error", None):
         return LLM_ERROR
     if summary.soliloquy or not summary.tools_run:

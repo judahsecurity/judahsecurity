@@ -1605,6 +1605,40 @@ async def _run_specialist(
     directive: Any = None,
     execution_progress: Optional[Dict[str, Any]] = None,
 ) -> SpecialistReport:
+    """Run one specialist with a control channel for corrections and stops."""
+    from app.services.agent import specialist_supervision as supervision
+
+    try:
+        from app.services.agent.tools import current_organization_id, current_session_id
+        session = current_session_id.get() or ""
+        organization = current_organization_id.get()
+    except Exception:
+        session, organization = "", None
+    control = supervision.register(
+        session, profile.name, organization_id=organization,
+        lease_id=str(getattr(directive, "lease_id", "") or ""),
+        hypothesis_ids=list(getattr(directive, "hypothesis_ids", None) or []),
+    )
+    token = supervision.current_member.set(control)
+    try:
+        return await _run_specialist_body(
+            profile, mission, targets, llm, tools_manager,
+            directive=directive, execution_progress=execution_progress,
+        )
+    finally:
+        supervision.current_member.reset(token)
+        supervision.unregister(control)
+
+
+async def _run_specialist_body(
+    profile: SpecialistProfile,
+    mission: str,
+    targets: Iterable[str],
+    llm: Any,
+    tools_manager: Any,
+    directive: Any = None,
+    execution_progress: Optional[Dict[str, Any]] = None,
+) -> SpecialistReport:
     start = datetime.utcnow()
     target_list = list(targets) if targets else []
     report = SpecialistReport(
@@ -1814,6 +1848,27 @@ async def _run_specialist(
             report.summary = "Stopped near the specialist time limit; remaining checks are open."
             exhausted_by = "time"
             break
+        from app.services.agent import specialist_supervision as supervision
+
+        control = supervision.current_member.get()
+        corrections, stop_reason = supervision.drain(control)
+        if stop_reason:
+            by = getattr(control, "stopped_by", "") or "operator"
+            report.verdict = "inconclusive"
+            # An operator stop is final; a supervisor stop may be retried
+            # with a rewrite that says what went wrong.
+            report.rewrite_hint = (
+                f"operator_stopped: {stop_reason}" if by == "operator"
+                else f"supervisor stopped the run: {stop_reason}"
+            )
+            report.summary = f"Stopped by the {by}: {stop_reason}."
+            exhausted_by = "stopped"
+            break
+        if corrections:
+            messages.append(HumanMessage(content=(
+                "CORRECTION (follow it; your earlier evidence still counts):\n"
+                + "\n".join(corrections)
+            )))
         iteration += 1
         try:
             from app.services.agent.orchestrator import _ledger_llm_call
@@ -1930,6 +1985,7 @@ async def _run_specialist(
         if peer_results:
             feedback["peer_results"] = peer_results
         messages.append(HumanMessage(content=json.dumps(feedback)))
+        supervision.review(supervision.current_member.get(), report.tool_calls)
     else:
         # The loop condition ended the run: the turn budget ran out.
         exhausted_by = "iterations"
