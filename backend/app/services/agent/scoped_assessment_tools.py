@@ -1139,6 +1139,26 @@ class ScopedAssessmentTools:
         )
         return json.dumps(result)
 
+    def _unmapped_parameter_error(self, kind: str, url: str, parameter: str,
+                                  identity: str) -> ValueError:
+        """Say which GET parameters are mapped on this path, so the agent can retry."""
+        from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+        parts = urlsplit(url)
+        cmap = getattr(self, "_capability_map", None) or {}
+        names = sorted({
+            str(row.get("name")) for row in collect_parameter_inventory(cmap)
+            if row.get("method") == "GET" and row.get("host") == parts.netloc
+            and row.get("path") == (parts.path or "/") and row.get("location") == "query"
+            and row.get("identity") == identity and row.get("testable")
+        })[:20]
+        mapped = (f" Mapped GET query parameters on {parts.path or '/'} for {identity}: "
+                  + ", ".join(names) + ".") if names else (
+            f" No GET query parameters are mapped on {parts.path or '/'} for {identity};"
+            " a POST form field needs a body probe, and an unmapped page needs a crawl first.")
+        return ValueError(f"{kind} proof requires a mapped GET query parameter; "
+                          f"{parameter!r} is not one.{mapped}")
+
     def _observed_numeric_baseline(
         self, url: str, parameter: str, identity: str, allowed: str,
     ) -> tuple[str, str, str, str]:
@@ -1154,7 +1174,7 @@ class ScopedAssessmentTools:
             for row in collect_parameter_inventory(cmap)
         )
         if not observed:
-            raise ValueError("Numeric SQLi proof requires a mapped GET query parameter")
+            raise self._unmapped_parameter_error("Numeric SQLi", url, parameter, identity)
         candidates = [
             *(page for page in cmap.get("pages_visited", [])
               if identity == "anonymous" and isinstance(page, str)),
@@ -1270,7 +1290,7 @@ class ScopedAssessmentTools:
                 "application_operation",
             }), None)
         if observed is None:
-            raise ValueError("String SQLi proof requires a mapped GET query parameter")
+            raise self._unmapped_parameter_error("String SQLi", url, parameter, identity)
         needs_preflight = False
         baseline_source = observed["source"]
         if not parts.query:

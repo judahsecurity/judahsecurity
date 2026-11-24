@@ -39,6 +39,29 @@ def _tool_output_max_chars() -> int:
 logger = logging.getLogger(__name__)
 
 
+def _lease_failure_reason(cell: Optional[Dict[str, Any]], lease_id: str) -> str:
+    """Name why a coverage-cell lease check failed, for the action ledger.
+
+    The lease state is checked first; when it is valid the cell itself did
+    not fit the tool (wrong test type, method, location or source).
+    """
+    import time
+
+    from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+
+    if not cell:
+        return "missing_cell"
+    if cell.get("status") != "leased":
+        return "not_leased"
+    if cell.get("lease_id") != lease_id:
+        return "lease_mismatch"
+    if float(cell.get("lease_deadline") or 0) <= time.time():
+        return "lease_expired"
+    if not allowed_discovery_path(str(cell.get("path") or "/")):
+        return "unsafe_path"
+    return "unsupported_input"
+
+
 def _emit_finding_to_sink(
     *,
     title: str,
@@ -1790,7 +1813,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 or cell.get("method") != "GET" or location != "query"
                 or not separator or not parameter
                 or not allowed_discovery_path(str(cell.get("path") or "/"))):
-            return {"success": False, "error": "invalid_coverage_lease"}
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": _lease_failure_reason(cell, coverage_lease_id)}
         cmap = getattr(self, "_capability_map", None) or {}
         scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
         parts = urlsplit(scoped_origin)
@@ -1874,7 +1898,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 or cell.get("source") != "surface_applicability"
                 or cell.get("test_type") != "cors"
                 or not allowed_discovery_path(str(cell.get("path") or "/"))):
-            return {"success": False, "error": "invalid_coverage_lease"}
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": _lease_failure_reason(cell, coverage_lease_id)}
         cmap = getattr(self, "_capability_map", None) or {}
         scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
         parts = urlsplit(scoped_origin)
@@ -1942,7 +1967,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 or cell.get("test_type") != "race_condition"
                 or str(cell.get("method") or "POST").upper() not in {"POST", "PUT", "PATCH"}
                 or not allowed_discovery_path(str(cell.get("path") or "/"))):
-            return {"success": False, "error": "invalid_coverage_lease"}
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": _lease_failure_reason(cell, coverage_lease_id)}
         action_path = str(cell.get("path") or "/")
         if action_path not in (getattr(self, "_scoped_race_action_paths", None) or set()):
             return {"success": False, "error": "operator_approval_required",
@@ -2046,7 +2072,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 or not (get_input or post_input)
                 or not separator or not parameter
                 or not allowed_discovery_path(str(cell.get("path") or "/"))):
-            return {"success": False, "error": "invalid_coverage_lease"}
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": _lease_failure_reason(cell, coverage_lease_id)}
         if post_input and str(cell.get("path") or "/") not in (
                 getattr(self, "_scoped_body_replay_paths", None) or set()):
             return {"success": False, "error": "operator_approval_required",
@@ -2394,7 +2421,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 or cell.get("test_type") != "csrf"
                 or str(cell.get("method") or "POST").upper() != "POST"
                 or not allowed_discovery_path(str(cell.get("path") or "/"))):
-            return {"success": False, "error": "invalid_coverage_lease"}
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": _lease_failure_reason(cell, coverage_lease_id)}
         action_path = str(cell.get("path") or "/")
         if action_path not in (getattr(self, "_scoped_csrf_action_paths", None) or set()):
             return {"success": False, "error": "operator_approval_required",
@@ -3227,7 +3255,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         evidence_ids = referenced if isinstance(referenced, list) else []
         failure_code = str(result.get("error") or "")
         if failure_code in {"assessment_scope_denied", "invalid_browser_args",
-                            "blocked_by_guard"}:
+                            "blocked_by_guard", "invalid_coverage_lease"}:
             # The action ledger excludes raw arguments and output. A stable
             # reason code distinguishes bad browser args from a true host deny.
             failure_code += f":{str(result.get('reason') or 'unspecified')[:40]}"
