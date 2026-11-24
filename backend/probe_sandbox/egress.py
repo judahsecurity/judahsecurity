@@ -154,10 +154,16 @@ def resolve_checked(host: str, port: int, allowed: list[str]) -> tuple[str | Non
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError:
         return None, "DNS resolution failed"
+    checked = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if _public(ip) or ALLOW_PRIVATE:
-            return str(ip), ""
+            checked.append(ip)
+    if checked:
+        # The proxy's socket is pinned to the checked IP. Prefer IPv4 when a
+        # name has both families: an IPv4-only target would otherwise fail if
+        # getaddrinfo returns an IPv6 address first (as localhost often does).
+        return str(next((ip for ip in checked if ip.version == 4), checked[0])), ""
     return None, "resolves only to non-public addresses"
 
 
