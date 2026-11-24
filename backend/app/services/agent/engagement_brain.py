@@ -3773,7 +3773,7 @@ def boost_methodologies_for_cwes(
 
 
 _COVERAGE_STATUSES = (
-    "untested", "in_focus", "inconclusive", "finding", "tested_clean", "skipped",
+    "untested", "in_focus", "inconclusive", "blocked", "finding", "tested_clean", "skipped",
 )
 
 
@@ -3915,7 +3915,7 @@ def record_surface_coverage(
     status = (status or "tested_clean").strip().lower()
     if status not in _COVERAGE_STATUSES:
         raise ValueError(f"Unknown coverage status: {status}")
-    if status in {"skipped", "inconclusive"} and not (reason or "").strip():
+    if status in {"skipped", "inconclusive", "blocked"} and not (reason or "").strip():
         raise ValueError(f"{status} coverage requires a reason")
     path = (path or brain.target or "/").strip() or "/"
     host = (host or "").strip()
@@ -4078,7 +4078,7 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         else:
             merged["status"] = st if st in _COVERAGE_STATUSES else "untested"
             untested.append(merged)
-            buckets["inconclusive" if st == "inconclusive" else "untested"].append(merged)
+            buckets[st if st in {"inconclusive", "blocked"} else "untested"].append(merged)
     accounted = (
         len(buckets["finding"])
         + len(buckets["tested_clean"])
@@ -4102,6 +4102,7 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         "tested_clean": len(buckets["tested_clean"]),
         "skipped": len(buckets["skipped"]),
         "inconclusive": len(buckets["inconclusive"]),
+        "blocked": len(buckets["blocked"]),
         "untested_count": len(untested),
         "untested": untested[:20],
         "verified_checks": sum(1 for cell in cells if cell.get("evidence_ids")),
@@ -4119,7 +4120,8 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         "summary": (
             f"coverage {accounted}/{denom_n or 0} accounted "
             f"(finding={len(buckets['finding'])} clean={len(buckets['tested_clean'])} "
-            f"skipped={len(buckets['skipped'])} untested={len(untested)}); "
+            f"skipped={len(buckets['skipped'])} blocked={len(buckets['blocked'])} "
+            f"untested={len(untested)}); "
             f"cells {len(cells) - len(open_cells)}/{len(cells)} complete"
         ),
     }
