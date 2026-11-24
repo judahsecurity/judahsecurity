@@ -84,3 +84,17 @@ def test_compare_and_render():
     assert comparison["totals"]["model_led"]["classes_passed"] == 1
     text = ab_matrix.render(comparison)
     assert "idor" in text and "1/0/Y" in text and "0/0/n" in text
+
+
+def test_deep_presets_pass_the_assessment_mode_flag(tmp_path):
+    _argv, args = _args(tmp_path)
+    plan = ab_matrix.build_plan(args)
+    step = dict(plan[0])
+    for config, mode in (("strict", "standard"), ("model_led", "standard"),
+                         ("deep", "deep"), ("deep_sandbox", "deep")):
+        step["config"] = config
+        command = ab_matrix._agent_command(args, step)
+        assert command[command.index("--assessment-mode") + 1] == mode, config
+    # deep differs from model_led only in budget, so the A/B isolates it.
+    assert ab_matrix.PRESETS["deep"] == ab_matrix.PRESETS["model_led"]
+    assert ab_matrix.PRESETS["deep_sandbox"] == ab_matrix.PRESETS["model_led_sandbox"]

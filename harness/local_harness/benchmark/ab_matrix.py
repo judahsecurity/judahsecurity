@@ -65,6 +65,14 @@ PRESETS: Dict[str, Dict[str, str]] = {
     },
 }
 
+# Deep assessment (larger budgets, specialist seeding, advisory steering for
+# the run) is a product_agent flag, not an environment default, so presets
+# that use it name the mode here. Flags match the model_led presets so a
+# model_led vs deep comparison isolates the budget dimension.
+PRESETS["deep"] = dict(PRESETS["model_led"])
+PRESETS["deep_sandbox"] = dict(PRESETS["model_led_sandbox"])
+PRESET_ASSESSMENT_MODE: Dict[str, str] = {"deep": "deep", "deep_sandbox": "deep"}
+
 COMPARE_FIELDS = ("passed", "true_positives", "verified_true_positives", "false_positives",
                   "false_negatives", "recall", "verified_recall", "precision",
                   "incomplete_or_error", "cost_usd", "duration_seconds")
@@ -120,6 +128,7 @@ def _agent_command(args: argparse.Namespace, step: dict) -> List[str]:
             command += [flag, str(value)]
     if case["bug_class"] == "ssrf" and case["polarity"] == "positive":
         command.append("--require-oast")
+    command += ["--assessment-mode", PRESET_ASSESSMENT_MODE.get(step["config"], "standard")]
     return command
 
 

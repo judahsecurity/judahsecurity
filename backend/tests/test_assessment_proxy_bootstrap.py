@@ -101,3 +101,81 @@ async def test_ready_check_is_noop_without_proxy_and_cached_with_one(monkeypatch
     await boot.ensure_assessment_proxy_ready("https://app.test/b?q=1")
     assert seen == ["https://app.test/"], "one preflight per origin, cached"
     boot.reset_cache()
+
+
+def test_bootstrap_requests_a_temporary_project():
+    # Caido 0.58 refuses guests a persistent project (PermissionDeniedUserError);
+    # Strix uses a temporary one for the same reason.
+    seen = {}
+
+    def handler(request):
+        body = json.loads(request.content)
+        if "loginAsGuest" in body["query"]:
+            return httpx.Response(200, json={"data": {"loginAsGuest": {"token": {"accessToken": "t"}}}})
+        if "createProject" in body["query"]:
+            seen.update(body["variables"]["input"])
+            return httpx.Response(200, json={"data": {"createProject": {"project": {"id": "p"}, "error": None}}})
+        if "selectProject" in body["query"]:
+            return httpx.Response(200, json={"data": {"selectProject": {"currentProject": {"project": {"id": "p"}}, "error": None}}})
+        return httpx.Response(200, json={"data": {"projects": []}})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await boot.ensure_project("http://caido:8080", client=client)
+
+    import asyncio
+    asyncio.run(run())
+    assert seen["temporary"] is True
+
+
+def test_invalidate_forgets_one_origin():
+    boot._ready_until["https://a.test"] = 9e18
+    boot._ready_until["https://b.test"] = 9e18
+    boot.invalidate("https://a.test/some/path?x=1")
+    assert "https://a.test" not in boot._ready_until and "https://b.test" in boot._ready_until
+    boot.reset_cache()
+
+
+async def _browser_with_proxy_error_once(monkeypatch, operation):
+    from app.services.agent.assessment_scope import register_scope
+    from app.services.agent.scoped_assessment import browser
+    from app.services.agent.tools import ASMToolsManager
+
+    readiness, calls = [], []
+
+    async def fake_ready(url):
+        readiness.append(url)
+
+    async def fake_browser(**kwargs):
+        calls.append(kwargs["operation"])
+        if len(calls) == 1:
+            raise browser.AssessmentProxyError("proxy answered")
+        return ({"operation": kwargs["operation"], "final_origin": "https://app.example.test",
+                 "final_path": "/", "requests": [], "actions": [], "status": 200,
+                 "pages": []}, b"")
+
+    monkeypatch.setattr(boot, "ensure_assessment_proxy_ready", fake_ready)
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.browser.check_browser", fake_browser)
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    return manager, readiness, calls
+
+
+@pytest.mark.asyncio
+async def test_read_only_browser_operation_rebootstraps_and_retries_once(monkeypatch):
+    manager, readiness, calls = await _browser_with_proxy_error_once(monkeypatch, "inspect_js")
+    await manager.scoped_browser_assessment("inspect_js", "https://app.example.test/")
+    assert calls == ["inspect_js", "inspect_js"]
+    assert len(readiness) == 2, "readiness re-checked after the proxy error"
+
+
+@pytest.mark.asyncio
+async def test_write_capable_browser_operation_is_not_retried(monkeypatch):
+    from app.services.agent.scoped_assessment import browser
+
+    manager, readiness, calls = await _browser_with_proxy_error_once(monkeypatch, "check_xss")
+    with pytest.raises(browser.AssessmentProxyError):
+        await manager.scoped_browser_assessment(
+            "check_xss", "https://app.example.test/search?q=1")
+    assert calls == ["check_xss"]

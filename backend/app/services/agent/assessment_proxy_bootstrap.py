@@ -85,7 +85,7 @@ async def ensure_project(api_url: str, *, client=None) -> str:
         project_id = next((p["id"] for p in projects if p.get("name") == PROJECT_NAME), "")
         if not project_id:
             created = (await _graphql(client, api_url, _CREATE,
-                                      {"input": {"name": PROJECT_NAME, "temporary": False}},
+                                      {"input": {"name": PROJECT_NAME, "temporary": True}},
                                       token=token)).get("createProject") or {}
             if created.get("error"):
                 raise AssessmentProxyNotReady(f"Caido project create failed: {created['error']}")
@@ -150,6 +150,18 @@ async def ensure_assessment_proxy_ready(target: str) -> None:
         await preflight(f"{key}/")
         _ready_until[key] = time.monotonic() + _READY_TTL_SECONDS
         logger.info("assessment proxy ready for %s", key)
+
+
+def invalidate(target: str) -> None:
+    """Forget readiness for an origin, e.g. after Caido restarted.
+
+    Caido drops a temporary project on restart and then answers every proxied
+    request with its own error page, so a cached "ready" must not outlive it.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(target)
+    _ready_until.pop(f"{parts.scheme}://{parts.netloc}", None)
 
 
 def reset_cache() -> None:

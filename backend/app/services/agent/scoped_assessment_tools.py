@@ -548,10 +548,16 @@ class ScopedAssessmentTools:
         # Chromium goes through the assessment proxy. Make sure the proxy has
         # a selected project and can actually reach this origin first, so a
         # broken proxy is one clear failure instead of fake 500 pages.
-        from app.services.agent.assessment_proxy_bootstrap import ensure_assessment_proxy_ready
+        from app.services.agent.assessment_proxy_bootstrap import (
+            ensure_assessment_proxy_ready, invalidate as invalidate_proxy_ready,
+        )
 
         await ensure_assessment_proxy_ready(url)
-        result, screenshot = await browser.check_browser(
+
+        async def run_browser():
+            for collected in (sources, exchanges, link_baselines):
+                collected.clear()
+            return await browser.check_browser(
             operation=operation, url=url, allowed_origins=[allowed],
             storage_state=state, max_pages=max_pages,
             javascript_sources=sources if operation == "inspect_js" else None,
@@ -574,7 +580,20 @@ class ScopedAssessmentTools:
             xhr_baseline_request_sha256=hashlib.sha256(xhr_post[0]).hexdigest() if xhr_post else "",
             readback_url=readback_url, cleanup_url_template=cleanup_url_template,
             client_test_type=client_test_type,
-        )
+            )
+
+        try:
+            result, screenshot = await run_browser()
+        except browser.AssessmentProxyError:
+            # Caido answered instead of the target, so nothing reached the
+            # site. The usual cause is a restart that dropped its temporary
+            # project: forget the cached readiness and bootstrap again. Only
+            # read-only operations are retried; write-capable ones re-raise.
+            invalidate_proxy_ready(url)
+            if operation not in {"map", "crawl", "inspect_js"}:
+                raise
+            await ensure_assessment_proxy_ready(url)
+            result, screenshot = await run_browser()
         result["identity"] = identity
         if link_baselines:
             private = dict(getattr(self, "_scoped_link_baselines", None) or {})

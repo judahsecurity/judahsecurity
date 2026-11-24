@@ -30,7 +30,10 @@ sudo docker compose --profile caido-assessment up -d caido-assessment
 Caido only proxies traffic once a project is selected. Prowl now does this
 itself: before the first proxied browser action it logs in to Caido as a
 guest, selects the `prowl-assessment` project (creating it if needed), and
-sends one GET through the proxy to the target. If any step fails, the action
+sends one GET through the proxy to the target. Caido only lets guests
+create temporary projects, which a Caido restart discards; when a proxied
+browser request then gets Caido's error page, Prowl re-runs this bootstrap
+and retries read-only browser operations once. If any step fails, the action
 fails with a message naming the proxy instead of recording Caido's own error
 page as the target's response. The `caido-assessment` service runs with
 `--allow-guests` and `--ui-domain caido-assessment` for this. Keep Intercept
