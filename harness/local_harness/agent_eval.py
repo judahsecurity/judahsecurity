@@ -51,6 +51,25 @@ def eval_capability_map(cmap: Any, expected: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _refusals_by_role(actions: Sequence[dict]) -> Dict[str, Dict[str, Any]]:
+    """Model calls and refusals per role (ledger phase), with the refusal rate."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for action in actions:
+        name = action.get("tool_name")
+        if not name or not (name == "model_refusal" or str(name).endswith("_model")
+                            or name.startswith("agent_")):
+            continue
+        role = str(action.get("phase") or name)
+        row = out.setdefault(role, {"calls": 0, "refusals": 0})
+        if name == "model_refusal":
+            row["refusals"] += 1
+        elif action.get("status") == "completed":
+            row["calls"] += 1
+    for row in out.values():
+        row["refusal_rate"] = round(row["refusals"] / row["calls"], 3) if row["calls"] else 0.0
+    return out
+
+
 def summarize_run_ledgers(runs: Sequence[dict]) -> Dict[str, Any]:
     """Summarize work and telemetry quality across all turns of one assessment."""
     valid = [run for run in runs if isinstance(run, dict) and run.get("run_id")]
@@ -81,6 +100,8 @@ def summarize_run_ledgers(runs: Sequence[dict]) -> Dict[str, Any]:
             int(row.get("exact_repeated_tool_calls") or 0) for row in coverage
         ),
         "published_findings": sum(int(row.get("published_findings") or 0) for row in coverage),
+        "model_refusals": sum(action.get("tool_name") == "model_refusal" for action in actions),
+        "refusals_by_role": _refusals_by_role(actions),
         "duration_seconds": round(sum(float(row.get("duration_seconds") or 0) for row in coverage), 1),
         "timeout_runs": sum(run.get("status") in {"timeout", "interrupted", "stalled"} for run in valid),
         "receipt_complete": bool(valid and actions and terminal and no_open_actions and action_count_matches),
@@ -100,9 +121,11 @@ def compare_ledger_assessments(baseline: dict, candidate: dict) -> Dict[str, Any
     metrics = (
         "actions", "test_actions", "repeated_tool_target_actions",
         "fingerprinted_tool_calls", "exact_repeated_tool_calls",
-        "timeout_runs", "published_findings", "duration_seconds",
+        "timeout_runs", "published_findings", "duration_seconds", "model_refusals",
     )
     return {
+        "refusals_by_role": {"baseline": old.get("refusals_by_role") or {},
+                             "candidate": new.get("refusals_by_role") or {}},
         "target": baseline.get("target"),
         "baseline": {key: old.get(key) for key in metrics},
         "candidate": {key: new.get(key) for key in metrics},

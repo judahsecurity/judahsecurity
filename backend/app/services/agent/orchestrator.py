@@ -230,6 +230,12 @@ async def _ledger_llm_call(llm, messages, *, kind: str, target: str = "",
                       phase=phase, detail=type(exc).__name__)
         raise
     append_action(run_id, action_id, "completed", kind, target=target, phase=phase)
+    from app.services.agent.refusals import is_refusal
+
+    if is_refusal(response):
+        # Counted per role (phase) so refusal rates can be compared on benchmarks.
+        append_action(run_id, uuid.uuid4().hex, "completed", "model_refusal",
+                      target=target, phase=phase or kind, detail=f"{kind}: model refused")
     return response
 
 
@@ -3633,18 +3639,9 @@ class AgentOrchestrator:
     @staticmethod
     def _looks_like_refusal(text: str) -> bool:
         """Heuristic: does an un-parseable LLM reply read like a safety refusal?"""
-        if not text:
-            return False
-        low = text.lower()
-        markers = (
-            "i can't help", "i cannot help", "i can't assist", "i cannot assist",
-            "i'm unable to", "i am unable to", "i'm not able to", "i am not able to",
-            "i won't", "i will not", "cannot comply", "can't comply",
-            "against my guidelines", "i must decline", "i have to decline",
-            "not able to provide", "unable to provide assistance",
-            "i can't provide", "i cannot provide",
-        )
-        return any(m in low for m in markers)
+        from app.services.agent.refusals import text_looks_like_refusal
+
+        return text_looks_like_refusal(text)
     
     def _parse_analysis_response(self, text: str) -> OutputAnalysis:
         """Parse analysis response."""

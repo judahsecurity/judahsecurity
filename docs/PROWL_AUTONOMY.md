@@ -311,3 +311,24 @@ already filed on the asset with their status, checks that tested clean,
 guarded surfaces, and earlier goals. `prior_engagement(detail)` returns the
 brief, the findings, or the earlier surface URLs (for `ingest_urls_into_map`).
 It reads one level deep and never writes to the current run.
+
+## Thin negatives, offline scripts, early candidates, refusals
+
+- **Thin negatives.** A hypothesis closed as clean on one receipt from one
+  tool returns to ready once, with guidance to try other techniques and
+  bypasses; the second result stands. Specialists are told a first block is
+  not a kill.
+- **Offline scripts.** `run_sandboxed_script(code, input, timeout)` runs
+  stdlib-only Python under user, mount and network namespaces and a chroot
+  with read-only `/usr` and `/lib` plus a scratch folder, with an audit hook,
+  resource limits and a per-session cap (`AGENT_SCRIPT_SANDBOX_MAX_RUNS`).
+  Without `unshare`/`chroot` support (Docker's default seccomp profile blocks
+  user namespaces) the tool refuses unless
+  `AGENT_SCRIPT_SANDBOX_ALLOW_WEAK=true`.
+- **Early candidates.** Each candidate submission appears in the Run Ledger as
+  `unverified_candidate`, and each verifier verdict as `candidate_verdict`.
+  Publication rules are unchanged.
+- **Refusals.** Each model call that comes back as a refusal adds a
+  `model_refusal` ledger entry for its role; the harness reports
+  `model_refusals` and `refusals_by_role`. See
+  [PROWL_BENCHMARK_RUNBOOK.md](PROWL_BENCHMARK_RUNBOOK.md).

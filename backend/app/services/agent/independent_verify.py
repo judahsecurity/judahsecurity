@@ -2284,6 +2284,9 @@ def apply_verdict(
             tools_manager._verify_receipts[receipt_key]
         )
     tools_manager._engagement_brain = brain.to_dict()
+    from app.services.agent.candidate_signal import signal
+
+    signal(cand, verdict)
     observer = getattr(tools_manager, "_early_verdict_observer", None)
     if callable(observer):
         try:

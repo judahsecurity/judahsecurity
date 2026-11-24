@@ -11389,6 +11389,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
                     cell.pop("first_pass_candidate_handoff_error", None)
                     break
         self._engagement_brain = brain.to_dict()
+        from app.services.agent.candidate_signal import signal
+
+        signal(cand, "submitted")
         return json.dumps(
             {
                 "candidate": cand.to_dict(),
