@@ -163,6 +163,26 @@ def test_inconclusive_coverage_keeps_the_gap_open_and_rejects_unknown_status():
     assert progress["ready_to_complete_coverage"] is False
 
 
+def test_blocked_coverage_records_reason_and_keeps_gap_open():
+    brain = EngagementBrain(surfaces=[{
+        "method": "POST", "path": "/cart", "host": "app.test", "takes_input": True,
+    }])
+    seed_coverage_from_surfaces(brain)
+    with pytest.raises(ValueError, match="blocked coverage requires a reason"):
+        record_surface_coverage(
+            brain, method="POST", path="/cart", host="app.test", status="blocked",
+        )
+    record_surface_coverage(
+        brain, method="POST", path="/cart", host="app.test", status="blocked",
+        reason="POST requires an exact approved path",
+    )
+    progress = coverage_progress(brain)
+    assert progress["blocked"] == 1
+    assert progress["untested_count"] == 1
+    assert progress["untested"][0]["status"] == "blocked"
+    assert progress["ready_to_complete_coverage"] is False
+
+
 def test_old_snapshot_endpoint_update_closes_migrated_legacy_cell():
     brain = EngagementBrain(
         surfaces=[
