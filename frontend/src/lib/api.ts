@@ -2778,13 +2778,6 @@ class ApiClient {
     return response.data;
   }
 
-  async getGraphOverview(organizationId?: number) {
-    const params: any = {};
-    if (organizationId) params.organization_id = organizationId;
-    const response = await this.client.get('/graph/overview', { params });
-    return response.data;
-  }
-
   // ---------------------------------------------------------------------------
   // Agent (ask a question → agent uses MCP tools for testing)
   // ---------------------------------------------------------------------------

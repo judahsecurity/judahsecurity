@@ -63,6 +63,77 @@ _SEVERITY_ESCALATION: Dict[tuple, str] = {
 }
 
 
+# vuln_type -> MITRE ATT&CK technique for a confirmed PoC step. The platform's
+# attack-path campaign view renders these as technique nodes.
+VULN_TYPE_TECHNIQUES: Dict[str, str] = {
+    "sqli": "T1190",
+    "rce": "T1190",
+    "ssti": "T1190",
+    "xxe": "T1190",
+    "lfi": "T1190",
+    "path-traversal": "T1190",
+    "ssrf": "T1190",
+    "deserialization": "T1190",
+    "file-upload": "T1190",
+    "idor": "T1190",
+    "bola": "T1190",
+    "xss": "T1059.007",
+    "dom-xss": "T1059.007",
+    "jwt": "T1550.001",
+    "auth-bypass": "T1078",
+    "default-credentials": "T1078.001",
+    "brute-force": "T1110",
+    "secret-exposure": "T1552.001",
+}
+
+_CHAIN_MAX_STEPS = 12
+
+
+def run_session_id() -> str:
+    """Identifier shared by every finding from one Vanguard run."""
+    return (
+        os.environ.get("AEGIS_LEDGER_SESSION")
+        or os.environ.get("ASM_SESSION_ID")
+        or ""
+    )[:128]
+
+
+def _clip(text: Any, limit: int) -> str:
+    text = "" if text is None else str(text)
+    return text if len(text) <= limit else text[:limit]
+
+
+def chain_step(
+    *,
+    step: int,
+    summary: str,
+    tool: str = "",
+    asset: str = "",
+    request_raw: str = "",
+    response_snippet: str = "",
+    outcome: str = "",
+    mitre_id: str = "",
+    finding_ref: str = "",
+) -> Dict[str, Any]:
+    """One step in the platform's ``agent_detection.chain`` format."""
+    first_line = (request_raw or "").strip().splitlines()[0] if (request_raw or "").strip() else ""
+    out: Dict[str, Any] = {
+        "step": step,
+        "summary": _clip(summary, 280),
+        "tool": tool or "manual",
+        "args": [first_line[:500]] if first_line else [],
+        "stdout": _clip(response_snippet, 4000),
+        "outcome": _clip(outcome, 280),
+    }
+    if asset:
+        out["asset"] = _clip(asset, 500)
+    if mitre_id:
+        out["mitre_id"] = mitre_id
+    if finding_ref:
+        out["finding_ref"] = _clip(finding_ref, 200)
+    return out
+
+
 try:
     from asm_scanner_core.findings import Finding  # shared with platform worker / OpenClaw
 except ImportError:
@@ -338,9 +409,93 @@ class ASMBridge:
                 "poc": poc.to_dict(),
                 "original_severity": current_severity,
                 "escalated": did_escalate,
+                "agent_detection": {
+                    "source": "aegis-vanguard",
+                    "session_id": run_session_id() or None,
+                    "chain": [chain_step(
+                        step=1,
+                        summary=f"{vuln_type} confirmed at {poc.endpoint}",
+                        tool=poc.tool or vuln_type,
+                        asset=poc.endpoint or host,
+                        request_raw=poc.request_raw,
+                        response_snippet=poc.response_snippet or poc.execution_evidence,
+                        outcome=poc.execution_evidence,
+                        mitre_id=VULN_TYPE_TECHNIQUES.get(vuln_type.lower(), ""),
+                    )],
+                },
             },
         ))
         return escalated
+
+    def confirm_chain(
+        self,
+        host: str,
+        title: str,
+        steps: List[Dict[str, Any]],
+        severity: str = "high",
+        impact: str = "",
+        not_demonstrated: str = "",
+        source: str = "aegis-vanguard-chain",
+    ) -> Dict[str, Any]:
+        """Submit a multi-step exploit chain as one structured finding.
+
+        Each step is a dict with ``summary`` (required) and optional ``asset``
+        (host or URL it ran against), ``tool``, ``request_raw``,
+        ``response_snippet``, ``outcome``, ``mitre_id`` (ATT&CK ID) and
+        ``finding_ref`` (title of the confirmed finding the step relies on).
+        Steps without a summary are dropped. Returns the normalised chain.
+        """
+        normalised: List[Dict[str, Any]] = []
+        for raw in steps or []:
+            if not isinstance(raw, dict) or not str(raw.get("summary") or "").strip():
+                continue
+            vuln_type = str(raw.get("vuln_type") or "").lower()
+            normalised.append(chain_step(
+                step=len(normalised) + 1,
+                summary=str(raw["summary"]),
+                tool=str(raw.get("tool") or ""),
+                asset=str(raw.get("asset") or raw.get("endpoint") or ""),
+                request_raw=str(raw.get("request_raw") or raw.get("request") or ""),
+                response_snippet=str(raw.get("response_snippet") or raw.get("response") or ""),
+                outcome=str(raw.get("outcome") or ""),
+                mitre_id=str(raw.get("mitre_id") or VULN_TYPE_TECHNIQUES.get(vuln_type, "")),
+                finding_ref=str(raw.get("finding_ref") or ""),
+            ))
+            if len(normalised) >= _CHAIN_MAX_STEPS:
+                break
+        if len(normalised) < 2:
+            raise ValueError("an exploit chain needs at least 2 steps with a summary")
+
+        refs = sorted({s["finding_ref"] for s in normalised if s.get("finding_ref")})
+        assets = [s["asset"] for s in normalised if s.get("asset")]
+        description = impact or title
+        description += "\n\nSteps:\n" + "\n".join(
+            f"{s['step']}. {s['summary']}" + (f" ({s['asset']})" if s.get("asset") else "")
+            for s in normalised
+        )
+        self._add(Finding(
+            type="vulnerability",
+            source=source,
+            target=host,
+            host=host,
+            title=f"[CHAIN] {title}",
+            severity=severity,
+            confidence="confirmed",
+            description=description,
+            tags=["confirmed", "exploit_chain"],
+            raw_data={
+                "agent_detection": {
+                    "source": "aegis-vanguard",
+                    "session_id": run_session_id() or None,
+                    "chain": normalised,
+                    "context": impact,
+                    "not_demonstrated": not_demonstrated,
+                    "assets": assets,
+                    "related_findings": refs,
+                },
+            },
+        ))
+        return {"title": f"[CHAIN] {title}", "severity": severity, "chain": normalised}
 
     # =====================================================================
     # Buffer Management

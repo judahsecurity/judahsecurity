@@ -126,6 +126,7 @@ class GraphService:
                 "CREATE CONSTRAINT vulnerability_id IF NOT EXISTS FOR (v:Vulnerability) REQUIRE v.vuln_id IS UNIQUE",
                 "CREATE CONSTRAINT cve_id IF NOT EXISTS FOR (c:CVE) REQUIRE c.cve_id IS UNIQUE",
                 "CREATE CONSTRAINT cwe_id IF NOT EXISTS FOR (w:CWE) REQUIRE w.cwe_id IS UNIQUE",
+                "CREATE CONSTRAINT attack_technique_id IF NOT EXISTS FOR (t:AttackTechnique) REQUIRE t.technique_id IS UNIQUE",
                 # Web application layer
                 "CREATE CONSTRAINT baseurl_id IF NOT EXISTS FOR (b:BaseURL) REQUIRE b.baseurl_id IS UNIQUE",
                 "CREATE CONSTRAINT endpoint_id IF NOT EXISTS FOR (e:Endpoint) REQUIRE e.endpoint_id IS UNIQUE",
@@ -166,6 +167,7 @@ class GraphService:
                 "CREATE INDEX vuln_severity IF NOT EXISTS FOR (v:Vulnerability) ON (v.severity)",
                 "CREATE INDEX vuln_status IF NOT EXISTS FOR (v:Vulnerability) ON (v.status)",
                 "CREATE INDEX vuln_org IF NOT EXISTS FOR (v:Vulnerability) ON (v.organization_id)",
+                "CREATE INDEX attack_chain_session IF NOT EXISTS FOR (c:AttackChain) ON (c.session_id)",
                 # Technology indexes
                 "CREATE INDEX tech_categories IF NOT EXISTS FOR (t:Technology) ON (t.categories)",
                 # Web application layer
@@ -254,6 +256,63 @@ class GraphService:
         finally:
             db.close()
     
+    def _sync_agent_chain(self, session, vuln, org_id: int) -> None:
+        """Project an agent-demonstrated chain onto the asset graph.
+
+        (:AttackChain {session_id})-[:INCLUDES]->(v:Vulnerability)
+        (v)-[:DEMONSTRATED_ON {steps, techniques}]->(:Asset)   per touched asset
+        (v)-[:USES_TECHNIQUE]->(:AttackTechnique {technique_id})
+        """
+        meta = getattr(vuln, "metadata_", None) or {}
+        detection = meta.get("agent_detection") if isinstance(meta, dict) else None
+        if not isinstance(detection, dict):
+            return
+        steps = [s for s in (detection.get("chain") or []) if isinstance(s, dict)]
+        by_asset: Dict[int, Dict[str, list]] = {}
+        techniques = set()
+        for step in steps:
+            tech = step.get("mitre_id")
+            if tech:
+                techniques.add(str(tech))
+            aid = step.get("asset_id") or vuln.asset_id
+            if not isinstance(aid, int):
+                continue
+            entry = by_asset.setdefault(aid, {"steps": [], "techniques": []})
+            entry["steps"].append(int(step.get("step") or 0))
+            if tech and tech not in entry["techniques"]:
+                entry["techniques"].append(str(tech))
+        session.run("""
+            MATCH (v:Vulnerability {vuln_id: $vuln_id})
+            SET v.demonstrated = $demonstrated, v.chain_steps = $count
+        """, {"vuln_id": vuln.id, "demonstrated": bool(steps), "count": len(steps)})
+        for aid, entry in by_asset.items():
+            session.run("""
+                MATCH (v:Vulnerability {vuln_id: $vuln_id})
+                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                MERGE (v)-[r:DEMONSTRATED_ON]->(a)
+                SET r.steps = $steps, r.techniques = $techniques
+            """, {
+                "vuln_id": vuln.id, "asset_id": aid, "org_id": org_id,
+                "steps": entry["steps"], "techniques": entry["techniques"],
+            })
+        for tech in sorted(techniques):
+            session.run("""
+                MATCH (v:Vulnerability {vuln_id: $vuln_id})
+                MERGE (t:AttackTechnique {technique_id: $tech})
+                MERGE (v)-[:USES_TECHNIQUE]->(t)
+            """, {"vuln_id": vuln.id, "tech": tech})
+        session_id = detection.get("session_id")
+        if session_id:
+            session.run("""
+                MATCH (v:Vulnerability {vuln_id: $vuln_id})
+                MERGE (c:AttackChain {session_id: $sid, organization_id: $org_id})
+                SET c.source = $source
+                MERGE (c)-[:INCLUDES]->(v)
+            """, {
+                "vuln_id": vuln.id, "sid": str(session_id)[:128], "org_id": org_id,
+                "source": str(detection.get("source") or "agent")[:64],
+            })
+
     def _sync_asset(self, session, asset: Asset, org_id: int):
         """
         Sync a single asset and all its relationships to the graph.
@@ -552,6 +611,8 @@ class GraphService:
                         MATCH (cwe:CWE {cwe_id: $cwe_id})
                         MERGE (cve)-[:EXPLOITS_WEAKNESS]->(cwe)
                     """, {"cve_id": vuln.cve_id, "cwe_id": vuln.cwe_id})
+
+            self._sync_agent_chain(session, vuln, org_id)
             
             # ===== 7b. FOUND_AT: link vulnerability to Endpoint when url/path known (web layer) =====
             path_for_endpoint = None

@@ -188,6 +188,18 @@ def technique_for_tool(tool: Optional[str]) -> Optional[Dict[str, str]]:
     return technique_payload(tech_id)
 
 
+def declared_techniques(steps: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """ATT&CK techniques named on chain steps, last step first (closest to impact)."""
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for step in reversed(list(steps or [])):
+        tech_id = str(step.get("mitre_id") or "").strip().upper()
+        if tech_id and tech_id not in seen:
+            seen.add(tech_id)
+            out.append(technique_payload(tech_id))
+    return out
+
+
 def heuristic_techniques(title: str, description: str = "") -> List[Dict[str, str]]:
     text = f"{title} {description}"
     out: List[Dict[str, str]] = []
@@ -371,7 +383,11 @@ def build_graph(group: Sequence[FindingView]) -> Tuple[List[Dict[str, Any]], Lis
     recon_tech: Optional[Dict[str, str]] = None
     for row in group:
         for step in row.chain_steps:
-            recon_tech = technique_for_tool(step.get("tool") or step.get("display_tool"))
+            declared = str(step.get("mitre_id") or "").upper()
+            if declared.startswith(("T159", "T1046")):
+                recon_tech = technique_payload(declared)
+            else:
+                recon_tech = technique_for_tool(step.get("tool") or step.get("display_tool"))
             if recon_tech:
                 break
         if recon_tech:
@@ -483,9 +499,11 @@ def build_graph(group: Sequence[FindingView]) -> Tuple[List[Dict[str, Any]], Lis
         extra_tech = None
         extra_status = "tested"
         for row in findings:
-            candidates = heuristic_techniques(row.title, f"{row.description} {row.impact}") + techniques_for_cwe(row.cwe_id)
+            heuristics = heuristic_techniques(row.title, f"{row.description} {row.impact}") + techniques_for_cwe(row.cwe_id)
             # Prefer impact techniques (integrity bypass) over the recon duplicate.
-            candidates.sort(key=lambda t: 0 if t["id"] == "T1565.002" else 1)
+            heuristics.sort(key=lambda t: 0 if t["id"] == "T1565.002" else 1)
+            # Techniques the agent declared on its demonstrated steps beat guesses.
+            candidates = declared_techniques(row.chain_steps) + heuristics
             for tech in candidates:
                 if tech["id"] in extra_seen:
                     continue

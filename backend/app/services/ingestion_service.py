@@ -249,6 +249,128 @@ def _upsert_vulnerability(
     return vuln, "created", None
 
 
+def _step_host(value: str) -> str:
+    text = (value or "").strip()
+    if "://" in text:
+        from urllib.parse import urlparse
+        return (urlparse(text).hostname or "").lower()
+    return text.split("/")[0].split(":")[0].lower()
+
+
+def _apply_agent_detection(
+    db: Session,
+    vuln: Vulnerability,
+    asset: Asset,
+    finding: UnifiedFinding,
+) -> List[int]:
+    """Persist an agent's demonstrated chain onto ``vuln.metadata_``.
+
+    External agents (Aegis Vanguard) send ``raw_data.agent_detection`` with
+    ordered steps. Steps are normalised by the same builder the platform agent
+    uses, each step's ``asset`` is resolved to an existing org asset, and the
+    result is stored as ``metadata_["agent_detection"]`` so the attack-path
+    campaign view and graph sync pick it up. Returns the asset IDs the chain
+    touched.
+    """
+    raw = finding.raw_data if isinstance(finding.raw_data, dict) else {}
+    meta = dict(vuln.metadata_ or {})
+    if isinstance(raw.get("poc"), dict):
+        meta["poc"] = raw["poc"]
+    detection = raw.get("agent_detection")
+    if not isinstance(detection, dict):
+        if meta != (vuln.metadata_ or {}):
+            vuln.metadata_ = meta
+        return []
+
+    from app.services.agent.demonstrated_chain import build_agent_detection
+
+    payload = build_agent_detection(
+        chain=detection.get("chain"),
+        target=finding.url or finding.host,
+        context=detection.get("context"),
+        not_demonstrated=detection.get("not_demonstrated"),
+        references=detection.get("references") or finding.references,
+        assets=detection.get("assets"),
+        session_id=detection.get("session_id"),
+    )
+    payload["source"] = str(detection.get("source") or finding.source or "agent")[:64]
+
+    touched: List[int] = [asset.id]
+    steps = payload.get("chain") or []
+
+    # Agent-supplied asset IDs must belong to this organisation.
+    claimed = {s["asset_id"] for s in steps if s.get("asset_id")}
+    if claimed:
+        valid = {
+            row[0] for row in db.query(Asset.id).filter(
+                Asset.organization_id == asset.organization_id, Asset.id.in_(claimed)
+            )
+        }
+        for step in steps:
+            if step.get("asset_id") and step["asset_id"] not in valid:
+                step.pop("asset_id")
+        touched.extend(valid)
+
+    # Resolve each step's host/URL to an existing asset in the organisation.
+    host_cache = {_step_host(asset.value or ""): asset.id}
+    for step in steps:
+        if step.get("asset_id") or not step.get("asset"):
+            continue
+        host = _step_host(step["asset"])
+        if not host:
+            continue
+        if host not in host_cache:
+            match = (
+                db.query(Asset.id)
+                .filter(Asset.organization_id == asset.organization_id, Asset.value == host)
+                .first()
+            )
+            host_cache[host] = match[0] if match else None
+        if host_cache[host]:
+            step["asset_id"] = host_cache[host]
+            touched.append(host_cache[host])
+
+    existing = meta.get("agent_detection") if isinstance(meta.get("agent_detection"), dict) else {}
+    if payload["step_count"] and payload["step_count"] >= int(existing.get("step_count") or 0):
+        meta["agent_detection"] = payload
+    elif not existing and payload.get("session_id"):
+        # No usable steps, but keep the session so the finding still groups
+        # with the rest of the run in the campaign view.
+        meta["agent_detection"] = payload
+    vuln.metadata_ = meta
+    return sorted(set(touched))
+
+
+def _trigger_graph_sync_background(organization_id: int, asset_ids: List[int]) -> None:
+    """Project freshly ingested assets into Neo4j without blocking the request."""
+    if not asset_ids:
+        return
+    import threading
+
+    def _run():
+        from app.db.database import SessionLocal
+        from app.services.graph_service import sync_organization_background
+        db = SessionLocal()
+        try:
+            values = [
+                v for (v,) in db.query(Asset.value).filter(
+                    Asset.organization_id == organization_id, Asset.id.in_(asset_ids)
+                )
+            ]
+        finally:
+            db.close()
+        if not values:
+            return
+        try:
+            result = sync_organization_background(organization_id, asset_values=values)
+            if result.get("error"):
+                logger.debug("Post-ingest graph sync skipped: %s", result["error"])
+        except Exception as exc:
+            logger.debug("Post-ingest graph sync failed: %s", exc)
+
+    threading.Thread(target=_run, name="ingest-graph-sync", daemon=True).start()
+
+
 def _enrich_takeover(asset: Asset, finding: UnifiedFinding):
     """Enrich asset with subdomain takeover data and escalate as vulnerability."""
     meta = dict(asset.metadata_ or {})
@@ -340,6 +462,7 @@ def process_ingestion_batch(
     created = updated = duplicates = errors = 0
     # Track reactivated findings so we can sync their Jira tickets after commit.
     reactivations: List[Tuple[int, str]] = []  # (vuln_id, old_status_value)
+    graph_assets: set = set()
 
     for idx, finding in enumerate(request.findings):
         try:
@@ -357,6 +480,8 @@ def process_ingestion_batch(
                 vuln, v_status, old_st = _upsert_vulnerability(db, asset, finding)
                 status = v_status
                 finding_id = vuln.id if vuln else None
+                if vuln is not None:
+                    graph_assets.update(_apply_agent_detection(db, vuln, asset, finding))
                 if v_status == "reactivated" and vuln and old_st:
                     reactivations.append((vuln.id, old_st))
 
@@ -365,6 +490,8 @@ def process_ingestion_batch(
                 vuln, v_status, old_st = _upsert_vulnerability(db, asset, finding)
                 status = v_status
                 finding_id = vuln.id if vuln else None
+                if vuln is not None:
+                    graph_assets.add(asset.id)
                 if v_status == "reactivated" and vuln and old_st:
                     reactivations.append((vuln.id, old_st))
 
@@ -411,6 +538,10 @@ def process_ingestion_batch(
             ))
 
     db.commit()
+
+    # Vulnerabilities and agent chains reach Neo4j now rather than on the next
+    # scheduled sync.
+    _trigger_graph_sync_background(organization_id, sorted(graph_assets))
 
     # After commit, trigger Jira reopen syncs for reactivated findings.
     # Each call spawns a self-contained daemon thread with its own DB session.

@@ -6,7 +6,8 @@ using the Neo4j graph database.
 """
 
 import logging
-from typing import Optional, List
+import re
+from typing import Any, Dict, Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
@@ -334,9 +335,15 @@ async def get_vulnerability_impact(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class GraphQueryRequest(BaseModel):
+    cypher: str
+    params: Optional[Dict[str, Any]] = None
+
+
 @router.post("/query")
 async def execute_graph_query(
-    query: str,
+    body: Optional[GraphQueryRequest] = None,
+    query: Optional[str] = Query(None, description="Deprecated: send {cypher, params} as JSON"),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -349,20 +356,26 @@ async def execute_graph_query(
             status_code=403,
             detail="Only admins can execute custom queries"
         )
-    
+
+    cypher = (body.cypher if body else query) or ""
+    params: Dict[str, Any] = dict(body.params or {}) if body else {}
+    if not cypher.strip():
+        raise HTTPException(status_code=422, detail="cypher is required")
+
     org_id = current_user.organization_id if hasattr(current_user, 'organization_id') else None
-    
+
     # Add organization filter for safety
-    if org_id and "organization_id" not in query.lower():
+    if org_id and "organization_id" not in cypher.lower():
+        params["__org_id"] = org_id
         # Inject org filter into WHERE clause
-        if "WHERE" in query.upper():
-            query = query.replace("WHERE", f"WHERE n.organization_id = {org_id} AND ", 1)
-        elif "RETURN" in query.upper():
-            query = query.replace("RETURN", f"WHERE n.organization_id = {org_id} RETURN", 1)
-    
+        if "WHERE" in cypher.upper():
+            cypher = re.sub(r"\bWHERE\b", "WHERE n.organization_id = $__org_id AND ", cypher, count=1, flags=re.I)
+        elif "RETURN" in cypher.upper():
+            cypher = re.sub(r"\bRETURN\b", "WHERE n.organization_id = $__org_id RETURN", cypher, count=1, flags=re.I)
+
     try:
         graph = get_graph_service()
-        results = graph.query(query)
+        results = graph.query(cypher, params)
         return {"results": results, "count": len(results)}
     except Exception as e:
         logger.error(f"Custom query error: {e}")

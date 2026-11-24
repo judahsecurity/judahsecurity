@@ -1057,6 +1057,74 @@ def confirm_vulnerability_poc(
     })
 
 
+@security_tool(category="exploit", risk="high")
+def confirm_exploit_chain(
+    host: str,
+    chain_title: str,
+    steps_json: str,
+    severity: str = "high",
+    impact: str = "",
+    not_demonstrated: str = "",
+) -> str:
+    """Submit a confirmed multi-step exploit chain as structured, ordered steps.
+
+    Use this (not confirm_vulnerability_poc) for exploit chains. The platform
+    links every step to the asset it ran against and renders the chain as an
+    attack path with ATT&CK techniques.
+
+    Args:
+        host: Primary hostname the chain compromises
+        chain_title: Short name, e.g. "IDOR + mass assignment -> admin takeover"
+        steps_json: JSON array of ordered steps, at least 2. Each step is an object
+            with "summary" (required, what was observed), "asset" (host or URL the
+            step ran against), "finding_ref" (title of the confirmed finding it
+            uses), "vuln_type" or "mitre_id" (ATT&CK ID such as T1190),
+            "request_raw", "response_snippet", "outcome" and "tool".
+        severity: Compound severity of the whole chain (info/low/medium/high/critical)
+        impact: What the full chain achieves
+        not_demonstrated: Links that were reasoned about but not observed
+    """
+    try:
+        steps = json.loads(steps_json) if isinstance(steps_json, str) else steps_json
+    except json.JSONDecodeError as exc:
+        return json.dumps({"confirmed": False, "error": f"steps_json is not valid JSON: {exc}"})
+    if isinstance(steps, dict):
+        steps = steps.get("steps") or steps.get("chain") or []
+    if not isinstance(steps, list):
+        return json.dumps({"confirmed": False, "error": "steps_json must be a JSON array"})
+    bridge = _get_bridge()
+    try:
+        result = bridge.confirm_chain(
+            host=host,
+            title=chain_title,
+            steps=steps,
+            severity=severity,
+            impact=impact,
+            not_demonstrated=not_demonstrated,
+        )
+    except ValueError as exc:
+        return json.dumps({"confirmed": False, "error": str(exc)})
+    bridge.flush()
+    return json.dumps({
+        "confirmed": True,
+        "title": result["title"],
+        "name": result["title"],
+        "host": host,
+        "vuln_type": "exploit_chain",
+        "severity": severity,
+        "step_count": len(result["chain"]),
+        "steps": result["chain"],
+        "findings": [{
+            "title": result["title"],
+            "name": result["title"],
+            "severity": severity,
+            "vuln_type": "exploit_chain",
+            "host": host,
+            "confirmed": True,
+            "source": "confirm_exploit_chain",
+        }],
+    }, default=str)
+
 # --- Reporting Tools ---
 
 @security_tool(category="report", risk="safe")
@@ -2171,7 +2239,7 @@ CHAIN_TOOLS = [
     "diff_http_requests",
     "crawl_urls",
     "discover_parameters",
-    "confirm_vulnerability_poc",
+    "confirm_exploit_chain",
     "submit_findings_to_platform",
     "brain_add_note",
 ]
@@ -2420,10 +2488,14 @@ can constitute a critical account takeover or full compromise.
    c. Document the full request sequence as the PoC.
    d. Estimate the compound severity: if any step in the chain yields critical
       impact, the chain severity is critical.
-4. Confirm each chain via confirm_vulnerability_poc:
-   - vuln_type = "exploit_chain"
-   - payload = the step-by-step PoC
+4. Confirm each chain via confirm_exploit_chain, one call per chain:
+   - steps_json = ordered JSON array, one object per step, each with
+     "summary" (what you observed), "asset" (the exact host or URL the step
+     hit), "finding_ref" (title of the confirmed finding the step uses),
+     "vuln_type" or "mitre_id", and the "request_raw"/"response_snippet" proof
+   - severity = compound severity of the whole chain
    - impact = compound impact description
+   - not_demonstrated = any link you reasoned about but did not observe
 5. Use brain_add_note to record any new observations about the app for future runs.
 6. If no chains are possible (all findings are isolated), say so explicitly.
 

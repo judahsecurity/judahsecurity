@@ -76,6 +76,7 @@ _SKIP_RECORD = frozenset({
     "complete",
 })
 
+_MITRE_RE = re.compile(r"T\d{4}(?:\.\d{3})?")
 _HTTP_STATUS_RE = re.compile(r"HTTP/\d(?:\.\d)?\s+(\d{3})")
 _JSON_ERROR_RE = re.compile(r'"error"\s*:\s*"([^"]{3,80})"', re.I)
 _WELCOME_RE = re.compile(r'"couchdb"\s*:\s*"Welcome".*?"version"\s*:\s*"([^"]+)"', re.I | re.S)
@@ -634,7 +635,7 @@ def normalize_step(raw: Any, index: int) -> Optional[Dict[str, Any]]:
             "exit_code": int(exit_code) if isinstance(exit_code, (int, float)) else exit_code,
         }
 
-    return {
+    step: Dict[str, Any] = {
         "step": step_n,
         "summary": summary[:MAX_SUMMARY],
         "outcome": outcome[:MAX_OUTCOME],
@@ -643,6 +644,27 @@ def normalize_step(raw: Any, index: int) -> Optional[Dict[str, Any]]:
         "args": args,
         "result": stored_result,
     }
+    step.update(step_anchors(raw))
+    return step
+
+
+def step_anchors(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Optional structured links on a step: the asset it touched, its ATT&CK
+    technique, and the finding it produced or relied on."""
+    out: Dict[str, Any] = {}
+    asset = raw.get("asset") or raw.get("host") or raw.get("endpoint")
+    if isinstance(asset, str) and asset.strip():
+        out["asset"] = redact_secrets(asset.strip())[:500]
+    asset_id = raw.get("asset_id")
+    if isinstance(asset_id, int) and not isinstance(asset_id, bool) and asset_id > 0:
+        out["asset_id"] = asset_id
+    mitre = str(raw.get("mitre_id") or raw.get("technique") or "").strip().upper()
+    if _MITRE_RE.fullmatch(mitre):
+        out["mitre_id"] = mitre
+    ref = raw.get("finding_ref") or raw.get("finding")
+    if isinstance(ref, (str, int)) and str(ref).strip():
+        out["finding_ref"] = str(ref).strip()[:200]
+    return out
 
 
 def parse_chain_payload(raw: Any) -> List[Any]:
