@@ -1311,6 +1311,10 @@ INSTRUCTIONS:
    For lists (paths/params/xss) call mutate_list once — do not ReAct them.
 3. Blind SSRF/XXE: execute_interactsh register, plant payload_url. Never 169.254.169.254 or localhost.
 4. Think briefly about which tool(s) will most quickly prove or kill the hypothesis.
+   A first block (filtered payload, 404, WAF page, no echo) is not a kill: work
+   through the bypasses (encodings, other parameter locations or methods, case and
+   comment tricks, timing or out-of-band signals) before verdict=killed. A kill
+   needs evidence from more than one technique; otherwise say inconclusive.
 5. Respond ONLY with a JSON object of this shape:
 
    {{

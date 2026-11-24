@@ -569,6 +569,10 @@ def directives_from_hypotheses(
             )
         except Exception:
             pass
+        node = ((getattr(brain, "task_graph", None) or {}).get("nodes") or {}).get(leased_hypothesis_id)
+        if (isinstance(node, dict) and node.get("negative_rechecked")
+                and node.get("rewritten_test") and not out[name].rewrite_note):
+            out[name].rewrite_note = str(node["rewritten_test"])[:600]
     return out
 
 

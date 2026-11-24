@@ -65,9 +65,14 @@ class TaskNode:
     lease_started_at: float = 0.0
     lease_deadline: float = 0.0
     recovery_required: bool = False
+    # A thin "clean" verdict gets one re-check with different techniques.
+    negative_rechecked: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if not self.negative_rechecked:
+            data.pop("negative_rechecked")  # keep snapshots unchanged when unused
+        return data
 
 
 @dataclass
@@ -514,6 +519,12 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
     )
 
 
+def thin_negative(result: Dict[str, Any], summary: "ExecutorSummary") -> bool:
+    """A clean verdict resting on one receipt from one tool."""
+    receipts = {str(item) for item in result.get("evidence_ids") or [] if item}
+    return len(receipts) < 2 and len(summary.tools_run or []) < 2
+
+
 def apply_executor_summary(
     graph: PenetrationTaskGraph,
     brain: Any,
@@ -556,7 +567,22 @@ def apply_executor_summary(
         verdict = result.get("verdict")
         evidence = str(result.get("evidence") or "")[:2000]
         node.evidence_ids = [str(item) for item in result.get("evidence_ids", [])][:50]
-        if verdict == "killed" and result.get("evidence_ids") and evidence:
+        if (verdict == "killed" and result.get("evidence_ids") and evidence
+                and thin_negative(result, summary) and not node.negative_rechecked):
+            # One probe with one technique is an observation, not a conclusion:
+            # re-check once with different techniques, then respect the result.
+            node.negative_rechecked = True
+            node.status, hyp_status = NODE_RETRY, "in_progress"
+            node.max_attempts = max(node.max_attempts, node.attempts + 1)
+            node.rewritten_test = (
+                "Re-check a thin negative: the last run concluded 'clean' from "
+                f"{', '.join(summary.tools_run) or 'one probe'} with one receipt. Use "
+                "different techniques and bypasses (encodings, other parameter "
+                "locations or methods, filter evasion, timing or out-of-band signals) "
+                "before concluding. Kill only with evidence from several techniques."
+            )
+            node.last_failure = node.rewritten_test[:500]
+        elif verdict == "killed" and result.get("evidence_ids") and evidence:
             node.status, hyp_status = NODE_KILLED, "killed"
         elif verdict == "blocked":
             node.status, hyp_status = NODE_BLOCKED, "open"

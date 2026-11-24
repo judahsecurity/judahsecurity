@@ -969,7 +969,8 @@ def test_summary_does_not_close_unrelated_hypotheses():
                 {
                     "hypothesis_id": "a",
                     "verdict": "killed",
-                    "evidence_ids": ["execution-A"],
+                    # Two receipts: a single-receipt kill would be re-checked once.
+                    "evidence_ids": ["execution-A", "execution-A2"],
                     "evidence": "A denied",
                 }
             ],
@@ -1065,7 +1066,8 @@ async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
                         {
                             "hypothesis_id": hypothesis_id,
                             "verdict": "killed",
-                            "evidence_ids": ["http-denied"],
+                            # Two receipts: a single-receipt kill is re-checked once.
+                            "evidence_ids": ["http-denied", "http-denied-2"],
                             "evidence": "Attacker received a denial",
                         }
                     ],
@@ -1075,7 +1077,7 @@ async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
                             args={"hypothesis_id": hypothesis_id},
                             success=True,
                             summary="denied",
-                            evidence_ids=["http-denied"],
+                            evidence_ids=["http-denied", "http-denied-2"],
                         )
                     ],
                 )
@@ -1098,7 +1100,7 @@ async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
     rows = manager._engagement_brain["task_graph"]["nodes"]
     sibling_id = ({"authz-a", "authz-b"} - {leased_id}).pop()
     assert rows[leased_id]["status"] == "killed"
-    assert rows[leased_id]["evidence_ids"] == ["http-denied"]
+    assert rows[leased_id]["evidence_ids"] == ["http-denied", "http-denied-2"]
     assert rows[sibling_id]["status"] == "ready"
     assert manager._engagement_brain["hypothesis_wave_history"] == ["wave-test"]
     assert any(
