@@ -73,6 +73,9 @@ above only with a proof kind for the class; classes without proof kinds and
 | `candidates` | `GET /agent/sessions/{sid}/candidates` | JWT |
 | `verdict` | candidate status from `candidates` when intake was used; else ledger receipts | JWT |
 | `stop` | `POST /agent/sessions/{sid}/stop` | JWT |
+| `identities` / `start --identity-file` | logs each identity in locally (`agent/identity_sessions.py`), then `POST /agent/sessions/{sid}/identities` with cookies + auth headers only | JWT |
+| `har` | `POST /agent/sessions/{sid}/har` (DevTools HAR of a logged-in session) | JWT |
+| `capture-token` | `POST /agent/sessions/{sid}/capture-token` (for the capture extension) | JWT |
 | `tool` | `POST /mcp/call` (subfinder, dnsx, httpx, katana, waybackurls; scope-checked) | JWT |
 | `classes` | local `data/vuln_classes.json` | — |
 | `classes --remote` | `GET /agent/proof-classes` | JWT |
@@ -142,6 +145,19 @@ status `queued`, plus `run_in_progress`. `verdict` maps `queued` to `pending`.
 `GET /agent/proof-classes` returns `PROOFS_BY_CLASS` (sorted kinds), coverage
 classes with their proof class and lane, `severity_caps` and
 `non_confirmable`. `data/vuln_classes.json` stays as the offline copy.
+
+### Test identities (closed gap)
+
+`identities` (or `start --identity-file`) reads a Vanguard identity file
+(`agent/identities.py` format), logs each identity in on this machine with the
+Vanguard login engine, and hands Prowl only the resulting session: exact
+origin, cookies and auth headers. Passwords never leave this machine. The
+backend stores the material encrypted in the operator-capture inbox, checks it
+against the engagement scope when the run drains it at its next think turn, and
+registers a named identity the model can use but never see. Identities whose
+login is rejected are not sent; `ready_unverified` ones (no success marker) need
+`--allow-unverified`. Prowl does not refresh CSRF tokens or re-login on expiry;
+re-run `identities` for a new session.
 
 ### Remaining API gaps (documented, not invented)
 

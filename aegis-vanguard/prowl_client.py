@@ -16,7 +16,7 @@ Commands:
     asset --host HOST                        GET  /assets/?search=HOST&in_scope=true
     start --target ORIGIN --scope-file F     POST /agent/query (mode=agent)
           [--playbook ID] [--objective TXT] [--policy-file P] [--oob]
-          [--asset-id N --executor] [--run-dir D]
+          [--asset-id N --executor] [--run-dir D] [--identity-file I]
     poll --session S [--wait] [--run-dir D]  GET  /agent/conversations/S and /ledger
     findings --asset-id N                    GET  /vulnerabilities/?asset_id=N&detected_by=agent_family
     verify --run-dir D --finding-id ID --target ORIGIN --scope-file F [--session S]
@@ -29,6 +29,14 @@ Commands:
     verdict --run-dir D --finding-id ID      candidate status (intake) or ledger ->
                                              confirmed | refuted | improve | pending
     stop --session S                         POST /agent/sessions/S/stop
+    identities --session S --target ORIGIN --scope-file F --identity-file I [--allow-unverified]
+                                             log each identity in locally (agent/identity_sessions),
+                                             then POST /agent/sessions/S/identities with the
+                                             session cookies/headers only (never passwords)
+    har --session S --identity NAME --file H [--role R --tenant T]
+                                             POST /agent/sessions/S/har (DevTools HAR of a login)
+    capture-token --session S --identity NAME
+                                             POST /agent/sessions/S/capture-token (capture extension)
     tool --scope-file F --name execute_httpx --args "..."
                                              POST /mcp/call (recon tools only, scope-checked)
 
@@ -319,9 +327,90 @@ def cmd_asset(args) -> dict | list:
     return request("GET", "/assets/", params={"search": args.host, "in_scope": "true", "limit": 20})
 
 
+_IDENTITY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}\Z")
+
+
+def prepare_identities(path: str, origin: str, *, allow_unverified: bool = False,
+                       transport=None) -> list[tuple[dict, dict | None]]:
+    """Log in each identity on this machine. Returns (public row, handoff payload or None).
+
+    The payload carries cookies and headers only; it must go nowhere but the
+    platform API. Rows are safe to print.
+    """
+    sys.path.insert(0, str(ROOT))
+    from agent.identities import load_identities
+    from agent.identity_sessions import IdentitySessionManager
+
+    identities = load_identities(path)
+    if not identities:
+        raise ProwlError(f"{path} has no identities")
+    for item in identities:
+        if not _IDENTITY_NAME.fullmatch(item["label"]) or item["label"] in ("anonymous", "legacy"):
+            raise ProwlError(f"identity label {item['label']!r} must be 1-40 letters, digits, "
+                             "dot, dash or underscore, and not anonymous or legacy")
+    manager = IdentitySessionManager(transport=transport)
+    manager.configure(identities, origin)
+    prepared = []
+    for item in identities:
+        status = manager.establish(item["label"])
+        row = {"identity": item["label"], "role": status["role"], "tenant": status["tenant"],
+               "state": status["state"], "evidence": status["evidence"], "error": status["error"],
+               "cookie_names": status["cookie_names"], "sent": False}
+        if status["csrf_available"]:
+            row["note"] = "CSRF token captured locally; Prowl does not refresh it per request"
+        material = manager.session_material(item["label"])
+        accepted = status["state"] == "authenticated" or (
+            allow_unverified and status["state"] == "ready_unverified")
+        if not accepted:
+            row["skipped"] = (f"login state {status['state']}"
+                              + ("" if allow_unverified or status["state"] != "ready_unverified"
+                                 else "; pass --allow-unverified to send it anyway"))
+            prepared.append((row, None))
+        elif not (material["cookies"] or material["headers"]):
+            row["skipped"] = "no cookies or session headers to hand over"
+            prepared.append((row, None))
+        else:
+            prepared.append((row, {"identity": item["label"], "role": status["role"],
+                                   "tenant": status["tenant"], **material}))
+    return prepared
+
+
+def send_identities(session: str, prepared: list[tuple[dict, dict | None]]) -> list[dict]:
+    rows = []
+    for row, payload in prepared:
+        if payload is not None:
+            resp = request("POST", f"/agent/sessions/{urllib.parse.quote(session)}/identities", payload)
+            row = {**row, "sent": True, "origin": resp.get("origin"),
+                   "header_names": resp.get("headers"), "cookies": resp.get("cookies")}
+        rows.append(row)
+    return rows
+
+
+def cmd_identities(args) -> dict:
+    origin = origin_of(args.target)
+    require_scope(args.scope_file, origin)
+    prepared = prepare_identities(args.identity_file, origin, allow_unverified=args.allow_unverified)
+    return {"session_id": args.session, "target": origin,
+            "identities": send_identities(args.session, prepared)}
+
+
+def cmd_har(args) -> dict:
+    har = json.loads(Path(args.file).read_text())
+    return request("POST", f"/agent/sessions/{urllib.parse.quote(args.session)}/har",
+                   {"identity": args.identity, "role": args.role, "tenant": args.tenant, "har": har})
+
+
+def cmd_capture_token(args) -> dict:
+    return request("POST", f"/agent/sessions/{urllib.parse.quote(args.session)}/capture-token",
+                   {"identity": args.identity, "role": args.role, "tenant": args.tenant})
+
+
 def cmd_start(args) -> dict:
     origin = origin_of(args.target)
     require_scope(args.scope_file, origin)
+    # Log identities in before starting, so a bad identity file never starts a run.
+    prepared = (prepare_identities(args.identity_file, origin, allow_unverified=args.allow_unverified)
+                if args.identity_file else [])
     out: dict = {"target": origin, "started_at": _now()}
     session_id = args.session
     if args.executor:
@@ -341,6 +430,9 @@ def cmd_start(args) -> dict:
     resp = request("POST", "/agent/query", body)
     out.update(session_id=resp.get("session_id"), running=resp.get("running"),
                playbook=args.playbook)
+    if prepared:
+        # The run picks these up at its next think turn (operator capture drain).
+        out["identities"] = send_identities(out["session_id"], prepared)
     if args.run_dir:
         _write(Path(args.run_dir) / "prowl_run.json", out)
     return out
@@ -504,6 +596,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--oob", action="store_true", help="operator grant for OOB callbacks")
     s.add_argument("--policy-file", help="JSON AgentAssessmentPolicy (body_replay_paths, csrf_action_paths, ...)")
     s.add_argument("--price-limit", type=float); s.add_argument("--run-dir")
+    s.add_argument("--identity-file", help="Vanguard identity JSON; logged in locally, sessions handed to Prowl")
+    s.add_argument("--allow-unverified", action="store_true",
+                   help="also hand over identities whose login could not be confirmed")
     s.set_defaults(fn=cmd_start)
     s = sub.add_parser("poll")
     s.add_argument("--session", required=True); s.add_argument("--wait", action="store_true")
@@ -524,6 +619,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run-dir", required=True); s.add_argument("--finding-id", required=True)
     s.set_defaults(fn=cmd_verdict)
     s = sub.add_parser("stop"); s.add_argument("--session", required=True); s.set_defaults(fn=cmd_stop)
+    s = sub.add_parser("identities")
+    for name in ("--session", "--target", "--scope-file", "--identity-file"):
+        s.add_argument(name, required=True)
+    s.add_argument("--allow-unverified", action="store_true")
+    s.set_defaults(fn=cmd_identities)
+    for name, fn in (("har", cmd_har), ("capture-token", cmd_capture_token)):
+        s = sub.add_parser(name)
+        s.add_argument("--session", required=True); s.add_argument("--identity", required=True)
+        s.add_argument("--role", default=""); s.add_argument("--tenant", default="")
+        if name == "har":
+            s.add_argument("--file", required=True)
+        s.set_defaults(fn=fn)
     s = sub.add_parser("tool")
     s.add_argument("--scope-file", required=True); s.add_argument("--name", required=True)
     s.add_argument("--args", required=True); s.set_defaults(fn=cmd_tool)

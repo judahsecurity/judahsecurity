@@ -1402,7 +1402,8 @@ class AgentOrchestrator:
                 state = {**state, "engagement_brain": inbox_brain_update}
                 capture_note = (
                     f"Operator capture: {capture_summary['recorded']} logged-in exchanges recorded "
-                    f"as evidence for identities {', '.join(capture_summary['identities']) or 'none'}"
+                    f"and {capture_summary.get('sessions', 0)} identity session handoffs applied "
+                    f"for identities {', '.join(capture_summary['identities']) or 'none'}"
                     f"; {capture_summary['out_of_scope']} out-of-scope exchanges dropped. "
                     "The identities are registered (credentials hidden); use them with "
                     "list_test_identities, compare_requests and mutate_captured_request."

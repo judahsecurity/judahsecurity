@@ -8,7 +8,11 @@ session's requests/responses here or they upload a DevTools HAR. Each batch:
   HMAC-signed capture token (or the analyst's own login for HAR upload);
 * is normalized (text bodies only, bounded sizes) and stored encrypted at rest
   until the running assessment drains it;
-* on drain, is filtered to the engagement's network scope, registers or
+Tools that log in on the analyst's machine (Aegis Vanguard's identity file)
+can instead hand over the resulting session material only: an exact origin
+plus cookies and auth headers, no passwords. It uses the same encrypted inbox.
+
+Each batch, on drain, is filtered to the engagement's network scope, registers or
   refreshes the identity's cookies and auth headers in the identity registry
   (never shown to the model), records every exchange as redacted
   ``http_exchange`` evidence, and maps the requests into operations so
@@ -44,6 +48,15 @@ _SESSION = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _MAGIC = b"JUDAH_OPCAPTURE_1\0"
 # Request headers that carry the logged-in session, replayed for the identity.
 _SESSION_HEADERS = ("authorization", "x-csrf-token", "x-xsrf-token", "x-api-key", "x-auth-token")
+# Never replayed from operator-supplied session material.
+_FORBIDDEN_SESSION_HEADERS = frozenset({
+    "host", "content-length", "transfer-encoding", "connection", "te", "upgrade",
+    "proxy-authorization", "proxy-connection", "keep-alive", "trailer",
+})
+_HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}\Z")
+_COOKIE_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}\Z")
+MAX_SESSION_HEADERS = 20
+MAX_SESSION_COOKIES = 60
 _SKIP_MIME = ("image/", "font/", "video/", "audio/", "application/octet-stream",
               "application/zip", "application/pdf", "application/wasm")
 
@@ -209,6 +222,55 @@ def normalize_batch(entries: Any) -> List[Dict[str, Any]]:
     return clean
 
 
+def normalize_session_material(origin_url: Any, cookies: Any, headers: Any) -> Dict[str, Any]:
+    """Validate operator-supplied session material for one exact origin."""
+    parts = urlsplit(str(origin_url or ""))
+    if (parts.scheme not in ("http", "https") or not parts.hostname or parts.username
+            or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment):
+        raise CaptureError(422, "origin must be an exact http(s) origin such as https://app.example.com")
+    try:
+        parts.port
+    except ValueError:
+        raise CaptureError(422, "origin has an invalid port") from None
+    if not isinstance(cookies or {}, dict) or not isinstance(headers or {}, dict):
+        raise CaptureError(422, "cookies and headers must be objects")
+
+    def clean_value(value: Any, what: str) -> str:
+        value = str(value if value is not None else "")
+        if len(value) > 8000 or any(ch in value for ch in "\r\n\0"):
+            raise CaptureError(422, f"{what} value is too long or contains control characters")
+        return value
+
+    jar: Dict[str, str] = {}
+    out_headers: Dict[str, str] = {}
+    for name, value in (headers or {}).items():
+        name = str(name or "").strip()
+        if not _HEADER_NAME.fullmatch(name):
+            raise CaptureError(422, f"invalid header name: {name[:40]!r}")
+        if name.lower() in _FORBIDDEN_SESSION_HEADERS:
+            raise CaptureError(422, f"header {name} cannot be supplied for an identity")
+        value = clean_value(value, f"header {name}")
+        if name.lower() == "cookie":
+            for pair in value.split(";"):
+                key, sep, cookie_value = pair.strip().partition("=")
+                if sep and key:
+                    jar[key] = cookie_value
+            continue
+        out_headers[name.title() if name.lower() == "authorization" else name] = value
+    for name, value in (cookies or {}).items():
+        jar[str(name or "").strip()] = clean_value(value, "cookie")
+    for name in jar:
+        if not _COOKIE_NAME.fullmatch(name):
+            raise CaptureError(422, f"invalid cookie name: {name[:40]!r}")
+    if not jar and not out_headers:
+        raise CaptureError(422, "identity needs at least one cookie or session header")
+    if len(out_headers) > MAX_SESSION_HEADERS or len(jar) > MAX_SESSION_COOKIES:
+        raise CaptureError(422, "too many headers or cookies for one identity")
+    return {"origin": f"{parts.scheme}://{parts.netloc}".lower(),
+            "cookies": [{"name": k, "value": v} for k, v in jar.items()],
+            "headers": out_headers}
+
+
 # --------------------------------------------------------------------------
 # encrypted inbox
 # --------------------------------------------------------------------------
@@ -227,33 +289,54 @@ def _box_key() -> bytes:
 
 def enqueue(organization_id: int, session_id: str, *, identity: str, role: str, tenant: str,
             entries: List[Dict[str, Any]], source: str) -> Dict[str, Any]:
+    if not entries:
+        if _inbox_dir(organization_id, session_id) is None:
+            raise CaptureError(503, "capture storage is not configured (AEGIS_EVIDENCE_DIR)")
+        return {"accepted": 0, "batches": 0}
+    directory = _open_inbox(organization_id, session_id)
+    batches = 0
+    for start in range(0, len(entries), MAX_ENTRIES_PER_BATCH):
+        chunk = entries[start:start + MAX_ENTRIES_PER_BATCH]
+        _write_batch(directory, {"identity": identity, "role": role, "tenant": tenant,
+                                 "source": source, "entries": chunk})
+        batches += 1
+    return {"accepted": len(entries), "batches": batches}
+
+
+def enqueue_session(organization_id: int, session_id: str, *, identity: str, role: str,
+                    tenant: str, material: Dict[str, Any], source: str) -> Dict[str, Any]:
+    """Queue validated session material (see normalize_session_material) for one identity."""
+    directory = _open_inbox(organization_id, session_id)
+    _write_batch(directory, {"identity": identity, "role": role, "tenant": tenant,
+                             "source": source, "entries": [], "session": material})
+    return {"accepted": 1, "batches": 1, "origin": material["origin"],
+            "cookies": len(material["cookies"]), "headers": sorted(material["headers"])}
+
+
+def _open_inbox(organization_id: int, session_id: str) -> Path:
     directory = _inbox_dir(organization_id, session_id)
     if directory is None:
         raise CaptureError(503, "capture storage is not configured (AEGIS_EVIDENCE_DIR)")
-    if not entries:
-        return {"accepted": 0, "batches": 0}
     if directory.is_symlink():
         raise CaptureError(500, "capture storage path is invalid")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if len(list(directory.glob("*.capture"))) >= MAX_PENDING_BATCHES:
         raise CaptureError(429, "too many undelivered capture batches; start or resume the assessment")
-    batches = 0
-    for start in range(0, len(entries), MAX_ENTRIES_PER_BATCH):
-        chunk = entries[start:start + MAX_ENTRIES_PER_BATCH]
-        payload = json.dumps({"identity": identity, "role": role, "tenant": tenant,
-                              "source": source, "entries": chunk}).encode()
-        if len(payload) > MAX_BATCH_BYTES:
-            raise CaptureError(413, "capture batch too large")
-        batch_id = f"{int(time.time() * 1000):015d}-{uuid.uuid4().hex}"
-        nonce = os.urandom(12)
-        blob = _MAGIC + nonce + AESGCM(_box_key()).encrypt(nonce, payload, batch_id.encode())
-        temporary = directory / f".{batch_id}.tmp"
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(blob)
-        os.replace(temporary, directory / f"{batch_id}.capture")
-        batches += 1
-    return {"accepted": len(entries), "batches": batches}
+    return directory
+
+
+def _write_batch(directory: Path, batch: Dict[str, Any]) -> None:
+    payload = json.dumps(batch).encode()
+    if len(payload) > MAX_BATCH_BYTES:
+        raise CaptureError(413, "capture batch too large")
+    batch_id = f"{int(time.time() * 1000):015d}-{uuid.uuid4().hex}"
+    nonce = os.urandom(12)
+    blob = _MAGIC + nonce + AESGCM(_box_key()).encrypt(nonce, payload, batch_id.encode())
+    temporary = directory / f".{batch_id}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(blob)
+    os.replace(temporary, directory / f"{batch_id}.capture")
 
 
 def pending_count(organization_id: int, session_id: str) -> int:
@@ -315,6 +398,22 @@ async def apply_batches(manager: Any, batches: List[Dict[str, Any]]) -> Dict[str
     store = evidence_store(manager)
     for batch in batches:
         identity = str(batch.get("identity") or "")
+        material = batch.get("session")
+        if isinstance(material, dict):
+            try:
+                assert_url_in_scope(manager, material["origin"])
+                identity_registry(manager).register(
+                    identity, material["origin"], cookies=material.get("cookies") or [],
+                    headers=material.get("headers") or {},
+                    role=str(batch.get("role") or ""), tenant=str(batch.get("tenant") or ""),
+                )
+            except (KeyError, TypeError, ValueError):
+                summary["out_of_scope"] += 1
+                continue
+            if identity not in summary["identities"]:
+                summary["identities"].append(identity)
+            summary["sessions"] = summary.get("sessions", 0) + 1
+            continue
         entries = [e for e in batch.get("entries") or [] if isinstance(e, dict) and e.get("request")]
         in_scope = []
         for entry in entries:

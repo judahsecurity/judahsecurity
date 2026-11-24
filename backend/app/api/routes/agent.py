@@ -1021,6 +1021,42 @@ async def upload_har_capture(
     return {"session_id": session_id, "identity": identity, **result}
 
 
+class IdentityHandoff(CaptureTokenRequest):
+    """Session material for one named identity, produced by an operator-side login."""
+    origin: str = Field(..., max_length=300)
+    cookies: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+@router.post("/sessions/{session_id}/identities", status_code=202)
+async def hand_over_identity(
+    session_id: str,
+    payload: IdentityHandoff,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Register a named test identity from cookies and auth headers.
+
+    For tools that log in on the analyst's side (Aegis Vanguard identity files):
+    only the resulting session material is sent, never a password. It is stored
+    encrypted with the capture inbox, checked against the engagement scope when
+    the run drains it, and never shown to the model.
+    """
+    from app.services.agent.operator_capture import (
+        CaptureError, enqueue_session, normalize_session_material, validate_identity,
+    )
+
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    try:
+        identity = validate_identity(payload.identity)
+        material = normalize_session_material(payload.origin, payload.cookies, payload.headers)
+        result = enqueue_session(org_id, session_id, identity=identity, role=payload.role,
+                                 tenant=payload.tenant, material=material, source="identity_handoff")
+    except CaptureError as exc:
+        raise _capture_http_error(exc)
+    return {"session_id": session_id, "identity": identity, **result}
+
+
 @router.get("/sessions/{session_id}/captures")
 async def capture_status(
     session_id: str,

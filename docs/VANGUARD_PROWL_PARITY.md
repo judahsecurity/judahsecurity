@@ -40,16 +40,15 @@ validator. Port `tests/test_finding_lifecycle.py`.
 
 ## OOB and identities
 
-The blocker: **pc cannot hand identities or credentials to Prowl.**
-`AgentAssessmentPolicy` has no identities field; `start --executor` never
-sends `identities`/`authz_expectations`; HAR/capture-token endpoints are not
-wired into pc.
+Closed: pc now hands named identities to Prowl (`identities`,
+`start --identity-file`, `har`, `capture-token`). Logins run locally with
+`agent/identity_sessions.py`; only session material reaches
+`POST /agent/sessions/{sid}/identities`. `identity_sessions.py` therefore stays.
 
-Identity gaps: named multi-identity login (Prowl logs in one unnamed
-`legacy` identity from server env `TARGET_USER`/`TARGET_PASS`); JSON/API
-login, `extra_fields`, bearer extraction from login response; login failure
-oracle and false-auth-cookie guard; `{{csrf}}` substitution/refresh;
-auto re-login on 401/403; non-GET and fuzzy-similarity authz diff with an
+Still open on the Prowl side:
+
+Identity gaps inside a Prowl run: `{{csrf}}` substitution/refresh;
+auto re-login on 401/403 (session expiry means re-running `identities`); non-GET and fuzzy-similarity authz diff with an
 anonymous leg.
 
 OOB gaps: generic webhook/self-hosted collector (`AEGIS_OOB_DOMAIN`,

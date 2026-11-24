@@ -229,3 +229,105 @@ def test_classes_remote_and_candidates(monkeypatch):
     assert client.main(["classes", "--remote", "--resolve", "idor"]) == 0
     assert client.main(["candidates", "--session", "s1"]) == 0
     assert seen == ["/agent/proof-classes", "/agent/sessions/s1/candidates"]
+
+
+# ---------------------------------------------------------------- identity handoff
+
+LOGIN_HTML = ('<form action="/session" method="post"><input name="email" type="email">'
+              '<input name="password" type="password"></form>')
+
+
+def _identity_file(tmp_path, rows):
+    path = tmp_path / "identities.json"
+    path.write_text(json.dumps(rows))
+    return str(path)
+
+
+def _login_transport(method, url, headers, body, follow_redirects):
+    if url.endswith("/login"):
+        return {"status": 200, "body": LOGIN_HTML, "headers": {}}
+    if url.endswith("/session"):
+        ok = "password=right" in body
+        return {"status": 302 if ok else 200, "body": "" if ok else "Invalid password",
+                "raw_headers": ("HTTP/1.1 302 Found\r\nLocation: /home\r\n"
+                                "Set-Cookie: sid=private-cookie; HttpOnly\r\n\r\n") if ok else ""}
+    if url.endswith("/me"):
+        return {"status": 200, "body": "signed in as owner", "headers": {}}
+    return {"status": 200, "body": "Welcome", "headers": {}}
+
+
+def test_identities_log_in_locally_and_hand_over_sessions_only(scope_file, monkeypatch, tmp_path):
+    path = _identity_file(tmp_path, [
+        {"label": "owner", "role": "admin", "username": "a@example.com", "password": "right",
+         "login": {"url": "https://app.example.com/login"}},
+        {"label": "wrong", "username": "b@example.com", "password": "nope",
+         "login": {"url": "https://app.example.com/login"}},
+        {"label": "api_user", "headers": {"Authorization": "Bearer header-token"},
+         "login": {"verify_url": "https://app.example.com/me", "success_marker": "signed in"}},
+    ])
+    posted = []
+
+    def fake(method, path_, body=None, **kw):
+        posted.append((method, path_, body))
+        return {"origin": body["origin"], "headers": sorted(body["headers"]),
+                "cookies": len(body["cookies"])}
+
+    monkeypatch.setattr(client, "request", fake)
+    prepared = client.prepare_identities(path, "https://app.example.com", transport=_login_transport)
+    rows = client.send_identities("s1", prepared)
+
+    assert [p[1] for p in posted] == ["/agent/sessions/s1/identities"] * 2
+    owner, api_user = posted[0][2], posted[1][2]
+    assert owner["identity"] == "owner" and owner["role"] == "admin"
+    assert owner["cookies"] == {"sid": "private-cookie"} and owner["origin"] == "https://app.example.com"
+    assert "password" not in json.dumps(posted) and "right" not in json.dumps(owner)
+    assert api_user["headers"] == {"Authorization": "Bearer header-token"}
+
+    by_name = {row["identity"]: row for row in rows}
+    assert by_name["owner"]["sent"] and by_name["api_user"]["sent"]
+    assert not by_name["wrong"]["sent"] and by_name["wrong"]["state"] == "rejected"
+    printed = json.dumps(rows)
+    assert "private-cookie" not in printed and "header-token" not in printed
+
+
+def test_identities_refuse_out_of_scope_and_bad_labels(scope_file, monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
+    path = _identity_file(tmp_path, [{"label": "owner", "headers": {"Authorization": "Bearer x"}}])
+    rc = client.main(["identities", "--session", "s1", "--target", "https://evil.com",
+                      "--scope-file", str(scope_file), "--identity-file", path])
+    assert rc == 2
+    bad = _identity_file(tmp_path, [{"label": "legacy", "headers": {"Authorization": "Bearer x"}}])
+    with pytest.raises(client.ProwlError):
+        client.prepare_identities(bad, "https://app.example.com", transport=_login_transport)
+
+
+def test_unverified_identity_needs_explicit_flag(tmp_path):
+    path = _identity_file(tmp_path, [{"label": "plain", "headers": {"Authorization": "Bearer x"}}])
+    [(row, payload)] = client.prepare_identities(path, "https://app.example.com",
+                                                 transport=_login_transport)
+    assert row["state"] == "ready_unverified" and payload is None and "--allow-unverified" in row["skipped"]
+    [(row, payload)] = client.prepare_identities(path, "https://app.example.com",
+                                                 allow_unverified=True, transport=_login_transport)
+    assert payload["headers"] == {"Authorization": "Bearer x"}
+
+
+def test_start_logs_in_before_starting_and_hands_over(scope_file, monkeypatch, tmp_path):
+    path = _identity_file(tmp_path, [
+        {"label": "owner", "username": "a@example.com", "password": "right",
+         "login": {"url": "https://app.example.com/login"}}])
+    calls = []
+    real_prepare = client.prepare_identities
+    monkeypatch.setattr(client, "prepare_identities",
+                        lambda *a, **k: real_prepare(*a, **k, transport=_login_transport))
+
+    def fake(method, path_, body=None, **kw):
+        calls.append(path_)
+        if path_ == "/agent/query":
+            return {"session_id": "s9", "running": True}
+        return {"origin": body["origin"], "headers": [], "cookies": 1}
+
+    monkeypatch.setattr(client, "request", fake)
+    rc = client.main(["start", "--target", "https://app.example.com", "--scope-file", str(scope_file),
+                      "--identity-file", path])
+    assert rc == 0 and calls == ["/agent/query", "/agent/sessions/s9/identities"]
+

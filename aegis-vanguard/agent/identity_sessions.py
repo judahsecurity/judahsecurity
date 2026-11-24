@@ -715,6 +715,20 @@ class IdentitySessionManager:
             "last_url": runtime.last_url,
         }
 
+    def session_material(self, identity_label: str) -> dict:
+        """Cookies and request headers of an established identity, for handoff.
+
+        Secret-bearing: callers must send it only to the platform API and never
+        log it. Passwords are not included.
+        """
+        runtime = self._runtime(identity_label)
+        with runtime.lock:
+            return {
+                "origin": "{}://{}".format(*urlparse(self._target_url)[:2]).lower(),
+                "cookies": dict(runtime.cookies),
+                "headers": dict(runtime.base_headers),
+            }
+
     def status(self) -> List[dict]:
         with self._lock:
             runtimes = list(self._identities.values())
