@@ -896,6 +896,20 @@ async def get_proof_classes(current_user: User = Depends(get_current_user)):
     return proof_class_catalog()
 
 
+@router.get("/verdicts/summary")
+async def get_verdict_summary(
+    days: int = Query(30, ge=1, le=365),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Independent-verifier verdicts per vulnerability class for the caller's org."""
+    from app.services.agent.unverified_findings import verdict_summary
+
+    if not current_user.organization_id:
+        raise HTTPException(status_code=403, detail="Organization required")
+    return verdict_summary(db, current_user.organization_id, days=days)
+
+
 @router.post("/sessions/{session_id}/candidates", status_code=201)
 async def submit_session_candidate(
     session_id: str,

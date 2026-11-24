@@ -323,6 +323,22 @@ export interface JiraIntegration {
   updated_at: string;
 }
 
+export interface VerdictClassRow {
+  vulnerability_class: string;
+  confirmed: number;
+  refuted: number;
+  inconclusive: number;
+  total: number;
+  rejection_rate: number;
+  top_inconclusive_reasons: { reason: string; count: number }[];
+}
+
+export interface VerdictSummary {
+  days: number;
+  classes: VerdictClassRow[];
+  totals: { confirmed: number; refuted: number; inconclusive: number; total: number };
+}
+
 export interface JiraTicket {
   id: number;
   vulnerability_id: number;
@@ -1263,10 +1279,27 @@ class ApiClient {
     /** OPES priority category — preferred over scanner severity for triage filters */
     opes_category?: string;
     detected_by?: string;
+    status?: string;
+    /** exploit_verified | source_verified | analyst_verified | unverified | superseded */
+    verification_level?: string;
+    /** Include unverified/superseded agent findings, which are hidden by default */
+    include_unverified?: boolean;
     skip?: number; 
     limit?: number;
   }) {
     const response = await this.client.get('/vulnerabilities/', { params });
+    return response.data;
+  }
+
+  /** Promote an unverified agent finding to analyst_verified, or dismiss it. */
+  async reviewUnverifiedFinding(id: number, body: { action: 'promote' | 'dismiss'; severity?: string; note?: string }) {
+    const response = await this.client.post(`/vulnerabilities/${id}/unverified-review`, body);
+    return response.data;
+  }
+
+  /** Independent-verifier verdicts per vulnerability class. */
+  async getVerdictSummary(days: number = 30): Promise<VerdictSummary> {
+    const response = await this.client.get('/agent/verdicts/summary', { params: { days } });
     return response.data;
   }
 

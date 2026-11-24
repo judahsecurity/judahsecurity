@@ -247,9 +247,11 @@ def get_asset_findings_count(
     """
     asset = check_asset_access(db, current_user, asset_id)
     
-    findings = db.query(Vulnerability).filter(
+    from app.services.agent.unverified_findings import exclude_hidden_levels
+
+    findings = exclude_hidden_levels(db.query(Vulnerability).filter(
         Vulnerability.asset_id == asset_id
-    ).all()
+    ), Vulnerability).all()
     
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "total": 0}
     manual_count = 0

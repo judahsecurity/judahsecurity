@@ -219,9 +219,15 @@ class Settings(BaseSettings):
     # Hunters must attach an adversarial self-review (reachability,
     # preconditions, downstream controls, scope, benign explanation, strongest
     # objection, disproof test) to submit_finding_candidate. The verifier gets
-    # it as a checklist; inconclusive candidates with hunter evidence and a
-    # challenge are flagged needs_analyst_review instead of disappearing.
+    # it as a checklist. When on, inconclusive candidates need a challenge (as
+    # well as hunter evidence) to be flagged needs_analyst_review; when off,
+    # hunter evidence alone is enough.
     AGENT_SELF_CHALLENGE: bool = False
+    # Publish inconclusive candidates that carry hunter evidence as findings
+    # with verification_level="unverified", capped at medium. They stay out of
+    # default findings lists, dashboards and reports until an analyst promotes
+    # them. Confirmed (exploit_verified) publication is unchanged.
+    AGENT_UNVERIFIED_FINDINGS: bool = True
     # A specialist "killed" verdict backed by one evidence receipt or one
     # testing tool goes back once for a different technique before closing.
     AGENT_RECHECK_WEAK_NEGATIVES: bool = False

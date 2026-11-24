@@ -147,7 +147,12 @@ class ReportService:
         if not asset:
             raise ValueError(f"Asset with ID {asset_id} not found")
 
-        query = self.db.query(Vulnerability).filter(Vulnerability.asset_id == asset_id)
+        from app.services.agent.unverified_findings import exclude_hidden_levels
+
+        # Unverified agent leads stay out of asset reports until an analyst promotes them.
+        query = exclude_hidden_levels(
+            self.db.query(Vulnerability).filter(Vulnerability.asset_id == asset_id), Vulnerability,
+        )
         if not include_info_findings:
             query = query.filter(Vulnerability.severity != Severity.INFO)
 

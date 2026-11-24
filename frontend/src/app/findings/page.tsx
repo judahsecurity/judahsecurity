@@ -71,6 +71,7 @@ import { RemediationPanel } from '@/components/remediation/RemediationPanel';
 import { type AgentDetection } from '@/components/findings/DemonstratedChain';
 import { type ScannerDetection } from '@/components/findings/DetectionPanel';
 import { FindingDetailWorkspace } from '@/components/findings/FindingDetailWorkspace';
+import { UnverifiedReviewPanel, VerdictSummaryPanel, type UnverifiedLead } from '@/components/findings/UnverifiedReview';
 import { RiskAssessmentPanel, raStatusLabel, type RiskAssessment } from '@/components/findings/RiskAssessmentPanel';
 import {
   RiskFactorTriagePanel,
@@ -174,6 +175,9 @@ interface Finding {
   detection?: ScannerDetection;
   remediation_deadline?: string;
   detected_by?: string;
+  // exploit_verified | source_verified | analyst_verified | unverified | superseded
+  verification_level?: string | null;
+  unverified_lead?: UnverifiedLead | null;
   matcher_name?: string;
   asset_id?: number;
   organization_id?: number;
@@ -918,6 +922,10 @@ export default function FindingsPage() {
   const [onlyKev, setOnlyKev] = useState(false);
   const [onlyAgent, setOnlyAgent] = useState(false);
   const [onlyNeedsTriage, setOnlyNeedsTriage] = useState(false);
+  // Agent findings the independent verifier could not confirm. Hidden from the
+  // default list; shown on their own so analysts can promote or dismiss them.
+  const [onlyUnverified, setOnlyUnverified] = useState(false);
+  const [unverifiedCount, setUnverifiedCount] = useState(0);
   const [severityEvalBusy, setSeverityEvalBusy] = useState(false);
   const [oracleBatchBusy, setOracleBatchBusy] = useState(false);
   const findingReviewDirty = useRef(false);
@@ -1744,15 +1752,18 @@ export default function FindingsPage() {
     setError(null);
     try {
       // Fetch findings and summary in parallel
-      const [findingsData, summaryData] = await Promise.all([
+      const [findingsData, summaryData, unverifiedData] = await Promise.all([
         api.getFindings({
           // Top chips filter by OPES priority score (scanner severity as unscored fallback)
           opes_category: selectedSeverity || undefined,
           detected_by: onlyAgent ? 'agent' : undefined,
+          ...(onlyUnverified ? { verification_level: 'unverified', status: 'open' } : {}),
           limit: 100,
         }),
         api.getFindingsSummary(),
+        api.getFindings({ verification_level: 'unverified', status: 'open', limit: 100 }).catch(() => []),
       ]);
+      setUnverifiedCount(Array.isArray(unverifiedData) ? unverifiedData.length : 0);
 
       // Handle both array and paginated responses
       const items = Array.isArray(findingsData) ? findingsData : (findingsData.items || []);
@@ -1779,7 +1790,7 @@ export default function FindingsPage() {
     api.getOrganizations().then((orgs: any[]) => {
       if (orgs?.length) setFirstOrgId(orgs[0].id);
     }).catch(() => {});
-  }, [selectedSeverity, onlyAgent]);
+  }, [selectedSeverity, onlyAgent, onlyUnverified]);
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
@@ -2102,6 +2113,15 @@ export default function FindingsPage() {
               Needs triage {needsTriageCount > 0 && <span className="ml-1 text-xs opacity-70">({needsTriageCount})</span>}
             </Button>
             <Button
+              variant={onlyUnverified ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setOnlyUnverified((v) => !v)}
+              title="Agent findings the independent verifier could not confirm. Hidden from the default list, dashboards and reports until an analyst promotes them."
+            >
+              <ShieldOff className="h-4 w-4 mr-2" />
+              Unverified {unverifiedCount > 0 && <span className="ml-1 text-xs opacity-70">({unverifiedCount >= 100 ? '100+' : unverifiedCount})</span>}
+            </Button>
+            <Button
               variant="outline"
               size="sm"
               onClick={handleSeverityEvaluateAll}
@@ -2253,6 +2273,19 @@ export default function FindingsPage() {
                   Clear
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {onlyUnverified && (
+          <Card className="border-amber-500/30 bg-amber-500/5">
+            <CardContent className="space-y-2 p-4">
+              <p className="text-sm font-medium">Unverified agent findings</p>
+              <p className="text-xs text-muted-foreground">
+                The hunter reported these with evidence, but the independent verifier could not reproduce them with a supported proof.
+                Open one to promote it to a finding or dismiss it.
+              </p>
+              <VerdictSummaryPanel />
             </CardContent>
           </Card>
         )}
@@ -2414,6 +2447,9 @@ export default function FindingsPage() {
                       >
                         {finding.title || finding.name || finding.template_id}
                       </button>
+                      {finding.verification_level === 'unverified' && (
+                        <Badge variant="outline" className="mt-1 border-amber-500/50 text-[10px] text-amber-600 dark:text-amber-400">Unverified</Badge>
+                      )}
                     </TableCell>
                     <TableCell>
                       {finding.host ? (
@@ -3171,11 +3207,22 @@ export default function FindingsPage() {
                 )}
               </div>
               </>}
-              statusActions={<label className="block space-y-1 text-xs text-muted-foreground">Finding status
+              statusActions={<>
+                {selectedFinding?.verification_level === 'unverified' && <UnverifiedReviewPanel
+                  finding={selectedFinding}
+                  onReviewed={(updated) => {
+                    setSelectedFinding(updated);
+                    setFindings((previous) => previous.map((item) => item.id === updated.id ? { ...item, ...updated } : item));
+                    setUnverifiedCount((n) => Math.max(0, n - 1));
+                    toast({ title: updated.verification_level === 'analyst_verified' ? 'Promoted to finding' : 'Dismissed' });
+                  }}
+                />}
+                <label className="block space-y-1 text-xs text-muted-foreground">Finding status
                   <select aria-label="Finding remediation status" value={selectedFinding?.status || 'open'} disabled={updatingStatus} className="w-full rounded-md border border-input bg-background p-2 text-sm text-foreground" onChange={(event) => selectedFinding && handleStatusChange(selectedFinding.id, event.target.value)}>
                     {Object.entries(statusConfig).map(([value, config]) => <option key={value} value={value}>{config.label}</option>)}
                   </select>
-                </label>}
+                </label>
+              </>}
             />}
           </SheetContent>
         </Sheet>

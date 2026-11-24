@@ -96,6 +96,35 @@ These are minimum proof requirements, not a universal vulnerability oracle. The 
 
 Confirmed receipts bind to the current candidate revision. Refutation invalidates the receipt. Changing the candidate's description, severity, or evidence requires reverification. Publication must use the verified target, description, and severity. Risk assessment remains a separate step.
 
+### Unverified findings tier
+
+A class-specific proof recipe is still the only way to reach `exploit_verified`.
+A real bug that no recipe covers used to end as an `inconclusive` candidate and
+never reach the findings table. Now, when `AGENT_UNVERIFIED_FINDINGS=true` (the
+default), an inconclusive candidate that carries hunter evidence is flagged
+`needs_analyst_review` and published as a finding with
+`verification_level="unverified"`:
+
+- Severity is capped at `medium`; the hunter's requested severity, the verifier's
+  proof gap and suggested next step are kept in `metadata.unverified_lead`.
+- Default findings lists, summary/funnel/exposure/remediation statistics and
+  asset reports exclude `unverified` and `superseded` findings. Request them with
+  `GET /vulnerabilities/?verification_level=unverified` (or `include_unverified=true`).
+  The findings page has an **Unverified** toggle for this view.
+- Analysts call `POST /vulnerabilities/{id}/unverified-review` with
+  `{"action": "promote", "severity": "high"}` (becomes `analyst_verified`, severity
+  restored) or `{"action": "dismiss"}` (closed as `false_positive`).
+- A later confirmed publication marks the unverified row `superseded`; a later
+  `refuted` verdict, which needs counterevidence, closes it as `false_positive`.
+- A candidate without hunter evidence is still only logged. With
+  `AGENT_SELF_CHALLENGE=true`, a completed self-challenge is also required.
+
+Every verdict is appended to `agent_verdict_log` (class, verdict, proof kind, gap
+reason; no request bytes). `GET /agent/verdicts/summary?days=30` returns counts per
+class, the share not confirmed, and the most common inconclusive reasons. Classes
+with many inconclusive verdicts are where a proof recipe may be stricter than the
+bugs it is meant to confirm.
+
 ## Configure two test identities
 
 Register sessions supplied for the engagement using the tool API:

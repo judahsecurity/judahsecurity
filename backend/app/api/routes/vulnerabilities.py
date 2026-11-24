@@ -20,6 +20,7 @@ from app.schemas.vulnerability import VulnerabilityCreate, VulnerabilityUpdate, 
 from app.api.deps import get_current_active_user, require_admin, require_analyst
 from app.schemas.finding_triage import FindingTriageWrite
 from app.services.finding_triage import asset_mentions, record_decision, target_host, triage_state
+from app.services.agent.unverified_findings import exclude_hidden_levels
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,9 @@ def build_vuln_response(
         risk_assessment = vuln.metadata_.get("risk_assessment")
         if risk_assessment:
             d["risk_assessment"] = risk_assessment
+        unverified_lead = vuln.metadata_.get("unverified_lead")
+        if unverified_lead:
+            d["unverified_lead"] = unverified_lead
         netbrain_exposure = vuln.metadata_.get("netbrain_exposure")
         if netbrain_exposure:
             d["netbrain_exposure"] = netbrain_exposure
@@ -311,6 +315,15 @@ def list_vulnerabilities(
         description="Filter by severity triage status: needs_analyst, triaged, incomplete, or not_evaluated",
     ),
     business_app_id: Optional[int] = Query(None, description="Filter by business application"),
+    verification_level: Optional[str] = Query(
+        None,
+        description="Filter by verification level (exploit_verified, source_verified, "
+        "analyst_verified, unverified, superseded). Unverified and superseded findings "
+        "are hidden unless requested here or with include_unverified.",
+    ),
+    include_unverified: bool = Query(
+        False, description="Include unverified and superseded agent findings",
+    ),
     sort: Optional[str] = Query(
         None,
         description="'risk' orders by severity-evaluation score; default orders by OPES priority",
@@ -343,6 +356,10 @@ def list_vulnerabilities(
         query = query.filter(Vulnerability.severity == severity)
     if status:
         query = query.filter(Vulnerability.status == status)
+    if verification_level:
+        query = query.filter(Vulnerability.verification_level == verification_level.strip().lower())
+    elif not include_unverified:
+        query = exclude_hidden_levels(query, Vulnerability)
     if asset_id:
         query = query.filter(Vulnerability.asset_id == asset_id)
     if cve_id:
@@ -569,6 +586,35 @@ def save_finding_triage(vuln_id: int, payload: FindingTriageWrite,
     db.commit()
     db.refresh(vuln)
     return triage_state(vuln)
+
+
+class UnverifiedReviewWrite(BaseModel):
+    action: str = Field(..., pattern="^(promote|dismiss)$")
+    severity: Optional[Severity] = None
+    note: str = Field("", max_length=2000)
+
+
+@router.post("/{vuln_id}/unverified-review")
+def review_unverified_finding(vuln_id: int, payload: UnverifiedReviewWrite,
+                              db: Session = Depends(get_db),
+                              current_user: User = Depends(require_analyst)):
+    """Promote an unverified agent finding to analyst_verified, or dismiss it."""
+    from app.services.agent.unverified_findings import dismiss_finding, promote_finding
+
+    vuln = _review_finding(db, current_user, vuln_id, lock=True)
+    try:
+        if payload.action == "promote":
+            promote_finding(vuln, current_user,
+                            severity=payload.severity.value if payload.severity else None,
+                            note=payload.note)
+        else:
+            dismiss_finding(vuln, current_user, note=payload.note)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(vuln)
+    return build_vuln_response(vuln, db=db)
 
 
 @router.get("/{vuln_id}/asset-context")
@@ -825,7 +871,7 @@ def get_vulnerabilities_summary(
         "groups": [],
     }
 
-    base = db.query(Vulnerability).join(Asset)
+    base = exclude_hidden_levels(db.query(Vulnerability).join(Asset), Vulnerability)
 
     if current_user.is_superuser:
         if organization_id:
@@ -1060,7 +1106,7 @@ def get_prioritization_funnel(
         },
     }
 
-    base = db.query(Vulnerability).join(Asset)
+    base = exclude_hidden_levels(db.query(Vulnerability).join(Asset), Vulnerability)
 
     if current_user.is_superuser:
         if organization_id:
@@ -1276,7 +1322,7 @@ def get_remediation_efficiency(
     """
     cutoff_date = datetime.utcnow() - timedelta(days=days)
     
-    query = db.query(Vulnerability).join(Asset)
+    query = exclude_hidden_levels(db.query(Vulnerability).join(Asset), Vulnerability)
     
     # Organization filter
     if not current_user.is_superuser:
@@ -1363,7 +1409,7 @@ def get_vulnerability_exposure(
     
     Shows overall exposure level and risk distribution across assets.
     """
-    query = db.query(Vulnerability).join(Asset)
+    query = exclude_hidden_levels(db.query(Vulnerability).join(Asset), Vulnerability)
     
     # Organization filter
     if not current_user.is_superuser:
@@ -1938,7 +1984,9 @@ def severity_evaluation_summary(
     """Open findings by triage status and risk level — drives the
     'needs triage' queue."""
     open_states = [VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]
-    base = db.query(Vulnerability).join(Asset).filter(Vulnerability.status.in_(open_states))
+    base = exclude_hidden_levels(
+        db.query(Vulnerability).join(Asset).filter(Vulnerability.status.in_(open_states)), Vulnerability,
+    )
     if not current_user.is_superuser:
         base = base.filter(Asset.organization_id == current_user.organization_id)
     by_status = dict(

@@ -67,6 +67,9 @@ class FindingCandidate:
     # "needs_analyst_review": inconclusive, but hunter evidence plus a completed
     # self-challenge make it worth a human look instead of a silent drop.
     review_status: str = ""
+    # Finding id of the "unverified" tier row published for this candidate
+    # while it was inconclusive (see unverified_findings.py). 0 = none.
+    unverified_finding_id: int = 0
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     verified_at: str = ""
 
@@ -2262,9 +2265,13 @@ def apply_verdict(
                 if verdict == "inconclusive" else {}
             )
             c.verifier_run_id = run.id
+            # Hunter evidence alone is enough for analyst review; the
+            # self-challenge is required only when that setting is on.
+            hunter_evidence_count = len(c.evidence_ids or [])
             c.review_status = (
                 "needs_analyst_review"
-                if verdict == "inconclusive" and c.challenge and c.evidence_ids
+                if verdict == "inconclusive" and c.evidence_ids
+                and (c.challenge or not self_challenge_required())
                 else ""
             )
             c.evidence_ids = list(dict.fromkeys([*c.evidence_ids, *(evidence_ids or [])]))
@@ -2346,6 +2353,11 @@ def apply_verdict(
         brain.verification_receipts[receipt_key] = dict(
             tools_manager._verify_receipts[receipt_key]
         )
+    from app.services.agent.unverified_findings import after_verdict
+
+    after_verdict(tools_manager, brain, cand, verdict,
+                  proof_kind=str((proof or {}).get("kind") or ""),
+                  hunter_evidence_count=hunter_evidence_count)
     tools_manager._engagement_brain = brain.to_dict()
     observer = getattr(tools_manager, "_early_verdict_observer", None)
     if callable(observer):

@@ -5627,6 +5627,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             db.add(vuln)
             db.commit()
             db.refresh(vuln)
+            if verified is not None and getattr(verified, "unverified_finding_id", 0):
+                # The confirmed finding replaces the earlier unverified one.
+                from app.services.agent.unverified_findings import close_unverified_finding
+
+                close_unverified_finding(verified.unverified_finding_id, superseded_by=vuln.id)
             ra_msg = ""
             try:
                 from app.services.agent.risk_assessment import (
