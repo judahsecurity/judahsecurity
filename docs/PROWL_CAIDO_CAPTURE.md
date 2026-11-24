@@ -27,17 +27,25 @@ sudo docker compose build backend
 sudo docker compose --profile caido-assessment up -d caido-assessment
 ```
 
-Before enabling proxy routing, open the Caido UI through the loopback SSH tunnel,
-sign in, and create/select a project for this assessment. Caido needs an
-active project to retain traffic. Keep Intercept turned off so probes are
-not paused waiting for a manual forward.
+Caido only proxies traffic once a project is selected. Prowl now does this
+itself: before the first proxied browser action it logs in to Caido as a
+guest, selects the `prowl-assessment` project (creating it if needed), and
+sends one GET through the proxy to the target. If any step fails, the action
+fails with a message naming the proxy instead of recording Caido's own error
+page as the target's response. The `caido-assessment` service runs with
+`--allow-guests` and `--ui-domain caido-assessment` for this. Keep Intercept
+turned off so probes are not paused waiting for a manual forward.
 
-Set these two values in `/opt/asm/.env`:
+Set these values in `/opt/asm/.env`:
 
 ```dotenv
 AEGIS_ASSESSMENT_PROXY_URL=http://caido-assessment:8082
+AEGIS_ASSESSMENT_PROXY_API_URL=http://caido-assessment:8080
 AEGIS_ASSESSMENT_CA_BUNDLE=/app/certs/caido/ca.crt
 ```
+
+Without `AEGIS_ASSESSMENT_PROXY_API_URL`, Prowl skips the project bootstrap
+(select one in the UI yourself) but still runs the reachability preflight.
 
 Then:
 

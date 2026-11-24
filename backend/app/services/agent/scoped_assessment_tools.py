@@ -545,6 +545,12 @@ class ScopedAssessmentTools:
         sources: list[dict] = []
         exchanges: list[dict] = []
         link_baselines: list[str] = []
+        # Chromium goes through the assessment proxy. Make sure the proxy has
+        # a selected project and can actually reach this origin first, so a
+        # broken proxy is one clear failure instead of fake 500 pages.
+        from app.services.agent.assessment_proxy_bootstrap import ensure_assessment_proxy_ready
+
+        await ensure_assessment_proxy_ready(url)
         result, screenshot = await browser.check_browser(
             operation=operation, url=url, allowed_origins=[allowed],
             storage_state=state, max_pages=max_pages,
