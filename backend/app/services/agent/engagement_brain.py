@@ -129,6 +129,8 @@ class EngagementBrain:
     engagement_goals: List[Dict[str, Any]] = field(default_factory=list)
     operator_constraints: List[Dict[str, Any]] = field(default_factory=list)
     goals_derived: bool = False
+    # Confirmed footholds whose follow-ups are pressed first (attack_focus.py).
+    attack_routes: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         data = self._base_dict()
@@ -140,6 +142,8 @@ class EngagementBrain:
             data["operator_constraints"] = [dict(row) for row in self.operator_constraints]
         if self.goals_derived:
             data["goals_derived"] = True
+        if self.attack_routes:
+            data["attack_routes"] = [dict(route) for route in self.attack_routes]
         return data
 
     def _base_dict(self) -> Dict[str, Any]:
@@ -3688,9 +3692,10 @@ def methodology_progress(
 
 
 def _goals_block(brain: EngagementBrain) -> str:
+    from app.services.agent.attack_focus import routes_prompt_block
     from app.services.agent.engagement_goals import goals_prompt_block
 
-    return goals_prompt_block(brain)
+    return "\n".join(filter(None, [goals_prompt_block(brain), routes_prompt_block(brain)]))
 
 
 def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:

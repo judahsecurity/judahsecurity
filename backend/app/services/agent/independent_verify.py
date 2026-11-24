@@ -2283,6 +2283,15 @@ def apply_verdict(
         brain.verification_receipts[receipt_key] = dict(
             tools_manager._verify_receipts[receipt_key]
         )
+    if verdict == "confirmed":
+        from app.services.agent.attack_focus import deepen_after_confirmation
+
+        try:
+            deepen_after_confirmation(brain, cand)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception("Foothold follow-up queueing failed")
     tools_manager._engagement_brain = brain.to_dict()
     from app.services.agent.candidate_signal import signal
 

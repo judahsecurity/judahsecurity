@@ -11961,6 +11961,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
                 chosen = None
 
         graph = sync_graph_from_brain(brain)
+        # Never idle: when the operator's goals are open and no work is ready
+        # or running, give each open goal a fresh route to try.
+        goal_work_seeded: list = []
+        if mode == "attack":
+            from app.services.agent.engagement_goals import seed_goal_hypotheses
+            from app.services.agent.penetration_task_graph import NODE_READY as _READY, NODE_RUNNING as _RUNNING
+
+            if not any(node.status in (_READY, _RUNNING) for node in graph.nodes.values()):
+                goal_work_seeded = seed_goal_hypotheses(brain)
+                if goal_work_seeded:
+                    graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
 
         def _checkpoint_task_graph() -> None:
@@ -12367,11 +12378,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
                 # Follow-up ledgers: rolling dispatch records leads and facts and
                 # claims follow-ups on the live brain while the wave runs.
                 "observation_events", "followup_proposals", "assignment_chains",
-                "recon_observations",
+                "recon_observations", "attack_routes",
             ):
                 value = getattr(live, field_name, None)
                 if value:
                     setattr(brain, field_name, value)
+            # Follow-ups queued on the live brain during the wave (a confirmed
+            # foothold's chain) are new hypotheses this copy has not seen.
+            known_ids = {h.id for h in brain.hypotheses}
+            brain.hypotheses.extend(h for h in live.hypotheses if h.id not in known_ids)
             applied_early_ids: set[str] = set()
             for snapshot in early_verdicts.values():
                 candidate = snapshot["candidate"]
@@ -12920,6 +12935,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities, FactSharing
                 leads_recorded=leads_recorded,
             ),
             "started_mid_wave": mid_wave_starts[:12],
+            "goal_work_seeded": goal_work_seeded,
             "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],
             "surface_signature": surface_signature[:32],

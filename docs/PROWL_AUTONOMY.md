@@ -332,3 +332,40 @@ It reads one level deep and never writes to the current run.
   `model_refusal` ledger entry for its role; the harness reports
   `model_refusals` and `refusals_by_role`. See
   [PROWL_BENCHMARK_RUNBOOK.md](PROWL_BENCHMARK_RUNBOOK.md).
+
+## Supervising running specialists
+
+Each running specialist has a control channel. A correction is read before
+its next model call, with its context and evidence kept; a stop ends it at
+the next turn through the normal wrap-up, so evidenced leads are still
+written back.
+
+- A code-only reviewer steers a specialist that repeats an identical tool
+  call or hits three failed calls in a row, and stops it if the same problem
+  continues after the correction. Supervisor stops can be retried with a
+  rewrite.
+- Operators steer from the session steer box: `@injection focus on the id
+  parameter` steers it, `@stop injection wrong host` stops it (final, not
+  retried). A specialist can be named by specialist name, lease id or
+  hypothesis id. `GET /api/agent/sessions/{id}/specialists` lists the running
+  ones. Controls are scoped to the session and organization; other messages
+  go to the session steer as before.
+
+## Depth after a foothold
+
+When the independent verifier confirms a high or critical candidate, or one
+whose class opens a path (injection, auth bypass, IDOR, SSRF, file read,
+default login and similar), its chain follow-ups are queued at once at
+critical priority, so the next waves press that route first. The coverage
+lane keeps its reserved slot and the completion gate is unchanged. Confirmed
+routes are listed under "ACTIVE ATTACK ROUTES" in the planner's progress text
+and kept in the brain's `attack_routes`.
+
+## Never idle with open goals
+
+When dispatch finds nothing ready or running in attack mode and an engagement
+goal is still open, each open goal without an active attempt gets a new
+critical hypothesis (`<goal id>-try-N`), routed to a matching specialist and
+told what earlier attempts found, at most three per goal. After that the goal
+has to be proven (`prove_goal`) or closed (`close_goal`). The dispatch result
+lists them under `goal_work_seeded`.

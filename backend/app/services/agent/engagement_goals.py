@@ -224,3 +224,59 @@ def specialist_block(brain: Any) -> str:
                      "evidence, the orchestrator links it):")
         lines.extend(f"- {goal['text']}" for goal in goals)
     return "\n".join(lines)
+
+
+# -- never idle -------------------------------------------------------------
+
+MAX_GOAL_ATTEMPTS = 3
+_GOAL_SPECIALISTS = {
+    "idor": "api_authz", "bola": "api_authz", "authz": "api_authz",
+    "auth_bypass": "auth_logic", "auth": "auth_logic", "account_takeover": "auth_logic",
+    "sqli": "sqli", "xss": "xss", "ssrf": "ssrf", "file_upload": "file_upload",
+    "rce": "server_injection", "cmdi": "server_injection", "ssti": "server_injection",
+    "info_disclosure": "secrets_hunter", "secrets": "secrets_hunter",
+    "business_logic": "business_logic",
+}
+
+
+def goal_specialist(goal: dict) -> str:
+    return _GOAL_SPECIALISTS.get(str(goal.get("vuln_class") or ""), "business_logic")
+
+
+def seed_goal_hypotheses(brain: Any) -> list[str]:
+    """Give each open goal one active hypothesis when nothing else is queued.
+
+    The operator's goal is unmet and no work is ready or running, so the run
+    would stop short. Each open goal without an active hypothesis gets a new
+    one (at most ``MAX_GOAL_ATTEMPTS`` per goal), told to try a route different
+    from the earlier attempts. After that, the goal has to be proven or closed.
+    """
+    from app.services.agent.engagement_brain import Hypothesis
+
+    created: list[str] = []
+    for goal in open_goals(brain):
+        attempts = [h for h in brain.hypotheses if h.id.startswith(f"{goal['id']}-try-")]
+        if any(h.status in ("open", "in_progress") for h in attempts):
+            continue
+        if len(attempts) >= MAX_GOAL_ATTEMPTS:
+            continue
+        earlier = "; ".join(
+            f"try {i + 1} ({h.status}): {str(h.evidence or 'no evidence')[:140]}"
+            for i, h in enumerate(attempts)
+        )
+        hypothesis = Hypothesis(
+            id=f"{goal['id']}-try-{len(attempts) + 1}",
+            title=f"Goal: {goal['text']}"[:200],
+            assumption="The operator's stated result is reachable from the current map and evidence.",
+            test=(f"Find and prove a route to: {goal['text']}. Build on confirmed findings and "
+                  "active attack routes; use a different route from earlier attempts."
+                  + (f" Earlier: {earlier}." if earlier else "")),
+            pass_criteria="A candidate the independent verifier confirms that demonstrates the goal.",
+            kill_criteria="Several distinct routes tried with evidence; report each so the goal can be closed.",
+            specialist=goal_specialist(goal),
+            priority="critical",
+            source="goal",
+        )
+        brain.hypotheses.append(hypothesis)
+        created.append(hypothesis.id)
+    return created
