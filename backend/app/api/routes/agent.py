@@ -807,9 +807,7 @@ async def steer_agent_run(
     """Inject an operator instruction into a live hunt without cancelling it."""
     if request.session_id != session_id:
         raise HTTPException(status_code=400, detail="session_id mismatch")
-    org_id = _resolve_agent_organization_id(current_user, db)
-    if not org_id:
-        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _owned_conversation(db, session_id, current_user)
     from app.services.agent.run_control import has_running_task, queue_steer
 
     in_flight = queue_steer(session_id, request.message)
@@ -828,9 +826,7 @@ async def compact_agent_run(
     db: Session = Depends(get_db),
 ):
     """Queue a CAI-style context compact for the next think turn."""
-    org_id = _resolve_agent_organization_id(current_user, db)
-    if not org_id:
-        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _owned_conversation(db, session_id, current_user)
     from app.services.agent.run_control import request_compact
 
     request_compact(session_id)
@@ -1433,6 +1429,21 @@ def _authenticate_ws_token(token: str):
         db.close()
 
 
+def _ws_session_owned(session_id: str, user_id: int, org_id: int) -> bool:
+    """True only when a conversation row for ``session_id`` belongs to this user and org.
+
+    Checked per steer/compact rather than only at init: the row may not exist
+    when the socket connects, and a missing row must not let a caller queue
+    instructions that another tenant's later run would drain.
+    """
+    db = SessionLocal()
+    try:
+        conv = db.query(AgentConversation).filter_by(session_id=session_id).first()
+        return bool(conv is not None and conv.user_id == user_id and conv.organization_id == org_id)
+    finally:
+        db.close()
+
+
 @router.websocket("/ws/{session_id}")
 async def agent_websocket(websocket: WebSocket, session_id: str):
     """
@@ -1833,6 +1844,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         "message": "message must be at most 4,000 characters",
                     })
                     continue
+                if not _ws_session_owned(session_id, user_id, org_id):
+                    await websocket.send_json({"type": "error", "message": "Agent session not found"})
+                    continue
                 from app.services.agent.run_control import has_running_task, queue_steer
 
                 in_flight = queue_steer(session_id, message)
@@ -1845,6 +1859,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
             elif msg_type == "compact":
                 if not user_id:
                     await websocket.send_json({"type": "error", "message": "Not authenticated"})
+                    continue
+                if not _ws_session_owned(session_id, user_id, org_id):
+                    await websocket.send_json({"type": "error", "message": "Agent session not found"})
                     continue
                 from app.services.agent.run_control import request_compact
 
