@@ -3275,6 +3275,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         """Execute a tool with the given arguments."""
         tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
         if self._scoped_policy_applied and tool_name in {"run_custom_probe", "run_poc_python"}:
+            from app.services.agent.custom_probe import custom_probe_mode
+            # The isolated runner's egress enforces the method policy itself;
+            # only the in-process lane cannot, so only it stays denied.
+            policy_enforceable = custom_probe_mode() == "isolated"
+        else:
+            policy_enforceable = True
+        if not policy_enforceable:
             return {
                 "success": False,
                 "output": "Custom Python HTTP probes cannot enforce operator method and path approvals; use structured replay tools.",
@@ -7192,8 +7199,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         Print results to stdout. Runs only when AGENT_CUSTOM_PROBE_MODE allows it;
         "isolated" executes in the probe-runner container behind a scope proxy.
         """
-        if self._scoped_policy_applied:
-            return json.dumps({"error": "Custom Python HTTP probes cannot enforce operator method and path approvals; use structured replay tools."})
         from app.services.agent.custom_probe import (
             custom_probe_mode,
             run_custom_probe_async,
@@ -7201,6 +7206,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         )
 
         mode = custom_probe_mode()
+        if self._scoped_policy_applied and mode != "isolated":
+            return json.dumps({"error": "In-process custom probes cannot enforce operator method and path approvals; use structured replay tools or the isolated probe runner."})
         if mode == "off":
             return json.dumps({
                 "error": "custom_probe_disabled",
@@ -7209,16 +7216,27 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                           "replay_http_request, compare_requests, or mutate_list.",
             })
         hosts = self._probe_scope_hosts(allowed_hosts)
-        runner = run_custom_probe_isolated if mode == "isolated" else run_custom_probe_async
-        result = await runner(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
+        if mode == "isolated":
+            result = await run_custom_probe_isolated(
+                source, allowed_hosts=hosts, timeout_sec=timeout_sec,
+                method_policy=self._probe_method_policy(),
+                oob_allowed=bool(self._oob_callbacks_allowed),
+            )
+        else:
+            result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
         result["execution"] = mode
         if result.get("exchanges"):
             result["exchanges"] = self._record_probe_exchanges(result["exchanges"])
-        result["oob_allowed"] = True
+        oob_allowed = mode != "isolated" or bool(self._oob_callbacks_allowed)
+        result["oob_allowed"] = oob_allowed
         result["hint"] = (
-            "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
-            "localhost — Lictor blocks those. Print JSON proof to stdout."
+            ("In-scope hosts plus Interactsh/OAST. " if oob_allowed else "In-scope hosts only. ")
+            + "Never fetch 169.254.169.254 or localhost — Lictor blocks those. "
+            "Print JSON proof to stdout."
         )
+        if self._scoped_policy_applied:
+            result["hint"] += (" Operator method policy: GET/HEAD only; POST/DELETE need an "
+                               "approved path; raw TCP is unavailable.")
         if result.get("exchanges"):
             result["hint"] += (
                 " Every request this probe sent is recorded under exchanges[].evidence_id "
@@ -7247,8 +7265,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         """
         from app.services.agent.custom_probe import custom_probe_mode, run_sandbox_shell
 
-        if self._scoped_policy_applied:
-            return json.dumps({"error": "Sandbox shell cannot enforce operator method and path approvals; use structured replay tools."})
         if custom_probe_mode() != "isolated" or not getattr(settings, "AGENT_SANDBOX_SHELL", False):
             return json.dumps({
                 "error": "sandbox_shell_disabled",
@@ -7256,6 +7272,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             })
         result = await run_sandbox_shell(
             command, allowed_hosts=self._probe_scope_hosts(allowed_hosts), timeout_sec=timeout_sec,
+            method_policy=self._probe_method_policy(),
+            oob_allowed=bool(self._oob_callbacks_allowed),
         )
         result["execution"] = "isolated"
         if result.get("exchanges"):
@@ -7266,6 +7284,22 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "submit_finding_candidate."
             )
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    def _probe_method_policy(self) -> Optional[Dict[str, List[str]]]:
+        """The operator method policy for probe-egress to enforce, if one applies."""
+        if not self._scoped_policy_applied:
+            return None
+        return {
+            "approved_post_paths": sorted(
+                self._scoped_body_replay_paths | self._scoped_race_action_paths
+                | self._scoped_csrf_action_paths
+                | ({self._scoped_auth_login_path} if self._scoped_auth_login_path else set())
+            ),
+            "approved_delete_paths": sorted(
+                self._scoped_stored_xss_cleanup_paths | self._scoped_race_cleanup_paths
+                | self._scoped_csrf_cleanup_paths
+            ),
+        }
 
     def _probe_scope_hosts(self, allowed_hosts: Optional[str]) -> List[str]:
         hosts: List[str] = []

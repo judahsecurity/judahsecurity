@@ -280,7 +280,7 @@ def test_sandbox_shell_posts_command_and_records_exchanges(monkeypatch):
     monkeypatch.setattr(settings, "AGENT_SANDBOX_SHELL", True)
     sent = {}
 
-    async def fake_relay(job, hosts, timeout):
+    async def fake_relay(job, hosts, timeout, **_policy):
         sent.update(job=job, hosts=hosts, timeout=timeout)
         return {"ok": True, "stdout": "200", "exchanges": [{
             "request": {"method": "GET", "url": "https://app.example.com/", "headers": {}},
@@ -405,3 +405,123 @@ def test_socks_resolves_in_scope_hostname(socks):
     sock.close()
     _sock, code = _socks_connect(port, "socks-token", "other.example.net", target_port)
     assert code == 2
+
+
+# --- operator method policy enforced by probe-egress ---------------------------
+
+import base64 as _b64
+from http.server import BaseHTTPRequestHandler as _BaseHandler
+from http.server import ThreadingHTTPServer as _HTTPServer
+
+
+def test_method_policy_parsing_and_decisions():
+    assert egress.parse_method_policy(None) is None
+    policy = egress.parse_method_policy({"approved_post_paths": ["/cart"],
+                                         "approved_delete_paths": ["/cart/1"]})
+    allowed = lambda m, t: egress.method_allowed(policy, m, t)[0]  # noqa: E731
+    assert allowed("GET", "/anything?x=1") and allowed("HEAD", "/")
+    assert allowed("POST", "/cart") and allowed("POST", "/cart?coupon=1")
+    assert not allowed("POST", "/checkout")
+    assert allowed("DELETE", "/cart/1") and not allowed("DELETE", "/cart")
+    assert not allowed("PUT", "/cart") and not allowed("PATCH", "/cart")
+    assert egress.method_allowed(None, "PUT", "/x") == (True, "")
+    for bad in ({"approved_post_paths": "/cart"}, {"approved_post_paths": ["cart"]},
+                {"approved_post_paths": ["/a?b"]}, "nope"):
+        with pytest.raises(ValueError):
+            egress.parse_method_policy(bad)
+
+
+@pytest.fixture
+def policy_proxy(monkeypatch):
+    monkeypatch.setattr(egress, "ALLOW_PRIVATE", True)
+    seen = []
+
+    class Target(_BaseHandler):
+        def log_message(self, *a):
+            pass
+
+        def _reply(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            seen.append((self.command, self.path))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        do_GET = do_POST = do_PUT = do_DELETE = _reply
+
+    target = _HTTPServer(("127.0.0.1", 0), Target)
+    proxy = _HTTPServer(("127.0.0.1", 0), egress.ProxyHandler)
+    for server in (target, proxy):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    job = {"allowed": ["127.0.0.1"], "oob": [], "log": [], "exchanges": [],
+           "recorded_bytes": 0, "dropped": 0, "tcp": {}, "tcp_count": 0,
+           "policy": egress.parse_method_policy({"approved_post_paths": ["/cart"]})}
+    egress._jobs["policy-token"] = job
+    yield proxy.server_address[1], target.server_address[1], job, seen
+    egress._jobs.pop("policy-token", None)
+    target.shutdown()
+    proxy.shutdown()
+
+
+def _via_proxy(proxy_port, target_port, method, path):
+    auth = _b64.b64encode(b"job:policy-token").decode()
+    sock = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
+    sock.sendall((f"{method} http://127.0.0.1:{target_port}{path} HTTP/1.1\r\n"
+                  f"Host: 127.0.0.1:{target_port}\r\nProxy-Authorization: Basic {auth}\r\n"
+                  "Content-Length: 0\r\nConnection: close\r\n\r\n").encode())
+    data = b""
+    while chunk := sock.recv(4096):
+        data += chunk
+    sock.close()
+    return int(data.split(b" ", 2)[1])
+
+
+def test_egress_enforces_method_policy_end_to_end(policy_proxy):
+    proxy_port, target_port, job, seen = policy_proxy
+    assert _via_proxy(proxy_port, target_port, "GET", "/catalog?q=1") == 200
+    assert _via_proxy(proxy_port, target_port, "POST", "/cart") == 200
+    assert _via_proxy(proxy_port, target_port, "POST", "/checkout") == 403
+    assert _via_proxy(proxy_port, target_port, "PUT", "/cart") == 403
+    # Denied writes never reach the target.
+    assert ("POST", "/checkout") not in seen and ("PUT", "/cart") not in seen
+    denied = [e for e in job["log"] if e.get("allowed") is False]
+    assert any("operator-approved" in e.get("reason", "") for e in denied)
+
+
+def test_socks_lane_closed_under_method_policy(socks):
+    port, target_port, job = socks
+    job["policy"] = egress.parse_method_policy({})
+    _sock, code = _socks_connect(port, "socks-token", "127.0.0.1", target_port)
+    assert code == 2
+    assert "method policy" in job["tcp"]["127.0.0.1:%d" % target_port]["reason"]
+
+
+def test_sandbox_shell_runs_under_policy_and_sends_it(monkeypatch):
+    from app.services.agent import custom_probe
+
+    monkeypatch.setattr(settings, "AGENT_CUSTOM_PROBE_MODE", "isolated")
+    monkeypatch.setattr(settings, "AGENT_SANDBOX_SHELL", True)
+    sent = {}
+
+    async def fake_relay(job, hosts, timeout_sec, *, method_policy=None, oob_allowed=True):
+        sent.update(method_policy=method_policy, oob_allowed=oob_allowed)
+        return {"ok": True, "stdout": "", "exchanges": []}
+
+    monkeypatch.setattr(custom_probe, "_post_to_relay", fake_relay)
+    manager = _shell_manager()
+    manager._scoped_policy_applied = True
+    manager._scoped_body_replay_paths = {"/cart"}
+    manager._scoped_race_action_paths = set()
+    manager._scoped_csrf_action_paths = set()
+    manager._scoped_auth_login_path = ""
+    manager._scoped_stored_xss_cleanup_paths = set()
+    manager._scoped_race_cleanup_paths = set()
+    manager._scoped_csrf_cleanup_paths = set()
+    manager._oob_callbacks_allowed = False
+    out = json.loads(asyncio.run(manager.sandbox_shell("curl -s https://app.example.com/")))
+    assert "error" not in out, out
+    assert sent["method_policy"] == {"approved_post_paths": ["/cart"], "approved_delete_paths": []}
+    assert sent["oob_allowed"] is False

@@ -376,6 +376,8 @@ async def run_custom_probe_isolated(
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    method_policy: dict | None = None,
+    oob_allowed: bool = True,
 ) -> dict[str, Any]:
     """Run the probe in the probe-runner container via the probe-egress relay.
 
@@ -387,7 +389,8 @@ async def run_custom_probe_isolated(
     if isinstance(prepared, dict):
         return prepared
     hosts, timeout_sec, script, _env = prepared
-    return await _post_to_relay({"script": script}, hosts, timeout_sec)
+    return await _post_to_relay({"script": script}, hosts, timeout_sec,
+                                method_policy=method_policy, oob_allowed=oob_allowed)
 
 
 # Flags that turn a sandboxed check into a destructive or exfiltrating action
@@ -432,6 +435,8 @@ async def run_sandbox_shell(
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = 60,
+    method_policy: dict | None = None,
+    oob_allowed: bool = True,
 ) -> dict[str, Any]:
     """Run a shell command in probe-runner; network only via probe-egress."""
     hosts = _normalize_hosts(allowed_hosts)
@@ -441,10 +446,13 @@ async def run_sandbox_shell(
     if violations:
         return {"ok": False, "error": "Sandbox rejected command", "violations": violations}
     timeout_sec = max(3.0, min(float(timeout_sec or 60), MAX_SHELL_TIMEOUT_SEC))
-    return await _post_to_relay({"command": command}, hosts, timeout_sec)
+    return await _post_to_relay({"command": command}, hosts, timeout_sec,
+                                method_policy=method_policy, oob_allowed=oob_allowed)
 
 
-async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: float) -> dict[str, Any]:
+async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: float, *,
+                         method_policy: dict | None = None,
+                         oob_allowed: bool = True) -> dict[str, Any]:
     import httpx
 
     from app.core.config import settings
@@ -457,9 +465,13 @@ async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: flo
     payload = {
         **job,
         "allowed_hosts": hosts,
-        "oob_suffixes": list(OOB_HOST_SUFFIXES),
+        "oob_suffixes": list(OOB_HOST_SUFFIXES) if oob_allowed else [],
         "timeout_sec": timeout_sec,
     }
+    if method_policy is not None:
+        # probe-egress enforces it on every decrypted request and closes the
+        # raw-TCP lane, so the sandbox cannot send an unapproved write.
+        payload["method_policy"] = method_policy
     try:
         async with httpx.AsyncClient(trust_env=False, timeout=timeout_sec + 15) as client:
             response = await client.post(

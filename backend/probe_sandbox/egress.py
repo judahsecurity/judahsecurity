@@ -89,6 +89,49 @@ def host_in_scope(host: str, allowed: list[str], oob: list[str]) -> bool:
     return False
 
 
+_WRITE_POLICY_METHODS = ("POST", "DELETE")
+
+
+def parse_method_policy(raw) -> dict | None:
+    """Normalise an operator method policy sent with a job; None means no policy.
+
+    The backend applies one in every Prowl-mode run: GET/HEAD are free, and a
+    write is allowed only as POST or DELETE to an exact approved path.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("method policy must be an object")
+    def paths(key):
+        values = raw.get(key) or []
+        if not isinstance(values, list) or len(values) > 32:
+            raise ValueError(f"{key} must be a short list")
+        out = set()
+        for value in values:
+            if (not isinstance(value, str) or not value.startswith("/") or value.startswith("//")
+                    or len(value) > 256 or any(c in value for c in "?#\\\r\n\t ")):
+                raise ValueError(f"invalid path in {key}")
+            out.add(value)
+        return out
+    return {"post_paths": paths("approved_post_paths"),
+            "delete_paths": paths("approved_delete_paths")}
+
+
+def method_allowed(policy: dict | None, method: str, target: str) -> tuple[bool, str]:
+    """Mirror assessment_scope.assert_method_allowed for proxied traffic."""
+    if policy is None:
+        return True, ""
+    method = (method or "").upper()
+    path = urlsplit(target if "://" in target else "http://x" + (target or "/")).path or "/"
+    if method in ("GET", "HEAD"):
+        return True, ""
+    if method == "POST" and path in policy["post_paths"]:
+        return True, ""
+    if method == "DELETE" and path in policy["delete_paths"]:
+        return True, ""
+    return False, f"{method} {path} requires an exact operator-approved path"
+
+
 def _public(ip) -> bool:
     return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
                 or ip.is_reserved or ip.is_unspecified)
@@ -506,6 +549,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _forward
 
     def _exchange(self, job, entry, scheme, host, port, ip, method, target, request, wfile) -> None:
+        ok, why = method_allowed(job.get("policy"), method, target)
+        if not ok:
+            entry.update(allowed=False, reason=why)
+            self._deny(403, why, wfile)
+            return
         started = time.monotonic()
         try:
             upstream = socket.create_connection((ip, port), timeout=SOCKET_TIMEOUT)
@@ -676,6 +724,13 @@ class SocksHandler(socketserver.BaseRequestHandler):
                 _tcp_note(job, host, port, False, "connection budget exhausted")
                 client.sendall(_socks_reply(2))
                 return
+            if job.get("policy") is not None:
+                # Raw TCP bytes cannot be checked against a method policy (a
+                # socket could carry an unapproved POST), so the lane is closed.
+                _tcp_note(job, host, port, False,
+                          "raw TCP is unavailable under the operator method policy")
+                client.sendall(_socks_reply(2))
+                return
             if not host_in_scope(host, job["allowed"], job["oob"]):
                 _tcp_note(job, host, port, False, "host not in scope")
                 client.sendall(_socks_reply(2))
@@ -752,6 +807,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             script = "" if command else str(req["script"])
             allowed = [str(h) for h in req.get("allowed_hosts") or []]
             oob = [str(h) for h in req.get("oob_suffixes") or []]
+            policy = parse_method_policy(req.get("method_policy"))
             ceiling = MAX_SHELL_TIMEOUT if command else MAX_TIMEOUT
             timeout = max(3.0, min(float(req.get("timeout_sec") or 20), ceiling))
         except (ValueError, KeyError, TypeError):
@@ -762,7 +818,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
         token = secrets.token_urlsafe(24)
         job = {"allowed": allowed, "oob": oob, "log": [], "exchanges": [],
-               "recorded_bytes": 0, "dropped": 0, "tcp": {}, "tcp_count": 0}
+               "recorded_bytes": 0, "dropped": 0, "tcp": {}, "tcp_count": 0,
+               "policy": policy}
         with _jobs_lock:
             _jobs[token] = job
         try:
