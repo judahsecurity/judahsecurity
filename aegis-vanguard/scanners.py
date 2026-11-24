@@ -25,9 +25,9 @@ from asm_bridge import ASMBridge, Finding
 logger = logging.getLogger("asm_scanners")
 
 
-def _run(cmd: List[str], timeout: int = 600) -> subprocess.CompletedProcess:
+def _run(cmd: List[str], timeout: int = 600, input: Optional[str] = None) -> subprocess.CompletedProcess:
     logger.info(f"Running: {' '.join(cmd)}")
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=input)
 
 
 def _tool_available(name: str) -> bool:
@@ -1556,7 +1556,7 @@ def run_waybackurls(domain: str, bridge: ASMBridge, timeout: int = 300) -> List[
     """Historical URL discovery via waybackurls."""
     if not _tool_available("waybackurls"):
         logger.error("waybackurls not installed"); return []
-    result = _run(["bash", "-c", f"echo {domain} | waybackurls"], timeout=timeout)
+    result = _run(["waybackurls"], timeout=timeout, input=f"{domain}\n")
     urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip().startswith("http")]
     for url in urls:
         bridge.submit_url(url, source="waybackurls")
@@ -1569,7 +1569,7 @@ def run_gau(domain: str, bridge: ASMBridge, timeout: int = 300) -> List[str]:
     """URL discovery via gau (GetAllURLs)."""
     if not _tool_available("gau"):
         logger.error("gau not installed"); return []
-    result = _run(["bash", "-c", f"echo {domain} | gau --subs"], timeout=timeout)
+    result = _run(["gau", "--subs"], timeout=timeout, input=f"{domain}\n")
     urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip().startswith("http")]
     for url in urls:
         bridge.submit_url(url, source="gau")
@@ -2386,8 +2386,8 @@ def run_cmseek(target: str, bridge: ASMBridge, timeout: int = 300) -> Optional[s
     """CMS detection via CMSeeK."""
     if not _tool_available("cmseek") and not os.path.exists("/opt/cmseek/cmseek.py"):
         logger.error("cmseek not installed"); return None
-    binary = "cmseek" if _tool_available("cmseek") else "python3 /opt/cmseek/cmseek.py"
-    cmd = ["bash", "-c", f"{binary} -u {target} --batch"]
+    binary = ["cmseek"] if _tool_available("cmseek") else ["python3", "/opt/cmseek/cmseek.py"]
+    cmd = [*binary, "-u", target, "--batch"]
     result = _run(cmd, timeout=timeout)
     cms = None
     for line in result.stdout.splitlines():
