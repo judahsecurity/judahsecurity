@@ -5,12 +5,72 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 from app.services.agent import evograph
 from app.services.agent import orchestrator as orchestrator_module
 from app.services.agent.orchestrator import (
-    AgentOrchestrator, _initial_operator_note, _operator_recon_limits,
+    AgentOrchestrator, _initial_operator_note, _operator_forbidden_tools,
+    _operator_recon_limits,
 )
+
+
+@pytest.mark.asyncio
+async def test_explicit_startup_exclusions_prevent_unrequested_target_traffic(monkeypatch):
+    from app.services.agent import assessment_kickoff, recon_workers
+    from app.services import interceptor_service
+
+    prompt = (
+        "Assess https://app.test with sequential GET/HEAD only; no automatic "
+        "kickoff, interceptor, deep crawl, scanners, browser automation with "
+        "uncounted subrequests, or recon workers."
+    )
+    forbidden = _operator_forbidden_tools([prompt])
+    assert {"assessment_kickoff", "execute_interceptor", "execute_deep_crawl",
+            "execute_browser", "scoped_browser_assessment", "execute_nuclei",
+            "spawn_recon_workers"} <= forbidden
+    kickoff = AsyncMock(side_effect=AssertionError("kickoff sent traffic"))
+    queue = AsyncMock(side_effect=AssertionError("interceptor queued"))
+    spawn = AsyncMock(side_effect=AssertionError("recon worker started"))
+    monkeypatch.setattr(assessment_kickoff, "run_assessment_kickoff", kickoff)
+    monkeypatch.setattr(interceptor_service, "queue_early_pentester_crawl", queue)
+    monkeypatch.setattr(recon_workers, "spawn_workers", spawn)
+
+    orchestrator = AgentOrchestrator()
+    result = await orchestrator._initialize_node({
+        "user_id": "1", "session_id": "no-auto-start",
+        "mode": "assist", "messages": [HumanMessage(content=prompt)],
+    })
+    assert result["target_info"]["primary_target"] == "https://app.test"
+    assert result["execution_trace"] == []
+    assert result["interceptor_job_id"] is None
+    kickoff.assert_not_awaited()
+    queue.assert_not_awaited()
+    spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_tool_exclusion_blocks_model_call_before_execution(monkeypatch):
+    from app.services.agent import action_ledger
+
+    monkeypatch.setattr(action_ledger, "append_action", lambda *_args, **_kwargs: None)
+    orchestrator = AgentOrchestrator()
+    orchestrator.tool_manager = SimpleNamespace(execute=AsyncMock())
+    orchestrator._emit_status = AsyncMock()
+    result = await orchestrator._execute_tool_node({
+        "user_id": "1", "session_id": "excluded-tool", "mode": "assist",
+        "original_objective": "Assess https://app.test; no interceptor or deep crawl.",
+        "target_info": {"primary_target": "https://app.test"},
+        "_current_step": {"tool_name": "execute_interceptor", "tool_args": {}},
+    })
+    assert result["_current_step"]["error_message"] == "operator_tool_denied"
+    orchestrator.tool_manager.execute.assert_not_awaited()
+
+
+def test_contrast_clause_does_not_exclude_allowed_tool():
+    assert _operator_forbidden_tools([
+        "No automatic kickoff, but use interceptor after approval."
+    ]) == frozenset({"assessment_kickoff"})
 
 
 @pytest.mark.asyncio

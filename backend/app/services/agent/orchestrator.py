@@ -86,6 +86,47 @@ def _operator_recon_limits(notes: List[str]) -> tuple[bool, bool]:
     ))
     return scanners, directories
 
+
+def _operator_forbidden_tools(notes: List[str]) -> frozenset[str]:
+    """Turn explicit tool exclusions into a deterministic run boundary."""
+    text = " ".join(str(note or "") for note in notes)
+    forbidden: set[str] = set()
+    scanner_tools = {
+        "create_scan", "execute_llm_red_team", "execute_garak",
+        "execute_nuclei", "execute_naabu", "execute_httpx", "execute_subfinder",
+        "execute_subfaster", "execute_dnsx", "execute_katana", "execute_tldfinder",
+        "execute_atlas", "execute_argus", "execute_hermes", "execute_themis",
+        "execute_janus", "execute_waybackurls", "execute_nmap", "execute_masscan",
+        "execute_ffuf", "execute_amass", "execute_whatweb", "execute_knockpy",
+        "execute_gau", "execute_kiterunner", "execute_wappalyzer", "execute_crtsh",
+        "execute_crt_name", "execute_schemathesis", "execute_astf", "execute_sqlmap",
+        "execute_nikto", "execute_wafw00f", "execute_testssl", "execute_sslyze",
+        "execute_arjun", "execute_wpscan", "execute_xsstrike", "execute_dalfox",
+        "execute_commix", "execute_hydra", "execute_feroxbuster",
+        "execute_gitleaks", "execute_retirejs", "execute_jwt", "execute_interactsh",
+        "execute_semgrep", "execute_trivy", "execute_cmseek",
+        "scan_js_urls_for_secrets", "scan_assigned_js",
+    }
+    for match in re.finditer(
+        r"\b(?:no|avoid|skip|without|disable|do not|don't)\b\s+([^.;\n]{1,400})",
+        text, re.IGNORECASE,
+    ):
+        clause = re.split(r"\b(?:but|however|instead|then)\b", match.group(1), 1,
+                          flags=re.IGNORECASE)[0].lower()
+        if re.search(r"\b(?:automatic|auto)\s+kickoff\b", clause):
+            forbidden.add("assessment_kickoff")
+        if re.search(r"\binterceptor\b", clause):
+            forbidden.add("execute_interceptor")
+        if re.search(r"\bdeep[ -]crawl\b", clause):
+            forbidden.add("execute_deep_crawl")
+        if re.search(r"\brecon\s+workers?\b", clause):
+            forbidden.add("spawn_recon_workers")
+        if re.search(r"\bbrowser\s+automation\b", clause):
+            forbidden.update({"execute_browser", "scoped_browser_assessment"})
+        if re.search(r"\b(?:automated\s+)?scann?ers?\b", clause):
+            forbidden.update(scanner_tools)
+    return frozenset(forbidden)
+
 # Type alias for the optional WebSocket status callback
 StatusCallback = Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
 
@@ -628,6 +669,9 @@ class AgentOrchestrator:
                 break
         initial_note = _initial_operator_note(str(latest_message or ""))
         no_scanners, no_directories = _operator_recon_limits([str(latest_message or "")])
+        forbidden_tools = _operator_forbidden_tools([str(latest_message or "")])
+        no_scanners = no_scanners or "execute_nuclei" in forbidden_tools
+        no_directories = no_directories or no_scanners
         initial_constraints = ([initial_note or str(latest_message)]
                                if initial_note or no_scanners or no_directories else [])
         
@@ -700,7 +744,8 @@ class AgentOrchestrator:
         kickoff: Any = {}
         auto_enrich_target: Optional[str] = None
         org_id = state.get("organization_id")
-        if seed and mode != "pilot" and not resume_ready:
+        if (seed and mode != "pilot" and not resume_ready
+                and "assessment_kickoff" not in forbidden_tools):
             session_id = state.get("session_id")
             uid_raw = state.get("user_id")
             try:
@@ -741,6 +786,25 @@ class AgentOrchestrator:
                 if acr_seed or cve_only or auth_login:
                     kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
                     queued, streams = {}, []
+                elif "execute_interceptor" in forbidden_tools:
+                    queued = {}
+                    if no_scanners or "spawn_recon_workers" in forbidden_tools:
+                        kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
+                        streams = []
+                    else:
+                        from app.services.agent.autonomy_limits import current_autonomy_limits
+                        streams_coro = recon_workers.spawn_workers(
+                            url=seed,
+                            session_id=str(session_id or ""),
+                            pack="autonomy_early" if current_autonomy_limits.get() else "early",
+                            tools_manager=self.tool_manager,
+                            user_id=uid_int,
+                            organization_id=org_id if isinstance(org_id, int) else None,
+                        )
+                        kickoff, streams = await asyncio.wait_for(
+                            asyncio.gather(kickoff_coro, streams_coro, return_exceptions=True),
+                            timeout=28.0,
+                        )
                 else:
                     append_action(active_run_id.get(), queue_action_id, "started",
                                   "queue_early_interceptor", target=seed)
@@ -762,7 +826,7 @@ class AgentOrchestrator:
                             session_id=session_id,
                             organization_id=org_id,
                         )
-                    if no_scanners:
+                    if no_scanners or "spawn_recon_workers" in forbidden_tools:
                         kickoff, queued = await asyncio.wait_for(
                             asyncio.gather(kickoff_coro, queue_coro, return_exceptions=True),
                             timeout=28.0,
@@ -797,7 +861,8 @@ class AgentOrchestrator:
                 if isinstance(queued, Exception):
                     logger.warning("early interceptor queue failed: %s", queued)
                     queued = {}
-                if not acr_seed and not cve_only:
+                if (not acr_seed and not cve_only
+                        and "execute_interceptor" not in forbidden_tools):
                     policy_skip = (isinstance(queued, dict)
                                    and queued.get("note") == "skipped_operator_method_policy")
                     append_action(
@@ -856,7 +921,9 @@ class AgentOrchestrator:
                     )
                     kickoff_brief = (kickoff_brief + snote) if kickoff_brief else snote.strip()
 
-                needs_dirs = bool((kickoff or {}).get("needs_dir_brute")) and not no_directories
+                needs_dirs = (bool((kickoff or {}).get("needs_dir_brute"))
+                              and not no_directories
+                              and "spawn_recon_workers" not in forbidden_tools)
                 if needs_dirs:
                     try:
                         enrich = await recon_workers.spawn_workers(
@@ -912,13 +979,23 @@ class AgentOrchestrator:
                             "create_finding if verdict=SUBMIT (High; Critical only if later secret scan finds ghp_*)",
                         ]
                     else:
-                        next_steps = [
-                            ("execute_deep_crawl on the primary URL" if mode == "agent"
-                             else "execute_interceptor (attaches to early job if queued)"),
-                            "ingest_urls_into_map → discover_parameters/arjun",
-                            "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
-                        ]
-                        if not no_directories:
+                        first_step = (
+                            "Use only the operator-approved manual tools"
+                            if "execute_deep_crawl" in forbidden_tools
+                            and (mode == "agent" or "execute_interceptor" in forbidden_tools)
+                            else "execute_deep_crawl on the primary URL"
+                            if mode == "agent" or "execute_interceptor" in forbidden_tools
+                            else "execute_interceptor (attaches to early job if queued)"
+                        )
+                        next_steps = [first_step]
+                        if no_scanners:
+                            next_steps.extend(["ingest_urls_into_map", "sync_engagement_brain"])
+                        else:
+                            next_steps.extend([
+                                "ingest_urls_into_map → discover_parameters/arjun",
+                                "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
+                            ])
+                        if not no_directories and "spawn_recon_workers" not in forbidden_tools:
                             next_steps.insert(1, "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404)")
                     execution_trace.append(
                         ExecutionStep(
@@ -937,11 +1014,7 @@ class AgentOrchestrator:
                             },
                             tool_output=kickoff_brief,
                             success=bool((kickoff or {}).get("success")) or bool(interceptor_job_id),
-                            actionable_findings=[
-                                "Start execute_deep_crawl next" if mode == "agent" else (
-                                    "Attach via execute_interceptor" if interceptor_job_id
-                                    else "Start execute_interceptor next")
-                            ],
+                            actionable_findings=[next_steps[0]],
                             recommended_next_steps=next_steps,
                         ).model_dump()
                     )
@@ -1331,6 +1404,9 @@ class AgentOrchestrator:
             extra = "\n\n".join(load_briefs)
             prior_hunt_brief = f"{prior_hunt_brief}\n\n{extra}".strip() if prior_hunt_brief else extra
         operator_steers = list(state.get("operator_steers") or []) + steer_notes
+        forbidden_tools = _operator_forbidden_tools([
+            str(state.get("original_objective") or ""), *operator_steers,
+        ])
         if steer_notes:
             await self._emit_status({
                 "type": "steered",
@@ -1668,6 +1744,7 @@ class AgentOrchestrator:
             try:
                 from app.services.agent.tester_loop import forced_next_step
                 _, no_directories = _operator_recon_limits(operator_steers)
+                no_directories = no_directories or "spawn_recon_workers" in forbidden_tools
                 forced = forced_next_step({
                     **state,
                     "execution_trace": merged_trace,
@@ -1675,6 +1752,8 @@ class AgentOrchestrator:
                     "engagement_brain": recon_brain_update or state.get("engagement_brain"),
                     "skip_directory_enrichment": no_directories,
                 })
+                if forced and forced.get("tool_name") in forbidden_tools:
+                    forced = None
             except Exception:
                 logger.exception("forced assessment step failed")
             if not forced:
@@ -1783,8 +1862,17 @@ class AgentOrchestrator:
             if state.get("mode") == "agent":
                 available_tools += (
                     "\nScoped Agent mode: execute_interceptor is unavailable because its workers "
-                    "cannot enforce exact method and path approvals. Use execute_deep_crawl "
-                    "for the application walk instead."
+                    "cannot enforce exact method and path approvals. "
+                    + ("Use execute_deep_crawl for the application walk instead."
+                       if "execute_deep_crawl" not in forbidden_tools
+                       else "Follow the operator-approved manual workflow.")
+                )
+            excluded_calls = forbidden_tools - {"assessment_kickoff"}
+            if excluded_calls:
+                available_tools += (
+                    "\n\nOperator-excluded tools for this run: "
+                    + ", ".join(sorted(excluded_calls))
+                    + ". Do not call them."
                 )
             try:
                 from app.services.agent.assessment_depth import assessment_depth
@@ -2371,6 +2459,24 @@ class AgentOrchestrator:
         if not tool_name:
             step_data["tool_output"] = "Error: No tool specified"
             step_data["success"] = False
+            return {"_current_step": step_data}
+
+        forbidden_tools = _operator_forbidden_tools([
+            str(state.get("original_objective") or ""),
+            *(state.get("operator_steers") or []),
+        ])
+        if tool_name in forbidden_tools:
+            step_data["tool_output"] = (
+                f"Skipped {tool_name}: the operator excluded this tool for this run. "
+                "Choose an allowed method within the stated scope and request budget."
+            )
+            step_data["success"] = False
+            step_data["error_message"] = "operator_tool_denied"
+            record_skip("operator_tool_denied")
+            await self._emit_status({
+                "type": "tool_complete", "tool_name": tool_name, "success": False,
+                "output_summary": step_data["tool_output"], "iteration": iteration,
+            })
             return {"_current_step": step_data}
 
         try:
@@ -3629,11 +3735,12 @@ class AgentOrchestrator:
         from app.services.agent.pilot_policy import current_pilot
         if current_pilot() is not None:
             return None
-        _, no_directories = _operator_recon_limits([
+        notes = [
             str(state.get("original_objective") or ""),
             *(state.get("operator_steers") or []),
-        ])
-        if no_directories:
+        ]
+        _, no_directories = _operator_recon_limits(notes)
+        if no_directories or "spawn_recon_workers" in _operator_forbidden_tools(notes):
             return None
         from app.services.agent.tester_loop import (
             normalized_tools_run,
