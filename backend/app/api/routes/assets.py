@@ -924,6 +924,45 @@ def get_asset(
     )
 
 
+@router.get("/{asset_id}/agent-coverage")
+def get_asset_agent_coverage(
+    asset_id: int,
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """What the pentest agent tested on this asset, across sessions: outcome per
+    surface/parameter/risk area, including tested-and-clean, plus whether an
+    exploitable or KEV finding on the asset has never been tested."""
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not check_org_access(current_user, asset.organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    from app.models.vulnerability import Vulnerability, VulnerabilityStatus
+    from app.services.agent.test_coverage_store import asset_coverage
+    from app.services.exploit_priority import EXPLOITABLE_THRESHOLD
+
+    summary = asset_coverage(db, asset.organization_id, asset.id, limit=limit)
+    exploitable = (
+        db.query(Vulnerability.id, Vulnerability.title, Vulnerability.exploit_score, Vulnerability.exploit_tier)
+        .filter(
+            Vulnerability.asset_id == asset.id,
+            Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]),
+            Vulnerability.exploit_score >= EXPLOITABLE_THRESHOLD,
+        )
+        .order_by(Vulnerability.exploit_priority.desc().nullslast())
+        .limit(20)
+        .all()
+    )
+    summary["exploitable_findings"] = [
+        {"id": v.id, "title": v.title, "exploit_score": v.exploit_score, "tier": v.exploit_tier}
+        for v in exploitable
+    ]
+    summary["exploitable_untested"] = bool(exploitable) and summary["tested"] == 0
+    return summary
+
+
 @router.get("/{asset_id}/openapi.yaml")
 def download_asset_openapi(
     asset_id: int,

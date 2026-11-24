@@ -76,6 +76,7 @@ import { formatDate } from '@/lib/utils';
 import { ApplicationMap } from '@/components/assets/ApplicationMap';
 import { SitemapInventory } from '@/components/assets/SitemapInventory';
 import { DiscoveryPath } from '@/components/assets/DiscoveryPath';
+import { AgentCoverageCard } from '@/components/assets/AgentCoverageCard';
 import { AddFindingDialog } from '@/components/findings/AddFindingDialog';
 import { LaunchAssessmentDialog } from '@/components/agent/LaunchAssessmentDialog';
 
@@ -264,6 +265,7 @@ const TABS = [
   { id: 'discovery', label: 'Discovery', icon: Radar },
   { id: 'app-structure', label: 'App Structure', icon: FolderSearch },
   { id: 'findings', label: 'Findings', icon: Shield },
+  { id: 'agent-testing', label: 'Agent Testing', icon: ShieldCheck },
   { id: 'ports', label: 'Open Ports', icon: Network },
   { id: 'activity', label: 'Activity', icon: Activity },
   { id: 'mitigations', label: 'Mitigations', icon: Settings },
@@ -2306,6 +2308,8 @@ export default function AssetDetailPage() {
         )}
 
         {/* Open Ports Tab */}
+        {activeTab === 'agent-testing' && <AgentCoverageCard assetId={Number(assetId)} />}
+
         {activeTab === 'ports' && (
           <Card>
             <CardHeader>

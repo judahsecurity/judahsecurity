@@ -1085,6 +1085,31 @@ class AgentOrchestrator:
                 out["current_phase"] = snap["current_phase"]
         except Exception:
             logger.debug("run snapshot resume skipped", exc_info=True)
+        # A new session inherits the organization's recent test coverage for the
+        # hosts in scope (app.services.agent.test_coverage_store), so it spends
+        # its budget on what is still untested instead of starting from zero.
+        try:
+            if org_id and session_id and seed and not prior_snapshot.get("engagement_brain"):
+                from app.db.database import SessionLocal
+                from app.services.agent.assessment_scope import observation_scope_hosts
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+                from app.services.agent.test_coverage_store import prior_rows, seed_brain
+
+                scope_hosts = observation_scope_hosts(self.tool_manager)
+                if scope_hosts:
+                    with SessionLocal() as db:
+                        rows = prior_rows(db, org_id, scope_hosts)
+                    if rows:
+                        brain = engagement_brain_from_dict(out.get("engagement_brain"))
+                        added = seed_brain(brain, rows, organization_id=org_id, session_id=session_id)
+                        if added:
+                            brain.notes.append(
+                                f"Inherited {added} coverage results from earlier sessions "
+                                "(tested within the reuse window); retest only what changed."
+                            )
+                            out["engagement_brain"] = brain.to_dict()
+        except Exception:
+            logger.debug("prior coverage inheritance skipped", exc_info=True)
         # Hand off recent first-party takeover scanner observations to opted-in
         # scheduled hunts. They remain leads until the normal proof gate runs.
         try:

@@ -176,6 +176,13 @@ def save_run_snapshot(
     })
     if not payload["engagement_brain"] and not payload["capability_map"]:
         return
+    if isinstance(brain, dict) and brain.get("coverage_cells"):
+        try:
+            from app.services.agent.test_coverage_store import persist as persist_coverage
+
+            persist_coverage(organization_id, session_id, brain)
+        except Exception:
+            logger.exception("durable test coverage save failed; the next save retries")
     encoded = json.dumps(payload, default=str, separators=(",", ":")).encode()
     if len(encoded) > _MAX_SNAPSHOT_BYTES:
         logger.warning("run snapshot exceeds %d bytes; prior snapshot retained", _MAX_SNAPSHOT_BYTES)

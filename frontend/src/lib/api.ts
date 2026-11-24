@@ -1207,6 +1207,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getAssetAgentCoverage(assetId: number, limit = 500) {
+    const response = await this.client.get(`/assets/${assetId}/agent-coverage`, { params: { limit } });
+    return response.data;
+  }
+
   async downloadAssetOpenapi(assetId: number) {
     const response = await this.client.get(`/assets/${assetId}/openapi.yaml`, {
       responseType: 'blob',

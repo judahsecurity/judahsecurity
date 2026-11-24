@@ -15,7 +15,8 @@ Relationships:
   - (ChainStep)-[:NEXT_STEP]->(ChainStep)
   - (ChainStep)-[:PRODUCED]->(ChainFinding)
   - (ChainStep)-[:FAILED_WITH]->(ChainFailure)
-  - (AgentChain)-[:TARGETS]->(Asset/IP/Domain)  — bridge to recon graph
+  - (AgentChain)-[:TARGETS]->(Asset)  — bridge to recon graph (set on the first
+    finding about an organization asset)
 """
 
 import logging
@@ -176,6 +177,10 @@ def record_finding(
                 WHERE a.value IN $targets
                 FOREACH (_ IN CASE WHEN a IS NULL THEN [] ELSE [1] END |
                     MERGE (f)-[:ABOUT_ASSET]->(a))
+                WITH f, a
+                OPTIONAL MATCH (c:AgentChain {session_id: $sid})
+                FOREACH (_ IN CASE WHEN a IS NULL OR c IS NULL THEN [] ELSE [1] END |
+                    MERGE (c)-[:TARGETS]->(a))
                 """,
                 sid=session_id, iter=iteration,
                 ftype=finding_type, sev=severity,

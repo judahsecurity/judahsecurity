@@ -257,6 +257,44 @@ class GraphService:
         finally:
             db.close()
     
+    def _sync_agent_coverage(self, session, asset) -> None:
+        """Stamp agent test coverage counts on the Asset node (agent_test_coverage)."""
+        try:
+            from sqlalchemy import func
+            from sqlalchemy.orm import object_session
+            from app.models.agent_test_coverage import AgentTestCoverage
+
+            db = object_session(asset)
+            if db is None:
+                return
+            rows = (
+                db.query(AgentTestCoverage.outcome, func.count(AgentTestCoverage.id),
+                         func.max(AgentTestCoverage.last_tested_at))
+                .filter(AgentTestCoverage.asset_id == asset.id)
+                .group_by(AgentTestCoverage.outcome)
+                .all()
+            )
+        except Exception as exc:  # table missing on an old deployment, etc.
+            logger.debug("agent coverage lookup skipped for asset %s: %s", asset.id, exc)
+            return
+        counts = {outcome: n for outcome, n, _ in rows}
+        last = max((t for _, _, t in rows if t), default=None)
+        tested = sum(counts.get(o, 0) for o in ("reported", "no_issue_found", "ruled_out", "not_applicable"))
+        session.run("""
+            MATCH (a:Asset {asset_id: $asset_id})
+            SET a.agent_tested = $tested,
+                a.agent_reported = $reported,
+                a.agent_clean = $clean,
+                a.agent_follow_up = $follow_up,
+                a.agent_last_tested = $last
+        """, {
+            "asset_id": asset.id, "tested": tested,
+            "reported": counts.get("reported", 0),
+            "clean": counts.get("no_issue_found", 0) + counts.get("ruled_out", 0),
+            "follow_up": counts.get("needs_follow_up", 0),
+            "last": last.isoformat() if last else None,
+        })
+
     def _sync_agent_chain(self, session, vuln, org_id: int) -> None:
         """Project an agent-demonstrated chain onto the asset graph.
 
@@ -552,6 +590,8 @@ class GraphService:
                 MERGE (s)-[:USES_TECHNOLOGY]->(t)
             """, {"asset_id": asset.id, "name": tech.name})
         
+        self._sync_agent_coverage(session, asset)
+
         # ===== 5. VULNERABILITY: Technology HAS_VULNERABILITY, REFERENCES CVE, MAPS_TO MITRE =====
         vulnerabilities = getattr(asset, 'vulnerabilities', None) or []
         for vuln in vulnerabilities:
