@@ -603,6 +603,47 @@ async def test_scoped_browser_route_blocks_unapproved_post():
         assert route.result == expected
 
 
+@pytest.mark.asyncio
+async def test_autonomous_browser_read_route_blocks_writes_and_websockets():
+    from app.services.agent.assessment_sessions import configure_browser_origin
+
+    class Context:
+        async def route(self, _pattern, callback):
+            self.callback = callback
+
+        async def route_web_socket(self, _pattern, callback):
+            self.socket_callback = callback
+
+    class Route:
+        def __init__(self, method):
+            self.request = SimpleNamespace(method=method, url="https://app.test/save")
+            self.result = None
+
+        async def continue_(self):
+            self.result = "continued"
+
+        async def abort(self):
+            self.result = "aborted"
+
+    context = Context()
+    await configure_browser_origin(
+        context, "https://app.test", allowed_methods=["GET", "HEAD"],
+        block_web_sockets=True,
+    )
+    read = Route("GET")
+    write = Route("POST")
+    await context.callback(read)
+    await context.callback(write)
+    assert read.result == "continued"
+    assert write.result == "aborted"
+    socket_events = []
+    context.socket_callback(SimpleNamespace(
+        url="wss://app.test/events", close=lambda: socket_events.append("closed"),
+        connect_to_server=lambda: socket_events.append("connected"),
+    ))
+    assert socket_events == ["closed"]
+
+
 def cookies_for(jar, url):
     request = httpx.Request("GET", url)
     jar.set_cookie_header(request)

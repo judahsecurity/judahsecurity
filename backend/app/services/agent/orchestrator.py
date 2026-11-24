@@ -60,7 +60,7 @@ from app.services.agent.prompts import (
 )
 from app.services.agent.tools import ASMToolsManager, set_tenant_context
 from app.services.agent.model_router import LLMTask
-from app.services.agent.confirmation_service import set_autonomous_mode
+from app.services.agent.confirmation_service import set_autonomous_mode, set_scoped_browser_reads
 from app.services.agent import evograph
 from app.services.agent.tool_selector import get_tool_recommendations
 
@@ -691,9 +691,9 @@ class AgentOrchestrator:
                 "username_env": "TARGET_USER", "password_env": "TARGET_PASS",
             }
 
-        # Fast parallel probes + early Interceptor queue so crawl starts while
-        # the LLM plans. execute_interceptor later attaches to the same job_id.
-        # Also spawn Copilot-style recon streams (httpx/waf/whatweb) in background.
+        # Fast parallel probes and recon streams run while the LLM plans.
+        # The existing operator method-policy check skips Interceptor when its
+        # worker cannot enforce the run's method and path contract.
         execution_trace: list = []
         interceptor_job_id: Optional[str] = None
         recon_worker_briefs: List[str] = []
@@ -913,7 +913,8 @@ class AgentOrchestrator:
                         ]
                     else:
                         next_steps = [
-                            "execute_interceptor (attaches to early job if queued)",
+                            ("execute_deep_crawl on the primary URL" if mode == "agent"
+                             else "execute_interceptor (attaches to early job if queued)"),
                             "ingest_urls_into_map → discover_parameters/arjun",
                             "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
                         ]
@@ -923,7 +924,8 @@ class AgentOrchestrator:
                         ExecutionStep(
                             iteration=0,
                             phase="informational",
-                            thought="Automatic kickoff + Interceptor queue + recon streams",
+                            thought=("Automatic kickoff + recon streams" if mode == "agent"
+                                     else "Automatic kickoff + Interceptor queue + recon streams"),
                             reasoning="Surface signal + parallel streams while LLM plans",
                             tool_name="assessment_kickoff",
                             tool_args={
@@ -936,9 +938,9 @@ class AgentOrchestrator:
                             tool_output=kickoff_brief,
                             success=bool((kickoff or {}).get("success")) or bool(interceptor_job_id),
                             actionable_findings=[
-                                "Attach via execute_interceptor"
-                                if interceptor_job_id
-                                else "Start execute_interceptor next"
+                                "Start execute_deep_crawl next" if mode == "agent" else (
+                                    "Attach via execute_interceptor" if interceptor_job_id
+                                    else "Start execute_interceptor next")
                             ],
                             recommended_next_steps=next_steps,
                         ).model_dump()
@@ -1778,6 +1780,12 @@ class AgentOrchestrator:
 
                 available_tools = tool_index(available_tools)
             available_tools += self._unavailable_tools_note()
+            if state.get("mode") == "agent":
+                available_tools += (
+                    "\nScoped Agent mode: execute_interceptor is unavailable because its workers "
+                    "cannot enforce exact method and path approvals. Use execute_deep_crawl "
+                    "for the application walk instead."
+                )
             try:
                 from app.services.agent.assessment_depth import assessment_depth
                 from app.services.agent.custom_probe import custom_probe_mode
@@ -1904,6 +1912,7 @@ class AgentOrchestrator:
                     current_phase=phase,
                     parameters=discovered_params,
                     waf_detected=waf_detected,
+                    unavailable_tools={"execute_interceptor"} if state.get("mode") == "agent" else None,
                 )
             # WordPress-specific hunt: once WP is fingerprinted, do not wait for
             # methodology cards — run wpscan + REST user enum + ajax SQLi probes.
@@ -2690,9 +2699,11 @@ class AgentOrchestrator:
         if tool_name in spray_tools and not map_ready and not force:
             step_data["tool_output"] = (
                 f"Blocked: '{tool_name}' before application capability map. "
-                "Walk the app like a tester first with execute_interceptor (or execute_deep_crawl) on the primary URL, "
-                "then sync_engagement_brain + fireteam_dispatch(specialists='auto'), then resume scanning. "
-                "Pass force=true only for intentionally non-browser targets."
+                + ("Walk the app like a tester first with execute_deep_crawl on the primary URL, "
+                   if state.get("mode") == "agent" else
+                   "Walk the app like a tester first with execute_interceptor (or execute_deep_crawl) on the primary URL, ")
+                + "then sync_engagement_brain + fireteam_dispatch(specialists='auto'), then resume scanning. "
+                + "Pass force=true only for intentionally non-browser targets."
             )
             step_data["success"] = False
             step_data["error_message"] = "capability_map_required"
@@ -3957,6 +3968,13 @@ class AgentOrchestrator:
             _max_iterations_var.set(max_iterations)
             self._start_turn_deadline()
             set_autonomous_mode(mode in ("agent", "pilot"))
+            browser_read_origin = extract_seed_target(question) if mode == "agent" else ""
+            browser_reads = bool(
+                mode == "agent" and assessment_policy
+                and assessment_policy.get("scoped_autonomous_reads")
+                and browser_read_origin
+            )
+            set_scoped_browser_reads(browser_reads, browser_read_origin)
             logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'}, depth={current_assessment_depth.get().name})")
             if price_limit_usd is not None:
                 set_price_limit(session_id, float(price_limit_usd))
@@ -4013,6 +4031,8 @@ class AgentOrchestrator:
                 "organization_id": organization_id,
                 "session_id": session_id,
                 "mode": mode,
+                "scoped_browser_reads": browser_reads,
+                "scoped_browser_origin": browser_read_origin if browser_reads else "",
             }
             if pilot_policy is not None:
                 input_data["pilot_policy"] = pilot_policy.as_config()
@@ -4090,6 +4110,7 @@ class AgentOrchestrator:
             evograph.record_chain_end(session_id=session_id, status="error", outcome=str(e)[:300])
             return InvokeResponse(error=str(e))
         finally:
+            set_scoped_browser_reads(False)
             reset_pilot(pilot_token)
             current_assessment_depth.reset(depth_token)
             await _cancel_background_executions(run_id)
@@ -4133,6 +4154,10 @@ class AgentOrchestrator:
             )
         token = set_pilot(policy)
         set_autonomous_mode(mode in ("agent", "pilot"))
+        set_scoped_browser_reads(
+            mode == "agent" and values.get("scoped_browser_reads") is True,
+            str(values.get("scoped_browser_origin") or ""),
+        )
         # Keep the depth the run started with; a resume must not silently
         # switch a deep assessment back to standard budgets or vice versa.
         from app.services.agent.assessment_depth import set_assessment_depth
@@ -4204,6 +4229,7 @@ class AgentOrchestrator:
             finish_run(run_id, "error", type(e).__name__)
             return InvokeResponse(error=str(e))
         finally:
+            set_scoped_browser_reads(False)
             if pilot_token is not None:
                 from app.services.agent.pilot_policy import reset_pilot
                 reset_pilot(pilot_token)
@@ -4276,6 +4302,7 @@ class AgentOrchestrator:
             finish_run(run_id, "error", type(e).__name__)
             return InvokeResponse(error=str(e))
         finally:
+            set_scoped_browser_reads(False)
             if pilot_token is not None:
                 from app.services.agent.pilot_policy import reset_pilot
                 reset_pilot(pilot_token)

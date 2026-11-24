@@ -149,6 +149,7 @@ async def configure_browser_origin(
     context, target: str, *, allowed_methods: list[str] | None = None,
     approved_post_paths: list[str] | None = None,
     approved_delete_paths: list[str] | None = None,
+    block_web_sockets: bool = False,
 ) -> None:
     """Apply the same exact-origin boundary to browser and crawler contexts."""
     expected_origin = origin(target)
@@ -175,7 +176,7 @@ async def configure_browser_origin(
         await route.continue_() if permitted else await route.abort()
     await context.route("**/*", scope_route)
     def scope_socket_route(socket):
-        if pilot is not None:
+        if pilot is not None or block_web_sockets:
             socket.close()
             return
         try:

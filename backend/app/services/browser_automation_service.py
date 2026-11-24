@@ -240,6 +240,7 @@ async def execute_browser_actions(
                     allowed_methods=spec.get("allowed_methods"),
                     approved_post_paths=spec.get("approved_post_paths"),
                     approved_delete_paths=spec.get("approved_delete_paths"),
+                    block_web_sockets=spec.get("block_web_sockets") is True,
                 )
             if isinstance(seed_cookies, list) and seed_cookies and not storage_state:
                 try:

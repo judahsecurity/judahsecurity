@@ -133,6 +133,7 @@ class ToolSelector:
         current_phase: str = "informational",
         parameters: Optional[Dict[str, Any]] = None,
         waf_detected: Optional[str] = None,
+        unavailable_tools: Optional[Set[str]] = None,
     ):
         self.target = target
         self.target_info = target_info or {}
@@ -140,6 +141,7 @@ class ToolSelector:
         self.current_phase = current_phase
         self.parameters = parameters or {}
         self.waf_detected = waf_detected
+        self._unavailable_tools = unavailable_tools or set()
 
         # Derived state
         self._tools_already_run: Set[str] = self._extract_tools_run()
@@ -235,7 +237,8 @@ class ToolSelector:
         seen: Set[str] = set()
         filtered: List[ToolRecommendation] = []
         for r in sorted(recs, key=lambda x: (0 if x.category == "cms" else 1, x.priority)):
-            if r.tool_name in self._tools_already_run or r.tool_name in seen:
+            if (r.tool_name in self._tools_already_run or r.tool_name in seen
+                    or r.tool_name in self._unavailable_tools):
                 continue
             seen.add(r.tool_name)
             filtered.append(r)
@@ -1148,6 +1151,7 @@ def get_tool_recommendations(
     current_phase: str = "informational",
     parameters: Optional[Dict[str, Any]] = None,
     waf_detected: Optional[str] = None,
+    unavailable_tools: Optional[Set[str]] = None,
 ) -> str:
     """
     Get formatted tool recommendations for injection into the agent prompt.
@@ -1161,6 +1165,7 @@ def get_tool_recommendations(
         current_phase=current_phase,
         parameters=parameters,
         waf_detected=waf_detected,
+        unavailable_tools=unavailable_tools,
     )
     return selector.get_recommendations_text()
 

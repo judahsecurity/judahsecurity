@@ -698,6 +698,7 @@ function AgentPageContent() {
   const [storedXssCleanupPathsText, setStoredXssCleanupPathsText] = useState('');
   const [ownerOnlyText, setOwnerOnlyText] = useState('');
   const [authLoginPath, setAuthLoginPath] = useState('');
+  const [scopedAutonomousReads, setScopedAutonomousReads] = useState(false);
   const [mode, setMode] = useState<'assist' | 'agent' | 'pilot'>('agent');
   // Assessment depth for Prowl mode: 'standard' keeps the deterministic
   // pipeline; 'deep' lets the model choose steps after recon on larger
@@ -1294,8 +1295,9 @@ function AgentPageContent() {
         description: 'Use at most eight POST paths, eight stored XSS cleanup paths, and eight owner-only lines in URL | owner | other format.' });
       return;
     }
-    const assessmentPolicy = bodyReplayPaths.length || storedXssCleanupPaths.length || ownerOnlyResources.length || authLoginPath.trim()
-      ? { body_replay_paths: bodyReplayPaths,
+    const assessmentPolicy = bodyReplayPaths.length || storedXssCleanupPaths.length || ownerOnlyResources.length || authLoginPath.trim() || (mode === 'agent' && scopedAutonomousReads)
+      ? { scoped_autonomous_reads: mode === 'agent' && scopedAutonomousReads,
+          body_replay_paths: bodyReplayPaths,
           stored_xss_cleanup_paths: storedXssCleanupPaths,
           auth_login_path: authLoginPath.trim() || undefined,
           owner_only_resources: ownerOnlyResources.map((row) => ({
@@ -2176,6 +2178,16 @@ function AgentPageContent() {
                       {mode !== 'pilot' && <details className="text-xs text-muted-foreground">
                         <summary className="cursor-pointer">Assessment policy</summary>
                         <div className="mt-2 space-y-2 w-80">
+                          {mode === 'agent' && <label className="flex items-start gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={scopedAutonomousReads}
+                              onChange={(event) => setScopedAutonomousReads(event.target.checked)}
+                              disabled={loading}
+                              className="mt-0.5"
+                            />
+                            <span>Autonomous browser reads on the selected origin. GET/HEAD navigation and observation can proceed without repeated approvals. Login, scripts, form actions, and writes still use the normal approval gate.</span>
+                          </label>}
                           <p>Exact-host GET and browser reads need no POST replay path. Analyst tool approvals may still apply. POST replay can change data, so list only paths with a rollback or reset plan; omitted POST checks remain open as blocked coverage.</p>
                           <p>For an authenticated crawl, enter its login path. The backend must have TARGET_USER and TARGET_PASS configured. Login is approval-gated; those values stay out of the agent prompt.</p>
                           <Input
