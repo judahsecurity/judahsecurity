@@ -111,3 +111,6 @@ backend/nuclei-templates-generated/
 
 # Production deployment backups
 backups/
+
+# Local Prowl lab runs (harness/scripts/prowl_lab_scan.sh)
+/runs/
