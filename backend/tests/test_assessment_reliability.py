@@ -1,5 +1,6 @@
 """Regression tests exercise production transport, proof gates, and scheduler code."""
 
+import uuid
 import asyncio
 import json
 import time
@@ -212,7 +213,9 @@ async def test_browser_xss_dialog_links_probe_and_candidate_to_observed_input(ma
 @pytest.fixture
 def manager():
     org = current_organization_id.set(98765)
-    session = current_session_id.set("assessment-reliability-test")
+    # A unique session per test: a fixed one shares one evidence namespace, so
+    # records persisted by earlier tests or runs inflate this store's totals.
+    session = current_session_id.set(f"assessment-reliability-{uuid.uuid4().hex}")
     instance = ASMToolsManager()
     instance._assessment_scope.update({"a.test", "b.test", "app.test", "other.test"})
     yield instance
