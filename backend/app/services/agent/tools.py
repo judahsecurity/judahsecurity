@@ -10165,9 +10165,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "Complete the structured authorization proof before submitting "
                     "a finding candidate."
                 )
+                # The orchestrator syncs state from self._engagement_brain; the full
+                # brain must not ride along in the tool output, where it overflows the
+                # output cap.
                 self._engagement_brain = brain.to_dict()
-                result["engagement_brain"] = self._engagement_brain
-        return json.dumps(result, indent=2)[:_tool_output_max_chars()]
+        serialized = json.dumps(result, indent=2)
+        if len(serialized) > _tool_output_max_chars():
+            # Never slice serialized JSON: a cut string is unparseable. Keep the
+            # verdict and the proof routing, and point at the stored evidence.
+            escalation = result.get("proof_escalation") or {}
+            serialized = json.dumps({
+                "verdict": result["verdict"],
+                "signals": [str(value)[:200] for value in result["signals"][:8]],
+                "baseline_evidence_id": (result.get("baseline") or {}).get("evidence_id"),
+                "mutant_evidence_id": (result.get("mutant") or {}).get("evidence_id"),
+                "proof_escalation": {
+                    field: escalation.get(field)
+                    for field in ("id", "status", "strategy", "evidence_ids", "coverage_cell_id", "specialist")
+                } if escalation else None,
+                "guidance": result["guidance"],
+                "next_action": str(result.get("next_action") or "")[:300],
+                "output_compacted": True,
+            })
+        return serialized
 
     def _resolve_request_cookies(self, headers, cookies, use_auth_session, url: str = ""):
         # Compatibility helper; the live transport uses the jar itself for redirects.

@@ -137,8 +137,16 @@ def _public(ip) -> bool:
                 or ip.is_reserved or ip.is_unspecified)
 
 
-def resolve_checked(host: str, port: int, allowed: list[str]) -> tuple[str | None, str]:
-    """Return (ip, "") for an allowed destination, else (None, reason)."""
+def resolve_checked_all(host: str, port: int, allowed: list[str]) -> tuple[list[str], str]:
+    """Return (addresses, "") for an allowed destination, else ([], reason).
+
+    Every resolved address that passes the address policy is returned, in
+    resolver order, so callers can fall back across address families. A
+    dual-stack name usually resolves to its IPv6 address first; when that path
+    is closed (no IPv6 route, or a service bound to IPv4 only) the IPv4
+    address must still be tried. Callers connect only to these checked
+    addresses and never re-resolve the name.
+    """
     host = _norm_host(host)
     try:
         literal = ipaddress.ip_address(host)
@@ -146,19 +154,42 @@ def resolve_checked(host: str, port: int, allowed: list[str]) -> tuple[str | Non
         literal = None
     if literal is not None:
         if host not in {_norm_host(item) for item in allowed}:
-            return None, "IP destinations need an exact scope entry"
+            return [], "IP destinations need an exact scope entry"
         if not _public(literal) and not ALLOW_PRIVATE:
-            return None, "non-public address blocked"
-        return host, ""
+            return [], "non-public address blocked"
+        return [host], ""
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError:
-        return None, "DNS resolution failed"
+        return [], "DNS resolution failed"
+    addresses: list[str] = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
-        if _public(ip) or ALLOW_PRIVATE:
-            return str(ip), ""
-    return None, "resolves only to non-public addresses"
+        if (_public(ip) or ALLOW_PRIVATE) and str(ip) not in addresses:
+            addresses.append(str(ip))
+    if not addresses:
+        return [], "resolves only to non-public addresses"
+    return addresses, ""
+
+
+def resolve_checked(host: str, port: int, allowed: list[str]) -> tuple[str | None, str]:
+    """Return (ip, "") for an allowed destination, else (None, reason)."""
+    addresses, reason = resolve_checked_all(host, port, allowed)
+    return (addresses[0], "") if addresses else (None, reason)
+
+
+def connect_checked(addresses: list[str], port: int, timeout: float) -> tuple[socket.socket, str]:
+    """Connect to the first reachable checked address; return (socket, address).
+
+    Raises the last connection error when none is reachable.
+    """
+    error: OSError = OSError("no checked address")
+    for address in addresses:
+        try:
+            return socket.create_connection((address, port), timeout=timeout), address
+        except OSError as exc:
+            error = exc
+    raise error
 
 
 def _job_for(header: str | None) -> tuple[str, dict] | tuple[None, None]:
@@ -472,13 +503,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             entry.update(allowed=False, reason="host not in scope")
             self._deny(403, "host not in engagement scope")
             return None, None, None
-        ip, reason = resolve_checked(host, port, job["allowed"])
-        if ip is None:
+        addresses, reason = resolve_checked_all(host, port, job["allowed"])
+        if not addresses:
             entry.update(allowed=False, reason=reason)
             self._deny(403, reason)
             return None, None, None
-        entry.update(allowed=True, ip=ip)
-        return job, ip, entry
+        entry.update(allowed=True, ip=addresses[0])
+        return job, addresses, entry
 
     def do_CONNECT(self) -> None:
         host, _, port_text = self.path.rpartition(":")
@@ -487,7 +518,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._deny(400, "bad CONNECT target")
             return
-        job, ip, entry = self._admit(host, port)
+        job, addresses, entry = self._admit(host, port)
         if job is None:
             return
         self.wfile.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -512,7 +543,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return
             method, _, rest = request.start.partition(" ")
             target = rest.rsplit(" ", 1)[0] or "/"
-            self._exchange(job, entry, "https", host, port, ip, method, target, request, wfile)
+            self._exchange(job, entry, "https", host, port, addresses, method, target, request, wfile)
         finally:
             for handle in (wfile, rfile):
                 try:
@@ -530,7 +561,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._deny(400, "absolute http:// URL required; use CONNECT for https")
             return
         port = parts.port or 80
-        job, ip, entry = self._admit(parts.hostname, port)
+        job, addresses, entry = self._admit(parts.hostname, port)
         if job is None:
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -543,12 +574,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
             target += "?" + parts.query
         request = Message(f"{self.command} {target} HTTP/1.1", list(self.headers.items()), body, body)
         self.close_connection = True
-        self._exchange(job, entry, "http", parts.hostname, port, ip, self.command, target,
+        self._exchange(job, entry, "http", parts.hostname, port, addresses, self.command, target,
                        request, self.wfile)
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _forward
 
-    def _exchange(self, job, entry, scheme, host, port, ip, method, target, request, wfile) -> None:
+    def _exchange(self, job, entry, scheme, host, port, addresses, method, target, request, wfile) -> None:
         ok, why = method_allowed(job.get("policy"), method, target)
         if not ok:
             entry.update(allowed=False, reason=why)
@@ -556,7 +587,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         started = time.monotonic()
         try:
-            upstream = socket.create_connection((ip, port), timeout=SOCKET_TIMEOUT)
+            upstream, entry["ip"] = connect_checked(addresses, port, SOCKET_TIMEOUT)
         except OSError:
             entry["reason"] = "upstream connect failed"
             self._deny(502, "upstream connect failed", wfile)
@@ -735,13 +766,13 @@ class SocksHandler(socketserver.BaseRequestHandler):
                 _tcp_note(job, host, port, False, "host not in scope")
                 client.sendall(_socks_reply(2))
                 return
-            ip, reason = resolve_checked(host, port, job["allowed"])
-            if ip is None:
+            addresses, reason = resolve_checked_all(host, port, job["allowed"])
+            if not addresses:
                 _tcp_note(job, host, port, False, reason)
                 client.sendall(_socks_reply(2))
                 return
             try:
-                upstream = socket.create_connection((ip, port), timeout=10)
+                upstream, _address = connect_checked(addresses, port, 10)
             except ConnectionRefusedError:
                 _tcp_note(job, host, port, True, "refused")
                 client.sendall(_socks_reply(5))
