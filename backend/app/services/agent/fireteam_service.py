@@ -1049,10 +1049,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "getuserrealm.srf (Managed vs Federated, federation endpoint/ADFS). Probe an "
             "exposed ADFS with test_saml_sso. Tenant metadata is informational: "
             "save_note. User enumeration (GetCredentialType): one nonexistent canary and "
-            "one address observed on the target, nothing more. account_enumeration has "
-            "no proof kind, so a repeatable difference stays a lead "
-            "(submit_finding_candidate(vulnerability_class='account_enumeration') "
-            "remains inconclusive). No password spraying, device-code or consent "
+            "one address observed on the target, nothing more. A repeatable difference "
+            "here stays a lead: account_enumeration confirms only through "
+            "scoped_account_enum_assigned on an operator-captured test account, which "
+            "this lane does not run. No password spraying, device-code or consent "
             "phishing, token theft or mailbox access; spraying belongs to "
             "credential_assault and only when the run grants credential testing."
         ),
@@ -1083,9 +1083,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "registration and exposed client ids. POST /api/v1/authn with one "
             "nonexistent canary and one observed username only to read the enumeration "
             "posture; never a real password, never more than these two. "
-            "account_enumeration has no proof kind: a repeatable difference is a lead "
-            "(submit_finding_candidate(vulnerability_class='account_enumeration') "
-            "remains inconclusive). Hand redirect_uri / SAML ACS issues to saml_sso via "
+            "A repeatable difference here is a lead: account_enumeration confirms only "
+            "through scoped_account_enum_assigned on an operator-captured test account. "
+            "Hand redirect_uri / SAML ACS issues to saml_sso via "
             "update_hypothesis. No password spraying, MFA fatigue or lockout testing; "
             "spraying belongs to credential_assault and only when the run grants "
             "credential testing."
@@ -1631,8 +1631,21 @@ _PORTED_TOOL_GRANTS: dict[str, tuple[str, ...]] = {
     "m365_entra": ("query_mail_security",),
     "okta_idp": ("query_mail_security",),
 }
+# Receipt-backed class proofs (tools_class_proofs.py), granted to the lanes the
+# coverage catalog routes those cells to. Approvals and scope are enforced by
+# the tools; a positive receipt is a candidate the verifier repeats.
+_CLASS_PROOF_TOOL_GRANTS: dict[str, tuple[str, ...]] = {
+    "file_upload": ("scoped_upload_probe_assigned",),
+    "auth_logic": ("scoped_account_enum_assigned", "scoped_oauth_redirect_assigned"),
+    "saml_sso": ("scoped_oauth_redirect_assigned",),
+    "injection": ("scoped_server_pp_assigned",),
+    "nodejs_express": ("scoped_server_pp_assigned",),
+    "api_authz": ("scoped_cswsh_probe",),
+    "agent_tools": ("scoped_llm_canary_assigned",),
+}
 for _profile in DEFAULT_SPECIALISTS:
     _extra = list(_PORTED_TOOL_GRANTS.get(_profile.name, ()))
+    _extra.extend(_CLASS_PROOF_TOOL_GRANTS.get(_profile.name, ()))
     # Specialists that log approaches can also record what the WAF blocked.
     if "log_engagement_approach" in _profile.allowed_tools:
         _extra.append("record_defense_profile")

@@ -34,6 +34,7 @@ SPEC_MODULES: Tuple[str, ...] = (
     "app.services.agent.tools_brain",
     "app.services.agent.tools_request_mutation",
     "app.services.agent.tools_graph",
+    "app.services.agent.tools_class_proofs",
 )
 
 

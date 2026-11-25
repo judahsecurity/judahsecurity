@@ -49,7 +49,33 @@ PROOFS_BY_CLASS = {
     # proven is filed under that behavior's class (traversal, SSTI, ...);
     # version-only claims are capped at low by finding_gate.
     "known_cve": frozenset(),
-    "account_enumeration": frozenset(),
+    # An operator-captured test account vs two fresh random nonexistent
+    # accounts, two repeats, stable normalized difference (class_probes.py).
+    "account_enumeration": frozenset({"scoped_account_enum_differential"}),
+    # A benign nonce HTML/SVG served back from the target origin as active content.
+    "file_upload": frozenset({"scoped_upload_served_active"}),
+    # The authorization server sends a grant (code/token) to a nonce
+    # prowl.invalid redirect_uri. Redirect_uri bugs only; other OAuth flaws
+    # prove under their own class.
+    "oauth": frozenset({"scoped_oauth_redirect_uri"}),
+    # Cross-site WebSocket hijacking: foreign-Origin handshake with a named
+    # identity reads a value an accepted anonymous or second-identity session does not get.
+    "cswsh": frozenset({"scoped_cswsh_cross_origin_read"}),
+    # Non-destructive JSON-spaces gadget with plain-property control and reset.
+    "server_prototype_pollution": frozenset({"scoped_server_pp_gadget"}),
+    # An instruction embedded in submitted data makes the model emit a token
+    # assembled from parts (no echo can match); a control does not.
+    "prompt_injection": frozenset({"scoped_llm_canary"}),
+}
+
+# Receipt-backed lanes in scoped_assessment/class_probes.py: proof kind -> class.
+CLASS_PROBE_KINDS = {
+    "scoped_upload_served_active": "file_upload",
+    "scoped_account_enum_differential": "account_enumeration",
+    "scoped_oauth_redirect_uri": "oauth",
+    "scoped_cswsh_cross_origin_read": "cswsh",
+    "scoped_server_pp_gadget": "server_prototype_pollution",
+    "scoped_llm_canary": "prompt_injection",
 }
 
 
@@ -80,19 +106,25 @@ _CLAIM_PATTERNS = (
      r"\bconcurrenc(?:y|e) (?:bug|flaw|abuse)\b|\blimit overrun\b"),
     ("client_template_injection", r"\bclient[ -]?side template injection\b|\bCSTI\b"),
     ("client_prototype_pollution", r"\bclient[ -]?side prototype pollution\b"),
+    ("server_prototype_pollution", r"\bserver[ -]?side prototype pollution\b|\bSSPP\b"),
     ("ssti", r"\bSSTI\b|server[ -]?side template injection|\btemplate injection\b"),
     ("jwt", r"\bJWT\b|JSON web token|\balg(?:orithm)?[\s:=\"']*none\b"),
     ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
     ("xxe", r"\bXXE\b|XML external entity"),
     ("command_injection", r"\b(?:OS|shell|command) injection\b|\bRCE\b|remote code execution"),
     ("path_traversal", r"\bpath traversal\b|\bdirectory traversal\b|\bLFI\b|local file inclusion"),
+    ("cswsh", r"\bCSWSH\b|cross[ -]?site web ?socket hijacking"),
     ("csrf", r"\bCSRF\b|cross[ -]?site request forgery"),
-    ("account_enumeration", r"\baccount enumeration\b|\buser enumeration\b"),
+    ("account_enumeration", r"\b(?:account|user|username|login) enumeration\b"),
+    ("oauth", r"\bredirect_uri\b|\bOAuth\b.{0,40}\bredirect(?:ion)?[ _-]?ur[il]\b"),
+    ("prompt_injection", r"\bprompt injection\b|\bLLM\b.{0,30}\binjection\b"),
     ("authorization", r"\bIDOR\b|\bBOLA\b|\b(?:unauthorized|unauthenticated)\b.{0,50}"
      r"\b(?:mutation|write|update|change|access|action|request|operation)\b|"
      r"\bauthori[sz]ation bypass\b|\bauthentication bypass\b|\bcross[ -]?(?:tenant|user)\b|"
      r"\bmass assignment\b|\baccount takeover\b|\bprivilege escalation\b"),
     ("known_cve", r"\bCVE-\d{4}-\d{4,}\b|\bknown CVE\b"),
+    ("file_upload", r"\b(?:unrestricted|arbitrary|malicious|unsafe) (?:file )?upload\b|"
+     r"\bfile upload\b"),
     ("exposure", r"\bexpos(?:ed|ure)\b|\bdisclos(?:ed|ure)\b|\bdirectory index\b|"
      r"\bdirectory listing\b|\bpublicly accessible\b"),
 )
@@ -209,6 +241,42 @@ def _validate_hunter_verifier_pair(store, candidate, proof: dict,
     return True, ""
 
 
+def _validate_class_probe_pair(store, candidate, proof: dict,
+                               evidence_ids: list[str], kind: str) -> tuple[bool, str]:
+    """Hunter receipt plus a later fresh-nonce verifier receipt on the same input.
+
+    Each receipt's verdict is re-derived from its recorded observations
+    (class_probes.class_proof_valid); proof_confirmed alone is not trusted.
+    """
+    from app.services.agent.scoped_assessment.class_probes import class_pair_valid
+
+    claim = CLASS_PROBE_KINDS[kind]
+    hunter_id = proof.get("hunter_artifact_id")
+    verifier_id = proof.get("artifact_id")
+    hunter = (store.records.get(hunter_id)
+              if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
+    verifier = store.records.get(verifier_id) if verifier_id in evidence_ids else None
+    if (not hunter or not verifier or hunter["id"] == verifier["id"]
+            or hunter["kind"] != "scoped_class_probe" or verifier["kind"] != "scoped_class_probe"
+            or hunter["created_at"] >= verifier["created_at"]):
+        return False, "Distinct ordered hunter and verifier execution evidence is required"
+    if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
+        return False, "Both actors must prove the same candidate target"
+    if hunter["identity"] != verifier["identity"]:
+        return False, "Hunter and verifier must use the same test identity"
+    if candidate.vulnerability_class != claim:
+        return False, f"{kind} requires vulnerability_class={claim}"
+    first, second = hunter["payload"], verifier["payload"]
+    if first.get("test_type") != claim or second.get("test_type") != claim:
+        return False, f"Both receipts must be {claim} probes"
+    if not class_pair_valid(claim, first, second):
+        return False, f"Independent {claim} proof with a fresh nonce on the same input is required"
+    from app.services.agent.proof_discipline import marker_ok
+
+    disciplined, why = marker_ok(first, second)
+    return (True, "") if disciplined else (False, why)
+
+
 def validate_proof(
     store, candidate, proof: dict, evidence_ids: list[str]
 ) -> tuple[bool, str]:
@@ -223,6 +291,8 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
+    if kind in CLASS_PROBE_KINDS:
+        return _validate_class_probe_pair(store, candidate, proof, evidence_ids, kind)
     if kind in _SERVER_INJECTION_KINDS or kind in {"scoped_csrf_state_change", "scoped_jwt_forgery",
                                                     "scoped_jwt_key_url_fetch"}:
         ok, why = _validate_hunter_verifier_pair(store, candidate, proof, evidence_ids, kind)
