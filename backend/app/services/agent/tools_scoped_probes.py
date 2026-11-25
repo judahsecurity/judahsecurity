@@ -2173,6 +2173,10 @@ class ScopedProbeToolsMixin:
 
     async def scoped_assessment_publish(self, candidate_id: str) -> Dict[str, Any]:
         """Retry publication of a service-confirmed candidate after intake recovery."""
+        from app.services.agent.prowl_revalidation import PUBLISH_REFUSAL, revalidation_only
+
+        if revalidation_only.get():
+            return {"success": False, "error": PUBLISH_REFUSAL}
         from app.services.agent.prowl_service_bridge import publish_confirmed_candidate
 
         user_id, org_id = get_tenant_context()

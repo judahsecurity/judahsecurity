@@ -168,7 +168,10 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 #   subprocess       — run aegis-vanguard/validate_finding.py in-process
 #   auto (default)   — native first; escalate to docker/subprocess if inconclusive.
 #                      Agent findings are never re-confirmed by reachability alone.
+# native | prowl | auto | docker | subprocess (see docker-compose.yml scanner)
 AEGIS_VALIDATOR_MODE=auto
+# AEGIS_VALIDATOR_PROWL=true                    # auto: re-test with Prowl before Vanguard
+# AEGIS_PROWL_VALIDATE_MAX_ITERATIONS=12
 AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # AEGIS_VANGUARD_PATH=/path/to/aegis-vanguard   # only for subprocess mode
 # AEGIS_VALIDATE_MAX_TURNS=20

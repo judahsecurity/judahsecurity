@@ -165,6 +165,52 @@ def signal_handler(signum, frame):
     shutdown_requested = True
 
 
+
+async def route_finding_validation(
+    mode: str,
+    *,
+    run_native,
+    run_prowl,
+    run_vanguard,
+    prowl_enabled: bool,
+    vanguard_fallback: Optional[str],
+) -> Optional[dict]:
+    """Pick the validator chain for one VALIDATE_FINDING job.
+
+    native   - native replay only
+    prowl    - native; Prowl independent verifier when native is inconclusive
+    auto     - native; then Prowl (if enabled); then the Vanguard LLM validator
+               only when Prowl cannot take the finding and a Vanguard backend exists
+    subprocess / docker (or unknown) - Vanguard LLM validator only
+
+    run_prowl returns None when Prowl cannot take the finding. Vanguard errors
+    in auto mode keep the earlier verdict; other errors propagate to the caller.
+    """
+    if mode not in ("native", "auto", "prowl"):
+        return await run_vanguard("subprocess" if mode == "subprocess" else "docker")
+    verdict = await run_native()
+    inconclusive = isinstance(verdict, dict) and verdict.get("verdict") == "needs_more_evidence"
+    if not inconclusive or mode == "native":
+        return verdict
+    prowl_verdict = None
+    if mode == "prowl" or prowl_enabled:
+        prowl_verdict = await run_prowl()
+        if prowl_verdict:
+            prowl_verdict["native_verdict"] = {
+                k: verdict.get(k) for k in ("verdict", "method", "reasoning")
+            }
+            return prowl_verdict
+    if mode == "auto" and vanguard_fallback:
+        logger.info(f"VALIDATE_FINDING: native inconclusive; escalating to {vanguard_fallback}")
+        try:
+            return await run_vanguard(vanguard_fallback)
+        except Exception as escalate_err:
+            logger.warning(
+                f"VALIDATE_FINDING: vanguard escalate failed, keeping native verdict: {escalate_err}"
+            )
+    return verdict
+
+
 class ScannerWorker:
     """
     Scanner worker that processes scan jobs from SQS or database.
@@ -1002,8 +1048,11 @@ class ScannerWorker:
         steps_to_reproduce / evidence / description. No Docker required.
 
         Optional modes:
+          - prowl — native first; when inconclusive, re-test with Prowl's
+            independent verifier (HTTP(S) findings in a class Prowl can prove)
+          - auto — native, then Prowl (unless AEGIS_VALIDATOR_PROWL=false), then
+            the Aegis Vanguard LLM validator only for findings Prowl cannot take
           - docker / subprocess — Aegis Vanguard LLM validator
-          - auto — native first, escalate to Vanguard when inconclusive
 
         Writes the structured verdict back to FindingValidation and denormalizes
         onto the Vulnerability. A false positive attributed to template logic
@@ -1191,8 +1240,9 @@ class ScannerWorker:
             # Build the validator invocation.
             # native (default) — replay original detector / steps on this scanner
             # docker / subprocess — Aegis Vanguard LLM validator (optional)
-            # auto — native first; escalate to docker/subprocess only if native
-            #        returns needs_more_evidence and that backend is available
+            # prowl — native first; Prowl independent verifier when inconclusive
+            # auto — native, then Prowl, then docker/subprocess Vanguard only when
+            #        Prowl cannot take the finding and that backend is available
             import shutil
 
             mode = os.getenv("AEGIS_VALIDATOR_MODE", "native").lower()
@@ -1212,6 +1262,21 @@ class ScannerWorker:
             async def _run_native():
                 from app.services.finding_revalidation_service import revalidate_finding
                 return await revalidate_finding(finding_payload)
+
+            async def _run_prowl():
+                """Prowl re-test; None when Prowl cannot take this finding."""
+                from app.services.agent.prowl_revalidation import revalidate_with_prowl
+                try:
+                    return await revalidate_with_prowl(
+                        finding_payload,
+                        organization_id=validation.organization_id,
+                        user_id=validation.requested_by_user_id,
+                        max_iterations=int(os.getenv("AEGIS_PROWL_VALIDATE_MAX_ITERATIONS", "12")),
+                        timeout_sec=timeout_sec,
+                    )
+                except Exception as prowl_err:
+                    logger.warning(f"VALIDATE_FINDING: Prowl re-test failed: {prowl_err}")
+                    return None
 
             async def _run_vanguard(vanguard_mode: str):
                 cwd = None
@@ -1264,35 +1329,15 @@ class ScannerWorker:
                 )
                 raise RuntimeError("no_verdict_in_output")
 
+            prowl_enabled = os.getenv("AEGIS_VALIDATOR_PROWL", "true").lower() not in ("0", "false", "no")
+            vanguard_fallback = "docker" if docker_bin else (
+                "subprocess" if os.getenv("AEGIS_VANGUARD_PATH") else None
+            )
             try:
-                if mode in ("native", "auto"):
-                    verdict_data = await _run_native()
-                    # Escalate to Vanguard only when native is inconclusive and a
-                    # Vanguard backend is explicitly available / requested via auto.
-                    if (
-                        mode == "auto"
-                        and isinstance(verdict_data, dict)
-                        and verdict_data.get("verdict") == "needs_more_evidence"
-                    ):
-                        vanguard_mode = "docker" if docker_bin else (
-                            "subprocess" if os.getenv("AEGIS_VANGUARD_PATH") else None
-                        )
-                        if vanguard_mode:
-                            logger.info(
-                                f"VALIDATE_FINDING: native inconclusive; escalating to {vanguard_mode}"
-                            )
-                            try:
-                                verdict_data = await _run_vanguard(vanguard_mode)
-                            except Exception as escalate_err:
-                                logger.warning(
-                                    f"VALIDATE_FINDING: vanguard escalate failed, "
-                                    f"keeping native verdict: {escalate_err}"
-                                )
-                elif mode == "subprocess":
-                    verdict_data = await _run_vanguard("subprocess")
-                else:
-                    # docker (legacy) or unknown → docker
-                    verdict_data = await _run_vanguard("docker")
+                verdict_data = await route_finding_validation(
+                    mode, run_native=_run_native, run_prowl=_run_prowl, run_vanguard=_run_vanguard,
+                    prowl_enabled=prowl_enabled, vanguard_fallback=vanguard_fallback,
+                )
             except subprocess.TimeoutExpired:
                 run_error = "validator_timeout"
             except FileNotFoundError as e:

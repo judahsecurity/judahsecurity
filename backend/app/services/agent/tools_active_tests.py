@@ -70,6 +70,10 @@ class ActiveTestToolsMixin:
             logger.exception("LLM red team scan failed")
             return f"Error running LLM red team scan: {e}"
 
+        from app.services.agent.prowl_revalidation import revalidation_only
+
+        if create_findings and revalidation_only.get():
+            create_findings = False  # re-validation runs never publish
         if create_findings and org_id and scan_result.vulnerabilities_found > 0:
             db = SessionLocal()
             try:

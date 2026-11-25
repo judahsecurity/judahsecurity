@@ -11,7 +11,7 @@ Legend: **MISSING** = no Prowl equivalent; **PARTIAL** = narrower in Prowl;
 
 | Module | Live caller | Effect of deletion |
 |---|---|---|
-| `aegis-vanguard/validate_finding.py` | `backend/app/workers/scanner_worker.py` `handle_validate_finding._run_vanguard` (modes `auto`/`docker`/`subprocess`; compose default `AEGIS_VALIDATOR_MODE=auto`) | Agent, LLM red-team and manual findings can no longer be re-confirmed; native validator refuses them by design (`finding_revalidation_service.py`) |
+| `aegis-vanguard/validate_finding.py` | `backend/app/workers/scanner_worker.py` `route_finding_validation` (modes `auto`/`docker`/`subprocess`). In `auto`, Prowl now re-tests inconclusive HTTP(S) findings in a provable class first (`app/services/agent/prowl_revalidation.py`); Vanguard is the fallback only for findings Prowl cannot take | Non-HTTP, no-proof-class and no-requesting-user findings lose their LLM re-test. Mode `prowl` already runs without Vanguard |
 | `aegis-vanguard/agent/finding_lifecycle.py` | `run_pentest.py` Phase 2b, `coverage.apply_findings` | ImportError in the autonomous CLI |
 | `aegis-vanguard/agent/session_ops.py` | `agent/core.py`, `run_pentest.py` | Not identity code: compaction, spend cap, `--load` for the CLI |
 | `agent/identities.py`, `identity_sessions.py`, `oob.py` | `agents.py`, `owasp_hunters.py`, `hunt_patterns.py`, `run_pentest.py` | CLI hunters lose tools |
@@ -33,7 +33,10 @@ Gaps (Vanguard `validate_finding.py` / `finding_lifecycle.py` vs Prowl
    ran only when native replay was inconclusive.
 3. Verification of non-HTTP findings (host:port services, secrets, manual steps) and nuclei re-runs — **MISSING** (pc rejects non-HTTP targets).
 4. `still_open` (remediated vs never real), `confidence`, verifier `recommended_severity`/downgrade — **MISSING** (Prowl only caps severity).
-5. Read-only verification — Prowl intake mutates the session and may publish.
+5. Read-only verification — **closed for worker re-tests**: `prowl_revalidation`
+   runs in a throwaway session with `revalidation_only` set, and `create_finding`,
+   `scoped_assessment_publish` and LLM red-team auto-filing refuse to publish while
+   it is. Operator `prowl_client verify` still runs in the operator's session.
 6. Batch decisions and `candidate/validated/rejected` states used by `run_pentest.py`.
 7. Operator knobs: model, max turns, max risk, stdin finding, `--output`; exit-code contract.
 8. Works with only an LLM key; Prowl needs platform, JWT, a session with a run snapshot, target in seed scope, <25 external candidates.
@@ -41,9 +44,9 @@ Gaps (Vanguard `validate_finding.py` / `finding_lifecycle.py` vs Prowl
 Prowl is stronger at: per-class proof kinds, independent verifier, root-cause
 dedup, publication gate.
 
-Tests to write before deletion: logical sanity, verdict extraction, field
-normalisation, exit codes, `scanner_worker` auto-escalation without the
-validator. Port `tests/test_finding_lifecycle.py`.
+Done: logical sanity (`backend/tests/test_finding_sanity.py`), worker routing
+(`test_validation_routing.py`), Prowl re-test mapping and publish refusal
+(`test_prowl_revalidation.py`). Still to port: `tests/test_finding_lifecycle.py`.
 
 ## OOB and identities
 

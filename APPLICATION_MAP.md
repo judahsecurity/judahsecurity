@@ -777,7 +777,7 @@ Autonomous external pentest agent that lives in `aegis-vanguard/` (not inside th
 
 **Auth:** create an agent API key (`tfasm_…`) with `agent_type: aegis_vanguard`.  
 **Image:** `docker build -f aegis-vanguard/Dockerfile -t aegis-vanguard:latest .`  
-**Env (validator worker):** `AEGIS_VALIDATOR_MODE`, `AEGIS_VANGUARD_IMAGE`, `AEGIS_VANGUARD_PATH`, `AEGIS_VALIDATE_MAX_TURNS`, `AEGIS_VALIDATE_TIMEOUT`.
+**Env (validator worker):** `AEGIS_VALIDATOR_MODE`, `AEGIS_VALIDATOR_PROWL`, `AEGIS_PROWL_VALIDATE_MAX_ITERATIONS`, `AEGIS_VANGUARD_IMAGE`, `AEGIS_VANGUARD_PATH`, `AEGIS_VALIDATE_MAX_TURNS`, `AEGIS_VALIDATE_TIMEOUT`.
 
 See [aegis-vanguard/README.md](aegis-vanguard/README.md) and [aegis-vanguard/DEPLOYMENT.md](aegis-vanguard/DEPLOYMENT.md).
 

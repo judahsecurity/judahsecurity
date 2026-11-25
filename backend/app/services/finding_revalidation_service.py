@@ -535,8 +535,8 @@ async def revalidate_finding(finding: dict) -> dict[str, Any]:
     verdict = _verdict_from_probes(finding, probes, method=method)
     if verdict.get("verdict") == "confirmed" and _application_level(detected_by, source_kind):
         # A reachable URL says nothing about whether an IDOR, injection or
-        # logic flaw still works. Leave it open for a real retest (auto mode
-        # escalates needs_more_evidence to the Vanguard validator).
+        # logic flaw still works. Leave it open for a real retest (auto and
+        # prowl modes re-test needs_more_evidence with Prowl's verifier).
         verdict.update(
             verdict="needs_more_evidence",
             confidence="low",
@@ -545,8 +545,8 @@ async def revalidate_finding(finding: dict) -> dict[str, Any]:
                 "The reproduction endpoints still respond, but reachability does not "
                 "re-prove an application-level vulnerability. "
                 + verdict.get("reasoning", "")
-                + " Re-test the exploit itself (AEGIS_VALIDATOR_MODE=auto escalates "
-                "to the Vanguard validator)."
+                + " Re-test the exploit itself (AEGIS_VALIDATOR_MODE=auto or prowl "
+                "re-tests it with Prowl's independent verifier)."
             ),
         )
     verdict["detected_by"] = detected_by

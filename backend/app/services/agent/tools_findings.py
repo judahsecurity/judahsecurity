@@ -328,6 +328,10 @@ class PlatformWriteToolsMixin:
           by the independent verifier is recorded as "exploit_verified" automatically; you
           cannot claim exploit_verified without that runtime proof.
         """
+        from app.services.agent.prowl_revalidation import PUBLISH_REFUSAL, revalidation_only
+
+        if revalidation_only.get():
+            return PUBLISH_REFUSAL
         from app.services.agent.independent_verify import finding_publish_allowed
 
         _, org_id = get_tenant_context()
