@@ -57,17 +57,17 @@
 │                                                                                   │
 └──────────────────────────────────────────────────────────────────────────────────┘
 
-External autonomous pentester + harness (optional):
+Operator skills + harness (optional):
 
-┌────────────────────────────┐     POST /api/v1/ingest/*      ┌──────────────────┐
-│  Aegis Vanguard            │ ─────────────────────────────▶ │  ASM Platform    │
-│  (aegis-vanguard/)         │                                │  findings +      │
-│  ReACT + parallel hunters  │ ◀── on-demand validate_finding │  validations     │
-│  → report                  │                                │                  │
-└─────────────▲──────────────┘                                └──────────────────┘
-              │ findings.jsonl (AEGIS_FINDINGS_SINK)
-┌─────────────┴──────────────┐
-│  Aegis Harness (harness/)  │  batch scan many targets + benchmark recall/precision
+┌────────────────────────────┐   prowl_client.py → /api/v1/agent/*   ┌──────────────────┐
+│  Aegis Vanguard skills     │ ────────────────────────────────────▶ │  Prowl agent     │
+│  (aegis-vanguard/, Claude  │   runs, verify, probes, identities    │  (scoped tests,  │
+│  Code: recon → triage)     │ ◀──────────── receipts ────────────── │  verifier, gate) │
+└────────────────────────────┘                                       └────────▲─────────┘
+                                                                              │ findings.jsonl
+┌────────────────────────────┐   local_harness.prowl_scanner                 │ (AEGIS_FINDINGS_SINK)
+│  Aegis Harness (harness/)  │ ─────────────────────────────────────────────┘
+│  batch scan + benchmark    │
 └────────────────────────────┘
 ```
 
@@ -131,7 +131,7 @@ Unified inventory page with three tabs:
 - See [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md)
 
 ### 🧪 Aegis Harness (batch + benchmarks)
-- **Batch scanning**: Drive Aegis Vanguard across many authorized targets with resumable state
+- **Batch scanning**: Drive Prowl across many authorized targets with resumable state
 - **Detection benchmarking**: Measure recall / precision / F1 (or CTF flag success) against ground-truth corpora
 - **CI gates**: Fail builds on low recall or scan errors — see [harness/README.md](harness/README.md)
 
@@ -458,12 +458,10 @@ judahsecurity/
 │   ├── Dockerfile.scanner     # Scanner worker image
 │   └── requirements.txt
 │
-├── aegis-vanguard/            # Aegis Vanguard: autonomous ReACT pentest agent
-│   ├── agent/                 # Orchestrator, OWASP hunters, guardrails, parallel fireteam
-│   ├── run_pentest.py         # Full pentest entrypoint
-│   ├── validate_finding.py    # On-demand single-finding validator
-│   ├── asm_bridge.py          # Ingestion client → ASM platform
-│   └── DEPLOYMENT.md          # Standalone / Docker deployment guide
+├── aegis-vanguard/            # Aegis Vanguard: Claude Code skills that drive Prowl
+│   ├── .claude/skills/        # /recon, /threat-model, /code-scan, /pentest, /triage, /chain
+│   ├── prowl_client.py        # CLI for the Prowl API (runs, verify, probes, identities)
+│   └── agent/                 # Local test-identity login (only sessions go to Prowl)
 │
 ├── harness/                   # Aegis Harness: batch scanning + detection benchmarking
 │   ├── local_harness/         # batch/ + benchmark/ + ground_truth corpora
@@ -537,16 +535,16 @@ All endpoints are prefixed with `/api/v1/`. Full interactive docs available at `
 | `/agent-knowledge/` | Agent knowledge base CRUD |
 | `/mcp/tools`, `/mcp/call` | MCP tool listing and invocation |
 
-### Aegis Vanguard / Ingestion APIs
+### Ingestion APIs
 
-External agent auth uses `tfasm_` API keys (`agent_type: aegis_vanguard`). See [aegis-vanguard/README.md](aegis-vanguard/README.md).
+External agent auth uses `tfasm_` API keys (`agent_type` such as `aegis_vanguard` or `custom`).
 
 | Endpoint | Description |
 |----------|-------------|
-| `/ingest/findings` | Batch findings from Aegis Vanguard (API key) |
+| `/ingest/findings` | Batch findings from external agents and scanners (API key) |
 | `/ingest/heartbeat` | Agent health check |
 | `/ingest/api-keys` | Create / list / revoke agent API keys (JWT) |
-| `/vulnerabilities/{id}/validate` | Queue on-demand Aegis Vanguard finding validation |
+| `/vulnerabilities/{id}/validate` | Queue on-demand finding validation (native replay, then Prowl's verifier) |
 
 ### Security & Analysis APIs
 
@@ -621,7 +619,7 @@ sudo docker system prune -a -f
 | [ENV_EXAMPLE.md](ENV_EXAMPLE.md) | Environment variable reference and troubleshooting |
 | [harness/README.md](harness/README.md) | **Aegis Harness** — batch scans + detection accuracy benchmarks |
 | [docs/HARNESS.md](docs/HARNESS.md) | Short pointer + how harness relates to the platform agent |
-| [aegis-vanguard/README.md](aegis-vanguard/README.md) | Autonomous ReACT pentester (ingest + validate) |
+| [aegis-vanguard/README.md](aegis-vanguard/README.md) | Claude Code skills that drive Prowl (recon → triage → chain) |
 | [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) | **Tester process** — hypotheses, fireteam, differentials, chain cards |
 | [docs/AEGIS_ARCHITECTURE.md](docs/AEGIS_ARCHITECTURE.md) | Praetorian-competitive agent architecture |
 | [docs/AEGIS_PANTHEON.md](docs/AEGIS_PANTHEON.md) | Specialist epithets (Samson, Daniel, Solomon, …) |

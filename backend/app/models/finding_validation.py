@@ -1,8 +1,9 @@
 """
 Finding Validation model.
 
-Records each on-demand run of the Aegis Vanguard validator agent against a single
-finding. The agent actively re-tests the live target and returns a structured
+Records each on-demand run of the finding validator against a single finding.
+It re-tests the live target (native detector replay, then Prowl's independent
+verifier when that is inconclusive) and returns a structured
 verdict (confirmed / false_positive / needs_more_evidence) plus the evidence it
 gathered. One finding can be validated multiple times; the latest completed
 record is surfaced in the UI.

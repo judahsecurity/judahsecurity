@@ -1,8 +1,8 @@
 """Scanner output parser registry.
 
 One pure parser per tool, keyed by tool name: raw output (+ exit code, timeout
-flag) -> :class:`ParsedResult`. Shared by the platform MCP server (Prowl) and,
-later, Aegis Vanguard, so ``aegis-vanguard/scanners.py`` parsing can retire.
+flag) -> :class:`ParsedResult`. Used by the platform MCP server (Prowl); it
+replaced the parsing in the removed ``aegis-vanguard/scanners.py``.
 
     from asm_scanner_core.parsers import parse_tool_output
     parsed = parse_tool_output("execute_nikto", raw, exit_code=0)

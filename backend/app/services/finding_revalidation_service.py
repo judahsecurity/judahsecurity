@@ -1,8 +1,8 @@
 """
 Native finding revalidation — replay the original detector / reproduction steps.
 
-Used by the scanner worker for on-demand "Validate finding" without requiring
-the Aegis Vanguard Docker image. Strategies:
+Used by the scanner worker for on-demand "Validate finding"; inconclusive
+results go on to Prowl's independent verifier. Strategies:
 
   0. Logical sanity   → deterministic service/port mismatch check (e.g. an LDAP
                         template that fired on HTTPS:443) before any replay

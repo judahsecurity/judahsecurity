@@ -248,7 +248,7 @@ class ResearchToolsMixin:
             return f"Invalid CVE ID format: {cve_id}. Expected CVE-YYYY-NNNNN."
 
         base_url = "https://api.projectdiscovery.io"
-        headers = {"User-Agent": "aegis-vanguard/1.0"}
+        headers = {"User-Agent": "prowl-research/1.0"}
         api_key = getattr(settings, "PDCP_API_KEY", None)
         if api_key:
             headers["X-PDCP-Key"] = api_key
@@ -433,7 +433,7 @@ class ResearchToolsMixin:
             limit = 25
 
         base_url = "https://api.projectdiscovery.io"
-        headers = {"User-Agent": "aegis-vanguard/1.0"}
+        headers = {"User-Agent": "prowl-research/1.0"}
         api_key = getattr(settings, "PDCP_API_KEY", None)
         if api_key:
             headers["X-PDCP-Key"] = api_key
@@ -669,7 +669,7 @@ class ResearchToolsMixin:
         """Return (formatted intel text, affected_products list)."""
         cve_id = (cve_id or "").strip().upper()
         base_url = "https://api.projectdiscovery.io"
-        headers = {"User-Agent": "aegis-vanguard/1.0"}
+        headers = {"User-Agent": "prowl-research/1.0"}
         api_key = getattr(settings, "PDCP_API_KEY", None)
         if api_key:
             headers["X-PDCP-Key"] = api_key

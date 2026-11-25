@@ -2,8 +2,8 @@
 
 Used by the scanner worker's VALIDATE_FINDING job when native replay is
 inconclusive (agent, LLM red-team and manual findings whose truth depends on
-application behaviour). It replaces the escalation to Aegis Vanguard's
-``validate_finding.py`` for HTTP(S) findings.
+application behaviour). It replaced the escalation to the removed Aegis
+Vanguard ``validate_finding.py`` validator for HTTP(S) findings.
 
 Flow, the same one ``prowl_client.py verify`` uses from outside:
 

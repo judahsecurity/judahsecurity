@@ -1772,7 +1772,7 @@ def _maybe_sync_servicenow(
 
 
 # =============================================================================
-# ON-DEMAND FINDING VALIDATION (Aegis Vanguard validator agent)
+# ON-DEMAND FINDING VALIDATION (native replay, then Prowl's independent verifier)
 # =============================================================================
 
 

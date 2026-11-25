@@ -1,20 +1,32 @@
 # Vanguard → Prowl capability parity
 
-Status: audit of 2026-11-24. Nothing in Vanguard has been deleted. Use this
-as the checklist before removing any Vanguard module: a row may only be
-deleted once its gap is ported (with tests) or explicitly dropped.
+Status: **the Vanguard CLI has been removed** (audit 2026-11-24, removal
+2026-11-25). Every row below was ported to Prowl with tests or explicitly
+dropped. This file is kept as the record of where each capability went.
 
 Legend: **MISSING** = no Prowl equivalent; **PARTIAL** = narrower in Prowl;
 "pc" = `aegis-vanguard/prowl_client.py`.
 
-## Hard blockers (deleting breaks something today)
+## What was removed and what stayed
 
-| Module | Live caller | Effect of deletion |
-|---|---|---|
-| `aegis-vanguard/validate_finding.py` | `backend/app/workers/scanner_worker.py` `route_finding_validation` (modes `auto`/`docker`/`subprocess`). In `auto`, Prowl now re-tests inconclusive HTTP(S) findings in a provable class first (`app/services/agent/prowl_revalidation.py`); Vanguard is the fallback only for findings Prowl cannot take | Non-HTTP, no-proof-class and no-requesting-user findings lose their LLM re-test. Mode `prowl` already runs without Vanguard |
-| `aegis-vanguard/agent/finding_lifecycle.py` | `run_pentest.py` Phase 2b, `coverage.apply_findings` | ImportError in the autonomous CLI |
-| `aegis-vanguard/agent/session_ops.py` | `agent/core.py`, `run_pentest.py` | Not identity code: compaction, spend cap, `--load` for the CLI |
-| `agent/identities.py`, `identity_sessions.py`, `oob.py` | `agents.py`, `owasp_hunters.py`, `hunt_patterns.py`, `run_pentest.py` | CLI hunters lose tools |
+Removed: `run_pentest.py`, `validate_finding.py`, `scanners.py`,
+`asm_bridge.py`, `reporter.py`, the `aegis-vanguard` Docker image and its
+Make/compose/Dockerfile wiring, every `agent/` module except identity login,
+their tests, `aegis-claude-sdk/`, and the harness XBEN Docker launcher. The
+scanner worker's `docker`/`subprocess` validator modes now run as `auto`
+(native replay, then Prowl), and the scanner no longer mounts the host Docker
+socket.
+
+Kept in `aegis-vanguard/`: the Claude Code skills (`.claude/skills/`),
+`prowl_client.py`, `agent/identities.py` + `agent/identity_sessions.py`
+(local test-identity login for `prowl_client identities`, now with its own
+standard-library HTTP transport), `agent/web_security_topics.json`,
+`data/vuln_classes.json` and `scripts/sync_vuln_classes.py`. The harness now
+benchmarks Prowl by default (`local_harness/prowl_scanner.py`).
+
+Deliberately dropped: offline / air-gapped runs, hunting without a platform
+login, the CLI's own SAST agents (the `/code-scan` skill covers source review),
+`techniques.json` prior art, and the CWE remediation `advise` tool.
 
 ## Finding verification
 

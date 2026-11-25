@@ -1,8 +1,8 @@
 """Benchmark scanner command that runs the in-product Prowl agent.
 
 The benchmark runner launches a scanner as ``<cmd> --target URL [--scope S]``
-with ``AEGIS_FINDINGS_SINK`` set. By default that scanner is Aegis Vanguard.
-Point the runner here to score Prowl on the same corpus, including XBEN:
+with ``AEGIS_FINDINGS_SINK`` set. This module is the default scanner; the
+explicit settings below add XBEN's synthetic flag capture:
 
     export AEGIS_HARNESS_SCANNER_CMD="python -m local_harness.prowl_scanner --benchmark-proof"
     export AEGIS_HARNESS_SCANNER_CWD="$PWD"          # the harness directory

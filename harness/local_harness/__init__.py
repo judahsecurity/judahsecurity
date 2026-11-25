@@ -1,6 +1,6 @@
 """
-Aegis Harness — workstation-scale tooling for driving the Aegis Vanguard
-autonomous pentester across many targets in batch and for benchmarking its
+Aegis Harness — workstation-scale tooling for driving Prowl, the in-product
+pentest agent, across many targets in batch and for benchmarking its
 detection accuracy against a known-vulnerable corpus.
 
 Two entry points, mirroring the workflow of a source-code hunting harness but

@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# USD per million tokens. Keep in sync with aegis-vanguard/agent/tracing.py.
+# USD per million tokens.
 MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
     "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},

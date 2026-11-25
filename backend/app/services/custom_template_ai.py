@@ -10,7 +10,7 @@ validated false positive) import from here so the LLM prompts, YAML sanitation,
 and re-check logic live in exactly one place.
 
 The refine flow closes the validate → diagnose → refine loop:
-  1. The Aegis Vanguard validator re-tests a finding and returns a false-positive
+  1. The finding validator re-tests a finding and returns a false-positive
      verdict with a `template_logic_issue` (what about the matcher is wrong).
   2. `refine_template()` feeds the original template + that diagnosis to the LLM
      and produces a tightened template saved as a draft custom template.

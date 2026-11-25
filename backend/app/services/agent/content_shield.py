@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Pattern, Tuple
 from app.services.agent.observability import redact_string
 
 # ---------------------------------------------------------------------------
-# Prompt-injection detection (ported from aegis-vanguard/agent/injection_shield)
+# Prompt-injection detection (originally ported from Aegis Vanguard's injection shield)
 # ---------------------------------------------------------------------------
 
 _RULES: List[Tuple[str, List[str]]] = [

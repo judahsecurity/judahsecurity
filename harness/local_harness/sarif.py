@@ -46,7 +46,7 @@ def _text(finding: Dict[str, Any]) -> str:
 
 def findings_to_sarif(
     findings: List[Dict[str, Any]],
-    tool_name: str = "Aegis Vanguard",
+    tool_name: str = "Prowl",
     version: str = "",
     information_uri: str = "https://github.com/judahsecurity/judahsecurity",
 ) -> Dict[str, Any]:

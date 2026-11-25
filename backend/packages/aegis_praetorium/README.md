@@ -1,7 +1,8 @@
 # aegis-praetorium
 
-Aegis Vanguard's deterministic guard layer, shared between the platform agent
-(`backend/app/services/agent/`) and the Aegis Vanguard agent (`aegis-vanguard/`).
+The deterministic guard layer for the platform agent's tool invocations
+(`backend/app/services/agent/`, MCP server). It originated in the former Aegis
+Vanguard CLI and has no backend dependencies.
 
 > The Praetorium was the headquarters where Roman magistrates — the praetors,
 > lictors, censors, and augurs — held court. This package houses the three

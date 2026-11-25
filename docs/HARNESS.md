@@ -8,7 +8,7 @@ The full harness guide lives next to the code:
 
 Workstation tooling to:
 
-1. **Batch-scan** many authorized targets with Aegis Vanguard (`run_pentest.py`)
+1. **Batch-scan** many authorized targets with Prowl (`local_harness/prowl_scanner.py`)
 2. **Benchmark** detection accuracy (recall / precision / F1 or CTF flag success)
 3. Gate CI on minimum recall / success rate
 
@@ -16,9 +16,8 @@ Workstation tooling to:
 
 | Layer | Role |
 |-------|------|
-| `aegis-vanguard/` | Autonomous scanner under test |
-| `harness/` | Drives Vanguard, collects `findings.jsonl`, judges vs ground truth |
-| ASM agent (`backend/.../agent/`) | In-product tester process (engagement brain) — see [TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](./TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) |
+| Prowl (`backend/.../agent/`) | In-product agent under test — see [TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](./TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) |
+| `harness/` | Drives Prowl through `prowl_scanner`, collects `findings.jsonl`, judges vs ground truth |
 
 Use harness ground-truth **tags** (`default_credentials`, `ssrf`, `idor`, …) when
 you want benchmarks to reflect chain/logic quality, not Nuclei volume alone.
