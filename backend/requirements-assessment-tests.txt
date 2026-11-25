@@ -1,6 +1,6 @@
 # Lightweight test environment. Does not install scanner binaries or LLM credentials.
 # Keep HTTP/database versions aligned with the production requirements.
-httpx==0.25.2
+httpx[http2]==0.25.2
 sqlalchemy==2.0.23
 pytest>=8
 pytest-asyncio>=0.23
