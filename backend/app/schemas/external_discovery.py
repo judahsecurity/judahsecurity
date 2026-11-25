@@ -115,6 +115,31 @@ class ExternalDiscoveryRequest(BaseModel):
         examples=[["rockwell", "factory", "allen-bradley"]]
     )
     
+    # Recursive ownership expansion
+    expand_ownership: bool = Field(
+        default=True,
+        description=(
+            "Pivot again from every newly found domain that is at least 'likely' owned "
+            "(M365 tenant, SPF/DMARC/MX/NS, website fingerprint; WHOIS and reverse NS/MX "
+            "within the paid budget) until no new owned domains appear"
+        ),
+    )
+    expansion_max_depth: int = Field(default=2, ge=1, le=5, description="Maximum pivot rounds")
+    expansion_max_domains: int = Field(
+        default=25, ge=1, le=200, description="Maximum discovered domains to pivot from across all rounds"
+    )
+    expansion_include_paid: bool = Field(
+        default=True,
+        description="Allow paid WHOIS / reverse NS/MX pivots during expansion (also requires include_paid_sources)",
+    )
+    expansion_max_paid_pivots: int = Field(
+        default=10, ge=0, le=100, description="Maximum domains that may spend paid credits during expansion"
+    )
+    corroborate_review_limit: int = Field(
+        default=50, ge=0, le=500,
+        description="Review-tier domains to re-check with free M365 / redirect / analytics-ID links",
+    )
+
     # Options
     create_assets: bool = Field(default=True, description="Automatically create discovered assets")
     skip_existing: bool = Field(default=True, description="Skip assets that already exist")
@@ -210,6 +235,13 @@ class SourceResult(BaseModel):
     error: Optional[str] = None
 
 
+class DomainOwnership(BaseModel):
+    """Corroborated ownership score for one root domain."""
+    score: int = Field(..., description="0-100 noisy-OR of independent ownership signals")
+    tier: str = Field(..., description="confirmed (>=90), likely (>=70) or review")
+    signals: List[str] = Field(default_factory=list, description="Signal classes, strongest first")
+
+
 class ExternalDiscoveryResponse(BaseModel):
     """Response schema for external discovery."""
     domain: str
@@ -236,6 +268,11 @@ class ExternalDiscoveryResponse(BaseModel):
     
     # Timing
     total_elapsed_time: float
+
+    # Root-domain ownership attribution
+    ownership: Dict[str, DomainOwnership] = Field(default_factory=dict)
+    ownership_counts: Dict[str, int] = Field(default_factory=dict)
+    expansion: Optional[Dict[str, Any]] = None
 
 
 class SingleSourceRequest(BaseModel):

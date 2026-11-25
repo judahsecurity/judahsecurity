@@ -1521,6 +1521,502 @@ class ExternalDiscoveryService:
         return result
 
     # =========================================================================
+    # Ownership pivots - certificate organization, mail auth, web fingerprint
+    # =========================================================================
+
+    def configured_organization_names(self) -> List[str]:
+        """Organization (legal) names saved on any registrant-capable service."""
+        names: List[str] = []
+        for svc in (ExternalService.WHOXY, ExternalService.WHOISXML, ExternalService.SECURITYTRAILS):
+            names.extend((self.get_config(svc) or {}).get("organization_names", []) or [])
+        return list(dict.fromkeys(n.strip() for n in names if n and n.strip()))
+
+    async def discover_crtsh_org(self, organization_names: List[str]) -> DiscoveryResult:
+        """
+        Find root domains on TLS certificates whose Subject Organization (O=)
+        is the org's legal name. OV/EV certificates carry a CA-validated
+        organization, so this catches owned domains whose *names* share
+        nothing with the primary domain (acquisitions, product brands).
+        """
+        from app.services.ownership_pivots import registrable_domain, is_hostname
+
+        start_time = time.time()
+        result = DiscoveryResult(source="crtsh_org", success=False)
+        names = [n for n in dict.fromkeys(organization_names or []) if n and n.strip()]
+        if not names:
+            result.error = "No organization names configured for certificate search"
+            return result
+
+        domains_by_org: Dict[str, List[str]] = {}
+        errors: List[str] = []
+        for name in names:
+            url = (
+                "https://crt.sh/?O=" + urllib.parse.quote(name.strip())
+                + "&exclude=expired&output=json"
+            )
+            success, data = await self._make_request(url, timeout=90)
+            if not success:
+                errors.append(f"{name}: {data}")
+                continue
+            found: Set[str] = set()
+            for cert in data if isinstance(data, list) else []:
+                values = str(cert.get("name_value", "")).split("\n") + [str(cert.get("common_name", ""))]
+                for v in values:
+                    v = v.strip().lower()
+                    if v.startswith("*."):
+                        v = v[2:]
+                    if not v or "@" in v or not is_hostname(v):
+                        continue
+                    found.add(registrable_domain(v))
+            domains_by_org[name] = sorted(found)
+
+        all_domains = sorted({d for ds in domains_by_org.values() for d in ds})
+        result.success = bool(domains_by_org)
+        result.domains = all_domains
+        result.raw_data = {"domains_by_org": domains_by_org, "errors": errors}
+        if not result.success:
+            result.error = "; ".join(errors) or "crt.sh organization search failed"
+        result.elapsed_time = time.time() - start_time
+        return result
+
+    async def discover_mail_auth(self, domain: str, max_spf_lookups: int = 10) -> DiscoveryResult:
+        """
+        Candidate owned domains from the domain's own mail/DNS records (free):
+        SPF include/redirect targets (followed recursively, as a receiver
+        would), DMARC rua/ruf report addresses, and the registrable domains of
+        its MX / NS hosts. Shared providers are filtered out.
+        """
+        from app.services.dns_service import DNSService
+        from app.services.ownership_pivots import (
+            parse_spf, parse_dmarc, candidate_domains_from_hosts,
+            is_shared_provider, registrable_domain,
+        )
+
+        start_time = time.time()
+        result = DiscoveryResult(source="mail_auth", success=False)
+        try:
+            svc = DNSService()
+            records = await asyncio.to_thread(svc.enumerate_domain, domain)
+            dmarc_txt = await asyncio.to_thread(svc._query_txt, f"_dmarc.{domain}")
+        except Exception as e:
+            result.error = f"DNS lookup failed: {e}"
+            return result
+
+        own = registrable_domain(domain)
+        spf_hosts: List[str] = []
+        queue = [records.txt_records or []]
+        visited: Set[str] = set()
+        lookups = 0
+        while queue:
+            parsed = parse_spf(queue.pop(0))
+            for target in parsed["includes"] + parsed["redirects"] + parsed["hosts"]:
+                spf_hosts.append(target)
+                # Follow org-controlled includes only (shared ones are huge
+                # trees that say nothing about ownership).
+                if (target in visited or lookups >= max_spf_lookups
+                        or is_shared_provider(target)
+                        or target not in parsed["includes"] + parsed["redirects"]):
+                    continue
+                visited.add(target)
+                lookups += 1
+                try:
+                    queue.append(await asyncio.to_thread(svc._query_txt, target))
+                except Exception:
+                    pass
+
+        dmarc_emails = parse_dmarc(dmarc_txt or [])
+        dns_hosts = [str(n).rstrip(".") for n in records.ns_records or []] + [
+            str(m.get("host", "")).rstrip(".") for m in records.mx_records or []
+        ]
+
+        def _by(hosts: List[str]) -> Dict[str, List[str]]:
+            out: Dict[str, List[str]] = {}
+            for h in hosts:
+                for cand in candidate_domains_from_hosts([h], exclude=[own]):
+                    out.setdefault(h, [])
+                    if cand not in out[h]:
+                        out[h].append(cand)
+            return out
+
+        raw = {
+            "domains_by_spf": _by(spf_hosts),
+            "domains_by_dmarc": _by(dmarc_emails),
+            "domains_by_dns_host": _by(dns_hosts),
+            "spf_targets": list(dict.fromkeys(spf_hosts)),
+            "dmarc_report_addresses": dmarc_emails,
+        }
+        result.success = True
+        result.domains = sorted({
+            d for key in ("domains_by_spf", "domains_by_dmarc", "domains_by_dns_host")
+            for ds in raw[key].values() for d in ds
+        })
+        result.raw_data = raw
+        result.elapsed_time = time.time() - start_time
+        return result
+
+    async def _fetch_homepage(self, domain: str) -> Tuple[Optional[str], Optional[str]]:
+        """Return (final_url, html) for the first of https/http that answers."""
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; ASM-Discovery/1.0)"}
+        for url in (f"https://{domain}/", f"http://{domain}/"):
+            try:
+                async with httpx.AsyncClient(timeout=8, follow_redirects=True, verify=False) as client:
+                    resp = await client.get(url, headers=headers)
+                if resp.status_code < 500 and resp.text:
+                    return str(resp.url), resp.text[:2_000_000]
+            except Exception:
+                continue
+        return None, None
+
+    async def _favicon_bytes(self, base_url: str, html: str) -> Optional[bytes]:
+        from app.services.ownership_pivots import find_favicon_href
+
+        href = find_favicon_href(html) or "/favicon.ico"
+        url = urllib.parse.urljoin(base_url, href)
+        try:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=True, verify=False) as client:
+                resp = await client.get(url)
+            ctype = resp.headers.get("content-type", "")
+            if resp.status_code == 200 and resp.content and "html" not in ctype:
+                return resp.content
+        except Exception:
+            pass
+        return None
+
+    async def _analytics_reverse(self, tracking_id: str) -> Optional[List[str]]:
+        """Reverse a UA-/pub- ID to the domains using it (HackerTarget)."""
+        params = {"q": tracking_id}
+        key = self.get_api_key("hackertarget")
+        if key:
+            params["apikey"] = key
+        ok, data = await self._make_request(
+            "https://api.hackertarget.com/analyticslookup/", params=params, timeout=30
+        )
+        if not ok or not isinstance(data, str):
+            return None
+        low = data.lower()
+        if "error" in low or "api count exceeded" in low or "no records" in low:
+            return None
+        from app.services.ownership_pivots import is_hostname
+        domains: Set[str] = set()
+        for line in data.splitlines():
+            for tok in line.replace(";", ",").split(","):
+                tok = tok.strip().lower()
+                if tok and not tok.upper().startswith(("UA-", "PUB-")) and is_hostname(tok):
+                    domains.add(tok)
+        return sorted(domains)
+
+    async def _favicon_reverse(self, fav_hash: int, max_hosts: int = 2000) -> Optional[List[str]]:
+        """Domains serving the same favicon (Shodan count+facets: no query credits)."""
+        key = self.get_api_key(ExternalService.SHODAN)
+        if not key:
+            return None
+        ok, data = await self._make_request(
+            "https://api.shodan.io/shodan/host/count",
+            params={"key": key, "query": f"http.favicon.hash:{fav_hash}", "facets": "domain:200"},
+            timeout=30,
+        )
+        if not ok or not isinstance(data, dict):
+            return None
+        # A favicon on thousands of hosts is a framework/vendor default, not a brand.
+        if int(data.get("total", 0) or 0) > max_hosts:
+            return []
+        return [f.get("value", "").lower() for f in (data.get("facets", {}) or {}).get("domain", []) if f.get("value")]
+
+    async def discover_web_fingerprint(
+        self, domain: str, reverse_lookups: bool = True
+    ) -> DiscoveryResult:
+        """
+        Fingerprint the domain's homepage: analytics / tag-manager / AdSense
+        IDs, favicon hash, and where it redirects. With ``reverse_lookups``,
+        reverse each ID / hash to other domains using it (UA- and pub- via
+        HackerTarget; favicon via Shodan when a key is configured). GA4 and
+        GTM IDs have no keyless reverse source; they are returned so expansion
+        can match them across domains we already know about.
+        """
+        from app.services.ownership_pivots import (
+            extract_tracking_ids, favicon_hash, registrable_domain,
+        )
+
+        start_time = time.time()
+        result = DiscoveryResult(source="web_fingerprint", success=False)
+        final_url, html = await self._fetch_homepage(domain)
+        if html is None:
+            result.error = "Homepage not reachable"
+            result.elapsed_time = time.time() - start_time
+            return result
+
+        ids = extract_tracking_ids(html)
+        fav = await self._favicon_bytes(final_url, html)
+        fav_h = favicon_hash(fav) if fav else None
+        final_host = urllib.parse.urlparse(final_url).hostname or ""
+        own = registrable_domain(domain)
+
+        domains_by_tracking_id: Dict[str, List[str]] = {}
+        domains_by_favicon: Dict[str, List[str]] = {}
+        if reverse_lookups:
+            for tid in ids.get("ua", []) + ids.get("adsense", []):
+                found = await self._analytics_reverse(tid)
+                if found:
+                    domains_by_tracking_id[tid] = sorted(
+                        {registrable_domain(d) for d in found} - {own}
+                    )
+            if fav_h is not None:
+                found = await self._favicon_reverse(fav_h)
+                if found:
+                    domains_by_favicon[str(fav_h)] = sorted(
+                        {registrable_domain(d) for d in found} - {own}
+                    )
+
+        result.success = True
+        result.domains = sorted({
+            d for m in (domains_by_tracking_id, domains_by_favicon) for ds in m.values() for d in ds
+        })
+        result.raw_data = {
+            "final_url": final_url,
+            "redirect_domain": registrable_domain(final_host) if final_host else None,
+            "tracking_ids": ids,
+            "favicon_hash": fav_h,
+            "domains_by_tracking_id": domains_by_tracking_id,
+            "domains_by_favicon": domains_by_favicon,
+        }
+        result.elapsed_time = time.time() - start_time
+        return result
+
+    # =========================================================================
+    # Recursive ownership expansion + corroboration
+    # =========================================================================
+
+    async def expand_ownership(
+        self,
+        seed_domain: str,
+        evidence: Dict[str, List[Dict[str, Any]]],
+        seed_results: Optional[Dict[str, "DiscoveryResult"]] = None,
+        *,
+        max_depth: int = 2,
+        max_pivot_domains: int = 25,
+        include_paid: bool = True,
+        max_paid_pivots: int = 10,
+        corroborate_limit: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Pivot from every newly discovered domain that is at least *likely*
+        owned, feeding results back in until no new likely domains appear or
+        ``max_depth`` rounds have run. Then try to corroborate *review*-tier
+        domains with free checks that link them to an owned domain.
+
+        ``evidence`` ({domain: [evidence...]}) is updated in place.
+
+        Per pivot domain (free): M365 tenant, SPF/DMARC/MX/NS, homepage
+        fingerprint. Paid (bounded by ``max_paid_pivots``): WHOIS on the
+        domain -> reverse-WHOIS on registrant terms not already searched, and
+        reverse-NS/MX on its org-specific infrastructure not already pivoted.
+        """
+        from app.services.domain_attribution import (
+            collect_evidence, merge_evidence, score_evidence, _make_evidence,
+        )
+        from app.services.ownership_pivots import registrable_domain, is_usable_registrant_email
+
+        seed = seed_domain.strip().lower()
+        seed_results = seed_results or {}
+        pivoted: Set[str] = {seed}
+        summary: Dict[str, Any] = {
+            "rounds": [], "domains_pivoted": [], "new_domains": [], "corroborated": [],
+            "paid_pivots_used": 0, "source_stats": {},
+        }
+
+        # Terms / hosts the seed run already spent credits on
+        searched_terms: Set[str] = set()
+        pivoted_hosts: Set[str] = set()
+        owned_ids: Dict[str, str] = {}  # tracking id -> domain it was seen on
+        for res in seed_results.values():
+            raw = getattr(res, "raw_data", None) or {}
+            for k in ("discovered_emails", "discovered_companies"):
+                searched_terms.update(t.lower() for t in raw.get(k, []) or [])
+            for k in ("domains_by_email", "domains_by_company"):
+                searched_terms.update(t.lower() for t in (raw.get(k) or {}).keys())
+            pivoted_hosts.update(h.lower() for h in raw.get("pivoted_nameservers", []) or [])
+            pivoted_hosts.update(h.lower() for h in raw.get("pivoted_mailservers", []) or [])
+            if getattr(res, "source", "") == "web_fingerprint":
+                for ids in (raw.get("tracking_ids") or {}).values():
+                    for tid in ids:
+                        owned_ids.setdefault(tid, seed)
+
+        whoxy_key = self.get_api_key(ExternalService.WHOXY)
+        reverse_ok = bool(self.get_api_key(ExternalService.WHOISXML) or self.get_api_key(ExternalService.SECURITYTRAILS))
+        sem = asyncio.Semaphore(8)
+        lock = asyncio.Lock()
+
+        def _stat(name: str, res: "DiscoveryResult") -> None:
+            st = summary["source_stats"].setdefault(name, {"runs": 0, "domains": 0, "errors": 0})
+            st["runs"] += 1
+            st["domains"] += len(res.domains or [])
+            if not res.success:
+                st["errors"] += 1
+
+        def _owned_roots() -> Set[str]:
+            return {d for d, evs in evidence.items() if score_evidence(evs).expandable}
+
+        async def _paid_pivots(domain: str) -> Dict[str, "DiscoveryResult"]:
+            out: Dict[str, DiscoveryResult] = {}
+            async with lock:
+                if not include_paid or summary["paid_pivots_used"] >= max_paid_pivots:
+                    return out
+                summary["paid_pivots_used"] += 1
+            if whoxy_key:
+                from app.services.whoxy_service import get_whoxy_service
+                try:
+                    wx = get_whoxy_service(whoxy_key)
+                    data = await wx.discover_related_domains(
+                        domain=domain, max_pages_per_query=5,
+                        skip_terms=searched_terms, email_filter=is_usable_registrant_email,
+                    )
+                    async with lock:
+                        searched_terms.update(t.lower() for t in data.get("discovered_emails", []))
+                        searched_terms.update(t.lower() for t in data.get("discovered_companies", []))
+                    out["whoxy"] = DiscoveryResult(
+                        source="whoxy", success=True,
+                        domains=data.get("related_domains", []),
+                        raw_data={
+                            "domains_by_email": data.get("domains_by_email", {}),
+                            "domains_by_company": data.get("domains_by_company", {}),
+                        },
+                    )
+                except Exception as e:
+                    out["whoxy"] = DiscoveryResult(source="whoxy", success=False, error=str(e))
+            if reverse_ok:
+                ns, mx = await self._resolve_domain_infrastructure(domain)
+                async with lock:
+                    ns = [h for h in ns if h not in pivoted_hosts]
+                    mx = [h for h in mx if h not in pivoted_hosts]
+                    pivoted_hosts.update(ns + mx)
+                if ns or mx:
+                    out["reverse_dns"] = await self.discover_reverse_dns(
+                        pivot_nameservers=ns, pivot_mailservers=mx,
+                    )
+            return out
+
+        async def _pivot(domain: str, depth: int, parent_score: int) -> Tuple[str, Dict[str, "DiscoveryResult"]]:
+            async with sem:
+                tasks = {
+                    "m365": self.discover_m365(domain),
+                    "mail_auth": self.discover_mail_auth(domain),
+                    "web_fingerprint": self.discover_web_fingerprint(domain),
+                }
+                names = list(tasks)
+                got = await asyncio.gather(*tasks.values(), return_exceptions=True)
+                res: Dict[str, DiscoveryResult] = {}
+                for n, r in zip(names, got):
+                    res[n] = r if not isinstance(r, Exception) else DiscoveryResult(source=n, success=False, error=str(r))
+                res.update(await _paid_pivots(domain))
+                return domain, res
+
+        def _link_evidence(domain: str, res: Dict[str, "DiscoveryResult"], owned: Set[str]) -> List[Dict[str, Any]]:
+            """Evidence tying ``domain`` itself to an already-owned domain."""
+            evs: List[Dict[str, Any]] = []
+            def best_owner(d: str) -> Tuple[int, str]:
+                return score_evidence(evidence.get(d, [])).score, d
+
+            m = res.get("m365")
+            if m and m.success:
+                shared = sorted((set(m.domains) - {domain}) & owned)
+                if shared:
+                    s, owner = max(best_owner(d) for d in shared)
+                    evs.append(_make_evidence(
+                        source="m365", signal="m365_tenant", query_domain=domain, depth=1,
+                        parent_score=s, match_value=owner,
+                    ))
+            fp = res.get("web_fingerprint")
+            if fp and fp.success:
+                raw = fp.raw_data or {}
+                rd = raw.get("redirect_domain")
+                if rd and rd != registrable_domain(domain) and rd in owned:
+                    s, _ = best_owner(rd)
+                    evs.append(_make_evidence(
+                        source="web_fingerprint", signal="redirect", query_domain=domain, depth=1,
+                        parent_score=s, match_value=rd,
+                    ))
+                for ids in (raw.get("tracking_ids") or {}).values():
+                    for tid in ids:
+                        owner = owned_ids.get(tid)
+                        if owner and owner != domain:
+                            s, _ = best_owner(owner)
+                            evs.append(_make_evidence(
+                                source="web_fingerprint", signal="analytics_id", query_domain=domain,
+                                depth=1, parent_score=s, match_value=f"{tid} (also on {owner})",
+                            ))
+            return evs
+
+        # ---- Recursive expansion rounds ------------------------------------
+        for depth in range(1, max_depth + 1):
+            scores = {d: score_evidence(evs) for d, evs in evidence.items()}
+            budget = max_pivot_domains - (len(pivoted) - 1)
+            candidates = sorted(
+                (d for d, s in scores.items() if s.expandable and d not in pivoted),
+                key=lambda d: -scores[d].score,
+            )[:max(0, budget)]
+            if not candidates:
+                break
+            pivoted.update(candidates)
+            outcomes = await asyncio.gather(*[_pivot(d, depth, scores[d].score) for d in candidates])
+            round_new: List[str] = []
+            owned_now = _owned_roots()
+            for domain, res in outcomes:
+                for n, r in res.items():
+                    _stat(n, r)
+                fp = res.get("web_fingerprint")
+                if fp and fp.success:
+                    for ids in ((fp.raw_data or {}).get("tracking_ids") or {}).values():
+                        for tid in ids:
+                            owned_ids.setdefault(tid, domain)
+                new_ev = collect_evidence(
+                    res, domain, depth=depth, parent_score=scores[domain].score,
+                    org_roots=owned_now,
+                )
+                new_ev.pop(domain, None)
+                links = _link_evidence(domain, res, owned_now - {domain})
+                if links:
+                    new_ev.setdefault(domain, []).extend(links)
+                round_new.extend(merge_evidence(evidence, new_ev))
+            summary["rounds"].append({"depth": depth, "pivoted": candidates, "new_domains": round_new})
+            summary["domains_pivoted"].extend(candidates)
+            summary["new_domains"].extend(round_new)
+
+        # ---- Corroboration of review-tier domains (free checks only) -------
+        owned_now = _owned_roots()
+        review = sorted(
+            (d for d, evs in evidence.items()
+             if d not in pivoted and not score_evidence(evs).expandable),
+            key=lambda d: -score_evidence(evidence[d]).score,
+        )[:corroborate_limit]
+
+        async def _check(domain: str):
+            async with sem:
+                m, fp = await asyncio.gather(
+                    self.discover_m365(domain),
+                    self.discover_web_fingerprint(domain, reverse_lookups=False),
+                    return_exceptions=True,
+                )
+                res = {}
+                if not isinstance(m, Exception):
+                    res["m365"] = m
+                if not isinstance(fp, Exception):
+                    res["web_fingerprint"] = fp
+                return domain, res
+
+        if review and owned_now:
+            for domain, res in await asyncio.gather(*[_check(d) for d in review]):
+                links = _link_evidence(domain, res, owned_now - {domain})
+                if links:
+                    before = score_evidence(evidence[domain]).tier
+                    merge_evidence(evidence, {domain: links})
+                    after = score_evidence(evidence[domain])
+                    summary["corroborated"].append(
+                        {"domain": domain, "from": before, "to": after.tier, "score": after.score}
+                    )
+
+        return summary
+
+    # =========================================================================
     # Full Discovery - Run All Sources
     # =========================================================================
     
@@ -1566,6 +2062,14 @@ class ExternalDiscoveryService:
             tasks.append(("shodan_ctl", self.discover_shodan_ctl(domain)))
             tasks.append(("crt_name", self.discover_crt_name(domain)))
             tasks.append(("m365", self.discover_m365(domain)))
+            # Root-domain ownership pivots (free)
+            tasks.append(("mail_auth", self.discover_mail_auth(domain)))
+            tasks.append(("web_fingerprint", self.discover_web_fingerprint(domain)))
+            cert_org_names = list(dict.fromkeys(
+                (organization_names or []) + self.configured_organization_names()
+            ))
+            if cert_org_names:
+                tasks.append(("crtsh_org", self.discover_crtsh_org(cert_org_names)))
             
             # Use comprehensive CC search if org_name or keywords provided
             if commoncrawl_org_name or commoncrawl_keywords:

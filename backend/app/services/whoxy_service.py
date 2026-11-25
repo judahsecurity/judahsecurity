@@ -13,7 +13,7 @@ import re
 import time
 import random
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple, Any
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -285,7 +285,9 @@ class WhoxyService:
         domain: str,
         additional_emails: Optional[List[str]] = None,
         additional_companies: Optional[List[str]] = None,
-        max_pages_per_query: int = 5
+        max_pages_per_query: int = 5,
+        skip_terms: Optional[Set[str]] = None,
+        email_filter: Optional[Callable[[str], bool]] = None,
     ) -> Dict[str, Any]:
         """
         Full domain reconnaissance workflow.
@@ -299,6 +301,10 @@ class WhoxyService:
             additional_emails: Extra emails to search (from settings)
             additional_companies: Extra company names to search (from settings)
             max_pages_per_query: Limit pages per reverse WHOIS query
+            skip_terms: Lower-cased emails/companies already reverse-searched
+                (recursive expansion passes these so credits are not re-spent)
+            email_filter: Optional predicate; emails failing it are not
+                reverse-searched (e.g. registrar / privacy role accounts)
             
         Returns:
             Dictionary with:
@@ -341,6 +347,12 @@ class WhoxyService:
         
         result["discovered_emails"] = list(emails)
         result["discovered_companies"] = list(companies)
+
+        skip = {t.lower() for t in (skip_terms or set())}
+        if email_filter is not None:
+            emails = {e for e in emails if email_filter(e)}
+        emails = {e for e in emails if e.lower() not in skip}
+        companies = {c for c in companies if c.lower() not in skip}
         
         all_domains = set()
         

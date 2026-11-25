@@ -65,6 +65,7 @@ from app.schemas.external_discovery import (
     APIConfigListResponse,
     ExternalDiscoveryRequest,
     ExternalDiscoveryResponse,
+    DomainOwnership,
     SingleSourceRequest,
     SingleSourceResponse,
     ReverseDiscoveryRequest,
@@ -75,6 +76,15 @@ from app.schemas.external_discovery import (
     FREE_SERVICES_INFO,
 )
 from app.services.external_discovery_service import ExternalDiscoveryService
+from app.services.domain_attribution import (
+    TIER_CONFIRMED,
+    TIER_LIKELY,
+    TIER_REVIEW,
+    collect_evidence,
+    describe,
+    number_steps,
+    score_evidence,
+)
 from app.services.technology_scan_service import run_technology_scan_for_hosts
 from app.services.subdomain_service import SubdomainService
 from app.services.screenshot_service import run_screenshots_for_hosts
@@ -544,14 +554,62 @@ async def run_external_discovery(
         ))
     
     # ==========================================================================
+    # OWNERSHIP ATTRIBUTION + RECURSIVE EXPANSION
+    # Every root domain gets independent ownership evidence. Domains that are
+    # at least "likely" owned are pivoted from again (M365 tenant, SPF/DMARC,
+    # web fingerprint, and - within a credit budget - WHOIS / reverse NS/MX)
+    # until nothing new turns up. Review-tier domains get free corroboration
+    # checks, and are created out of scope until an analyst confirms them.
+    # ==========================================================================
+    evidence = collect_evidence(results, request.domain)
+    evidence.setdefault(request.domain, []).insert(0, {
+        "source": "seed", "signal": "primary", "match_type": "primary domain",
+        "query_domain": request.domain, "depth": 0,
+        "timestamp": datetime.utcnow().isoformat(), "confidence": 100,
+    })
+    expansion_summary = None
+    if request.expand_ownership:
+        expansion_summary = await service.expand_ownership(
+            request.domain,
+            evidence,
+            results,
+            max_depth=request.expansion_max_depth,
+            max_pivot_domains=request.expansion_max_domains,
+            include_paid=request.include_paid_sources and request.expansion_include_paid,
+            max_paid_pivots=request.expansion_max_paid_pivots,
+            corroborate_limit=request.corroborate_review_limit,
+        )
+        for name, st in (expansion_summary.get("source_stats") or {}).items():
+            source_results.append(SourceResult(
+                source=f"expansion:{name}",
+                success=st["errors"] < st["runs"],
+                domains_found=st["domains"],
+                elapsed_time=0,
+                error=f"{st['errors']}/{st['runs']} pivots failed" if st["errors"] else None,
+            ))
+    aggregated["domains"].update(evidence.keys())
+    attribution = {d: score_evidence(evidence.get(d, [])) for d in aggregated["domains"]}
+    attribution_counts = {TIER_CONFIRMED: 0, TIER_LIKELY: 0, TIER_REVIEW: 0}
+    for score in attribution.values():
+        attribution_counts[score.tier] += 1
+
+    # ==========================================================================
     # CHAINED SUBDOMAIN ENUMERATION on discovered domains
     # Run subdomain enumeration on all domains discovered from Whoxy, M365, etc.
     # ==========================================================================
-    if request.enumerate_discovered_domains and len(aggregated["domains"]) > 1:
+    if request.enumerate_discovered_domains and any(
+        s.expandable for d, s in attribution.items() if d != request.domain
+    ):
         logger.info(f"Running chained subdomain enumeration on {len(aggregated['domains'])} discovered domains")
         subdomain_service = SubdomainService()
 
-        discovered_domains = [d for d in aggregated["domains"] if d != request.domain]
+        # Only expand domains we believe are owned; review-tier domains could
+        # belong to someone else and must not pull in their subdomains.
+        discovered_domains = sorted(
+            (d for d in aggregated["domains"]
+             if d != request.domain and attribution[d].expandable),
+            key=lambda d: -attribution[d].score,
+        )
         domains_to_enumerate = discovered_domains[:request.max_domains_to_enumerate]
 
         # Fan-out: enumerate every chained domain concurrently. Bounded
@@ -610,110 +668,9 @@ async def run_external_discovery(
     # This tracks exactly HOW and WHY each asset was discovered
     asset_sources: dict[str, list[dict]] = {}
     
+    # Root-domain evidence comes from `evidence` (domain_attribution); only
+    # subdomain provenance is tracked here.
     for source_name, result in results.items():
-        # For Whoxy, extract the specific match criteria (email or company that matched)
-        if result.source == "whoxy" and result.raw_data:
-            domains_by_email = result.raw_data.get("domains_by_email", {})
-            domains_by_company = result.raw_data.get("domains_by_company", {})
-            
-            # Track which email caused each domain to be discovered. A
-            # registrant email on the queried organisation's own domain is a
-            # stronger ownership signal than a third-party address.
-            org_root = extract_root_domain(request.domain)
-            for email, domains_list in domains_by_email.items():
-                email_root = extract_root_domain(email.rsplit("@", 1)[1]) if "@" in email else ""
-                for domain in domains_list:
-                    if domain not in asset_sources:
-                        asset_sources[domain] = []
-                    asset_sources[domain].append({
-                        "step": len(asset_sources[domain]) + 1,
-                        "source": "whoxy",
-                        "match_type": "email",
-                        "match_value": email,
-                        "query_domain": request.domain,
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "confidence": 90 if email_root and email_root == org_root else 70
-                    })
-            
-            # Track which company caused each domain to be discovered
-            for company, domains_list in domains_by_company.items():
-                for domain in domains_list:
-                    if domain not in asset_sources:
-                        asset_sources[domain] = []
-                    asset_sources[domain].append({
-                        "step": len(asset_sources[domain]) + 1,
-                        "source": "whoxy",
-                        "match_type": "company",
-                        "match_value": company,
-                        "query_domain": request.domain,
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "confidence": 85  # Company matches are generally reliable
-                    })
-        # For SecurityTrails, capture which reverse pivot matched each domain
-        elif result.source == "securitytrails" and result.raw_data:
-            pivot_map = [
-                ("domains_by_email", "registrant email", 90),
-                ("domains_by_registrar", "registrar", 75),
-                ("domains_by_ns", "shared nameserver", 85),
-                ("domains_by_mx", "shared mail server", 85),
-            ]
-            for raw_key, match_type, conf in pivot_map:
-                for match_value, domains_list in (result.raw_data.get(raw_key, {}) or {}).items():
-                    for domain in domains_list:
-                        if domain not in asset_sources:
-                            asset_sources[domain] = []
-                        asset_sources[domain].append({
-                            "step": len(asset_sources[domain]) + 1,
-                            "source": "securitytrails",
-                            "match_type": match_type,
-                            "match_value": match_value,
-                            "query_domain": request.domain,
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "confidence": conf,
-                        })
-            for domain in (result.raw_data.get("domains_associated", []) or []):
-                if domain not in asset_sources:
-                    asset_sources[domain] = []
-                asset_sources[domain].append({
-                    "step": len(asset_sources[domain]) + 1,
-                    "source": "securitytrails",
-                    "match_type": "associated domain",
-                    "match_value": request.domain,
-                    "query_domain": request.domain,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "confidence": 70,
-                })
-        # For reverse-DNS, capture which owned NS/MX matched each domain
-        elif result.source == "reverse_dns" and result.raw_data:
-            for raw_key, match_type in (("domains_by_ns", "shared nameserver"),
-                                        ("domains_by_mx", "shared mail server")):
-                for match_value, domains_list in (result.raw_data.get(raw_key, {}) or {}).items():
-                    for domain in domains_list:
-                        if domain not in asset_sources:
-                            asset_sources[domain] = []
-                        asset_sources[domain].append({
-                            "step": len(asset_sources[domain]) + 1,
-                            "source": "reverse_dns",
-                            "match_type": match_type,
-                            "match_value": match_value,
-                            "query_domain": request.domain,
-                            "timestamp": datetime.utcnow().isoformat(),
-                            # Owned infra is a strong ownership signal
-                            "confidence": 90,
-                        })
-        else:
-            # For other sources, just track the source
-            for domain in result.domains:
-                if domain not in asset_sources:
-                    asset_sources[domain] = []
-                asset_sources[domain].append({
-                    "step": len(asset_sources[domain]) + 1,
-                    "source": result.source,
-                    "query_domain": request.domain,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "confidence": 80
-                })
-        
         for subdomain in result.subdomains:
             if subdomain not in asset_sources:
                 asset_sources[subdomain] = []
@@ -726,81 +683,33 @@ async def run_external_discovery(
             })
     
     if request.create_assets:
-        # Create domain assets
-        for domain in aggregated["domains"]:
-            all_hosts.append(domain)  # Track all hosts for tech scanning
+        # Create domain assets, scored by corroborated ownership evidence
+        for domain in sorted(aggregated["domains"], key=lambda d: -attribution[d].score):
+            score = attribution[domain]
+            sources = number_steps(evidence.get(domain, []))
+            in_scope = score.expandable
+            if in_scope:
+                all_hosts.append(domain)  # Track owned hosts for tech scanning
             existing = db.query(Asset).filter(
                 Asset.organization_id == request.organization_id,
                 Asset.value == domain,
                 Asset.asset_type == AssetType.DOMAIN
             ).first()
-            
-            # Build discovery chain and association reason
-            sources = asset_sources.get(domain, [])
-            source_names = list(set(s["source"] for s in sources))
+
+            source_names = list(dict.fromkeys(s["source"] for s in sources if s.get("source") != "seed"))
             primary_source = source_names[0] if source_names else "external_discovery"
-            
-            # Calculate confidence from sources (use highest confidence)
-            confidence = max([s.get("confidence", 50) for s in sources]) if sources else 50
-            
-            # Build human-readable association reason with SPECIFIC match criteria
-            if domain == request.domain:
-                association_reason = f"Primary domain for organization"
-                confidence = 100
-            elif "whoxy" in source_names:
-                # Find the specific match that caused this domain to be discovered
-                whoxy_matches = [s for s in sources if s.get("source") == "whoxy"]
-                match_details = []
-                for match in whoxy_matches:
-                    match_type = match.get("match_type", "unknown")
-                    match_value = match.get("match_value", "unknown")
-                    if match_type == "email":
-                        match_details.append(f"registrant email '{match_value}'")
-                    elif match_type == "company":
-                        match_details.append(f"company name '{match_value}'")
-                
-                if match_details:
-                    association_reason = f"Found via Whoxy reverse WHOIS - matched on {', '.join(match_details)}"
-                else:
-                    association_reason = f"Found via Whoxy reverse WHOIS lookup on {request.domain}"
-            elif "securitytrails" in source_names:
-                st_matches = [s for s in sources if s.get("source") == "securitytrails"]
-                match_details = []
-                for match in st_matches:
-                    match_type = match.get("match_type", "reverse lookup")
-                    match_value = match.get("match_value", "unknown")
-                    match_details.append(f"{match_type} '{match_value}'")
-                if match_details:
-                    association_reason = f"Found via SecurityTrails reverse lookup - matched on {', '.join(match_details)}"
-                else:
-                    association_reason = f"Found via SecurityTrails reverse lookup on {request.domain}"
-            elif "reverse_dns" in source_names:
-                rd_matches = [s for s in sources if s.get("source") == "reverse_dns"]
-                match_details = []
-                for match in rd_matches:
-                    match_type = match.get("match_type", "shared infrastructure")
-                    match_value = match.get("match_value", "unknown")
-                    match_details.append(f"{match_type} '{match_value}'")
-                if match_details:
-                    association_reason = f"Shares owned infrastructure - matched on {', '.join(match_details)}"
-                else:
-                    association_reason = f"Found via reverse-NS/MX on owned infrastructure"
-            elif "m365" in source_names:
-                association_reason = f"Found via Microsoft 365 federation from {request.domain}"
-            elif "commoncrawl" in source_names or "commoncrawl_comprehensive" in source_names:
-                association_reason = f"Found via Common Crawl data related to {request.domain}"
-            else:
-                association_reason = f"Discovered via {', '.join(source_names)} from {request.domain}"
-            
+            association_reason = describe(domain, sources, score)
+            tier_tag = f"ownership:{score.tier}"
+
             if existing:
                 if request.skip_existing:
                     assets_skipped += 1
                     continue
-                # Update existing asset with discovery info if not set
-                if not existing.discovery_chain:
-                    existing.discovery_chain = sources
-                    existing.association_reason = association_reason
-                    existing.association_confidence = confidence
+                existing.discovery_chain = sources
+                existing.association_reason = association_reason
+                existing.association_confidence = score.score
+                tags = [t for t in (existing.tags or []) if not str(t).startswith("ownership:")]
+                existing.tags = tags + [tier_tag]
             else:
                 asset = Asset(
                     name=domain,
@@ -812,8 +721,10 @@ async def run_external_discovery(
                     discovery_source=primary_source,
                     discovery_chain=sources,
                     association_reason=association_reason,
-                    association_confidence=confidence,
-                    tags=["external-discovery"],
+                    association_confidence=score.score,
+                    # Review-tier domains wait for an analyst before scanning
+                    in_scope=in_scope,
+                    tags=["external-discovery", tier_tag],
                 )
                 db.add(asset)
                 assets_created += 1
@@ -1055,7 +966,13 @@ async def run_external_discovery(
         ip_ranges=list(aggregated["ip_ranges"]),
         assets_created=assets_created,
         assets_skipped=assets_skipped,
-        total_elapsed_time=time.time() - start_time
+        total_elapsed_time=time.time() - start_time,
+        ownership={
+            d: DomainOwnership(score=sc.score, tier=sc.tier, signals=sc.signals)
+            for d, sc in attribution.items()
+        },
+        ownership_counts=attribution_counts,
+        expansion=expansion_summary,
     )
 
 

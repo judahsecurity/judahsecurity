@@ -1912,6 +1912,13 @@ class ApiClient {
     run_screenshots?: boolean;
     max_screenshots?: number;
     screenshot_timeout?: number;
+    // Recursive ownership expansion (pivot from every likely-owned domain)
+    expand_ownership?: boolean;
+    expansion_max_depth?: number;
+    expansion_max_domains?: number;
+    expansion_include_paid?: boolean;
+    expansion_max_paid_pivots?: number;
+    corroborate_review_limit?: number;
   }) {
     // Discovery can take a long time with multiple sources (Common Crawl, SNI, etc.)
     // Use a 5-minute timeout for this operation
