@@ -238,3 +238,37 @@ def test_large_graphs_hide_least_certain_actions_first():
     for n in graph["nodes"]:
         if n["kind"] in ("host", "endpoint"):
             assert n["id"] in sources
+
+
+def test_proof_does_not_redraw_the_credential_it_used():
+    chain = _chain(
+        _step(1, "informational", "http_request", "{'url': 'https://app.example.com/main.js'}", True,
+              [{"type": "vulnerability", "severity": "high", "description": "Hard-coded API key exposed in main.js"}]),
+        _step(2, "exploitation", "http_request",
+              "{'url': 'https://api.example.com/admin/users', 'headers': {'X-Api-Key': '[redacted]'}}", True,
+              [{"type": "vulnerability", "severity": "critical",
+                "description": "Privilege escalation: leaked key grants admin access"}]),
+    )
+    graph = build_attack_graph(chain, proofs=[
+        _proof(5, "Leaked API key grants admin access to user API", host="api.example.com",
+               url="https://api.example.com/admin/users", headers=", 'headers': {'X-Api-Key': '[redacted]'}"),
+    ])
+    assert len(_by_kind(graph, "credential")) == 1
+    identity = _by_kind(graph, "identity")[0]
+    assert identity["title"] == "Admin access"
+    assert identity["status"] == "proven"
+
+
+def test_proof_merges_into_best_matching_action():
+    chain = _chain(
+        _step(1, "informational", "http_request", "{'url': 'https://app.example.com/preview'}", True,
+              [{"type": "vulnerability", "severity": "high", "description": "SSRF in link preview reaches instance metadata"}]),
+        _step(2, "exploitation", "http_request", "{'url': 'https://app.example.com/preview'}", True,
+              [{"type": "vulnerability", "severity": "critical", "description": "Obtained AWS credentials for web-role via SSRF"}]),
+    )
+    graph = build_attack_graph(chain, proofs=[
+        _proof(6, "SSRF in link preview returns AWS credentials for web-role", url="https://app.example.com/preview"),
+    ])
+    by_finding = {n.get("finding_id"): n for n in _by_kind(graph, "action")}
+    assert by_finding[6]["step_evidence"]["iteration"] == 2
+    assert _by_kind(graph, "credential")[0]["status"] == "proven"

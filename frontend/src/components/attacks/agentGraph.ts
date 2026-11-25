@@ -110,3 +110,60 @@ export const STATUS_STYLE: Record<
     hint: 'Hypothesis: the step failed or the agent hedged ("may be vulnerable")',
   },
 };
+
+const RANK: Record<AgentGraphStatus, number> = { inferred: 0, observed: 1, proven: 2 };
+
+/**
+ * Drop endpoint nodes and fold their path into the action labels
+ * ("/v2/admin/users · http_request"). Saves one column for narrow panels.
+ */
+export function foldEndpoints(graph: AgentAttackGraphData): AgentAttackGraphData {
+  const endpoints = new Map(graph.nodes.filter((n) => n.kind === 'endpoint').map((n) => [n.id, n]));
+  if (endpoints.size === 0) return graph;
+  const parentOf = new Map<string, string>();
+  graph.edges.forEach((e) => {
+    if (endpoints.has(e.target)) parentOf.set(e.target, e.source);
+  });
+  const prefix = new Map<string, string>();
+  const edges = new Map<string, AgentGraphEdge>();
+  const put = (e: AgentGraphEdge) => {
+    const prev = edges.get(e.id);
+    if (!prev || RANK[e.status] > RANK[prev.status]) edges.set(e.id, e);
+  };
+  graph.edges.forEach((e) => {
+    if (endpoints.has(e.target)) return;
+    if (endpoints.has(e.source)) {
+      const parent = parentOf.get(e.source);
+      if (!parent) return;
+      prefix.set(e.target, endpoints.get(e.source)!.title);
+      put({ ...e, id: `${parent}->${e.target}`, source: parent });
+      return;
+    }
+    put(e);
+  });
+  const nodes = graph.nodes
+    .filter((n) => !endpoints.has(n.id))
+    .map((n) =>
+      prefix.has(n.id) ? { ...n, subtitle: [prefix.get(n.id), n.subtitle].filter(Boolean).join(' · ') } : n
+    );
+  return { ...graph, nodes, edges: Array.from(edges.values()) };
+}
+
+/** Keep proven nodes and everything leading to them, so each path is unbroken. */
+export function provenOnly(graph: AgentAttackGraphData): AgentAttackGraphData {
+  const parents = new Map<string, string[]>();
+  graph.edges.forEach((e) => parents.set(e.target, [...(parents.get(e.target) || []), e.source]));
+  const keep = new Set<string>();
+  const stack = graph.nodes.filter((n) => n.status === 'proven').map((n) => n.id);
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (keep.has(id)) continue;
+    keep.add(id);
+    (parents.get(id) || []).forEach((p) => stack.push(p));
+  }
+  return {
+    ...graph,
+    nodes: graph.nodes.filter((n) => keep.has(n.id)),
+    edges: graph.edges.filter((e) => keep.has(e.source) && keep.has(e.target)),
+  };
+}

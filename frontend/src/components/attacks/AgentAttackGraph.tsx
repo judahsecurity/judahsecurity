@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { Controls, ReactFlow, type Edge, type Node } from '@xyflow/react';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { Controls, ReactFlow, type Edge, type Node, type ReactFlowInstance } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import Link from 'next/link';
 import { ExternalLink, Maximize2, Route, X } from 'lucide-react';
@@ -18,7 +18,12 @@ import {
   type AgentGraphKind,
   type AgentGraphNode,
   type AgentGraphStatus,
+  foldEndpoints,
+  provenOnly,
 } from './agentGraph';
+
+/** Below this zoom node labels are unreadable; pan instead of shrinking further. */
+const MIN_READABLE_ZOOM = 0.62;
 
 function toFlow(graph: AgentAttackGraphData): { nodes: Node[]; edges: Edge[] } {
   const rawNodes: Node[] = graph.nodes.map((n) => ({
@@ -168,19 +173,72 @@ function Field({
   );
 }
 
-function Canvas({ graph, className }: { graph: AgentAttackGraphData; className?: string }) {
+function Canvas({
+  graph,
+  className,
+  onExpand,
+}: {
+  graph: AgentAttackGraphData;
+  className?: string;
+  onExpand?: () => void;
+}) {
   const flow = useMemo(() => toFlow(graph), [graph]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = graph.nodes.find((n) => n.id === selectedId) || null;
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+
+  // Fit when the graph fits legibly; otherwise start readable at the Internet
+  // origin and let the user pan right along the path.
+  // Computed from dagre's positions rather than fitView(), which is async in
+  // React Flow 12 and can't be inspected before it applies.
+  const onInit = useCallback(
+    (rf: ReactFlowInstance<Node, Edge>) => {
+      const box = boxRef.current;
+      if (!box || flow.nodes.length === 0) return;
+      const { width: nw, height: nh } = AGENT_NODE_SIZE;
+      const xs = flow.nodes.map((n) => n.position.x);
+      const ys = flow.nodes.map((n) => n.position.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs) + nw;
+      const minY = Math.min(...ys), maxY = Math.max(...ys) + nh;
+      const pad = 32;
+      const fit = Math.min(
+        (box.clientWidth - pad * 2) / (maxX - minX),
+        (box.clientHeight - pad * 2) / (maxY - minY),
+        1.1
+      );
+      setOverflowing(fit < MIN_READABLE_ZOOM);
+      if (fit >= MIN_READABLE_ZOOM) {
+        rf.setViewport({
+          zoom: fit,
+          x: (box.clientWidth - (maxX - minX) * fit) / 2 - minX * fit,
+          y: (box.clientHeight - (maxY - minY) * fit) / 2 - minY * fit,
+        });
+        return;
+      }
+      const origin = flow.nodes.find((n) => n.id === 'origin') || flow.nodes[0];
+      const zoom = MIN_READABLE_ZOOM;
+      rf.setViewport({
+        zoom,
+        x: pad - origin.position.x * zoom,
+        y: box.clientHeight / 2 - (origin.position.y + 20) * zoom,
+      });
+    },
+    [flow]
+  );
+  const nodes: Node[] = useMemo(
+    () => flow.nodes.map((n) => ({ ...n, selected: n.id === selectedId })),
+    [flow, selectedId]
+  );
 
   return (
-    <div className={cn('relative h-full w-full bg-card', className)}>
+    <div ref={boxRef} className={cn('relative h-full w-full bg-card', className)}>
       <ReactFlow
-        nodes={flow.nodes.map((n) => ({ ...n, selected: n.id === selectedId }))}
+        key={flow.nodes.length}
+        nodes={nodes}
         edges={flow.edges}
         nodeTypes={agentPathNodeTypes}
-        fitView
-        fitViewOptions={{ padding: 0.15 }}
+        onInit={onInit}
         minZoom={0.2}
         maxZoom={1.75}
         proOptions={{ hideAttribution: true }}
@@ -196,6 +254,19 @@ function Canvas({ graph, className }: { graph: AgentAttackGraphData; className?:
           className="!m-2 !overflow-hidden !rounded-md !border !border-border !bg-card !shadow-none [&>button]:!border-border [&>button]:!bg-transparent [&>button]:!fill-foreground"
         />
       </ReactFlow>
+      {overflowing && onExpand && !selected ? (
+        <div className="pointer-events-none absolute inset-y-0 right-0 flex w-28 items-end justify-end bg-gradient-to-l from-card via-card/70 to-transparent p-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            className="pointer-events-auto h-6 gap-1 px-2 text-[10px]"
+            onClick={onExpand}
+          >
+            <Maximize2 className="h-3 w-3" />
+            Full path
+          </Button>
+        </div>
+      ) : null}
       {selected ? <Inspector node={selected} onClose={() => setSelectedId(null)} /> : null}
     </div>
   );
@@ -209,7 +280,13 @@ export function AgentAttackGraph({
   className?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [onlyProven, setOnlyProven] = useState(false);
   const meta = graph?.meta || {};
+  const shown = useMemo(
+    () => (graph && onlyProven ? provenOnly(graph) : graph),
+    [graph, onlyProven]
+  );
+  const compact = useMemo(() => (shown ? foldEndpoints(shown) : shown), [shown]);
 
   if (!graph || graph.nodes.length === 0) {
     return (
@@ -238,21 +315,33 @@ export function AgentAttackGraph({
     <div className={cn('flex min-h-0 flex-1 flex-col', className)}>
       <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-1.5">
         <span className="font-mono text-[10px] text-muted-foreground">{summary}</span>
-        <Button
+        <div className="flex items-center gap-1">
+          {meta.proven ? (
+            <Button
+              variant={onlyProven ? 'secondary' : 'ghost'}
+              size="sm"
+              className="h-6 px-2 text-[10px]"
+              onClick={() => setOnlyProven((v) => !v)}
+            >
+              Proven paths
+            </Button>
+          ) : null}
+          <Button
           variant="ghost"
           size="icon"
           className="h-6 w-6"
           title="Expand"
           onClick={() => setExpanded(true)}
         >
-          <Maximize2 className="h-3 w-3" />
-        </Button>
+            <Maximize2 className="h-3 w-3" />
+          </Button>
+        </div>
       </div>
       <div className="min-h-[360px] flex-1">
-        <Canvas graph={graph} />
+        <Canvas graph={compact!} onExpand={() => setExpanded(true)} />
       </div>
       <div className="border-t border-border px-3 py-1.5">
-        <Legend graph={graph} />
+        <Legend graph={compact!} />
       </div>
 
       <Dialog open={expanded} onOpenChange={setExpanded}>
@@ -266,9 +355,9 @@ export function AgentAttackGraph({
             <p className="-mt-1 line-clamp-2 text-xs text-muted-foreground">{meta.objective}</p>
           ) : null}
           <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
-            {expanded ? <Canvas graph={graph} /> : null}
+            {expanded ? <Canvas graph={shown!} /> : null}
           </div>
-          <Legend graph={graph} />
+          <Legend graph={shown!} />
         </DialogContent>
       </Dialog>
     </div>

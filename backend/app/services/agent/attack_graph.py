@@ -232,6 +232,7 @@ def proof_status(proof: Dict[str, Any]) -> Optional[str]:
 
 
 _RANK = {"inferred": 0, "observed": 1, "proven": 2}
+_CAPABILITY_KINDS = {"credential", "identity", "rce", "data"}
 
 
 def _stronger(a: str, b: str) -> str:
@@ -244,11 +245,14 @@ def _tokens(text: str) -> set:
     return {t for t in _norm(text).split() if len(t) > 2 and t not in stop}
 
 
-def _similar(a: str, b: str, threshold: float = 0.5) -> bool:
+SIMILAR = 0.5
+
+
+def _similarity(a: str, b: str) -> float:
     ta, tb = _tokens(a), _tokens(b)
     if not ta or not tb:
-        return False
-    return len(ta & tb) / min(len(ta), len(tb)) >= threshold
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
 
 
 class _Builder:
@@ -313,24 +317,30 @@ class _Builder:
         pool = self.captured.get(host or "", []) + self.captured.get("*", [])
         return pool[-1] if pool else None
 
-    def find_action(self, anchor: str, text: str) -> Optional[Dict[str, Any]]:
-        for e in self.edges.values():
-            if e["source"] != anchor:
-                continue
-            n = self.nodes.get(e["target"])
-            if n and n["kind"] == "action" and _similar(n.get("description") or n["title"], text):
-                return n
-        return None
+    def _best(self, candidates: List[Dict[str, Any]], text: str) -> Optional[Dict[str, Any]]:
+        best, best_score = None, SIMILAR
+        for n in candidates:
+            score = _similarity(n.get("description") or n["title"], text)
+            if score >= best_score and (best is None or score > best_score):
+                best, best_score = n, score
+        return best
+
+    def find_action(self, anchor: str, text: str, unpublished_only: bool = False) -> Optional[Dict[str, Any]]:
+        targets = [self.nodes.get(e["target"]) for e in self.edges.values() if e["source"] == anchor]
+        return self._best([n for n in targets if n and n["kind"] == "action"
+                           and not (unpublished_only and n.get("finding_id"))], text)
 
     def find_action_on_host(self, host: Optional[str], text: str) -> Optional[Dict[str, Any]]:
-        for n in self.nodes.values():
-            if n["kind"] != "action" or n.get("finding_id"):
-                continue
-            if host and n.get("host") not in (host, None):
-                continue
-            if _similar(n.get("description") or n["title"], text):
-                return n
-        return None
+        return self._best([n for n in self.nodes.values()
+                           if n["kind"] == "action" and not n.get("finding_id")
+                           and (not host or n.get("host") in (host, None))], text)
+
+    def downstream_capabilities(self, action_id: str) -> List[str]:
+        return [e["target"] for e in self.edges.values()
+                if e["source"] == action_id and self.nodes.get(e["target"], {}).get("kind") in _CAPABILITY_KINDS]
+
+    def upstream_capabilities(self, action_id: str) -> List[str]:
+        return [e["source"] for e in self.edges.values() if e["target"] == action_id and e["label"] == "uses"]
 
     def capability(self, action_id: str, text: str, host: Optional[str], status: str) -> None:
         cap = classify_capability(text)
@@ -338,6 +348,15 @@ class _Builder:
             return
         kind, label = cap
         title = capability_title(text, kind)
+        # "Leaked API key grants admin access": the key is what the action
+        # consumed, not what it gained. Don't redraw an input as an output.
+        used_titles = {self.nodes[c]["title"] for c in self.upstream_capabilities(action_id) if c in self.nodes}
+        if title in used_titles:
+            rest = classify_capability(re.sub(re.escape(title), " ", text, flags=re.I))
+            if not rest:
+                return
+            kind, label = rest
+            title = capability_title(re.sub(re.escape(title), " ", text, flags=re.I), kind)
         cap_id = f"{kind}:{host or '*'}:{_norm(title)}"
         self.node(cap_id, kind=kind, title=_clip(title, 40), subtitle=label,
                   description=_clip(text, 500), status=status, host=host)
@@ -454,7 +473,7 @@ def _add_proofs(b: _Builder, proofs: List[Dict[str, Any]]) -> int:
             verification=proof.get("verification_level") or proof.get("verdict") or "",
         )
 
-        existing = b.find_action(anchor, title) or b.find_action_on_host(host, title)
+        existing = b.find_action(anchor, title, unpublished_only=True) or b.find_action_on_host(host, title)
         if existing:
             existing.update(fields)
             if existing.get("evidence", {}).get("phase") != "published finding":
@@ -477,7 +496,15 @@ def _add_proofs(b: _Builder, proofs: List[Dict[str, Any]]) -> int:
             if e["target"] == action_id and e["label"] == "uses" and status == "proven":
                 e["status"] = "proven"
                 b.promote(e["source"], "proven")
-        b.capability(action_id, text, host, status)
+        downstream = b.downstream_capabilities(action_id)
+        if downstream:
+            # The step already said what this action gained; the proof confirms it.
+            for cap_id in downstream:
+                b.edges[f"{action_id}->{cap_id}"]["status"] = _stronger(
+                    b.edges[f"{action_id}->{cap_id}"]["status"], status)
+                b.promote(cap_id, status)
+        else:
+            b.capability(action_id, text, host, status)
         added += 1
     return added
 
@@ -534,7 +561,7 @@ def build_attack_graph(
 
     nodes = [b.nodes[nid] for nid in b.order]
     edges = list(b.edges.values())
-    capability_kinds = {"credential", "identity", "rce", "data"}
+    capability_kinds = _CAPABILITY_KINDS
     return {
         "nodes": nodes,
         "edges": edges,
