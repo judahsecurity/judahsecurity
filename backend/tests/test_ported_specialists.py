@@ -99,7 +99,11 @@ def test_identity_lanes_never_spray(name):
     text = profile.system_prompt_suffix.lower()
     assert "no password spraying" in text
     assert "credential_assault" in text and "grants credential testing" in text
-    assert PROOFS_BY_CLASS["account_enumeration"] == frozenset()
+    # Enumeration confirms only through the operator-captured test-account
+    # differential, which these IdP lanes are not granted.
+    assert PROOFS_BY_CLASS["account_enumeration"] == frozenset({"scoped_account_enum_differential"})
+    assert "scoped_account_enum_assigned" not in profile.allowed_tools
+    assert "stays a lead" in text or "is a lead" in text
 
 
 @pytest.mark.parametrize("name", ("deserialization", "nextjs"))

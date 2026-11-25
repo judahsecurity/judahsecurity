@@ -69,10 +69,20 @@ COVERAGE_TO_PROOF = {
     "sqli": "sql_injection", "xss": "xss", "stored_xss": "xss", "crlf": "crlf",
     "nosql": "nosql", "ssti": "ssti", "ssrf": "ssrf", "open_redirect": "open_redirect",
     "path_traversal": "path_traversal", "command_injection": "command_injection",
-    "authz": "authorization", "xxe": "xxe", "prototype_pollution": None, "csrf": "csrf",
+    "authz": "authorization", "xxe": "xxe",
+    # JSON-body endpoints: server-side gadget proof (scoped_server_pp_assigned).
+    "prototype_pollution": "server_prototype_pollution", "csrf": "csrf",
     "race_condition": "race_condition", "cors": "cors", "graphql": None,
-    "file_upload": None, "oauth": None, "saml_sso": None, "llm_ai": None,
-    "business_logic": None, "dom_open_redirect": "dom_open_redirect",
+    "file_upload": "file_upload",
+    # redirect_uri grant leakage only (scoped_oauth_redirect_assigned).
+    "oauth": "oauth", "saml_sso": None,
+    # Embedded-instruction canary (scoped_llm_canary_assigned).
+    "llm_ai": "prompt_injection",
+    # Business logic has no generic proof. A workflow bypass that is an
+    # authorization failure proves under authorization (workflow receipt,
+    # state_change with a distinct owner readback, or authorization); anything
+    # else stays a lead.
+    "business_logic": "authorization", "dom_open_redirect": "dom_open_redirect",
     "dom_link_manipulation": None, "dom_data_manipulation": None,
     "request_url_override": None, "client_template_injection": "client_template_injection",
     "client_prototype_pollution": "client_prototype_pollution",

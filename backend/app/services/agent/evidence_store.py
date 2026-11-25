@@ -493,7 +493,7 @@ class EvidenceStore:
                 "scoped_browser_check_stored_xss",
                 "scoped_browser_check_client", "scoped_response_probe",
                 "scoped_race_probe", "scoped_injection_probe", "scoped_csrf_probe",
-                "scoped_jwt_probe",
+                "scoped_jwt_probe", "scoped_class_probe",
             }:
                 try:
                     if origin(row["target"]) != origin(target):

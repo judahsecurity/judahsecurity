@@ -119,7 +119,10 @@ LOGIC = {
 def test_retest_class_and_eligibility():
     assert pr.proof_class_for(LOGIC) == ""
     assert pr.retest_class_for(LOGIC) == ec.RETEST_CLASS
-    assert pr.retest_class_for({"title": "User enumeration on /login"}) == "account_enumeration"
+    # account_enumeration now has a receipt-backed proof kind, so it is a proof
+    # class, not a retest class.
+    assert pr.proof_class_for({"title": "User enumeration on /login"}) == "account_enumeration"
+    assert pr.retest_class_for({"title": "User enumeration on /login"}) == ec.RETEST_CLASS
     assert pr.retest_eligible(LOGIC)
     assert pr.retest_eligible({**LOGIC, "detected_by": "manual"})
     assert not pr.retest_eligible({**LOGIC, "detected_by": "nuclei"})

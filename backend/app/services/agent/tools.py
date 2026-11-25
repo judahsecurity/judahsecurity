@@ -78,6 +78,7 @@ from app.services.agent.tools_threat_intel import ThreatIntelToolsMixin
 from app.services.agent.tools_ported_probes import PortedProbeToolsMixin
 from app.services.agent.tools_graph import AttackGraphToolsMixin
 from app.services.agent.tools_intent_probes import IntentProbeToolsMixin
+from app.services.agent.tools_class_proofs import ClassProofToolsMixin
 
 
 class ASMToolsManager(
@@ -99,6 +100,7 @@ class ASMToolsManager(
     PortedProbeToolsMixin,
     AttackGraphToolsMixin,
     IntentProbeToolsMixin,
+    ClassProofToolsMixin,
     ScopedAssessmentTools,
     AssessmentCapabilities,
 ):

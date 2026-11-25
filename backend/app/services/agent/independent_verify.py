@@ -834,6 +834,9 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_jwt_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_class_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 report = await _run_specialist(
                     profile, mission, [cand.target], llm, tools_manager,
                 )
@@ -1105,6 +1108,60 @@ async def _verify_scoped_cors_candidate(
         except Exception:
             logging.getLogger(__name__).exception("CORS verifier replay failed")
             failure = "CORS verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_class_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat a class_probes plan (upload, enumeration, OAuth, CSWSH, server PP,
+    LLM canary) with a fresh nonce and confirm only from the paired receipts."""
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import CLASS_PROBE_KINDS
+
+    kinds = {claim: kind for kind, claim in CLASS_PROBE_KINDS.items()}
+    claim = cand.vulnerability_class
+    if claim not in kinds:
+        return None
+    store = evidence_store(tools_manager)
+    identity = str(cand.identity or "")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_class_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and (not identity or store.records[eid].get("identity") == identity)
+                   and store.records[eid].get("payload", {}).get("test_type") == claim
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True),
+                  None)
+    failure = f"A positive {claim} class-probe receipt on the candidate target is required"
+    replay = getattr(tools_manager, "replay_class_probe", None)
+    if hunter and replay:
+        hunter_id, receipt = hunter
+        try:
+            artifact_id = await replay(cand, receipt)
+            verifier = store.records.get(artifact_id)
+            if (verifier and verifier.get("run_id") == run.id
+                    and verifier.get("payload", {}).get("proof_confirmed") is True):
+                proof = {"kind": kinds[claim], "hunter_artifact_id": hunter_id,
+                         "artifact_id": artifact_id}
+                ok, why = _confirm_or_explain(
+                    tools_manager, store, cand, run, proof, artifact_id,
+                    f"Fresh {claim} replay reproduced the hunter receipt.")
+                if ok:
+                    return {"candidate_id": cand.id, "title": cand.title,
+                            "status": "confirmed", "verifier_summary":
+                            f"Fresh {claim} probe matched the hunter receipt",
+                            "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why
+            else:
+                failure = f"Fresh {claim} probe did not reproduce the hunter receipt"
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Class-probe verifier replay failed")
+            failure = f"{claim} verifier replay failed: {type(exc).__name__}"
     apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
                   evidence=failure, summary=failure)
     return {"candidate_id": cand.id, "title": cand.title,
