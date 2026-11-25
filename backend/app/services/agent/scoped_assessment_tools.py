@@ -145,6 +145,10 @@ class ScopedAssessmentTools:
         from app.services.agent.scoped_assessment.test_records import validate_endpoints
 
         test_record_endpoints = validate_endpoints(policy.get("test_record_endpoints") or [])
+        from app.services.agent.scoped_assessment.class_probes import normalize_llm_indirect_fields
+
+        llm_indirect_fields = normalize_llm_indirect_fields(
+            policy.get("llm_indirect_fields") or [], test_record_endpoints)
         auth_login_path = policy.get("auth_login_path") or ""
         if (auth_login_path and (not isinstance(auth_login_path, str)
                 or not auth_login_path.startswith("/") or auth_login_path.startswith("//")
@@ -188,9 +192,11 @@ class ScopedAssessmentTools:
         self._scoped_csrf_cleanup_paths = set(csrf_cleanup_paths)
         self._scoped_owner_expectations = approved
         self._scoped_test_record_endpoints = test_record_endpoints
+        self._scoped_llm_indirect_fields = llm_indirect_fields
         self._scoped_auth_login_path = auth_login_path
         if (paths or cleanup_paths or race_action_paths or race_cleanup_paths
-                or csrf_action_paths or csrf_cleanup_paths or approved or test_record_endpoints):
+                or csrf_action_paths or csrf_cleanup_paths or approved or test_record_endpoints
+                or llm_indirect_fields):
             self._scoped_assessment_started = True
 
     def _scoped_origin(self, url: str) -> str:

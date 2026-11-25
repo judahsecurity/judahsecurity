@@ -5,6 +5,7 @@ import json
 import re
 import secrets
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from urllib.parse import parse_qsl, quote, urlsplit
@@ -36,8 +37,25 @@ class App:
         self.enum_mode = "differential"
         self.chat_mode = "obeys"
         self.spaces = None  # simulated Object.prototype["json spaces"]
+        self.proto_status = None  # simulated Object.prototype.status
+        self.pp_vulnerable = True
+        self.notes = []  # POST-mode documents
+        self.docs = {}  # Prowl-owned test records
+        self.fetched = []  # hosts the simulated model "fetched"
+        self.fetch_all_links = False
+        self.timing_delay = 0.06
         self.requests = []
         self.lock = threading.Lock()
+
+
+def _model(app, context):
+    """A toy model: follows split-word and fetch instructions found in its context."""
+    hosts = re.findall(r"open https://([^/\s]+)/", context)
+    if app.fetch_all_links:
+        hosts = re.findall(r"https://([^/\s]+)/", context)
+    app.fetched.extend(hosts)
+    found = re.search(r"joining '([^']*)', '([^']*)' and '([^']*)'", context)
+    return "".join(found.groups()) if found else "The notes look fine."
 
 
 def _serve(app):
@@ -79,15 +97,39 @@ def _serve(app):
                     return self._send(302, b"", [("Location", redirect + "?error=access_denied")])
                 return self._send(302, b"", [(
                     "Location", f"{redirect}?code=SUPERSECRETCODE123&state={query.get('state', '')}")])
+            if parts.path.startswith("/api/docs/"):
+                doc_id = parts.path.rsplit("/", 1)[1]
+                if doc_id not in app.docs:
+                    return self._send(404, b"missing")
+                return self._send(200, json.dumps(app.docs[doc_id]).encode(),
+                                  [("Content-Type", "application/json")])
             if parts.path == "/api/status":
                 doc = {"ok": True, "items": [1, 2]}
                 text = json.dumps(doc, indent=app.spaces) if app.spaces else json.dumps(doc, separators=(",", ":"))
                 return self._send(200, text.encode(), [("Content-Type", "application/json")])
             return self._send(404, b"nope")
 
+        def do_PUT(self):
+            parts = urlsplit(self.path)
+            body = self._body()
+            app.requests.append(("PUT", self.path))
+            doc_id = parts.path.rsplit("/", 1)[1]
+            if parts.path.startswith("/api/docs/") and doc_id in app.docs:
+                app.docs[doc_id] = json.loads(body)
+                return self._send(200, b'{"ok":true}', [("Content-Type", "application/json")])
+            return self._send(404)
+
         def do_DELETE(self):
             parts = urlsplit(self.path)
             app.requests.append(("DELETE", self.path))
+            if parts.path.startswith("/api/docs/"):
+                return self._send(204) if app.docs.pop(parts.path.rsplit("/", 1)[1], None) \
+                    else self._send(404)
+            if parts.path == "/api/notes/delete":
+                marker = dict(parse_qsl(parts.query)).get("marker", "")
+                before = len(app.notes)
+                app.notes = [n for n in app.notes if marker not in n]
+                return self._send(204 if len(app.notes) < before else 404)
             name = dict(parse_qsl(parts.query)).get("name", "")
             if parts.path == "/files/delete" and name in app.files:
                 del app.files[name]
@@ -108,6 +150,11 @@ def _serve(app):
                 fields = dict(parse_qsl(body.decode()))
                 user = fields.get("email", "")
                 token = secrets.token_hex(16)
+                if app.enum_mode in {"timing", "uniform"}:
+                    if app.enum_mode == "timing" and user == "alice@example.test":
+                        time.sleep(app.timing_delay)
+                    text = f'<input name="csrf" value="{token}"><p>Invalid email or password</p>'
+                    return self._send(401, text.encode(), [("Content-Type", "text/html")])
                 if user == "alice@example.test" and app.enum_mode == "differential":
                     text = f'<input name="csrf" value="{token}"><p>Wrong password for {user}</p>'
                 elif app.enum_mode == "lockout":
@@ -122,10 +169,37 @@ def _serve(app):
                 proto = doc.get("__proto__")
                 if isinstance(proto, dict) and "json spaces" in proto:
                     app.spaces = proto["json spaces"]
+                if isinstance(proto, dict) and "status" in proto and app.pp_vulnerable:
+                    app.proto_status = proto["status"]
                 return self._send(200, b'{"saved":true}', [("Content-Type", "application/json")])
+            if parts.path == "/api/other":
+                try:
+                    json.loads(body)
+                except ValueError:
+                    # http-errors: err.status (inherited) || 400
+                    status = app.proto_status if isinstance(app.proto_status, int) \
+                        and 400 <= app.proto_status < 600 else 400
+                    return self._send(status, b'{"error":"bad json"}',
+                                      [("Content-Type", "application/json")])
+                return self._send(200, b'{"ok":true}', [("Content-Type", "application/json")])
+            if parts.path == "/api/notes":
+                doc = json.loads(body)
+                app.notes.append(doc.get("body", ""))
+                return self._send(201, json.dumps({"id": len(app.notes)}).encode(),
+                                  [("Content-Type", "application/json")])
+            if parts.path == "/api/docs":
+                doc_id = secrets.token_hex(4)
+                app.docs[doc_id] = json.loads(body)
+                return self._send(201, json.dumps({"id": doc_id}).encode(),
+                                  [("Content-Type", "application/json")])
+            if parts.path == "/api/assistant":
+                context = " ".join([*app.notes, *(str(d.get("text", "")) for d in app.docs.values())])
+                return self._send(200, json.dumps({"reply": _model(app, context)}).encode(),
+                                  [("Content-Type", "application/json")])
             if parts.path == "/api/chat":
                 message = json.loads(body).get("message", "")
                 found = re.search(r"joining '([^']*)', '([^']*)' and '([^']*)'", message)
+                _model(app, message)  # records simulated fetches
                 if app.chat_mode == "echo":
                     reply = message
                 elif found:
@@ -618,3 +692,465 @@ def test_upload_escaped_preview_is_not_served_content():
     base = "https://a.test"
     assert not cp.served_active(cp.served_observation(escaped, content, base + "/v/x", base))
     assert cp.served_active(cp.served_observation(raw, content, base + "/v/x", base))
+
+
+# ================================================================ gap lanes
+
+_POLICY = {
+    "body_replay_paths": ["/upload", "/api/profile", "/api/chat", "/login", "/api/other"],
+    "stored_xss_cleanup_paths": ["/files/delete", "/api/notes/delete"],
+}
+_DOCS_ENDPOINT = {
+    "create_path": "/api/docs", "create_body": {"title": "doc-__PROWL_NONCE__", "text": "hello"},
+    "content_type": "json", "record_path": "/api/docs/{id}", "id_source": "json:id",
+    "write_methods": ["PUT"], "cleanup": "delete", "cleanup_delete_approved": True,
+}
+
+
+class FakeCollector:
+    """Stands in for oob_collectors: one unique id per registration, hits from app.fetched."""
+
+    def __init__(self, app):
+        self.app = app
+        self.sessions = {}
+        self.stopped = []
+
+    def register(self, server=None, token=None):
+        uid = secrets.token_hex(10)
+        sid = f"s{len(self.sessions)}"
+        self.sessions[sid] = f"{uid}.oast.test"
+        return {"success": True, "session_id": sid, "payload_domain": f"{uid}.oast.test",
+                "payload_url": f"http://{uid}.oast.test/", "reused": False}
+
+    def poll(self, session_id):
+        domain = self.sessions[session_id]
+        hits = [{"protocol": "http", "unique_id": domain.split(".")[0], "raw_request": host}
+                for host in self.app.fetched if host.endswith(domain)]
+        return {"success": True, "session_id": session_id, "interactions": hits}
+
+    def stop(self, session_id):
+        self.stopped.append(session_id)
+        return {"success": True}
+
+
+@pytest.fixture
+def collector(target, monkeypatch):
+    from app.services import oob_collectors
+
+    app, _base = target
+    fake = FakeCollector(app)
+    monkeypatch.setattr(oob_collectors, "oob_register", fake.register)
+    monkeypatch.setattr(oob_collectors, "oob_poll", fake.poll)
+    monkeypatch.setattr(oob_collectors, "oob_stop", fake.stop)
+    return fake
+
+
+def _chat_cell(manager, base, path, document=None):
+    capture = _capture(manager, base, path, document or {"message": "What do my notes say?"})
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    seed_parameter_coverage_cells(brain, [{
+        "method": "POST", "path": path, "host": urlsplit(base).netloc, "name": "message",
+        "location": "body_json", "source": "browser_traffic", "identity": "anonymous",
+        "testable": True, "artifact_id": capture}])
+    manager._engagement_brain = brain.to_dict()
+    return _lease(manager, "agent_tools", "llm_ai")
+
+
+# ---------------------------------------------------------------- 1. indirect LLM injection
+
+@pytest.mark.asyncio
+async def test_llm_indirect_post_document_canary_cleanup_and_verifier(target):
+    app, base = target
+    manager = _manager(base)
+    manager.set_scoped_assessment_policy({**_POLICY, "llm_indirect_fields": [
+        {"write_path": "/api/notes", "field": "body", "read_path": "/api/assistant"}]})
+    _capture(manager, base, "/api/notes", {"title": "n", "body": "original"})
+    lease = _chat_cell(manager, base, "/api/assistant")
+    unapproved = await manager.scoped_llm_indirect_canary_assigned(
+        lease.coverage_cell_id, lease.id, write_path="/api/other")
+    assert unapproved["error"] == "operator_approval_required"
+    result = await manager.scoped_llm_indirect_canary_assigned(
+        lease.coverage_cell_id, lease.id, write_path="/api/notes",
+        cleanup_url_template=base + "/api/notes/delete?marker=__PROWL_NONCE__")
+    assert result["proof_confirmed"] is True, result
+    assert result["write_mode"] == "post" and result["leftovers"] == []
+    assert app.notes == []  # both planted notes removed through the approved cleanup path
+    payload = evidence_store(manager).records[result["evidence_id"]]["payload"]
+    assert payload["channel"] == "indirect_document" and payload["canary_in_input"] is False
+    report = await _verify(manager, base, "/api/assistant", result, "prompt_injection",
+                           cell_id=lease.coverage_cell_id)
+    assert report["status"] == "confirmed", report["verifier_summary"]
+    assert app.notes == []
+
+
+@pytest.mark.asyncio
+async def test_llm_indirect_without_cleanup_reports_leftovers(target):
+    app, base = target
+    manager = _manager(base)
+    manager.set_scoped_assessment_policy({**_POLICY, "llm_indirect_fields": [
+        {"write_path": "/api/notes", "field": "body", "read_path": "/api/assistant"}]})
+    _capture(manager, base, "/api/notes", {"body": "original"})
+    lease = _chat_cell(manager, base, "/api/assistant")
+    result = await manager.scoped_llm_indirect_canary_assigned(
+        lease.coverage_cell_id, lease.id, write_path="/api/notes")
+    assert result["proof_confirmed"] is True, result
+    assert len(result["leftovers"]) == 2 and all("prowl-note-" in x for x in result["leftovers"])
+    assert len(app.notes) == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_indirect_own_record_put_and_delete(target):
+    app, base = target
+    manager = _manager(base)
+    manager.set_scoped_assessment_policy({
+        **_POLICY, "test_record_endpoints": [_DOCS_ENDPOINT],
+        "llm_indirect_fields": [{"write_path": "/api/docs/{id}", "field": "text",
+                                 "read_path": "/api/assistant"}]})
+    lease = _chat_cell(manager, base, "/api/assistant")
+    result = await manager.scoped_llm_indirect_canary_assigned(
+        lease.coverage_cell_id, lease.id, write_path="/api/docs/{id}")
+    assert result["proof_confirmed"] is True, result
+    assert result["write_mode"] == "own_record" and result["leftovers"] == []
+    assert app.docs == {}  # own records deleted and confirmed gone
+    puts = [r for r in app.requests if r[0] == "PUT"]
+    assert len(puts) == 2 and all(r[1].startswith("/api/docs/") for r in puts)
+    report = await _verify(manager, base, "/api/assistant", result, "prompt_injection",
+                           cell_id=lease.coverage_cell_id)
+    assert report["status"] == "confirmed", report["verifier_summary"]
+
+
+def test_llm_indirect_policy_validation():
+    from app.api.routes.agent import AgentAssessmentPolicy
+
+    ok = cp.normalize_llm_indirect_fields(
+        [{"write_path": "/api/notes", "field": "body", "read_path": "/api/assistant"}])
+    assert ok[0]["read_path"] == "/api/assistant"
+    bad_rows = (
+        [{"write_path": "/api/notes?x=1", "field": "body", "read_path": "/api/assistant"}],
+        [{"write_path": "/api/notes", "field": "body", "read_path": "/api/notes"}],
+        [{"write_path": "/api/notes", "field": "a b", "read_path": "/api/assistant"}],
+        [{"write_path": "/api/docs/{id}", "field": "text", "read_path": "/api/assistant"}],
+        [{"write_path": "/api/register", "field": "bio", "read_path": "/api/assistant"}],
+        [{"write_path": "/api/notes", "field": "body", "read_path": "/api/assistant", "x": 1}],
+    )
+    for rows in bad_rows:
+        with pytest.raises(ValueError):
+            cp.normalize_llm_indirect_fields(rows)
+    # The ownership nonce must survive the planted write.
+    only_nonce = {**_DOCS_ENDPOINT, "create_body": {"text": "doc-__PROWL_NONCE__"}}
+    with pytest.raises(ValueError, match="only"):
+        AgentAssessmentPolicy.model_validate({
+            "test_record_endpoints": [only_nonce],
+            "llm_indirect_fields": [{"write_path": "/api/docs/{id}", "field": "text",
+                                     "read_path": "/api/assistant"}]})
+    policy = AgentAssessmentPolicy.model_validate({
+        "test_record_endpoints": [_DOCS_ENDPOINT],
+        "llm_indirect_fields": [{"write_path": "/api/docs/{id}", "field": "text",
+                                 "read_path": "/api/assistant"}]})
+    assert policy.llm_indirect_fields[0].field == "text"
+
+
+# ---------------------------------------------------------------- 2. LLM via OOB
+
+@pytest.mark.asyncio
+async def test_llm_oob_fetch_needs_grant_correlates_and_verifier_replays(target, collector):
+    app, base = target
+    manager = _manager(base)
+    lease = _chat_cell(manager, base, "/api/chat", {"message": "hello"})
+    manager._class_oob_pause = 0
+    denied = await manager.scoped_llm_oob_fetch_assigned(lease.coverage_cell_id, lease.id)
+    assert denied["error"] == "operator_approval_required"
+    manager._oob_callbacks_allowed = True
+    result = await manager.scoped_llm_oob_fetch_assigned(lease.coverage_cell_id, lease.id)
+    assert result["proof_confirmed"] is True, result
+    assert result["probe"]["http_callback"] is True and result["control"]["any_callback"] is False
+    assert "not data exfiltration" in result["claim"]
+    assert len(collector.stopped) == 2  # both registrations closed
+    report = await _verify(manager, base, "/api/chat", result, "prompt_injection",
+                           cell_id=lease.coverage_cell_id)
+    assert report["status"] == "confirmed", report["verifier_summary"]
+
+
+@pytest.mark.asyncio
+async def test_llm_oob_control_fetch_is_not_proof(target, collector):
+    app, base = target
+    app.fetch_all_links = True  # fetches every URL in data: a link unfurler, not injection
+    manager = _manager(base)
+    manager._oob_callbacks_allowed = True
+    manager._class_oob_pause = 0
+    lease = _chat_cell(manager, base, "/api/chat", {"message": "hello"})
+    result = await manager.scoped_llm_oob_fetch_assigned(lease.coverage_cell_id, lease.id)
+    assert result["proof_confirmed"] is False
+    assert result["control"]["any_callback"] is True
+
+
+@pytest.mark.asyncio
+async def test_llm_indirect_oob_variant(target, collector):
+    app, base = target
+    manager = _manager(base)
+    manager._oob_callbacks_allowed = True
+    manager._class_oob_pause = 0
+    manager.set_scoped_assessment_policy({**_POLICY, "llm_indirect_fields": [
+        {"write_path": "/api/notes", "field": "body", "read_path": "/api/assistant"}]})
+    _capture(manager, base, "/api/notes", {"body": "original"})
+    lease = _chat_cell(manager, base, "/api/assistant")
+    result = await manager.scoped_llm_indirect_canary_assigned(
+        lease.coverage_cell_id, lease.id, write_path="/api/notes", oob=True,
+        cleanup_url_template=base + "/api/notes/delete?marker=__PROWL_NONCE__")
+    assert result["proof_confirmed"] is True, result
+    assert result["instruction"] == "oob_fetch"
+    payload = evidence_store(manager).records[result["evidence_id"]]["payload"]
+    assert cp.class_proof_valid("prompt_injection", payload)
+    tampered = json.loads(json.dumps(payload))
+    tampered["control"]["interactions"] = [{"protocol": "dns", "matches": True}]
+    assert not cp.class_proof_valid("prompt_injection", tampered)
+
+
+# ---------------------------------------------------------------- 3. timing enumeration
+
+@pytest.mark.asyncio
+async def test_account_enum_timing_needs_grant_and_verifier_replays(target):
+    app, base = target
+    app.enum_mode = "timing"
+    manager = _manager(base, [{"method": "POST", "path": "/login", "name": "email",
+                               "location": "body_form", "source": "browser_traffic",
+                               "identity": "anonymous"}])
+    manager._class_timing_interval = 0
+    _operator_login_capture(manager, base)
+    lease = _lease(manager, "auth_logic", "auth")
+    denied = await manager.scoped_account_enum_assigned(lease.coverage_cell_id, lease.id,
+                                                        identity="alice", mode="timing")
+    assert denied["error"] == "operator_approval_required"
+    plain = await manager.scoped_account_enum_assigned(lease.coverage_cell_id, lease.id,
+                                                       identity="alice")
+    assert plain["proof_confirmed"] is False  # identical bodies: no differential
+    manager._credential_testing_allowed = True
+    result = await manager.scoped_account_enum_assigned(lease.coverage_cell_id, lease.id,
+                                                        identity="alice", mode="timing")
+    assert result["proof_confirmed"] is True, result
+    assert result["requests_sent"] == cp.TIMING_REQUESTS == 40
+    payload = evidence_store(manager).records[result["evidence_id"]]["payload"]
+    assert "alice@example.test" not in json.dumps(payload)
+    assert payload["timing_direction"] == "test_slower"
+    report = await _verify(manager, base, "/login", result, "account_enumeration",
+                           identity="alice", cell_id=lease.coverage_cell_id)
+    assert report["status"] == "confirmed", report["verifier_summary"]
+
+
+@pytest.mark.parametrize("mode,stopped", (("uniform", ""), ("lockout", "lockout_or_rate_limit")))
+def test_account_enum_timing_flat_or_lockout_is_not_proof(target, mode, stopped):
+    app, base = target
+    app.enum_mode = mode
+    proof = cp.probe_account_enum_timing(
+        base + "/login", kind="form", fields={"email": "alice@example.test", "password": "x"},
+        username_field="email", password_field="password", test_username="alice@example.test",
+        allowed_origin=base, nonce="abcdef123456", interval=0)
+    assert proof["proof_confirmed"] is False and proof["stopped"] == stopped
+    if mode == "lockout":
+        assert proof["requests_sent"] == 1
+
+
+def test_timing_verdict_rejects_small_or_unstable_effects():
+    def rows(test, random, run):
+        out = []
+        for t, r in zip(test, random):
+            out += [{"account": "test", "run": run, "elapsed_ms": t},
+                    {"account": "random", "run": run, "elapsed_ms": r}]
+        return out
+
+    base = [10, 11, 9, 10, 12, 10, 11, 9, 10, 10]
+    slow = [v + 80 for v in base]
+    good = rows(slow, base, 0) + rows(slow, base, 1)
+    assert cp.timing_verdict(good)["timing_stable"] is True
+    # A 5 ms gap is below the absolute floor even with low noise.
+    small = rows([v + 5 for v in base], base, 0) + rows([v + 5 for v in base], base, 1)
+    assert cp.timing_verdict(small)["timing_stable"] is False
+    # Second run disagrees in direction.
+    flipped = rows(slow, base, 0) + rows(base, slow, 1)
+    assert cp.timing_verdict(flipped)["timing_stable"] is False
+    # Nine samples per group is not enough.
+    short = rows(slow[:9], base[:9], 0) + rows(slow[:9], base[:9], 1)
+    assert cp.timing_verdict(short)["timing_stable"] is False
+
+
+# ---------------------------------------------------------------- 4. PP status gadget
+
+def _pp_cell(manager, base):
+    capture = _capture(manager, base, "/api/profile", {"name": "bob"})
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    seed_parameter_coverage_cells(brain, [{
+        "method": "POST", "path": "/api/profile", "host": urlsplit(base).netloc, "name": "name",
+        "location": "body_json", "source": "browser_traffic", "identity": "anonymous",
+        "testable": True, "artifact_id": capture}])
+    manager._engagement_brain = brain.to_dict()
+    return _lease(manager, "injection", "prototype_pollution")
+
+
+@pytest.mark.asyncio
+async def test_server_pp_status_gadget_control_reset_and_verifier(target):
+    app, base = target
+    manager = _manager(base)
+    manager.set_scoped_assessment_policy(_POLICY)
+    lease = _pp_cell(manager, base)
+    result = await manager.scoped_server_pp_assigned(
+        lease.coverage_cell_id, lease.id, readback_url=base + "/api/other", gadget="status_code")
+    assert result["proof_confirmed"] is True, result
+    assert result["gadget"] == "status_code" and result["reset_restored"] is True
+    assert app.proto_status == 0
+    again = await manager.scoped_server_pp_assigned(
+        lease.coverage_cell_id, lease.id, readback_url=base + "/api/other", gadget="status_code")
+    assert again["error"] == "already_probed"
+    report = await _verify(manager, base, "/api/profile", result, "server_prototype_pollution",
+                           cell_id=lease.coverage_cell_id)
+    assert report["status"] == "confirmed", report["verifier_summary"]
+    hunter = evidence_store(manager).records[result["evidence_id"]]["payload"]
+    assert [s["status"] for s in hunter["steps"] if s.get("malformed")] == [
+        400, 400, hunter["code"], 400]
+
+
+@pytest.mark.asyncio
+async def test_server_pp_status_needs_approved_unrelated_readback(target):
+    _app, base = target
+    manager = _manager(base)  # /api/other is not in body_replay_paths here
+    lease = _pp_cell(manager, base)
+    result = await manager.scoped_server_pp_assigned(
+        lease.coverage_cell_id, lease.id, readback_url=base + "/api/other", gadget="status_code")
+    assert result["error"] == "operator_approval_required"
+    with pytest.raises(ValueError, match="unrelated"):
+        cp.probe_pp_status(base + "/api/profile", document={"a": 1},
+                           error_url=base + "/api/profile", allowed_origin=base, state=None,
+                           nonce="abcdef123456", code=555)
+
+
+def test_server_pp_status_not_vulnerable_is_not_proof(target):
+    app, base = target
+    app.pp_vulnerable = False
+    proof = cp.probe_pp_status(base + "/api/profile", document={"name": "bob"},
+                               error_url=base + "/api/other", allowed_origin=base, state=None,
+                               nonce="abcdef123456", code=555)
+    assert proof["proof_confirmed"] is False and proof["polluted_status"] == 400
+
+
+def test_server_pp_status_receipt_needs_reset_and_distinct_codes():
+    def row(nonce, code, reset=400):
+        return {"operation": "scoped_class_probe", "test_type": "server_prototype_pollution",
+                "nonce": nonce, "gadget": "status_code", "code": code, "action_path": "/api/p",
+                "readback_url": "https://a.test/api/other", "control_status": 400,
+                "plain_status": 400, "polluted_status": code, "reset_status": reset,
+                "requests_sent": 7, "proof_confirmed": True,
+                "steps": [{"step": "control", "status": 400, "malformed": True},
+                          {"step": "plain_property", "status": 200},
+                          {"step": "after_plain", "status": 400, "malformed": True},
+                          {"step": "pollute", "status": 200},
+                          {"step": "after_pollute", "status": code, "malformed": True},
+                          {"step": "reset", "status": 200},
+                          {"step": "after_reset", "status": reset, "malformed": True}]}
+
+    assert cp.class_proof_valid("server_prototype_pollution", row("aaaa1111bbbb", 555))
+    assert not cp.class_proof_valid("server_prototype_pollution", row("aaaa1111bbbb", 555, 555))
+    assert not cp.class_proof_valid("server_prototype_pollution", row("aaaa1111bbbb", 500))
+    assert cp.class_pair_valid("server_prototype_pollution", row("aaaa1111bbbb", 555),
+                               row("cccc2222dddd", 556))
+    assert not cp.class_pair_valid("server_prototype_pollution", row("aaaa1111bbbb", 555),
+                                   row("cccc2222dddd", 555))
+
+
+# ---------------------------------------------------------------- 5. CSWSH with a client frame
+
+@pytest.mark.parametrize("frame,ok", (
+    ('{"type":"subscribe","channel":"balance"}', True),
+    ('{"op":"hello"}', True),
+    ('{"type":"connection_init","payload":{}}', True),
+    ('42["subscribe",{"room":"inbox"}]', True),
+    ('{"type":"message","text":"hi"}', False),
+    ('{"type":"sendMessage","to":"bob"}', False),
+    ('{"type":"subscribe","token":"abc"}', False),
+    ('{"type":"auth","user":"alice"}', False),
+    ('{"type":"subscribe","channel":"x","sig":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.x"}', False),
+    ('{"type":"start","payload":{"query":"mutation { pay(amount: 5) }"}}', False),
+    ('{"type":"subscribe","channel":"aZ09aZ09aZ09aZ09aZ09aZ09aZ09"}', False),
+    ('{"type":"subscribe","delete":true}', False),
+    ('{"type":"subscribe","action":"delete"}', False),
+    ('{"type":"subscribe","channel":"orders"}', True),
+    ('hello', False),
+))
+def test_cswsh_client_frame_rule(frame, ok):
+    assert (cp.ws_frame_meta(frame) is not None) is ok
+
+
+@pytest.fixture
+def ws_hello_target():
+    from websockets.sync.server import serve
+
+    def handler(ws):
+        cookie = ws.request.headers.get("Cookie") or ""
+        try:
+            first = json.loads(ws.recv(timeout=3))
+        except Exception:
+            return
+        if first.get("type") != "subscribe":
+            return
+        if "sid=alice" in cookie:
+            ws.send(json.dumps({"type": "update", "user": "alice-7731", "balance": 4210}))
+        else:
+            ws.send(json.dumps({"type": "update", "user": "guest"}))
+        try:
+            ws.recv(timeout=3)
+        except Exception:
+            pass
+
+    server = serve(handler, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.socket.getsockname()[1]}"
+    server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cswsh_sends_one_captured_read_only_frame_and_verifier_replays(ws_hello_target):
+    from app.services.agent import operator_capture
+
+    base = ws_hello_target
+    manager = _manager(base)
+    identity_registry(manager).register("alice", base, cookies=[{"name": "sid", "value": "alice"}])
+    silent = await manager.scoped_cswsh_probe(url=base + "/ws", identity="alice")
+    assert silent["proof_confirmed"] is False  # pushes nothing without a client message
+    missing = await manager.scoped_cswsh_probe(url=base + "/ws", identity="alice",
+                                               send_captured_frame=True)
+    assert missing["success"] is False
+    har = {"log": {"entries": [{
+        "request": {"method": "GET", "url": base.replace("http", "ws") + "/ws",
+                    "headers": [{"name": "Cookie", "value": "sid=alice"}]},
+        "response": {"status": 101, "headers": [], "content": {}},
+        "_webSocketMessages": [
+            {"type": "send", "opcode": 1, "data": '{"type":"message","text":"hi bob"}'},
+            {"type": "receive", "opcode": 1, "data": '{"type":"update"}'},
+            {"type": "send", "opcode": 1, "data": '{"type":"subscribe","channel":"balance"}'},
+        ]}]}}
+    entries = operator_capture.normalize_batch(operator_capture.har_entries(har))
+    await operator_capture.apply_batches(manager, [{"identity": "alice", "entries": entries}])
+    recorded = [r for r in evidence_store(manager).records.values()
+                if r["kind"] == "http_exchange" and r["payload"].get("ws_client_frames")]
+    assert recorded and recorded[-1]["payload"]["ws_client_frames"]["count"] == 2
+    assert "hi bob" not in json.dumps(recorded[-1]["payload"])  # raw frames stay private
+    result = await manager.scoped_cswsh_probe(url=base + "/ws", identity="alice",
+                                              send_captured_frame=True)
+    assert result["proof_confirmed"] is True, result
+    assert result["client_frame_verb"] == "subscribe"
+    payload = evidence_store(manager).records[result["evidence_id"]]["payload"]
+    assert payload["frames_sent_by_prowl"] == 3 and "alice-7731" not in json.dumps(payload)
+    report = await _verify(manager, base, "/ws", result, "cswsh", identity="alice")
+    assert report["status"] == "confirmed", report["verifier_summary"]
+    tampered = json.loads(json.dumps(payload))
+    tampered["client_frame"]["verb"] = "sendMessage"
+    assert not cp.class_proof_valid("cswsh", tampered)
+
+
+def test_new_gap_tools_are_declared_and_granted():
+    from app.services.agent.fireteam_service import get_specialist
+    from app.services.agent.tool_specs import get_spec
+
+    for name in ("scoped_llm_oob_fetch_assigned", "scoped_llm_indirect_canary_assigned"):
+        spec = get_spec(name)
+        assert spec and not spec.read_only, name
+        assert name in get_specialist("agent_tools").allowed_tools, name

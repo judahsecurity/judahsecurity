@@ -133,12 +133,32 @@ class TestRecordEndpoint(BaseModel):
         return self
 
 
+class LlmIndirectField(BaseModel):
+    """Where Prowl may plant an indirect prompt-injection canary.
+
+    ``write_path`` is an exact path Prowl may POST one new document to, or a
+    ``test_record_endpoints`` record_path (with ``{id}``) allowing PUT/PATCH,
+    in which case only a Prowl-owned record is written. ``field`` is the text
+    field that receives the canary; ``read_path`` the exact chat path whose
+    answer is read. Validated again by the policy applier.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    write_path: str = Field(min_length=2, max_length=256)
+    field: str = Field(min_length=1, max_length=330)
+    read_path: str = Field(min_length=2, max_length=256)
+
+
 class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
     # PUT/PATCH/DELETE probes run only against a dummy record Prowl creates
     # from one of these endpoints, verifies as its own and cleans up.
     test_record_endpoints: list[TestRecordEndpoint] = Field(default_factory=list, max_length=4)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
+    # Indirect prompt injection: plant a canary in one approved document field
+    # and read the model's answer on the approved chat path.
+    llm_indirect_fields: list[LlmIndirectField] = Field(default_factory=list, max_length=4)
     # Operator-approved state-changing actions for the race and CSRF proofs.
     # Each needs a matching cleanup path that accepts the __PROWL_NONCE__ canary.
     race_action_paths: list[str] = Field(default_factory=list, max_length=8)
@@ -190,7 +210,11 @@ class AgentAssessmentPolicy(BaseModel):
     def validate_test_record_endpoints(self):
         from app.services.agent.scoped_assessment.test_records import validate_endpoints
 
-        validate_endpoints([row.model_dump() for row in self.test_record_endpoints])
+        endpoints = validate_endpoints([row.model_dump() for row in self.test_record_endpoints])
+        from app.services.agent.scoped_assessment.class_probes import normalize_llm_indirect_fields
+
+        normalize_llm_indirect_fields([row.model_dump() for row in self.llm_indirect_fields],
+                                      endpoints)
         return self
 
 

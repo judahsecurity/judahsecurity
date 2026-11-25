@@ -127,6 +127,14 @@ class ASMToolsManager(
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_test_record_endpoints = SessionValue(list)
     _scoped_test_records = SessionValue(list)
+    # Operator-approved indirect prompt-injection fields (llm_indirect_fields).
+    _scoped_llm_indirect_fields = SessionValue(list)
+    # Client WebSocket text frames from operator captures, per identity (never
+    # shown to the model; the CSWSH proof may replay one read-only frame).
+    _scoped_ws_client_frames = SessionValue(dict)
+    # Dedicated bounded budget for timing-only account enumeration samples.
+    _class_timing_post_count = SessionValue(lambda: 0)
+    _class_timing_verifier_post_count = SessionValue(lambda: 0)
     _scoped_auth_login_path = SessionValue(lambda: "")
     _scoped_assessment_started = SessionValue(lambda: False)
     _scoped_assessment_partial_reason = SessionValue(lambda: "")

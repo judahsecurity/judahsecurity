@@ -1641,7 +1641,8 @@ _CLASS_PROOF_TOOL_GRANTS: dict[str, tuple[str, ...]] = {
     "injection": ("scoped_server_pp_assigned",),
     "nodejs_express": ("scoped_server_pp_assigned",),
     "api_authz": ("scoped_cswsh_probe",),
-    "agent_tools": ("scoped_llm_canary_assigned",),
+    "agent_tools": ("scoped_llm_canary_assigned", "scoped_llm_oob_fetch_assigned",
+                    "scoped_llm_indirect_canary_assigned"),
 }
 for _profile in DEFAULT_SPECIALISTS:
     _extra = list(_PORTED_TOOL_GRANTS.get(_profile.name, ()))
