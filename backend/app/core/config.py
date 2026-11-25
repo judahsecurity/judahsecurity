@@ -225,6 +225,12 @@ class Settings(BaseSettings):
     # A specialist "killed" verdict backed by one evidence receipt or one
     # testing tool goes back once for a different technique before closing.
     AGENT_RECHECK_WEAK_NEGATIVES: bool = False
+    # When a turn ends on its iteration or time budget, one bounded model call
+    # lists leads the trace shows but that were never submitted, and saves them
+    # as pending, evidence-free candidates for the next run's verifier
+    # (services/agent/settlement.py). Never publishes anything.
+    AGENT_SETTLEMENT_BACKFILL: bool = False
+    AGENT_SETTLEMENT_TIMEOUT_SECONDS: int = 45
     # Where run_custom_probe / run_poc_python execute model-written Python.
     # "off": tool disabled. "isolated": sent to the probe-runner container
     # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).

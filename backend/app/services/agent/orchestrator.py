@@ -3576,6 +3576,10 @@ class AgentOrchestrator:
                 "token_usage": state.get("token_usage"),
             }
 
+        settlement_brain, settlement_note = await self._settle_unsubmitted_leads(
+            state, completion_reason,
+        )
+
         report_prompt = FINAL_REPORT_PROMPT.format(
             objective=state.get("original_objective", ""),
             iteration_count=state.get("current_iteration", 0),
@@ -3584,7 +3588,7 @@ class AgentOrchestrator:
             execution_trace=format_execution_trace(state.get("execution_trace") or []),
             target_info=json_dumps_safe(state.get("target_info") or {}, indent=2),
             todo_list=format_todo_list(state.get("todo_list") or []),
-        )
+        ) + settlement_note
         
         try:
             llm = self._resolve_llm(state, LLMTask.REPORT)
@@ -3602,12 +3606,50 @@ class AgentOrchestrator:
             from app.services.agent.action_ledger import active_run_id, partial_report
             answer = partial_report(active_run_id.get(), completion_reason)
         
-        return {
+        out = {
             "messages": [AIMessage(content=answer)],
             "task_complete": True,
             "completion_reason": completion_reason,
             "token_usage": state.get("token_usage"),
         }
+        if settlement_brain is not None:
+            out["engagement_brain"] = settlement_brain
+        return out
+
+    async def _settle_unsubmitted_leads(
+        self, state: AgentState, completion_reason: str,
+    ) -> tuple[Optional[dict], str]:
+        """On budget exhaustion, save trace leads as pending candidates (settlement.py).
+
+        Returns ``(brain_update_or_None, report_note)``. Never raises: a failed
+        settlement leaves the brain untouched and the report unchanged.
+        """
+        from app.services.agent import settlement
+
+        if not (settlement.settlement_enabled()
+                and settlement.settlement_applies(completion_reason)
+                and state.get("execution_trace")):
+            return None, ""
+        try:
+            llm = self._resolve_llm(state, LLMTask.REPORT)
+            response = await _ledger_llm_call(
+                llm, [HumanMessage(content=settlement.build_settlement_prompt(dict(state)))],
+                kind="agent_settlement",
+                target=(state.get("target_info") or {}).get("primary_target") or "",
+                phase=state.get("current_phase", "informational"),
+                timeout=float(getattr(settings, "AGENT_SETTLEMENT_TIMEOUT_SECONDS", 45)),
+            )
+            from app.services.agent.observability import model_id, record_llm_usage
+            record_llm_usage(state, response, task=LLMTask.REPORT, model=model_id(llm))
+            leads = settlement.parse_settlement_leads(llm_text(response.content))
+            brain, outcomes = settlement.apply_settlement_leads(dict(state), leads)
+        except Exception as exc:
+            logger.warning("Budget settlement skipped: %s", type(exc).__name__)
+            return None, ""
+        if outcomes:
+            logger.info("Budget settlement: %d leads proposed, %d saved", len(outcomes),
+                        sum(1 for o in outcomes if o.get("accepted")))
+        return brain, settlement.settlement_report_note(outcomes)
 
     async def _maybe_spawn_dir_brute(
         self,

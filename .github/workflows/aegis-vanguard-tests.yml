@@ -1,6 +1,7 @@
 name: aegis-vanguard tests
 
-# Test-gate for the Vanguard agent. Runs the full unittest suite on every push
+# Test-gate for the Vanguard agent. Runs the full pytest suite (which also collects
+# the unittest.TestCase files) on every push
 # to main and on PRs that touch the harness, so a broken change can't reach the
 # aegis-vanguard:latest image that production's scanner worker runs.
 
@@ -34,5 +35,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt 'pytest>=8,<9'
 
-      - name: Run unittest suite
-        run: python -m unittest discover -s tests -v
+      - name: Run test suite
+        # pytest, not `unittest discover`: about half the files are plain pytest
+        # functions that unittest never collects.
+        run: python -m pytest tests -v

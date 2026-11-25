@@ -39,6 +39,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_HUNT_DISCIPLINE_PROMPT": "false",
         "AGENT_SELF_CHALLENGE": "false",
         "AGENT_RECHECK_WEAK_NEGATIVES": "false",
+        "AGENT_SETTLEMENT_BACKFILL": "false",
         "AGENT_CUSTOM_PROBE_MODE": "off",
         "AGENT_SANDBOX_SHELL": "false",
     },
@@ -49,6 +50,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_HUNT_DISCIPLINE_PROMPT": "true",
         "AGENT_SELF_CHALLENGE": "true",
         "AGENT_RECHECK_WEAK_NEGATIVES": "true",
+        "AGENT_SETTLEMENT_BACKFILL": "false",
         "AGENT_CUSTOM_PROBE_MODE": "off",
         "AGENT_SANDBOX_SHELL": "false",
     },
@@ -60,6 +62,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_HUNT_DISCIPLINE_PROMPT": "true",
         "AGENT_SELF_CHALLENGE": "true",
         "AGENT_RECHECK_WEAK_NEGATIVES": "true",
+        "AGENT_SETTLEMENT_BACKFILL": "false",
         "AGENT_CUSTOM_PROBE_MODE": "isolated",
         "AGENT_SANDBOX_SHELL": "true",
     },
@@ -69,6 +72,10 @@ PRESETS: Dict[str, Dict[str, str]] = {
 # the run) is a product_agent flag, not an environment default, so presets
 # that use it name the mode here. Flags match the model_led presets so a
 # model_led vs deep comparison isolates the budget dimension.
+# model_led plus budget settlement: isolates whether saving unsubmitted
+# leads at budget end raises recall without adding false positives.
+PRESETS["model_led_settle"] = {**PRESETS["model_led"], "AGENT_SETTLEMENT_BACKFILL": "true"}
+
 PRESETS["deep"] = dict(PRESETS["model_led"])
 PRESETS["deep_sandbox"] = dict(PRESETS["model_led_sandbox"])
 PRESET_ASSESSMENT_MODE: Dict[str, str] = {"deep": "deep", "deep_sandbox": "deep"}
