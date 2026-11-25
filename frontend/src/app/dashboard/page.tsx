@@ -58,17 +58,9 @@ const WorldMap = dynamic(
   }
 );
 
-const PrioritizationFunnelCard = dynamic(
-  () =>
-    import('@/components/dashboard/PrioritizationFunnelCard').then(
-      (m) => m.PrioritizationFunnelCard
-    ),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="h-[420px] rounded-lg border border-orange-500/20 bg-card animate-pulse" />
-    ),
-  }
+const ValueFunnelCard = dynamic(
+  () => import('@/components/dashboard/ValueFunnelCard').then((m) => m.ValueFunnelCard),
+  { ssr: false }
 );
 
 type FindingsGroupBy =
@@ -469,7 +461,11 @@ export default function DashboardPage() {
 
   return (
     <MainLayout>
-      <Header title="Dashboard" subtitle="Overview of your attack surface" />
+      <Header
+        title="Dashboard"
+        subtitle="Overview of your attack surface"
+        actions={<LaunchAssessmentDialog />}
+      />
 
       <div className="p-6 space-y-6">
         {/* Proof-ranked priorities and live activity, Upwind-style */}
@@ -486,38 +482,50 @@ export default function DashboardPage() {
           loading={loading || pathsLoading}
         />
 
-        {/* Launch an engagement */}
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <h2 className="text-lg font-semibold">Start an engagement</h2>
-            <p className="text-sm text-muted-foreground">
-              Point Aegis at a target — pick a playbook or set a custom objective.
-            </p>
-          </div>
-          <LaunchAssessmentDialog />
-        </div>
-
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Headline numbers: one slim row instead of four large tiles */}
+        <div className="grid grid-cols-2 divide-border overflow-hidden rounded-lg border border-border bg-card md:grid-cols-4 md:divide-x">
           {statCards.map((stat) => (
-            <Link key={stat.title} href={stat.href}>
-              <Card className="hover:border-primary/50 transition-colors cursor-pointer">
-                <CardContent className="p-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm text-muted-foreground">{stat.title}</p>
-                      <p className="text-3xl font-bold mt-1">
-                        {loading ? '...' : formatNumber(stat.value)}
-                      </p>
-                    </div>
-                    <div className={`p-3 rounded-lg ${stat.bgColor}`}>
-                      <stat.icon className={`h-6 w-6 ${stat.color}`} />
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
+            <Link
+              key={stat.title}
+              href={stat.href}
+              className="group flex items-center gap-3 px-5 py-3 transition-colors hover:bg-muted/40"
+            >
+              <stat.icon className={`h-4 w-4 shrink-0 ${stat.color}`} />
+              <span className="text-sm text-muted-foreground group-hover:text-foreground">{stat.title}</span>
+              <span className="ml-auto text-lg font-semibold tabular-nums">
+                {loading ? '…' : formatNumber(stat.value)}
+              </span>
             </Link>
           ))}
+        </div>
+
+        {/* Value funnel beside the exposure map */}
+        <div className="grid gap-6 lg:grid-cols-3">
+          <ValueFunnelCard className="lg:col-span-2" />
+          <div className="min-w-0">
+            {mapLoading ? (
+              <div className="flex h-full min-h-[300px] items-center justify-center rounded-lg border border-border bg-card text-muted-foreground">
+                <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
+              </div>
+            ) : mapAssets.length > 0 ? (
+              <WorldMap
+                compact
+                assets={mapAssets}
+                onAssetClick={(asset) => {
+                  toast({
+                    title: asset.value,
+                    description: `${asset.geoLocation?.city || 'Unknown'}, ${asset.geoLocation?.country || 'Unknown'} · ${asset.findingsCount || 0} findings`,
+                  });
+                }}
+              />
+            ) : (
+              <div className="flex h-full min-h-[300px] flex-col items-center justify-center rounded-lg border border-border bg-card p-6 text-center text-muted-foreground">
+                <Globe className="mb-3 h-10 w-10 opacity-50" />
+                <p className="text-sm">No assets with geo-location data yet</p>
+                <p className="mt-1 text-xs">Run a DNS Resolution scan to resolve IPs and geo-locate assets</p>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* External Security Posture Grade */}
@@ -629,36 +637,6 @@ export default function DashboardPage() {
           </Card>
         )}
 
-        {/* World Map */}
-        <Card>
-          <CardContent className="pt-6">
-            {mapLoading ? (
-              <div className="text-center py-12 text-muted-foreground">
-                <RefreshCw className="h-8 w-8 mx-auto mb-4 opacity-50 animate-spin" />
-                <p>Loading map markers…</p>
-              </div>
-            ) : mapAssets.length > 0 ? (
-              <WorldMap 
-                assets={mapAssets} 
-                onAssetClick={(asset) => {
-                  toast({
-                    title: asset.value,
-                    description: `${asset.geoLocation?.city || 'Unknown'}, ${asset.geoLocation?.country || 'Unknown'} · ${asset.findingsCount || 0} findings`,
-                  });
-                }} 
-              />
-            ) : (
-              <div className="text-center py-12 text-muted-foreground">
-                <Globe className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p>No assets with geo-location data yet</p>
-                <p className="text-sm mt-2">Run a DNS Resolution scan to resolve IPs and geo-locate assets</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Prioritization value — live scanner → Delphi → OPES funnel */}
-        <PrioritizationFunnelCard />
 
         {/* Findings Breakdown */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
