@@ -12,7 +12,15 @@ can be measured. Isolation has to exist before any broader tooling. Pulling
 the command runner out of the large modules is the first step of both the
 isolation and the maintainability work.
 
-## Phase 0: baseline and quick fix
+## Phase 0: baseline and quick fixes
+
+### 0.0 Update model defaults (before the baseline)
+
+The defaults are dated: `claude-sonnet-4-6`, `gpt-4o` and `gemini-2.5-pro` in
+`backend/app/services/agent/llm_factory.py:43-50`, and `ANTHROPIC_MODEL` and
+`OPENAI_MODEL` in `backend/app/core/config.py:97,102`. A baseline run on
+these would understate Prowl and have to be redone, so update them before
+0.1. Check the `model_router.py` task defaults at the same time.
 
 ### 0.1 Benchmark baseline (no public numbers today)
 
@@ -45,6 +53,16 @@ Docker without a seccomp profile, so smoke-test the backend and
 `prowl-browser` images, and add a seccomp profile to compose if one is
 needed. Do not ship it as a blind change of the default.
 
+### 0.3 Persistent graph checkpoints
+
+`backend/app/services/agent/orchestrator.py:107` keeps LangGraph checkpoints
+in memory (`MemorySaver`); the comment above it already says production
+should use a persistent store. A backend restart in the middle of a turn
+loses graph state, and memory grows with every session. The Postgres run
+snapshots (`run_snapshot.py`) cover only part of this. Switch to
+`PostgresSaver` from `langgraph-checkpoint-postgres`, and test that a run
+resumes after a backend restart.
+
 ## Phase 1: real isolation
 
 Today the scanner CLI tools run as plain subprocesses inside the backend and
@@ -74,6 +92,13 @@ exists in the codebase; it just isn't safe yet.
 4. **Take the Docker socket away from the scanner.** Replace the socket mount
    with a small dedicated runner service (or rootless Docker or gVisor) that
    only accepts "launch an approved image with these limits".
+5. **Make spending and request limits hard.** `docs/PROWL_AUTONOMY.md:58-66`
+   admits that a model call can go past the dollar cap before usage is
+   reported, and that one CLI call can send many requests.
+   - Enforce a hard request count per engagement at the egress proxy from
+     step 3.
+   - Check the cost cap before each model call, using an estimated cost, as
+     well as after usage is reported.
 
 ## Phase 2: real MCP server
 
@@ -87,6 +112,8 @@ wrapper around the tool registry; no MCP SDK is used.
 4. Add stdio support later, for local clients.
 5. Keep the existing REST endpoints unchanged for current callers.
 6. Add a conformance test that uses an MCP client before calling this done.
+7. Make outbound MCP client sessions (`backend/app/services/agent/mcp_client.py`)
+   survive a process restart. Today they are process-local.
 
 ## Phase 3: memory
 
@@ -133,9 +160,32 @@ deliberate.
 - Full kill-chain or internal-network testing is a separate product
   decision, not a feature to match CyberStrikeAI on.
 
-## First three PRs
+## After the baseline: coverage gaps the docs admit to
 
-1. The browser sandbox default fix (0.2), with a smoke test.
-2. The baseline benchmark results doc (0.1).
-3. A `SandboxRunner` interface with only the `native` implementation (1.1),
+Schedule these once the Phase 0 benchmark shows how much each one matters:
+
+- XSS in URL or CSS contexts has no execution recipe.
+- The verifier on the legacy path isn't an independent adversarial agent.
+- Coverage only reaches inputs that were actually observed.
+
+## Open decisions
+
+- **Benchmark settings:** which model and which budget per run to use for
+  0.1.
+- **Vanguard:** move `aegis-vanguard/` onto Prowl's shared packages, or
+  freeze it as the research harness.
+- **`aegis-claude-sdk/`:** it runs on a Pro/Max subscription OAuth token,
+  and there is a `make` target for it in `Makefile:174-181`. Its own README
+  says that using it for client or commercial scans breaks Anthropic's
+  consumer terms and puts the account at risk. Recommended: move it out of
+  this repo, or at least make sure no deployment or customer workflow can
+  reach it. Commercial runs should use API keys.
+
+## First PRs
+
+1. Updated model defaults (0.0).
+2. The browser sandbox default fix (0.2), with a smoke test.
+3. Persistent graph checkpoints (0.3).
+4. The baseline benchmark results doc (0.1), after PR 1.
+5. A `SandboxRunner` interface with only the `native` implementation (1.1),
    so behaviour doesn't change yet.
