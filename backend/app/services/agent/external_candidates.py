@@ -38,6 +38,13 @@ EXTERNAL_SPECIALIST = "vanguard_external"
 MAX_EXTERNAL_CANDIDATES_PER_SESSION = 25
 SEVERITY_ORDER = ("info", "low", "medium", "high", "critical")
 SEVERITY_CAPS = {"known_cve": "low"}
+# Intake-only class for platform re-tests of findings whose class has no proof
+# kind (business logic, IDOR variants Prowl cannot prove, unclassifiable
+# application claims). It is not in PROOFS_BY_CLASS, so proof_kind_allowed
+# refuses every confirmation and capped_severity caps it at low: the candidate
+# can only end refuted (with counterevidence) or inconclusive. Only
+# prowl_revalidation passes allow_retest_class; the public intake route never does.
+RETEST_CLASS = "unproven_retest"
 
 FIELD_LIMITS = {
     "title": 200,
@@ -310,13 +317,14 @@ def _validated_payload(
     severity: str,
     parameter: str,
     evidence_note: str,
+    allow_retest_class: bool = False,
 ) -> Dict[str, Any]:
     """Scope/class/severity checks + sanitization. Returns the wrapped, inert payload."""
     from app.services.agent.independent_verify import candidate_id, root_cause_key
     from app.services.agent.proof_policy import PROOFS_BY_CLASS
 
     vclass = clean_text(vulnerability_class, FIELD_LIMITS["vulnerability_class"]).lower()
-    if vclass not in PROOFS_BY_CLASS:
+    if vclass not in PROOFS_BY_CLASS and not (allow_retest_class and vclass == RETEST_CLASS):
         raise IntakeError(422, f"vulnerability_class must be one of {sorted(PROOFS_BY_CLASS)}")
     clean_target = clean_text(target, FIELD_LIMITS["target"])
     try:
@@ -401,8 +409,12 @@ def submit_external_candidate(
     severity: str = "medium",
     parameter: str = "",
     evidence_note: str = "",
+    allow_retest_class: bool = False,
 ) -> Dict[str, Any]:
     """Add one pending external candidate to a session.
+
+    ``allow_retest_class`` (platform re-validation only) also accepts
+    ``RETEST_CLASS``, a class with no proof kind that can never be confirmed.
 
     Idle session: appended to the durable brain in the run snapshot.
     Running session: validated identically, then queued (write-through to the
@@ -430,6 +442,7 @@ def submit_external_candidate(
         seed, title=title, target=target, vulnerability_class=vulnerability_class,
         description=description, claimed_request=claimed_request, severity=severity,
         parameter=parameter, evidence_note=evidence_note,
+        allow_retest_class=allow_retest_class,
     )
     capped = payload["severity_capped"]
 

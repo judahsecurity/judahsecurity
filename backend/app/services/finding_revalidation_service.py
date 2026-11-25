@@ -221,8 +221,9 @@ def _revalidate_port_exposure(finding: dict, endpoints: list[dict[str, Any]]) ->
             "unknown",
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, ET.ParseError, RuntimeError) as exc:
+        from app.services.native_verifiers import tool_unavailable
         state = "unknown"
-        error = type(exc).__name__
+        error = tool_unavailable("nmap") if isinstance(exc, FileNotFoundError) else type(exc).__name__
     else:
         error = None
 
@@ -233,6 +234,10 @@ def _revalidate_port_exposure(finding: dict, endpoints: list[dict[str, Any]]) ->
     elif state in ("filtered", "closed"):
         verdict, confidence, still_open = "false_positive", "high", False
         reasoning = f"Nmap reports {endpoint} as {state}; the claimed internet exposure is not currently confirmed."
+    elif error and error.startswith("tool_unavailable:"):
+        verdict, confidence, still_open = "needs_more_evidence", "low", None
+        reasoning = (f"Nmap is not installed on the scanner worker; the state of {endpoint} "
+                     "was not checked. Install nmap to validate network findings.")
     else:
         verdict, confidence, still_open = "needs_more_evidence", "low", None
         reasoning = f"Nmap could not determine the current state of {endpoint}."
@@ -387,38 +392,51 @@ async def _revalidate_nuclei(finding: dict) -> Optional[dict[str, Any]]:
         logger.warning("Native nuclei revalidation imports failed: %s", e)
         return None
 
+    from app.services.native_verifiers import tool_unavailable
+
+    not_installed = {
+        "verdict": "needs_more_evidence",
+        "confidence": "low",
+        "is_false_positive": False,
+        "still_open": None,
+        "logical_mismatch": False,
+        "recommended_severity": finding.get("severity") or "info",
+        "reasoning": ("Nuclei is not installed on the scanner worker; cannot re-run the "
+                      "template. Install nuclei to validate template findings."),
+        "evidence": "nuclei_not_installed",
+        "template_logic_issue": None,
+        "method": "nuclei_template_replay",
+        "error": tool_unavailable("nuclei"),
+    }
     # Prefer full YAML when available; otherwise ask nuclei for the template id.
     if template_yaml:
         recheck = await recheck_template_against_target(template_yaml, str(target), timeout_sec=90)
     else:
         svc = NucleiService()
         if not svc.check_installation():
-            return {
-                "verdict": "needs_more_evidence",
-                "confidence": "low",
-                "is_false_positive": False,
-                "still_open": None,
-                "logical_mismatch": False,
-                "recommended_severity": finding.get("severity") or "info",
-                "reasoning": "Nuclei is not installed on the scanner worker; cannot re-run template.",
-                "evidence": "nuclei_not_installed",
-                "template_logic_issue": None,
-                "method": "nuclei_template_replay",
+            return not_installed
+        try:
+            scan = await svc.scan_targets(
+                targets=[str(target)],
+                severity=["critical", "high", "medium", "low", "info"],
+                templates=[str(template_id)],
+                timeout=90,
+            )
+            recheck = {
+                "ran": True,
+                "still_fires": bool(scan.findings),
+                "match_count": len(scan.findings or []),
+                "error": None,
             }
-        scan = await svc.scan_targets(
-            targets=[str(target)],
-            severity=["critical", "high", "medium", "low", "info"],
-            templates=[str(template_id)],
-            timeout=90,
-        )
-        recheck = {
-            "ran": True,
-            "still_fires": bool(scan.findings),
-            "match_count": len(scan.findings or []),
-            "error": None,
-        }
+        except Exception as exc:
+            recheck = {"ran": False, "still_fires": None, "match_count": 0,
+                       "error": f"{type(exc).__name__}: {exc}"[:255]}
 
     if recheck.get("error") and not recheck.get("ran"):
+        if recheck.get("error") == "nuclei_not_installed":
+            return {**not_installed, "nuclei_recheck": recheck}
+        # The tool is there but the re-run broke (timeout, crash, bad template):
+        # still an execution problem, not evidence about the target.
         return {
             "verdict": "needs_more_evidence",
             "confidence": "low",
@@ -431,6 +449,7 @@ async def _revalidate_nuclei(finding: dict) -> Optional[dict[str, Any]]:
             "template_logic_issue": None,
             "method": "nuclei_template_replay",
             "nuclei_recheck": recheck,
+            "error": "tool_failed:nuclei",
         }
 
     still = bool(recheck.get("still_fires"))
@@ -541,7 +560,7 @@ async def revalidate_finding(
     from app.services import native_verifiers as nv
 
     verdict = await _revalidate_finding(
-        finding, http_call=http_call, service_probe=service_probe,
+        finding, http_call=http_call, service_probe=service_probe, llm_call=llm_call,
     )
     # Template-logic diagnosis: only for template detections the re-test did
     # not confirm. Any LLM problem leaves the verdict as it is.
@@ -550,7 +569,100 @@ async def revalidate_finding(
     return nv.finalize_verdict(verdict, finding)
 
 
-async def _revalidate_finding(finding: dict, *, http_call=None, service_probe=None) -> dict[str, Any]:
+def _manual_unjudged(verdict: Optional[dict]) -> bool:
+    """Documented requests were replayed but the steps state no result to compare."""
+    return bool(verdict) and verdict.get("verdict") == "needs_more_evidence" \
+        and not verdict.get("native_verifier") and not verdict.get("indicators") \
+        and bool(verdict.get("replayed"))
+
+
+# Inferred classes that are exposure / version claims: reachability can answer them.
+_EXPOSURE_CLASSES = frozenset({"", "exposure", "known_cve"})
+
+
+def _application_claim(finding: dict, detected_by: str) -> bool:
+    """Does the finding claim application behaviour (injection, authz, logic)?"""
+    if detected_by in _APPLICATION_DETECTORS:
+        return True
+    from types import SimpleNamespace
+
+    from app.services.agent.proof_policy import inferred_vulnerability_class
+    meta = finding.get("metadata") if isinstance(finding.get("metadata"), dict) else {}
+    cls = str(meta.get("vulnerability_class") or "").strip().lower() or inferred_vulnerability_class(
+        SimpleNamespace(title=finding.get("title") or "", description=finding.get("description") or ""))
+    return cls not in _EXPOSURE_CLASSES
+
+
+def _is_app_endpoint(probe: dict) -> bool:
+    """An http(s) URL naming a route (path or query), not just a service root."""
+    if probe.get("kind") != "url":
+        return False
+    parts = urlparse(str(probe.get("url") or ""))
+    return parts.scheme in ("http", "https") and (parts.path not in ("", "/") or bool(parts.query))
+
+
+def _handoff_to_retest(verdict: dict, urls: list[str], reason: str) -> dict:
+    verdict.update(
+        verdict="needs_more_evidence", confidence="low", still_open=None,
+        remediation_state="unknown", prowl_retest=bool(urls), retest_urls=urls[:5],
+        reasoning=reason + " " + str(verdict.get("reasoning") or ""),
+    )
+    return verdict
+
+
+def resolve_mixed_endpoints(finding: dict, probes: list[dict[str, Any]], verdict: dict,
+                            detected_by: str) -> dict:
+    """Decide a mixed probe result per endpoint.
+
+    Each endpoint gets a decision: ``gone`` (unreachable), ``open`` (a service
+    or resource whose reachability is the claim) or ``retest`` (a reachable
+    route of an application-behaviour claim: reachability proves nothing).
+
+    * Application claim -> the reachable routes go to Prowl's retest
+      (``prowl_retest`` / ``retest_urls``); unreachable ones are recorded.
+    * Exposure claim -> the exposure still holds where an endpoint answers:
+      confirmed (medium), with the gone endpoints listed.
+    """
+    app_claim = _application_claim(finding, detected_by)
+    decisions = []
+    for p in probes:
+        label = p.get("url") or f"{p.get('host')}:{p.get('port')}"
+        if not p.get("reachable"):
+            decision = "gone"
+        elif app_claim and p.get("kind") == "url":
+            decision = "retest"
+        else:
+            decision = "open"
+        decisions.append({"endpoint": label, "decision": decision})
+    verdict["endpoint_decisions"] = decisions
+    gone = [d["endpoint"] for d in decisions if d["decision"] == "gone"]
+    if app_claim:
+        routes = [p["url"] for p in probes if p.get("reachable") and _is_app_endpoint(p)]
+        roots = [p["url"] for p in probes if p.get("reachable") and p.get("kind") == "url"
+                 and not _is_app_endpoint(p)]
+        urls = routes or roots
+        if urls:
+            return _handoff_to_retest(verdict, urls, (
+                f"Mixed endpoint results resolved per endpoint: {len(gone)} gone, "
+                f"{len(urls)} application endpoint(s) still answer. Reachability does not "
+                "re-prove an application-level claim; handed to an application retest."))
+        verdict["reasoning"] = (
+            "Mixed endpoint results: only non-HTTP endpoints still answer, which says nothing "
+            "about the claimed application behaviour. " + str(verdict.get("reasoning") or ""))
+        return verdict
+    still = [d["endpoint"] for d in decisions if d["decision"] == "open"]
+    verdict.update(
+        verdict="confirmed", confidence="medium", still_open=True, remediation_state="open",
+        reasoning=(
+            f"Mixed endpoint results resolved per endpoint: the exposure still holds on "
+            f"{len(still)} endpoint(s) ({', '.join(still[:5])}); {len(gone)} no longer answer"
+            f"{' (' + ', '.join(gone[:5]) + ')' if gone else ''}."),
+    )
+    return verdict
+
+
+async def _revalidate_finding(finding: dict, *, http_call=None, service_probe=None,
+                              llm_call=None) -> dict[str, Any]:
     from app.services import native_verifiers as nv
 
     detected_by = (finding.get("detected_by") or "").lower()
@@ -586,8 +698,18 @@ async def _revalidate_finding(finding: dict, *, http_call=None, service_probe=No
         return port_verdict
 
     # 4) Manual findings — replay the documented requests, compare the result.
+    #    Prose-only steps, or steps with no stated result: a bounded LLM step
+    #    extracts replayable requests (validated; untrusted) and their observable.
     if source_kind == "manual" or finding.get("is_manual"):
         manual = await asyncio.to_thread(nv.verify_manual, finding, http_call=http_call)
+        if manual is None or _manual_unjudged(manual):
+            extracted = await nv.verify_manual_extracted(
+                finding, http_call=http_call, llm_call=llm_call)
+            if extracted:
+                if manual:
+                    extracted["documented_replay"] = {
+                        k: manual.get(k) for k in ("replayed", "skipped", "reasoning")}
+                manual = extracted
         if manual:
             manual.update(detected_by=detected_by, source_kind=source_kind)
             return manual
@@ -607,22 +729,19 @@ async def _revalidate_finding(finding: dict, *, http_call=None, service_probe=No
 
     probes = await asyncio.to_thread(_probe_endpoints, endpoints)
     verdict = _verdict_from_probes(finding, probes, method=method)
+    reachable = [p for p in probes if p.get("reachable")]
     if verdict.get("verdict") == "confirmed" and _application_level(detected_by, source_kind):
         # A reachable URL says nothing about whether an IDOR, injection or
         # logic flaw still works. Leave it open for a real retest (auto and
         # prowl modes re-test needs_more_evidence with Prowl's verifier).
-        verdict.update(
-            verdict="needs_more_evidence",
-            confidence="low",
-            still_open=None,
-            reasoning=(
-                "The reproduction endpoints still respond, but reachability does not "
-                "re-prove an application-level vulnerability. "
-                + verdict.get("reasoning", "")
-                + " Re-test the exploit itself (AEGIS_VALIDATOR_MODE=auto or prowl "
-                "re-tests it with Prowl's independent verifier)."
-            ),
-        )
+        urls = ([p["url"] for p in reachable if _is_app_endpoint(p)]
+                or [p["url"] for p in reachable if p.get("kind") == "url"])
+        verdict = _handoff_to_retest(verdict, urls, (
+            "The reproduction endpoints still respond, but reachability does not "
+            "re-prove an application-level vulnerability. Re-test the exploit itself "
+            "(AEGIS_VALIDATOR_MODE=auto or prowl re-tests it with Prowl)."))
+    elif verdict.get("verdict") == "needs_more_evidence" and reachable and len(reachable) < len(probes):
+        verdict = resolve_mixed_endpoints(finding, probes, verdict, detected_by)
     verdict["detected_by"] = detected_by
     verdict["source_kind"] = source_kind
     verdict["endpoint_count"] = len(endpoints)

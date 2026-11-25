@@ -43,9 +43,30 @@ Gaps (Vanguard `validate_finding.py` / `finding_lifecycle.py` vs Prowl
    (`open|remediated|never_real|unknown`); remediated verdicts are not counted as
    detection false positives. `auto` mode escalates to Vanguard only when no
    native verifier owns the finding (`native_verifier` unset) and Prowl cannot
-   take it: today that is agent/LLM-red-team application findings outside
-   Prowl's provable classes, manual findings with no replayable request or no
-   stated result, and generic findings with mixed endpoint results.
+   take it. The former fallbacks are now closed natively or by Prowl, so with
+   no Vanguard backend every finding kind ends in a native or Prowl verdict
+   (`test_validation_gaps.py::test_every_finding_kind_ends_native_or_prowl_without_vanguard`):
+   - Application findings with no proof kind (agent / LLM red-team / manual,
+     or endpoints the native validator hands over with `prowl_retest`):
+     `prowl_revalidation` retest mode. The candidate enters under
+     `external_candidates.RETEST_CLASS` (or `known_cve` / `account_enumeration`),
+     which no proof kind confirms; intake accepts it only with
+     `allow_retest_class` (never from the public route) and caps it at low.
+     Outcomes: refuted with counterevidence (`false_positive`, `remediated`
+     when it held before), inconclusive; never `confirmed`.
+   - Prose manual findings / steps with no stated result:
+     `native_verifiers.verify_manual_extracted` (bounded LLM extraction, at most
+     3 same-host GET/HEAD/OPTIONS/POST requests, credential headers dropped,
+     every field validated; LLM failure means no extraction). No observable, or a
+     derived observable that no longer appears, goes to the Prowl retest.
+   - Mixed endpoint probes: `finding_revalidation_service.resolve_mixed_endpoints`
+     decides per endpoint (`gone` / `open` / `retest`). Exposure claims are
+     confirmed where an endpoint still answers; application claims hand their
+     reachable routes to the Prowl retest.
+   - Missing nuclei / nmap: needs_more_evidence with
+     `error="tool_unavailable:<tool>"` (a crashed nuclei run is
+     `tool_failed:nuclei`). Never counted as owned by `route_finding_validation`;
+     the scanner worker logs missing tools once at start-up.
 5. Read-only verification — **closed for worker re-tests**: `prowl_revalidation`
    runs in a throwaway session with `revalidation_only` set, and `create_finding`,
    `scoped_assessment_publish` and LLM red-team auto-filing refuse to publish while
@@ -59,7 +80,9 @@ dedup, publication gate.
 
 Done: logical sanity (`backend/tests/test_finding_sanity.py`), worker routing
 (`test_validation_routing.py`), Prowl re-test mapping and publish refusal
-(`test_prowl_revalidation.py`). Still to port: `tests/test_finding_lifecycle.py`.
+(`test_prowl_revalidation.py`), retest mode, prose extraction, mixed endpoints,
+missing tools and the kinds × availability outcome (`test_validation_gaps.py`).
+Still to port: `tests/test_finding_lifecycle.py`.
 
 ## OOB and identities
 

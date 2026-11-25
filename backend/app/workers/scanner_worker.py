@@ -185,8 +185,18 @@ async def route_finding_validation(
                backend exists
     subprocess / docker (or unknown) - Vanguard LLM validator only
 
-    run_prowl returns None when Prowl cannot take the finding. Vanguard errors
-    in auto mode keep the earlier verdict; other errors propagate to the caller.
+    run_prowl returns None when Prowl cannot take the finding: neither a
+    provable class (proof mode) nor an HTTP(S) application claim (retest mode,
+    which can refute or stay inconclusive but never confirm).
+
+    A native verdict with ``error="tool_unavailable:<tool>"`` (nuclei / nmap
+    missing on this worker) is an environment issue, never "owned": it may
+    still escalate, and when nothing else takes the finding it is the final
+    answer as is. Vanguard errors in auto mode keep the earlier verdict; other
+    errors propagate to the caller.
+
+    With ``vanguard_fallback=None`` every finding therefore ends in a native or
+    Prowl verdict.
     """
     if mode not in ("native", "auto", "prowl"):
         return await run_vanguard("subprocess" if mode == "subprocess" else "docker")
@@ -194,15 +204,18 @@ async def route_finding_validation(
     inconclusive = isinstance(verdict, dict) and verdict.get("verdict") == "needs_more_evidence"
     if not inconclusive or mode == "native":
         return verdict
+    tool_missing = str(verdict.get("error") or "").startswith("tool_unavailable:")
+    if tool_missing:
+        logger.warning(f"VALIDATE_FINDING: native validation could not run ({verdict.get('error')})")
     prowl_verdict = None
     if mode == "prowl" or prowl_enabled:
         prowl_verdict = await run_prowl()
         if prowl_verdict:
             prowl_verdict["native_verdict"] = {
-                k: verdict.get(k) for k in ("verdict", "method", "reasoning")
+                k: verdict.get(k) for k in ("verdict", "method", "reasoning", "error")
             }
             return prowl_verdict
-    if isinstance(verdict, dict) and verdict.get("native_verifier"):
+    if verdict.get("native_verifier") and not tool_missing:
         # A native verifier (network service, secret, manual replay, template
         # replay) owns this finding: its inconclusive answer is the answer.
         return verdict
@@ -283,6 +296,13 @@ class ScannerWorker:
         self.scan_semaphore = scan_semaphore
         
         logger.info(f"Scanner worker initialized (max_concurrent={MAX_CONCURRENT_SCANS})")
+        try:
+            # Once per process: a missing nuclei / nmap makes those findings end
+            # needs_more_evidence (tool_unavailable:<tool>) instead of a verdict.
+            from app.services.native_verifiers import log_tool_availability
+            log_tool_availability()
+        except Exception as e:
+            logger.debug(f"validation tool check skipped: {e}")
     
     def get_discovery_service(self, db):
         """Get or create discovery service with db session."""
@@ -1056,10 +1076,12 @@ class ScannerWorker:
         Optional modes:
           - prowl — native first; when inconclusive, re-test with Prowl's
             independent verifier (HTTP(S) findings in a class Prowl can prove)
-          - auto — native, then Prowl (unless AEGIS_VALIDATOR_PROWL=false), then
-            the Aegis Vanguard LLM validator only for findings that no native
-            verifier (network service, secret, manual replay, template replay)
-            handled and Prowl cannot take
+          - auto — native, then Prowl (unless AEGIS_VALIDATOR_PROWL=false): proof
+            mode for provable classes, retest mode (refute / inconclusive only)
+            for other HTTP(S) application claims; then the Aegis Vanguard LLM
+            validator, if one is installed, only for findings that no native
+            verifier handled and Prowl cannot take. Without Vanguard every
+            finding ends in a native or Prowl verdict.
           - docker / subprocess — Aegis Vanguard LLM validator
 
         Writes the structured verdict back to FindingValidation and denormalizes
@@ -1271,9 +1293,13 @@ class ScannerWorker:
             verdict_data = None
             run_error = None
 
+            native_result: dict = {}
+
             async def _run_native():
                 from app.services.finding_revalidation_service import revalidate_finding
-                return await revalidate_finding(finding_payload)
+                result = await revalidate_finding(finding_payload)
+                native_result["verdict"] = result
+                return result
 
             async def _run_prowl():
                 """Prowl re-test; None when Prowl cannot take this finding."""
@@ -1283,6 +1309,8 @@ class ScannerWorker:
                         finding_payload,
                         organization_id=validation.organization_id,
                         user_id=validation.requested_by_user_id,
+                        # Endpoints the native validator handed over (prowl_retest).
+                        native_verdict=native_result.get("verdict"),
                         max_iterations=int(os.getenv("AEGIS_PROWL_VALIDATE_MAX_ITERATIONS", "12")),
                         timeout_sec=timeout_sec,
                     )
