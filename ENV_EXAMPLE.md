@@ -322,6 +322,17 @@ NEO4J_BOLT_PORT=7687
 GITHUB_TOKEN=
 
 # =============================================================================
+# Leaked Credential Providers (optional)
+# =============================================================================
+
+# XposedOrNot domain-wide search. Per-email lookups are keyless; the domain
+# search needs a key for a domain verified with XposedOrNot.
+# XPOSEDORNOT_API_KEY=
+
+# Hudson Rock community infostealer API (keyless). Set false to disable.
+# HUDSONROCK_ENABLED=true
+
+# =============================================================================
 # Scanner Performance Tuning (optional)
 # =============================================================================
 

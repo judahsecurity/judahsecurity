@@ -83,3 +83,61 @@ CREATE INDEX IF NOT EXISTS ix_credential_exposures_identity_id ON credential_exp
 CREATE INDEX IF NOT EXISTS ix_credential_exposures_asset_id ON credential_exposures (asset_id);
 CREATE INDEX IF NOT EXISTS ix_credexp_org_priority ON credential_exposures (organization_id, priority_score);
 CREATE INDEX IF NOT EXISTS ix_credexp_org_identifier ON credential_exposures (organization_id, identifier);
+
+-- Infostealer login URLs per organization domain (Hudson Rock) and the latest
+-- provider summary per domain.
+CREATE TABLE IF NOT EXISTS stealer_url_exposures (
+    id SERIAL PRIMARY KEY,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL,
+    provider VARCHAR(50) NOT NULL,
+    domain VARCHAR(255) NOT NULL,
+    url VARCHAR(2000) NOT NULL,
+    host VARCHAR(255),
+    audience VARCHAR(20) NOT NULL,
+    occurrence INTEGER NOT NULL DEFAULT 0,
+    login_category VARCHAR(30),
+    last_compromised_at TIMESTAMP,
+    priority_score INTEGER NOT NULL DEFAULT 0,
+    severity VARCHAR(20) NOT NULL DEFAULT 'info',
+    score_factors JSON NOT NULL DEFAULT '[]',
+    status VARCHAR(30) NOT NULL DEFAULT 'open',
+    first_seen_at TIMESTAMP,
+    last_seen_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_stealer_url_org UNIQUE (organization_id, provider, url, audience)
+);
+
+CREATE INDEX IF NOT EXISTS ix_stealer_url_exposures_organization_id ON stealer_url_exposures (organization_id);
+CREATE INDEX IF NOT EXISTS ix_stealer_url_exposures_asset_id ON stealer_url_exposures (asset_id);
+CREATE INDEX IF NOT EXISTS ix_stealer_url_exposures_host ON stealer_url_exposures (host);
+CREATE INDEX IF NOT EXISTS ix_stealer_url_org_priority ON stealer_url_exposures (organization_id, priority_score);
+
+CREATE TABLE IF NOT EXISTS stealer_domain_summaries (
+    id SERIAL PRIMARY KEY,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    provider VARCHAR(50) NOT NULL,
+    domain VARCHAR(255) NOT NULL,
+    summary JSON NOT NULL DEFAULT '{}',
+    fetched_at TIMESTAMP,
+    CONSTRAINT uq_stealer_summary_org UNIQUE (organization_id, provider, domain)
+);
+
+CREATE INDEX IF NOT EXISTS ix_stealer_domain_summaries_organization_id
+    ON stealer_domain_summaries (organization_id);
+
+-- Harvested addresses are stored as EMAIL assets. Databases created before
+-- EMAIL was added to the enum need the value.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'assettype') AND NOT EXISTS (
+        SELECT 1
+        FROM pg_enum e
+        JOIN pg_type t ON e.enumtypid = t.oid
+        WHERE t.typname = 'assettype'
+          AND e.enumlabel = 'EMAIL'
+    ) THEN
+        ALTER TYPE assettype ADD VALUE 'EMAIL';
+    END IF;
+END $$;

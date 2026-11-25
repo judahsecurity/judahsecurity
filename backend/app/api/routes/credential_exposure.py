@@ -23,6 +23,8 @@ from app.models.identity import (
     CredentialExposure,
     Identity,
     IdentitySourceSync,
+    StealerDomainSummary,
+    StealerUrlExposure,
 )
 from app.models.servicenow_integration import ServiceNowIntegration
 from app.models.user import User
@@ -226,6 +228,111 @@ def rescore(
     count = rescore_organization(db, _org_id(current_user))
     db.commit()
     return {"rescored": count}
+
+
+# ── Infostealer login URLs ───────────────────────────────────────────────────
+
+class StealerUrlOut(BaseModel):
+    id: int
+    provider: str
+    domain: str
+    url: str
+    host: Optional[str] = None
+    audience: str
+    occurrence: int
+    login_category: Optional[str] = None
+    asset_id: Optional[int] = None
+    last_compromised_at: Optional[datetime] = None
+    priority_score: int
+    severity: str
+    score_factors: List[ScoreFactorOut] = Field(default_factory=list)
+    status: str
+    first_seen_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class DomainSummaryOut(BaseModel):
+    provider: str
+    domain: str
+    summary: dict
+    fetched_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/stealer-urls", response_model=Page)
+def list_stealer_urls(
+    audience: Optional[str] = Query(None, description="employee or user"),
+    status_filter: Optional[str] = Query("open", alias="status"),
+    asset_matched: bool = Query(False, description="Only URLs on inventory hosts"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Login URLs whose credentials infostealers captured, highest priority first."""
+    query = db.query(StealerUrlExposure).filter(
+        StealerUrlExposure.organization_id == _org_id(current_user)
+    )
+    if audience:
+        query = query.filter(StealerUrlExposure.audience == audience)
+    if status_filter:
+        query = query.filter(StealerUrlExposure.status == status_filter)
+    if asset_matched:
+        query = query.filter(StealerUrlExposure.asset_id.isnot(None))
+    total = query.count()
+    rows = (
+        query.order_by(
+            StealerUrlExposure.priority_score.desc(), StealerUrlExposure.occurrence.desc()
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return Page(total=total, items=[StealerUrlOut.model_validate(r) for r in rows])
+
+
+@router.patch("/stealer-urls/{row_id}", response_model=StealerUrlOut)
+def update_stealer_url_status(
+    row_id: int,
+    payload: ExposureStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    if payload.status not in EXPOSURE_STATUSES:
+        raise HTTPException(
+            status_code=422, detail=f"status must be one of: {', '.join(EXPOSURE_STATUSES)}"
+        )
+    row = (
+        db.query(StealerUrlExposure)
+        .filter(
+            StealerUrlExposure.id == row_id,
+            StealerUrlExposure.organization_id == _org_id(current_user),
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Stealer URL not found.")
+    row.status = payload.status
+    db.commit()
+    db.refresh(row)
+    return StealerUrlOut.model_validate(row)
+
+
+@router.get("/domain-summaries", response_model=List[DomainSummaryOut])
+def list_domain_summaries(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    rows = (
+        db.query(StealerDomainSummary)
+        .filter(StealerDomainSummary.organization_id == _org_id(current_user))
+        .order_by(StealerDomainSummary.domain)
+        .all()
+    )
+    return [DomainSummaryOut.model_validate(r) for r in rows]
 
 
 # ── Identities ───────────────────────────────────────────────────────────────

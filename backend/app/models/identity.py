@@ -179,3 +179,65 @@ class CredentialExposure(Base):
 
     def __repr__(self):
         return f"<CredentialExposure org={self.organization_id} {self.identifier} {self.source_name}>"
+
+
+class StealerUrlExposure(Base):
+    """A login URL of the organization whose credentials infostealers captured.
+
+    Domain-level signal: Hudson Rock reports how many infected machines saved
+    credentials for each URL, split into employees and customers, without
+    naming people. Matching the URL's host to an inventory asset turns
+    "thousands of infected employees" into "stolen logins for your ADFS".
+    """
+
+    __tablename__ = "stealer_url_exposures"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "provider", "url", "audience", name="uq_stealer_url_org"
+        ),
+        Index("ix_stealer_url_org_priority", "organization_id", "priority_score"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    asset_id = Column(
+        Integer, ForeignKey("assets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    provider = Column(String(50), nullable=False)
+    domain = Column(String(255), nullable=False)
+    url = Column(String(2000), nullable=False)
+    host = Column(String(255), nullable=True, index=True)
+    audience = Column(String(20), nullable=False)  # employee | user
+    occurrence = Column(Integer, nullable=False, default=0)
+    login_category = Column(String(30), nullable=True)  # sso | mfa | remote_access | ...
+    last_compromised_at = Column(DateTime, nullable=True)
+
+    priority_score = Column(Integer, nullable=False, default=0)
+    severity = Column(String(20), nullable=False, default="info")
+    score_factors = Column(JSON, nullable=False, default=list)
+    status = Column(String(30), nullable=False, default="open")
+
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class StealerDomainSummary(Base):
+    """Latest provider summary for one of the organization's domains."""
+
+    __tablename__ = "stealer_domain_summaries"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "provider", "domain", name="uq_stealer_summary_org"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider = Column(String(50), nullable=False)
+    domain = Column(String(255), nullable=False)
+    summary = Column(JSON, nullable=False, default=dict)
+    fetched_at = Column(DateTime, default=datetime.utcnow)

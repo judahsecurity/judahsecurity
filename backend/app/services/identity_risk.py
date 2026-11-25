@@ -204,3 +204,75 @@ def score_exposure(
 
     score = min(100, sum(f.points for f in factors))
     return score, severity_for(score), factors
+
+
+# ── Infostealer login URLs ───────────────────────────────────────────────────
+
+# Ordered: first match wins. Each entry is (category, points, host/path regex).
+LOGIN_CATEGORIES: tuple[tuple[str, int, re.Pattern[str]], ...] = (
+    ("mfa", 35, re.compile(r"mfa|2fa|otp|duo|authenticator|mfaportal", re.I)),
+    ("sso", 35, re.compile(
+        r"adfs|/saml|/oauth2?|/idp|^idp\.|^sso\.|^fs\.|okta|ping(one|fed|identity)|"
+        r"login\.microsoftonline|/auth/realms|shibboleth|/cas/login", re.I)),
+    ("remote_access", 35, re.compile(
+        r"vpn|citrix|netscaler|/remote/|globalprotect|anyconnect|pulse|rdweb|"
+        r"/rdp|^remote\.|^gateway\.|^portal\.|/owa|/ecp|horizon|workspace", re.I)),
+    ("admin", 30, re.compile(r"admin|manage|console|cpanel|plesk|jenkins|grafana|kibana", re.I)),
+    ("file_transfer", 25, re.compile(r"^s?ftps?://|^ftp\.|sharefile|filetransfer|moveit|sftp", re.I)),
+    ("password_reset", 15, re.compile(r"reset[-_]?password|updatepassword|forgot|recover", re.I)),
+    ("login", 15, re.compile(r"login|signin|sign-in|logon|/auth", re.I)),
+)
+
+
+def classify_login_url(url: str) -> tuple[str, int]:
+    # Host-anchored patterns (^idp.) need the scheme stripped; ^ftp:// needs it kept.
+    bare = url.split("://", 1)[-1]
+    for category, points, pattern in LOGIN_CATEGORIES:
+        if pattern.search(bare) or pattern.search(url):
+            return category, points
+    return "other", 5
+
+
+def volume_points(occurrence: int) -> int:
+    if occurrence >= 1000:
+        return 15
+    if occurrence >= 100:
+        return 10
+    if occurrence >= 10:
+        return 6
+    if occurrence >= 1:
+        return 2
+    return 0
+
+
+def score_stealer_url(
+    *,
+    url: str,
+    audience: str,
+    occurrence: int,
+    last_compromised: Optional[datetime],
+    asset_matched: bool,
+    now: Optional[datetime] = None,
+) -> tuple[int, str, str, list[ScoreFactor]]:
+    """Return (priority 0-100, severity, login category, factors)."""
+    factors: list[ScoreFactor] = []
+    category, cat_points = classify_login_url(url)
+    factors.append(ScoreFactor("login_category", cat_points, f"Login type: {category}"))
+
+    if audience == "employee":
+        factors.append(ScoreFactor("employee_credentials", 20, "Credentials saved by employees"))
+    else:
+        factors.append(ScoreFactor("customer_credentials", 5, "Credentials saved by customers"))
+
+    vol = volume_points(occurrence)
+    factors.append(ScoreFactor("volume", vol, f"{occurrence} infected machine(s) saved this login"))
+
+    rec, rec_detail = recency_points(last_compromised, now)
+    rec = rec // 2  # domain-wide date, not specific to this URL
+    factors.append(ScoreFactor("recency", rec, f"Latest infection for this audience: {rec_detail.lower()}"))
+
+    if asset_matched:
+        factors.append(ScoreFactor("asset_match", 10, "Host is in the organization's inventory"))
+
+    score = min(100, sum(f.points for f in factors))
+    return score, severity_for(score), category, factors

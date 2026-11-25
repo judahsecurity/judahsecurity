@@ -4,7 +4,9 @@ Email Breach Discovery Service
 Checks whether an email address (or domain's email addresses) has appeared in
 known data breach dumps using the XposedOrNot public API.
 
-XposedOrNot (https://xposedornot.com) is free and keyless — no API key required.
+XposedOrNot (https://xposedornot.com): per-email lookups are free and keyless.
+The domain-wide lookup needs an API key for a domain verified with XposedOrNot
+(set XPOSEDORNOT_API_KEY); without one it is skipped.
 
 This is intentionally different from git/code secret scanning (TruffleHog). This
 service answers the question: "Has this company's email address appeared in breach
@@ -27,9 +29,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# XposedOrNot public API — no key required
-_XON_EMAIL_URL = "https://api.xposedornot.com/v1/check-email/{email}"
-_XON_DOMAIN_URL = "https://api.xposedornot.com/v1/domain-breaches/{domain}"
+# breach-analytics returns per-breach dates, data classes and password risk;
+# check-email only returns a nested list of breach names.
+_XON_EMAIL_URL = "https://api.xposedornot.com/v1/breach-analytics"
+_XON_DOMAIN_URL = "https://api.xposedornot.com/v1/domain-breaches/"
 _TIMEOUT = 15.0
 
 
@@ -43,6 +46,8 @@ class BreachRecord:
     description: Optional[str] = None
     is_sensitive: bool = False
     is_verified: bool = True
+    # plaintextpassword | easytocrack | hardtocrack | unknown
+    password_risk: Optional[str] = None
 
 
 @dataclass
@@ -80,6 +85,7 @@ class EmailBreachResult:
                     "description": b.description,
                     "is_sensitive": b.is_sensitive,
                     "is_verified": b.is_verified,
+                    "password_risk": b.password_risk,
                 }
                 for b in self.breaches
             ],
@@ -111,9 +117,50 @@ class DomainBreachResult:
         }
 
 
+def _xon_api_key() -> Optional[str]:
+    from app.core.config import settings
+
+    return settings.XPOSEDORNOT_API_KEY or None
+
+
+def _flatten_names(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [name for item in value for name in _flatten_names(item)]
+    return []
+
+
+def parse_breach_analytics(data: dict) -> list[BreachRecord]:
+    """Parse ``/v1/breach-analytics`` (or the older ``check-email``) responses."""
+    data = data or {}
+    exposed = data.get("ExposedBreaches") or {}
+    details = exposed.get("breaches_details") if isinstance(exposed, dict) else None
+    records: list[BreachRecord] = []
+    if isinstance(details, list):
+        for b in details:
+            if not isinstance(b, dict):
+                continue
+            dc = b.get("xposed_data") or ""
+            if isinstance(dc, str):
+                dc = [x.strip() for x in dc.split(";") if x.strip()]
+            records.append(BreachRecord(
+                name=b.get("breach") or b.get("name") or "Unknown",
+                date=str(b.get("xposed_date")) if b.get("xposed_date") else None,
+                records_exposed=b.get("xposed_records"),
+                data_classes=list(dc),
+                description=b.get("details"),
+                is_verified=str(b.get("verified", "Yes")).lower() in {"yes", "true"},
+                password_risk=b.get("password_risk"),
+            ))
+        return records
+    # check-email shape: {"breaches": [["Name", "Name", ...]]}
+    return [BreachRecord(name=n) for n in _flatten_names(data.get("breaches"))]
+
+
 class EmailBreachService:
     """
-    Email breach discovery via XposedOrNot (keyless, free).
+    Email breach discovery via XposedOrNot.
 
     Rate limits: XposedOrNot is lenient for reasonable usage but has no
     official published rate limit. Batch operations include a small delay.
@@ -138,7 +185,7 @@ class EmailBreachService:
 
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                resp = await client.get(_XON_EMAIL_URL.format(email=email))
+                resp = await client.get(_XON_EMAIL_URL, params={"email": email})
 
             if resp.status_code == 404:
                 # Not found in any breach — clean result
@@ -151,35 +198,10 @@ class EmailBreachService:
                 result.error = f"XposedOrNot returned HTTP {resp.status_code}"
                 return result
 
-            data = resp.json()
-            # XposedOrNot v1 returns {"breaches": [...], "BreachMetrics": {...}}
-            raw_breaches = data.get("breaches") or []
-            if not isinstance(raw_breaches, list):
-                # May be {"breaches": [{"name": "...", ...}]} or flat list
-                raw_breaches = []
-
-            breach_records: list[BreachRecord] = []
+            breach_records = parse_breach_analytics(resp.json())
             all_data_classes: set[str] = set()
-
-            for b in raw_breaches:
-                if isinstance(b, str):
-                    breach_records.append(BreachRecord(name=b))
-                elif isinstance(b, dict):
-                    dc = b.get("xposed_data", "") or b.get("data_classes", "")
-                    if isinstance(dc, str):
-                        dc = [x.strip() for x in dc.split(";") if x.strip()]
-                    all_data_classes.update(dc)
-                    breach_records.append(
-                        BreachRecord(
-                            name=b.get("name") or b.get("breachName") or "Unknown",
-                            date=b.get("xposed_date") or b.get("date"),
-                            records_exposed=b.get("xposed_records") or b.get("pwnCount"),
-                            data_classes=dc,
-                            description=b.get("description"),
-                            is_sensitive=bool(b.get("IsSensitive") or b.get("isSensitive")),
-                            is_verified=bool(b.get("IsVerified", True)),
-                        )
-                    )
+            for record in breach_records:
+                all_data_classes.update(record.data_classes)
 
             result.success = True
             result.breached = len(breach_records) > 0
@@ -207,9 +229,21 @@ class EmailBreachService:
         domain = domain.strip().lower().lstrip("@")
         result = DomainBreachResult(domain=domain)
 
+        api_key = _xon_api_key()
+        if not api_key:
+            result.error = (
+                "Skipped: XposedOrNot domain search needs XPOSEDORNOT_API_KEY "
+                "for a domain verified with XposedOrNot."
+            )
+            return result
+
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                resp = await client.get(_XON_DOMAIN_URL.format(domain=domain))
+                resp = await client.post(
+                    _XON_DOMAIN_URL,
+                    headers={"x-api-key": api_key},
+                    json={"domain": domain},
+                )
 
             if resp.status_code == 404:
                 result.success = True

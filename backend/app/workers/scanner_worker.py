@@ -7649,13 +7649,20 @@ class ScannerWorker:
 
     async def handle_email_breach(self, body: dict) -> None:
         """
-        Check an org's domain against XposedOrNot for email breach exposure.
+        Leaked-credential check for an organization (XposedOrNot + Hudson Rock).
 
         config keys:
-            domain  (str)  — org domain to check, e.g. "target.com"
-            emails  (list) — optional explicit email list to check individually
+            domain     (str)  — domain to check; defaults to the org's domains
+            emails     (list) — explicit addresses; defaults to riskiest identities,
+                                then harvested EMAIL assets
+            max_emails (int)  — per-run cap on address lookups (default 50)
+            providers  (list) — subset of ["xposedornot", "hudsonrock"]
         """
-        from app.services.email_breach_service import get_email_breach_service
+        from app.services.credential_exposure_service import (
+            PROVIDER_HUDSONROCK,
+            PROVIDER_XPOSEDORNOT,
+            run_credential_exposure_check,
+        )
 
         scan_id = body.get("scan_id")
         organization_id = body.get("organization_id")
@@ -7666,62 +7673,39 @@ class ScannerWorker:
             scan = db.query(Scan).filter(Scan.id == scan_id).first() if scan_id else None
             if scan:
                 scan.status = ScanStatus.RUNNING
-                scan.current_step = "Checking email breach exposure"
+                scan.current_step = "Checking leaked credentials"
                 db.commit()
+            if not organization_id:
+                raise ValueError("Leaked-credential check needs an organization_id")
 
-            domain = config.get("domain") or (body.get("targets") or [""])[0]
-            explicit_emails: list[str] = config.get("emails") or []
-
-            service = get_email_breach_service()
-            results: dict = {}
-
-            # Domain-level check
-            if domain:
-                dom_result = await service.check_domain_breach_exposure(domain)
-                results["domain"] = dom_result.to_dict()
-
-            # Per-email checks. Without an explicit list, check the riskiest
-            # identities from the system of record first, then email assets.
-            if not explicit_emails and organization_id:
-                from app.services.credential_exposure_service import emails_to_check
-
-                explicit_emails = emails_to_check(
-                    db, organization_id, int(config.get("max_emails", 50))
-                )
-
-            if explicit_emails:
-                email_results = await service.batch_check_emails(explicit_emails[:50])
-                results["emails"] = {
-                    email: r.to_dict() for email, r in email_results.items()
-                }
-                if organization_id:
-                    from app.services.credential_exposure_service import (
-                        ingest_email_breach_results,
-                    )
-
-                    results["exposures"] = ingest_email_breach_results(
-                        db, organization_id, results["emails"]
-                    )
-
-            breached_count = sum(
-                1 for r in results.get("emails", {}).values() if r.get("breached")
+            domain = config.get("domain") or (body.get("targets") or [None])[0]
+            results = await run_credential_exposure_check(
+                db,
+                organization_id,
+                domains=[domain] if domain else None,
+                emails=config.get("emails") or None,
+                max_emails=int(config.get("max_emails", 50)),
+                providers=config.get("providers") or (PROVIDER_XPOSEDORNOT, PROVIDER_HUDSONROCK),
             )
 
+            breached = (results.get("xposedornot_emails") or {}).get("breached", 0)
+            infected = (results.get("hudsonrock_emails") or {}).get("infected", 0)
             if scan:
                 scan.status = ScanStatus.COMPLETED
                 scan.completed_at = datetime.utcnow()
                 scan.progress = 100
                 scan.current_step = "Completed"
                 scan.results = {
-                    "domain": domain,
-                    "breached_emails": breached_count,
-                    "emails_checked": len(explicit_emails),
+                    "domain": domain or (results.get("domains") or [None])[0],
+                    "breached_emails": breached,
+                    "infected_emails": infected,
+                    "emails_checked": results.get("emails_checked", 0),
                     "data": results,
                 }
             db.commit()
             logger.info(
-                "Email breach scan %s completed: %d/%d emails breached",
-                scan_id, breached_count, len(explicit_emails),
+                "Leaked-credential scan %s completed: %d breached, %d infected of %d checked",
+                scan_id, breached, infected, results.get("emails_checked", 0),
             )
 
         except Exception as exc:

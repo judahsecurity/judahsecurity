@@ -295,6 +295,11 @@ class Settings(BaseSettings):
     # GitHub Secret Scanning Configuration
     GITHUB_TOKEN: Optional[str] = None
     GITHUB_SECRET_SCAN_ENABLED: bool = True
+
+    # Leaked-credential providers. Hudson Rock's community API is keyless;
+    # XposedOrNot's domain search needs a key for a verified domain.
+    XPOSEDORNOT_API_KEY: Optional[str] = None
+    HUDSONROCK_ENABLED: bool = True
     
     # MITRE ATT&CK Enrichment
     MITRE_ENRICHMENT_ENABLED: bool = True
