@@ -425,7 +425,7 @@ def _import_risk(
                 db.query(Vulnerability)
                 .filter(
                     Vulnerability.asset_id == asset.id,
-                    Vulnerability.metadata_["censys_risk_id"].astext == str(risk_id),
+                    Vulnerability.metadata_["censys_risk_id"].as_string() == str(risk_id),
                 )
                 .first()
             )
