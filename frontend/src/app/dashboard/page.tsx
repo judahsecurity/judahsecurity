@@ -40,6 +40,11 @@ import { formatNumber } from '@/lib/utils';
 import Link from 'next/link';
 import { useToast } from '@/hooks/use-toast';
 import { LaunchAssessmentDialog } from '@/components/agent/LaunchAssessmentDialog';
+import {
+  WhatMattersNow,
+  type FeedEngagement,
+  type PriorityPath,
+} from '@/components/dashboard/WhatMattersNow';
 
 const WorldMap = dynamic(
   () => import('@/components/map/WorldMap').then((m) => m.WorldMap),
@@ -242,6 +247,9 @@ export default function DashboardPage() {
   const [findingsGroupBy, setFindingsGroupBy] = useState<FindingsGroupBy>('severity');
   const [findingsGroups, setFindingsGroups] = useState<Array<{ key: string; label: string; count: number }>>([]);
   const [groupsLoading, setGroupsLoading] = useState(false);
+  const [attackPaths, setAttackPaths] = useState<PriorityPath[]>([]);
+  const [engagements, setEngagements] = useState<FeedEngagement[]>([]);
+  const [pathsLoading, setPathsLoading] = useState(true);
   const { toast } = useToast();
 
   const syncFindingsGroups = useCallback((vulnSummary: any, groupBy: FindingsGroupBy) => {
@@ -327,6 +335,25 @@ export default function DashboardPage() {
       setDelphiPriorities(Array.isArray(delphiPrios) ? delphiPrios : []);
       setDelphiStatus(delphiStat);
       setLoading(false);
+
+      // Attack paths are org-scoped; superusers without an org fall back to the first one.
+      (async () => {
+        try {
+          let ws;
+          try {
+            ws = await api.getAttackWorkspace();
+          } catch {
+            const firstOrg = Array.isArray(orgs) ? orgs[0]?.id : undefined;
+            ws = firstOrg ? await api.getAttackWorkspace(firstOrg) : null;
+          }
+          setAttackPaths(Array.isArray(ws?.paths) ? ws.paths : []);
+          setEngagements(Array.isArray(ws?.red_team) ? ws.red_team : []);
+        } catch (error) {
+          console.error('Failed to fetch attack paths:', error);
+        } finally {
+          setPathsLoading(false);
+        }
+      })();
 
       // Slow path: lean geo markers (does not block stats)
       try {
@@ -445,6 +472,20 @@ export default function DashboardPage() {
       <Header title="Dashboard" subtitle="Overview of your attack surface" />
 
       <div className="p-6 space-y-6">
+        {/* Proof-ranked priorities and live activity, Upwind-style */}
+        <WhatMattersNow
+          paths={attackPaths}
+          findings={recentVulns}
+          engagements={engagements}
+          counts={{
+            critical: stats?.critical_count || 0,
+            high: stats?.high_count || 0,
+            medium: stats?.medium_count || 0,
+            low: stats?.low_count || 0,
+          }}
+          loading={loading || pathsLoading}
+        />
+
         {/* Launch an engagement */}
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>

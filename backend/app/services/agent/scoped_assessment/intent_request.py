@@ -1,6 +1,6 @@
 """Request plans for coverage cells that have no captured baseline.
 
-Intent-backed cells (``attack_graph.add_intent``: operator- or planner-directed
+Intent-backed cells (``planning_graph.add_intent``: operator- or planner-directed
 tests on inputs Prowl never observed) and observed header/cookie inputs name a
 method, URL, parameter and location, but carry no replayable capture. This
 module builds the inert control and the fixed probes for exactly one such

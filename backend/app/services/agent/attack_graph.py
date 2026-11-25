@@ -1,393 +1,646 @@
-"""Facts and intents with lineage on the engagement brain (AntiFox-style graph).
+"""Entity-centric attack graph built from an agent session's EvoGraph chain.
 
-* A **fact** is something observed: an origin, an evidence-backed exchange, an
-  operator-supplied lead, a callback, a verdict, a parsed scanner result.
-* An **intent** is one planned test (class + target + parameter/location +
-  identity). It must cite at least one existing parent: a fact, or a candidate
-  (finding) id. Intents never hang off other intents only.
-* A worker **claims** an open intent, then **completes** it by citing the result
-  facts it recorded. Completion without a result fact is refused.
+``evograph.get_session_chain`` returns the agent's run as a tool-by-tool
+timeline (chain -> step -> step -> finding). That is the right shape for a
+replay, but not for answering "how did the agent get from the internet to
+something valuable?".
 
-Intents can be backed by a coverage cell, so the scoped probes that lease cells
-can work them, including operator-directed tests on parameters Prowl never
-observed itself. Facts and intents are planning state: neither is proof.
-Everything is stored as plain dicts on ``EngagementBrain.facts`` / ``.intents``.
+This module turns the same payload into a layered graph:
+
+    Internet -> host -> endpoint -> [action] -> capability -> [action] -> ...
+
+* Graph nodes are *things*: the attacker origin, hosts, endpoints, and
+  capabilities the agent obtained (credentials, privileged identities,
+  code execution, data access).
+* Actions sit between them as small connector nodes, with the evidence that
+  produced them (step, tool, arguments, output summary, the agent's thought).
+* Every node carries a validation status:
+    - ``proven``   — a published finding for this session that the independent
+                     verifier reproduced (``exploit_verified``) or an analyst
+                     confirmed. Nothing else can claim this.
+    - ``observed`` — a tool ran and the agent reported it, or a published
+                     finding that was not runtime-verified
+    - ``inferred`` — the step failed, or the agent's wording is speculative
+                     ("may be vulnerable", "outdated version")
+
+Repeated sightings of the same issue on the same endpoint are merged, and
+past ``MAX_NODES`` the least certain leaf actions are hidden (``meta.hidden``).
+
+Edges are only drawn from a capability to a later action when the later step
+actually presents auth material (header, cookie, token, password) against the
+same host, or runs in post-exploitation. Otherwise the action hangs off the
+endpoint it hit. The graph never invents a chain the evidence does not show.
+
+The builder is pure (safe to unit test); ``load_session_proofs`` is the only
+function that touches the database.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
-import time
-from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import urlsplit
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
-FACT_KINDS = frozenset({
-    "origin", "observation", "evidence", "operator", "callback", "replay", "verdict", "parser",
-})
-INTENT_STATUSES = ("open", "claimed", "done", "blocked", "cancelled")
-INTENT_LOCATIONS = frozenset({
-    "", "query", "body_form", "body_json", "body_xml", "header", "cookie", "path", "fragment",
-})
-_TERMINAL = frozenset({"done", "blocked", "cancelled"})
-# Source of a coverage cell created for an intent (no observed capture behind it).
-INTENT_CELL_SOURCE = "attack_graph_intent"
-MAX_FACTS = 2000
-MAX_INTENTS = 1000
-_TEXT = 400
+from app.services.agent.observability import redact_string
 
+ORIGIN_ID = "origin"
 
-class LineageError(ValueError):
-    """An intent or fact cites parents that do not exist (or none at all)."""
+# Capability classification, most specific first. Applied to finding text.
+#
+# Each rule is (kind, label, strong, weak). A ``strong`` match alone means the
+# agent obtained the capability. A ``weak`` noun only counts alongside a
+# _GAINED verb, so "missing CSRF token" or "admin panel found" do not become
+# stolen credentials or privileged access.
+_GAINED = re.compile(
+    r"\b(leak\w*|expos\w*|disclos\w*|obtain\w*|captur\w*|harvest\w*|"
+    r"stole\w*|stolen|retriev\w*|extract\w*|dump\w*|hard-?coded|"
+    r"gain\w*|logged in|authenticated as|accessed|read|download\w*|export\w*|"
+    r"enumerat\w*|valid)\b",
+    re.I,
+)
 
+_CAPABILITY_RULES: List[Tuple[str, str, re.Pattern, Optional[re.Pattern]]] = [
+    (
+        "rce",
+        "Code execution",
+        re.compile(
+            r"\b(rce|remote code|code execution|command execution|"
+            r"command injection|reverse shell|webshell|web shell|"
+            r"os command|ssti)\b",
+            re.I,
+        ),
+        None,
+    ),
+    (
+        "credential",
+        "Credential",
+        re.compile(
+            r"(\bAKIA[0-9A-Z]{4,}|\bprivate key\b|\bdefault credentials\b|"
+            r"\bcredential stuffing succeeded\b|\bcracked\b)",
+            re.I,
+        ),
+        re.compile(
+            r"\b(credentials?|passwords?|api[ _-]?keys?|secrets?|"
+            r"access[ _-]?keys?|jwt|bearer token|session (cookie|token)|"
+            r"auth(entication)? token)\b",
+            re.I,
+        ),
+    ),
+    (
+        "identity",
+        "Privileged access",
+        re.compile(
+            r"\b(privilege escalation|escalated privileges?|account takeover|"
+            r"auth(entication)? bypass|bypass(ed)? auth\w*|"
+            r"assumed? (an? )?(iam )?role|impersonat\w*|idor|"
+            r"broken access control|admin access|access as admin)\b",
+            re.I,
+        ),
+        re.compile(r"\b(admin(istrator)?|root|superuser|iam role)\b", re.I),
+    ),
+    (
+        "data",
+        "Sensitive data",
+        re.compile(
+            r"(\bdb dump\b|\bdatabase dump\b|\bexfiltrat\w*|/etc/passwd|"
+            r"\blocal file (read|inclusion)\b|\barbitrary file read\b|"
+            r"\bpublic(ly)? (readable|listable) (s3 )?bucket\b)",
+            re.I,
+        ),
+        re.compile(
+            r"\b(database|pii|ssn|card numbers?|credit cards?|"
+            r"customer (data|records)|s3 bucket|bucket|"
+            r"sensitive (data|information)|backups?|source code|"
+            r"files?|tables?)\b",
+            re.I,
+        ),
+    ),
+]
 
-def _clean(value: Any, limit: int = _TEXT) -> str:
-    return " ".join(str(value or "").split())[:limit]
+# A later step presenting any of these is evidence it used a captured capability.
+_USES_AUTH = re.compile(
+    r"(authorization|bearer|cookie|x-api-key|api[_-]?key|access[_-]?token|"
+    r"\btoken\b|password|passwd|aws_access|session)",
+    re.I,
+)
 
-
-def _id(prefix: str, *parts: Any) -> str:
-    raw = json.dumps([str(p) for p in parts], separators=(",", ":"))
-    return f"{prefix}-{hashlib.sha1(raw.encode()).hexdigest()[:12]}"
-
-
-def _facts(brain: Any) -> List[Dict[str, Any]]:
-    if not isinstance(getattr(brain, "facts", None), list):
-        brain.facts = []
-    return brain.facts
-
-
-def _intents(brain: Any) -> List[Dict[str, Any]]:
-    if not isinstance(getattr(brain, "intents", None), list):
-        brain.intents = []
-    return brain.intents
-
-
-def _candidate_ids(brain: Any) -> set:
-    return {str(c.get("id")) for c in (getattr(brain, "candidates", None) or [])
-            if isinstance(c, dict) and c.get("id")}
-
-
-def get_fact(brain: Any, fact_id: str) -> Optional[Dict[str, Any]]:
-    return next((f for f in _facts(brain) if f.get("id") == fact_id), None)
-
-
-def get_intent(brain: Any, intent_id: str) -> Optional[Dict[str, Any]]:
-    return next((i for i in _intents(brain) if i.get("id") == intent_id), None)
-
-
-def _check_parents(brain: Any, parents: Iterable[str], *, allow_intents: bool) -> List[str]:
-    wanted = [str(p) for p in parents or [] if str(p or "").strip()]
-    if not wanted:
-        raise LineageError("cite at least one parent fact or finding id")
-    facts = {f.get("id") for f in _facts(brain)}
-    findings = _candidate_ids(brain)
-    intents = {i.get("id") for i in _intents(brain)} if allow_intents else set()
-    missing = [p for p in wanted if p not in facts and p not in findings and p not in intents]
-    if missing:
-        raise LineageError(f"unknown parent id(s): {', '.join(missing[:5])}")
-    if not allow_intents and not any(p in facts or p in findings for p in wanted):
-        raise LineageError("an intent must cite a fact or finding, not only other intents")
-    return list(dict.fromkeys(wanted))
-
-
-def _trim(rows: List[Dict[str, Any]], limit: int, *, keep_open: bool) -> None:
-    if len(rows) <= limit:
-        return
-    if keep_open:
-        closed = [r for r in rows if r.get("status") in _TERMINAL]
-        for row in closed[: len(rows) - limit]:
-            rows.remove(row)
-    del rows[: max(0, len(rows) - limit)]
-
-
-# ---------------------------------------------------------------- facts
-
-def ensure_origin_fact(brain: Any, target: str) -> Dict[str, Any]:
-    """The root fact for an engagement target (the AntiFox origin fact)."""
-    parts = urlsplit(target if "://" in str(target) else f"https://{target}")
-    origin = f"{parts.scheme}://{parts.netloc}".lower() if parts.netloc else _clean(target)
-    fid = _id("fact", "origin", origin)
-    existing = get_fact(brain, fid)
-    if existing:
-        return existing
-    row = {"id": fid, "kind": "origin", "summary": f"Engagement target {origin}", "target": origin,
-           "parents": [], "evidence_ids": [], "source": "engagement", "data": {},
-           "created_at": time.time()}
-    _facts(brain).append(row)
-    return row
+_URL = re.compile(r"https?://[^\s'\"<>,}\]\)]+", re.I)
+_HOST_KEY = re.compile(
+    r"['\"](?:target|host|hostname|domain|ip|address)['\"]\s*:\s*['\"]([^'\"/\s]+)['\"]",
+    re.I,
+)
 
 
-def record_fact(brain: Any, *, kind: str, summary: str, target: str = "",
-                evidence_ids: Iterable[str] = (), source: str = "", parents: Iterable[str] = (),
-                data: Optional[Dict[str, Any]] = None, key: str = "") -> Dict[str, Any]:
-    """Add (or return the existing) fact. Parents may be facts, findings or intents.
+def _clip(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
-    ``origin`` facts use ensure_origin_fact. Other facts need a parent unless the
-    brain has no facts yet, in which case the target's origin fact is created
-    and used as the parent.
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def classify_capability(text: str) -> Optional[Tuple[str, str]]:
+    """Return (kind, label) for what a finding grants, or None."""
+    text = text or ""
+    gained = bool(_GAINED.search(text))
+    for kind, label, strong, weak in _CAPABILITY_RULES:
+        if strong.search(text) or (weak is not None and gained and weak.search(text)):
+            return kind, label
+    return None
+
+
+def capability_title(text: str, kind: str) -> str:
+    """Name the captured thing ("API key", "Card numbers") rather than the action."""
+    text = text or ""
+    if kind == "credential" and re.search(r"\bAKIA|\baws\b", text, re.I):
+        return "AWS access key"
+    if kind == "identity":
+        for pattern, name in (
+            (r"\badmin(istrator)?\b", "Admin access"),
+            (r"\b(root|superuser)\b", "Root access"),
+            (r"\biam role\b|\bassumed? .*role\b", "IAM role"),
+            (r"\baccount takeover\b", "Victim account"),
+        ):
+            if re.search(pattern, text, re.I):
+                return name
+        return "Privileged access"
+    for rule_kind, label, strong, weak in _CAPABILITY_RULES:
+        if rule_kind != kind:
+            continue
+        for pattern in (weak, strong):
+            if pattern is None:
+                continue
+            match = pattern.search(text)
+            if match:
+                phrase = " ".join(match.group(0).split())
+                return phrase[:1].upper() + phrase[1:]
+        return label
+    return text
+
+
+def extract_targets(tool_args: str) -> Tuple[Optional[str], Optional[str]]:
+    """Pull (host, path) from a step's stringified tool arguments."""
+    raw = tool_args or ""
+    match = _URL.search(raw)
+    if match:
+        parsed = urlparse(match.group(0))
+        host = (parsed.hostname or "").lower() or None
+        path = parsed.path or ""
+        if path in ("", "/"):
+            path = ""
+        return host, path or None
+    match = _HOST_KEY.search(raw)
+    if match:
+        return match.group(1).lower(), None
+    return None, None
+
+
+# Wording that marks an LLM finding as a guess rather than an observation.
+_SPECULATIVE = re.compile(
+    r"\b(may|might|could|possibl[ey]|potential(ly)?|likely|appears? to|"
+    r"seems? to|suspected|suspicious|unconfirmed|if exploitable|"
+    r"version[- ]based|outdated version|vulnerable version)\b",
+    re.I,
+)
+
+# Above this many nodes, drop the least certain actions first.
+MAX_NODES = 60
+
+
+def step_status(phase: str, success: Any, text: str = "") -> str:
+    """Status of something the agent *said* it saw.
+
+    A step's ``success`` only means the tool ran; the finding text is the
+    model's reading of the output. So step-derived nodes top out at
+    ``observed`` — ``proven`` comes only from published, verified findings
+    (see ``proofs`` in :func:`build_attack_graph`).
     """
-    kind = str(kind or "").strip().lower()
-    if kind not in FACT_KINDS or kind == "origin":
-        raise ValueError(f"fact kind must be one of {sorted(FACT_KINDS - {'origin'})}")
-    summary = _clean(summary)
-    if not summary:
-        raise ValueError("fact summary is required")
-    parents = list(parents or [])
-    if not parents:
-        root_target = target or getattr(brain, "target", "")
-        if not root_target:
-            raise LineageError("cite a parent fact, or set the engagement target first")
-        parents = [ensure_origin_fact(brain, root_target)["id"]]
-    parents = _check_parents(brain, parents, allow_intents=True)
-    evidence = [str(e)[:80] for e in evidence_ids or [] if e][:20]
-    fid = _id("fact", kind, key or summary, target, *sorted(evidence))
-    existing = get_fact(brain, fid)
-    if existing:
-        existing["parents"] = list(dict.fromkeys([*existing.get("parents", []), *parents]))
-        return existing
-    row = {"id": fid, "kind": kind, "summary": summary, "target": _clean(target, 2048),
-           "parents": parents, "evidence_ids": evidence, "source": _clean(source, 80),
-           "data": _bounded_data(data), "created_at": time.time()}
-    rows = _facts(brain)
-    rows.append(row)
-    _trim(rows, MAX_FACTS, keep_open=False)
-    return row
+    if success is True and not _SPECULATIVE.search(text or ""):
+        return "observed"
+    return "inferred"
 
 
-def _bounded_data(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not isinstance(data, dict):
-        return {}
-    out: Dict[str, Any] = {}
-    for key, value in list(data.items())[:20]:
-        if isinstance(value, (int, float, bool)) or value is None:
-            out[str(key)[:60]] = value
-        else:
-            out[str(key)[:60]] = _clean(value if isinstance(value, str) else json.dumps(value, default=str))
-    return out
+def proof_status(proof: Dict[str, Any]) -> Optional[str]:
+    """Status for a published finding, or None if it was ruled a false positive."""
+    verdict = (proof.get("verdict") or "").lower()
+    if verdict == "false_positive":
+        return None
+    if (proof.get("verification_level") or "") == "exploit_verified" or verdict == "confirmed":
+        return "proven"
+    return "observed"
 
 
-# ---------------------------------------------------------------- intents
-
-def normalize_test_type(test_type: Any) -> str:
-    return _clean(test_type, 64).lower().replace(" ", "_").replace("-", "_")
+_RANK = {"inferred": 0, "observed": 1, "proven": 2}
+_CAPABILITY_KINDS = {"credential", "identity", "rce", "data"}
 
 
-def intent_id_for(*, test_type: str, target: str, parameter: str = "", location: str = "",
-                  method: str = "GET", identity: str = "") -> str:
-    """The id add_intent gives this test, so intake can dedup before the brain is loaded."""
-    return _id("intent", normalize_test_type(test_type), (_clean(method, 10) or "GET").upper(),
-               target, _clean(parameter, 128), _clean(location, 20).lower(), _clean(identity, 40))
+def _stronger(a: str, b: str) -> str:
+    return a if _RANK.get(a, 0) >= _RANK.get(b, 0) else b
 
 
-def add_intent(brain: Any, *, objective: str, test_type: str, target: str, parents: Iterable[str],
-               parameter: str = "", location: str = "", method: str = "GET", identity: str = "",
-               created_by: str = "planner", link_coverage: bool = True,
-               source_capture_id: str = "", source_evidence_id: str = "",
-               baseline_value: Optional[str] = None) -> Dict[str, Any]:
-    """Add one planned test. Same test on the same input returns the existing intent.
-
-    Provenance (optional, additive): ``source_capture_id`` names the private
-    browser capture the test comes from and ``source_evidence_id`` the evidence
-    record behind it, so the probe can take the input's baseline value and
-    request from that observation; ``baseline_value`` is the input's ordinary
-    value supplied with the intent (operator). Neither is proof. An existing
-    intent gains provenance it does not have yet; set values never change.
-    """
-    test_type = normalize_test_type(test_type)
-    if not test_type:
-        raise ValueError("test_type is required")
-    location = _clean(location, 20).lower()
-    if location not in INTENT_LOCATIONS:
-        raise ValueError(f"location must be one of {sorted(INTENT_LOCATIONS - {''})}")
-    method = (_clean(method, 10) or "GET").upper()
-    parts = urlsplit(str(target or ""))
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ValueError("intent target must be an absolute http(s) URL")
-    parents = _check_parents(brain, parents, allow_intents=False)
-    parameter = _clean(parameter, 128)
-    identity = _clean(identity, 40)
-    provenance = _provenance(source_capture_id=source_capture_id,
-                             source_evidence_id=source_evidence_id,
-                             baseline_value=baseline_value, location=location)
-    iid = intent_id_for(test_type=test_type, target=target, parameter=parameter,
-                        location=location, method=method, identity=identity)
-    existing = get_intent(brain, iid)
-    if existing:
-        existing["parents"] = list(dict.fromkeys([*existing.get("parents", []), *parents]))
-        for key, value in provenance.items():
-            existing.setdefault(key, value)
-        return existing
-    row = {"id": iid, "objective": _clean(objective) or f"{test_type} on {parameter or target}",
-           "test_type": test_type, "method": method, "target": _clean(target, 2048),
-           "parameter": parameter, "location": location, "identity": identity,
-           "parents": parents, "status": "open", "claimed_by": "", "result_facts": [],
-           "created_by": _clean(created_by, 40) or "planner", "coverage_cell_id": "",
-           "created_at": time.time(), "updated_at": time.time(), **provenance}
-    if link_coverage:
-        row["coverage_cell_id"] = _link_coverage_cell(brain, row, parts)
-    rows = _intents(brain)
-    rows.append(row)
-    _trim(rows, MAX_INTENTS, keep_open=True)
-    return row
+def _tokens(text: str) -> set:
+    stop = {"the", "a", "an", "in", "on", "of", "to", "via", "and", "or", "with",
+            "for", "from", "is", "are", "at", "by", "using", "parameter"}
+    return {t for t in _norm(text).split() if len(t) > 2 and t not in stop}
 
 
-_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}\Z")
-MAX_BASELINE_VALUE = 512
+SIMILAR = 0.5
 
 
-def _provenance(*, source_capture_id: str, source_evidence_id: str,
-                baseline_value: Optional[str], location: str) -> Dict[str, Any]:
-    """Validated optional provenance fields for an intent row (only those given)."""
-    out: Dict[str, Any] = {}
-    for key, value in (("source_capture_id", source_capture_id),
-                       ("source_evidence_id", source_evidence_id)):
-        text = str(value or "").strip()
-        if text:
-            if not _REFERENCE.fullmatch(text):
-                raise ValueError(f"{key} must be an evidence/capture id")
-            out[key] = text
-    if baseline_value is not None:
-        if (not isinstance(baseline_value, str) or not baseline_value
-                or len(baseline_value) > MAX_BASELINE_VALUE
-                or re.search(r"[\x00-\x1f\x7f]", baseline_value)):
-            raise ValueError(f"baseline_value must be 1-{MAX_BASELINE_VALUE} printable characters")
-        if not location or location == "fragment":
-            raise ValueError("baseline_value needs a server-side input location")
-        out["baseline_value"] = baseline_value
-    return out
+def _similarity(a: str, b: str) -> float:
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
 
 
-def _link_coverage_cell(brain: Any, intent: Dict[str, Any], parts) -> str:
-    """Back the intent with an exact coverage cell so lease-based probes can work it.
+class _Builder:
+    def __init__(self) -> None:
+        self.nodes: Dict[str, Dict[str, Any]] = {}
+        self.order: List[str] = []
+        self.edges: Dict[str, Dict[str, Any]] = {}
+        # capability ids per host, most recent last; "*" holds credentials,
+        # which are commonly reused across hosts.
+        self.captured: Dict[str, List[str]] = {}
 
-    A new cell is marked ``source=INTENT_CELL_SOURCE`` with the intent id, so
-    the scoped probes build its request from the intent (there is no capture).
-    When the cell already exists (Prowl observed the same input), it keeps its
-    own source and capture and only gains the intent id.
-    """
-    try:
-        from app.services.agent.coverage_cells import record_coverage_cell
-    except Exception:  # pragma: no cover - import guard
-        return ""
-    parameter = intent["parameter"]
-    if parameter and intent["location"] and ":" not in parameter:
-        parameter = f"{intent['location']}:{parameter}"
-    try:
-        from app.services.agent.coverage_cells import coverage_cell_id
+    def node(self, nid: str, **fields: Any) -> Dict[str, Any]:
+        existing = self.nodes.get(nid)
+        if existing:
+            existing["status"] = _stronger(existing["status"], fields.get("status", "inferred"))
+            return existing
+        node = {"id": nid, **fields}
+        self.nodes[nid] = node
+        self.order.append(nid)
+        return node
 
-        cid = coverage_cell_id(
-            method=intent["method"], path=parts.path or "/", host=parts.netloc, operation_id="",
-            identity=intent["identity"] or "anonymous", tenant="",
-            parameter=parameter or "endpoint", test_type=intent["test_type"])
-        existing = next((c for c in getattr(brain, "coverage_cells", None) or []
-                         if c.get("id") == cid), None)
-        if existing is not None:
-            # Never reset an observed cell's status, lease or verdict.
-            existing["intent_id"] = existing.get("intent_id") or intent["id"]
-            return cid
-        cell = record_coverage_cell(
-            brain, method=intent["method"], path=parts.path or "/", host=parts.netloc,
-            status="untested", identity=intent["identity"] or "anonymous", parameter=parameter,
-            test_type=intent["test_type"], reason=f"intent {intent['id']} ({intent['created_by']})",
+    def edge(self, source: str, target: str, status: str, label: str = "") -> None:
+        eid = f"{source}->{target}"
+        existing = self.edges.get(eid)
+        if existing:
+            existing["status"] = _stronger(existing["status"], status)
+            return
+        self.edges[eid] = {"id": eid, "source": source, "target": target,
+                           "status": status, "label": label}
+
+    def promote(self, nid: str, status: str) -> None:
+        node = self.nodes.get(nid)
+        if node:
+            node["status"] = _stronger(node["status"], status)
+        # Proof on a node also proves the way in to it.
+        if status == "proven":
+            for e in self.edges.values():
+                if e["target"] == nid and _RANK[e["status"]] < _RANK["proven"]:
+                    src = self.nodes.get(e["source"])
+                    if src and src["kind"] in ("origin", "host", "endpoint"):
+                        e["status"] = "proven"
+                        self.promote(e["source"], "proven")
+
+    def anchor(self, host: Optional[str], path: Optional[str], status: str) -> str:
+        self.node(ORIGIN_ID, kind="origin", title="Internet",
+                  subtitle="Unauthenticated attacker", status="observed")
+        if not host:
+            return ORIGIN_ID
+        host_id = f"host:{host}"
+        self.node(host_id, kind="host", title=host, subtitle="Host", status=status)
+        self.edge(ORIGIN_ID, host_id, status)
+        if not path:
+            return host_id
+        ep_id = f"endpoint:{host}{path}"
+        self.node(ep_id, kind="endpoint", title=_clip(path, 48), subtitle="Endpoint", status=status)
+        self.edge(host_id, ep_id, status)
+        return ep_id
+
+    def used_capability(self, host: Optional[str], args: str, post_exploitation: bool) -> Optional[str]:
+        if not (post_exploitation or _USES_AUTH.search(args or "")):
+            return None
+        pool = self.captured.get(host or "", []) + self.captured.get("*", [])
+        return pool[-1] if pool else None
+
+    def _best(self, candidates: List[Dict[str, Any]], text: str) -> Optional[Dict[str, Any]]:
+        best, best_score = None, SIMILAR
+        for n in candidates:
+            score = _similarity(n.get("description") or n["title"], text)
+            if score >= best_score and (best is None or score > best_score):
+                best, best_score = n, score
+        return best
+
+    def find_action(self, anchor: str, text: str, unpublished_only: bool = False) -> Optional[Dict[str, Any]]:
+        targets = [self.nodes.get(e["target"]) for e in self.edges.values() if e["source"] == anchor]
+        return self._best([n for n in targets if n and n["kind"] == "action"
+                           and not (unpublished_only and n.get("finding_id"))], text)
+
+    def find_action_on_host(self, host: Optional[str], text: str) -> Optional[Dict[str, Any]]:
+        return self._best([n for n in self.nodes.values()
+                           if n["kind"] == "action" and not n.get("finding_id")
+                           and (not host or n.get("host") in (host, None))], text)
+
+    def downstream_capabilities(self, action_id: str) -> List[str]:
+        return [e["target"] for e in self.edges.values()
+                if e["source"] == action_id and self.nodes.get(e["target"], {}).get("kind") in _CAPABILITY_KINDS]
+
+    def upstream_capabilities(self, action_id: str) -> List[str]:
+        return [e["source"] for e in self.edges.values() if e["target"] == action_id and e["label"] == "uses"]
+
+    def capability(self, action_id: str, text: str, host: Optional[str], status: str) -> None:
+        cap = classify_capability(text)
+        if not cap:
+            return
+        kind, label = cap
+        title = capability_title(text, kind)
+        # "Leaked API key grants admin access": the key is what the action
+        # consumed, not what it gained. Don't redraw an input as an output.
+        used_titles = {self.nodes[c]["title"] for c in self.upstream_capabilities(action_id) if c in self.nodes}
+        if title in used_titles:
+            rest = classify_capability(re.sub(re.escape(title), " ", text, flags=re.I))
+            if not rest:
+                return
+            kind, label = rest
+            title = capability_title(re.sub(re.escape(title), " ", text, flags=re.I), kind)
+        cap_id = f"{kind}:{host or '*'}:{_norm(title)}"
+        self.node(cap_id, kind=kind, title=_clip(title, 40), subtitle=label,
+                  description=_clip(text, 500), status=status, host=host)
+        self.promote(cap_id, status)
+        self.edge(action_id, cap_id, status)
+        pool = self.captured.setdefault("*" if kind == "credential" else (host or "*"), [])
+        if cap_id in pool:
+            pool.remove(cap_id)
+        pool.append(cap_id)
+
+
+def _steps_from_chain(chain: Dict[str, Any]) -> List[Dict[str, Any]]:
+    steps = [n for n in (chain.get("nodes") or []) if str(n.get("id", "")).startswith("step-")]
+    steps.sort(key=lambda n: (n.get("properties") or {}).get("iteration") or 0)
+    return steps
+
+
+def _add_steps(b: _Builder, steps: List[Dict[str, Any]]) -> int:
+    last_host: Optional[str] = None
+    failed_attempts = 0
+    for step in steps:
+        props = step.get("properties") or {}
+        iteration = props.get("iteration") or 0
+        phase = (props.get("phase") or "").lower()
+        tool = props.get("tool_name") or ""
+        args = props.get("tool_args") or ""
+        findings = [f for f in (props.get("findings") or []) if f.get("type")]
+        failed_attempts += len([f for f in (props.get("failures") or []) if f.get("tool")])
+
+        host, path = extract_targets(args)
+        host = host or last_host
+        if host:
+            last_host = host
+
+        relevant = [
+            f for f in findings
+            if f.get("type") == "vulnerability" or classify_capability(f.get("description") or "")
+        ]
+        if not relevant:
+            continue
+
+        evidence = {
+            "iteration": iteration,
+            "phase": phase,
+            "tool": tool,
+            "args": _clip(redact_string(args), 500),
+            "output": _clip(redact_string(props.get("output_summary") or ""), 1000),
+            "thought": _clip(redact_string(props.get("thought") or ""), 300),
+            "success": props.get("success"),
+        }
+
+        for idx, finding in enumerate(relevant):
+            desc = redact_string(finding.get("description") or "")
+            status = step_status(phase, props.get("success"), desc)
+            anchor = b.anchor(host, path, status)
+            used = b.used_capability(host, args, phase == "post_exploitation")
+
+            existing = b.find_action(anchor, desc)
+            if existing:
+                # Same issue seen again: merge instead of drawing a duplicate.
+                existing["occurrences"] = existing.get("occurrences", 1) + 1
+                b.promote(existing["id"], status)
+                action_id = existing["id"]
+            else:
+                action_id = f"action:{iteration}:{idx}"
+                b.node(action_id, kind="action", title=_clip(desc, 60) or tool or "Action",
+                       subtitle=tool or phase, status=status, severity=finding.get("severity") or "",
+                       description=_clip(desc, 500), host=host, evidence=evidence, occurrences=1)
+                b.edge(anchor, action_id, status)
+            if used:
+                b.edge(used, action_id, status, label="uses")
+            b.capability(action_id, desc, host, status)
+    return failed_attempts
+
+
+def _proof_target(proof: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], str]:
+    """(host, path, joined args) from a published finding's proof chain."""
+    host = (proof.get("host") or "").lower() or None
+    path: Optional[str] = None
+    joined = ""
+    for step in proof.get("chain") or []:
+        args = str(step.get("args") or "")
+        joined += " " + args
+        h, p = extract_targets(args)
+        if p and (not host or h == host) and not path:
+            path = p
+            host = host or h
+    return host, path, joined
+
+
+def _add_proofs(b: _Builder, proofs: List[Dict[str, Any]]) -> int:
+    added = 0
+    for proof in proofs:
+        status = proof_status(proof)
+        if status is None:
+            continue
+        title = redact_string(proof.get("title") or "Finding")
+        text = " ".join(redact_string(str(proof.get(k) or "")) for k in ("title", "description", "impact"))
+        host, path, chain_args = _proof_target(proof)
+        anchor = b.anchor(host, path, status)
+        chain = proof.get("chain") or []
+        evidence = {
+            "iteration": 0,
+            "phase": "published finding",
+            "tool": ", ".join(dict.fromkeys(str(s.get("display_tool") or s.get("tool") or "") for s in chain if s))[:120],
+            "args": _clip(redact_string(chain_args), 500),
+            "output": _clip(redact_string(" · ".join(str(s.get("outcome") or "") for s in chain if s.get("outcome"))), 1000),
+            "thought": _clip(redact_string(proof.get("not_demonstrated") or ""), 300),
+            "success": True,
+        }
+        fields = dict(
+            title=_clip(title, 60), severity=proof.get("severity") or "",
+            description=_clip(text, 500), finding_id=proof.get("id"),
+            verification=proof.get("verification_level") or proof.get("verdict") or "",
         )
-    except Exception:
-        return ""
-    cell_id = str((cell or {}).get("id") or "")
-    live = next((c for c in brain.coverage_cells if c.get("id") == cell_id), None)
-    if live is not None:
-        live["intent_id"] = intent["id"]
-        live["source"] = INTENT_CELL_SOURCE
-        live["observation_source"] = f"{intent['created_by']}_intent"[:40]
-    return cell_id
+
+        existing = b.find_action(anchor, title, unpublished_only=True) or b.find_action_on_host(host, title)
+        if existing:
+            existing.update(fields)
+            if existing.get("evidence", {}).get("phase") != "published finding":
+                existing["step_evidence"] = existing.get("evidence")
+            existing["evidence"] = evidence
+            b.edge(anchor, existing["id"], status)
+            b.promote(existing["id"], status)
+            action_id = existing["id"]
+        else:
+            action_id = f"finding:{proof.get('id')}"
+            b.node(action_id, kind="action", subtitle="Published finding", status=status,
+                   host=host, evidence=evidence, occurrences=1, **fields)
+            b.edge(anchor, action_id, status)
+            used = b.used_capability(host, chain_args, False)
+            if used:
+                b.edge(used, action_id, status, label="uses")
+        b.promote(action_id, status)
+        # Upstream capability this proof relied on is proven too.
+        for e in list(b.edges.values()):
+            if e["target"] == action_id and e["label"] == "uses" and status == "proven":
+                e["status"] = "proven"
+                b.promote(e["source"], "proven")
+        downstream = b.downstream_capabilities(action_id)
+        if downstream:
+            # The step already said what this action gained; the proof confirms it.
+            for cap_id in downstream:
+                b.edges[f"{action_id}->{cap_id}"]["status"] = _stronger(
+                    b.edges[f"{action_id}->{cap_id}"]["status"], status)
+                b.promote(cap_id, status)
+        else:
+            b.capability(action_id, text, host, status)
+        added += 1
+    return added
 
 
-def claim_intent(brain: Any, intent_id: str, worker: str) -> Dict[str, Any]:
-    intent = get_intent(brain, intent_id)
-    if intent is None:
-        raise ValueError(f"unknown intent {intent_id}")
-    worker = _clean(worker, 60)
-    if not worker:
-        raise ValueError("worker is required")
-    if intent["status"] == "claimed" and intent["claimed_by"] == worker:
-        return intent
-    if intent["status"] != "open":
-        raise ValueError(f"intent {intent_id} is {intent['status']}"
-                         + (f" by {intent['claimed_by']}" if intent["claimed_by"] else ""))
-    intent.update(status="claimed", claimed_by=worker, updated_at=time.time())
-    return intent
+def _prune(b: _Builder, max_nodes: int) -> int:
+    """Drop least-certain leaf actions until the graph fits; returns hidden count."""
+    hidden = 0
+
+    def outgoing(nid: str) -> bool:
+        return any(e["source"] == nid for e in b.edges.values())
+
+    def remove(nid: str) -> None:
+        b.nodes.pop(nid, None)
+        b.order.remove(nid)
+        for eid in [k for k, e in b.edges.items() if nid in (e["source"], e["target"])]:
+            del b.edges[eid]
+
+    for status in ("inferred", "observed"):
+        if len(b.nodes) <= max_nodes:
+            break
+        for nid in [n for n in reversed(b.order)
+                    if b.nodes[n]["kind"] == "action" and b.nodes[n]["status"] == status
+                    and not b.nodes[n].get("finding_id") and not outgoing(n)]:
+            if len(b.nodes) <= max_nodes:
+                break
+            remove(nid)
+            hidden += 1
+        # Endpoints/hosts left with nothing behind them go too.
+        changed = True
+        while changed:
+            changed = False
+            for nid in list(b.order):
+                if b.nodes[nid]["kind"] in ("endpoint", "host") and not outgoing(nid):
+                    remove(nid)
+                    changed = True
+    return hidden
 
 
-def complete_intent(brain: Any, intent_id: str, worker: str, *, result_facts: Iterable[str],
-                    status: str = "done", note: str = "") -> Dict[str, Any]:
-    """Close a claimed intent, citing the facts the work produced."""
-    intent = get_intent(brain, intent_id)
-    if intent is None:
-        raise ValueError(f"unknown intent {intent_id}")
-    if status not in _TERMINAL:
-        raise ValueError(f"status must be one of {sorted(_TERMINAL)}")
-    if intent["status"] != "claimed" or intent["claimed_by"] != _clean(worker, 60):
-        raise ValueError(f"intent {intent_id} is not claimed by {worker}")
-    results = [str(f) for f in result_facts or [] if f]
-    known = {f.get("id") for f in _facts(brain)}
-    missing = [f for f in results if f not in known]
-    if missing:
-        raise LineageError(f"unknown result fact(s): {', '.join(missing[:5])}")
-    if status == "done" and not results:
-        raise LineageError("a done intent must cite at least one result fact")
-    intent.update(status=status, result_facts=list(dict.fromkeys(results)),
-                  note=_clean(note), updated_at=time.time())
-    return intent
+def build_attack_graph(
+    chain: Dict[str, Any],
+    proofs: Optional[List[Dict[str, Any]]] = None,
+    max_nodes: int = MAX_NODES,
+) -> Dict[str, Any]:
+    """Convert a ``get_session_chain`` payload into an entity attack graph.
 
+    ``proofs`` are the session's published findings (see
+    :func:`load_session_proofs`); only those can make a node ``proven``.
+    """
+    b = _Builder()
+    meta = chain.get("meta") or {}
+    failed_attempts = _add_steps(b, _steps_from_chain(chain))
+    published = _add_proofs(b, proofs or [])
+    hidden = _prune(b, max_nodes)
 
-def open_intents(brain: Any, *, test_type: str = "") -> List[Dict[str, Any]]:
-    return [i for i in _intents(brain) if i.get("status") == "open"
-            and (not test_type or i.get("test_type") == test_type)]
-
-
-def lineage(brain: Any, node_id: str, *, depth: int = 12) -> List[Dict[str, str]]:
-    """Ancestors of a fact or intent, nearest first."""
-    out: List[Dict[str, str]] = []
-    seen = {node_id}
-    frontier = [node_id]
-    while frontier and len(out) < 50 and depth > 0:
-        depth -= 1
-        nxt = []
-        for nid in frontier:
-            node = get_fact(brain, nid) or get_intent(brain, nid)
-            for parent in (node or {}).get("parents", []):
-                if parent in seen:
-                    continue
-                seen.add(parent)
-                p = get_fact(brain, parent) or get_intent(brain, parent)
-                label = (p or {}).get("summary") or (p or {}).get("objective") or "finding"
-                out.append({"id": parent, "label": _clean(label, 160)})
-                nxt.append(parent)
-        frontier = nxt
-    return out
-
-
-def overview(brain: Any, *, recent: int = 15) -> Dict[str, Any]:
-    """Planner snapshot: counts, open/claimed intents with lineage, recent facts."""
-    facts = _facts(brain)
-    intents = _intents(brain)
-    by_status: Dict[str, int] = {}
-    for intent in intents:
-        by_status[intent.get("status", "open")] = by_status.get(intent.get("status", "open"), 0) + 1
-    active = [i for i in intents if i.get("status") in ("open", "claimed")][:30]
+    nodes = [b.nodes[nid] for nid in b.order]
+    edges = list(b.edges.values())
+    capability_kinds = _CAPABILITY_KINDS
     return {
-        "facts": len(facts),
-        "intents": by_status,
-        "findings": len(_candidate_ids(brain)),
-        "active_intents": [{
-            "id": i["id"], "status": i["status"], "test_type": i["test_type"],
-            "target": i["target"], "parameter": i["parameter"], "location": i["location"],
-            "claimed_by": i["claimed_by"], "coverage_cell_id": i["coverage_cell_id"],
-            "lineage": [step["id"] for step in lineage(brain, i["id"], depth=3)],
-        } for i in active],
-        "recent_facts": [{
-            "id": f["id"], "kind": f["kind"], "summary": f["summary"],
-            "evidence_ids": f.get("evidence_ids", [])[:5],
-        } for f in facts[-recent:]],
-        "note": "Facts and intents are planning state, never proof.",
+        "nodes": nodes,
+        "edges": edges,
+        "meta": {
+            "session_id": meta.get("session_id"),
+            "objective": meta.get("objective"),
+            "status": meta.get("status"),
+            "hosts": sum(1 for n in nodes if n["kind"] == "host"),
+            "actions": sum(1 for n in nodes if n["kind"] == "action"),
+            "capabilities": sum(1 for n in nodes if n["kind"] in capability_kinds),
+            "proven": sum(1 for n in nodes if n["kind"] == "action" and n["status"] == "proven"),
+            "published": published,
+            "hidden": hidden,
+            "failed_attempts": failed_attempts,
+        },
     }
+
+
+def load_session_proofs(db: Any, organization_id: int, session_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Published agent findings for one session, shaped for ``build_attack_graph``."""
+    from app.models.asset import Asset
+    from app.models.vulnerability import Vulnerability
+
+    rows = (
+        db.query(Vulnerability)
+        .join(Asset, Vulnerability.asset_id == Asset.id)
+        .filter(
+            Asset.organization_id == organization_id,
+            Vulnerability.detected_by == "agent",
+            Vulnerability.metadata_[("agent_detection", "session_id")].as_string() == str(session_id),
+        )
+        .order_by(Vulnerability.id.asc())
+        .limit(limit)
+        .all()
+    )
+    proofs: List[Dict[str, Any]] = []
+    for v in rows:
+        meta = v.metadata_ if isinstance(v.metadata_, dict) else {}
+        det = meta.get("agent_detection") if isinstance(meta.get("agent_detection"), dict) else {}
+        host = ""
+        if v.asset is not None:
+            value = v.asset.value or ""
+            host = (urlparse(value).hostname or "") if "://" in value else value.split("/")[0]
+        proofs.append({
+            "id": v.id,
+            "title": v.title,
+            "description": v.description or "",
+            "impact": v.impact or "",
+            "severity": getattr(v.severity, "value", v.severity) or "",
+            "host": host.lower(),
+            "verification_level": v.verification_level,
+            "verdict": v.last_validation_verdict,
+            "not_demonstrated": det.get("not_demonstrated") or "",
+            "chain": [s for s in (det.get("chain") or []) if isinstance(s, dict)],
+        })
+    return proofs
+
+
+def attach_verified_graph(chain: Dict[str, Any], organization_id: Optional[int],
+                          session_id: str, db: Any = None) -> Dict[str, Any]:
+    """Rebuild ``chain["attack_graph"]`` with the session's published findings.
+
+    Opens its own session when ``db`` is None. Never raises: on any failure the
+    step-only graph (which tops out at ``observed``) is left in place.
+    """
+    if not organization_id or not session_id:
+        return chain
+    try:
+        if db is not None:
+            proofs = load_session_proofs(db, organization_id, session_id)
+        else:
+            from app.db.database import SessionLocal
+
+            with SessionLocal() as own:
+                proofs = load_session_proofs(own, organization_id, session_id)
+        if proofs or chain.get("nodes"):
+            chain["attack_graph"] = build_attack_graph(chain, proofs=proofs)
+    except Exception as e:  # pragma: no cover - defensive
+        import logging
+
+        logging.getLogger(__name__).debug(f"attack_graph proofs unavailable: {e}")
+    return chain

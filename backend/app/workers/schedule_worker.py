@@ -783,6 +783,13 @@ class ScheduleWorker:
                         f"Wiz sync (org {integration.organization_id}, "
                         f"'{integration.connection_name}'): {result.get('message')}"
                     )
+                    from app.services.integration_graph_service import project_and_record_graph
+                    graph_result = await asyncio.to_thread(
+                        project_and_record_graph, integration.organization_id, "wiz", integration.id
+                    )
+                    if not graph_result["ok"]:
+                        logger.error("Wiz graph projection failed for org %s: %s",
+                                     integration.organization_id, graph_result.get("error"))
                 except Exception as exc:
                     logger.error(
                         f"Wiz sync failed for connection {integration.id}: {exc}",
@@ -833,7 +840,6 @@ class ScheduleWorker:
     async def run_crowdstrike_syncs(self):
         """Run due Falcon Exposure Management imports."""
         from app.models.crowdstrike_integration import CrowdStrikeIntegration
-        from app.models.crowdstrike_integration import CrowdStrikeAssetLink
         from app.services import crowdstrike_service
 
         db = self.get_db_session()
@@ -850,12 +856,13 @@ class ScheduleWorker:
                     result = await crowdstrike_service.sync_integration(db, integration)
                     logger.info("CrowdStrike sync for org %s: %s", integration.organization_id, result.get("message"))
                     if result["ok"]:
-                        from app.services.graph_service import sync_organization_background
-                        values = [value for (value,) in db.query(Asset.value).join(
-                            CrowdStrikeAssetLink, CrowdStrikeAssetLink.asset_id == Asset.id
-                        ).filter(CrowdStrikeAssetLink.integration_id == integration.id).distinct().all()]
-                        if values:
-                            await asyncio.to_thread(sync_organization_background, integration.organization_id, values)
+                        from app.services.integration_graph_service import project_and_record_graph
+                        graph_result = await asyncio.to_thread(
+                            project_and_record_graph, integration.organization_id, "crowdstrike", integration.id
+                        )
+                        if not graph_result["ok"]:
+                            logger.error("CrowdStrike graph projection failed for org %s: %s",
+                                         integration.organization_id, graph_result.get("error"))
         except Exception:
             logger.exception("CrowdStrike scheduled sync failed")
             db.rollback()

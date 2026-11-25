@@ -4,7 +4,7 @@ Mixin for ASMToolsManager (helpers only, no new tools). The leased scoped
 probes (``scoped_injection_probe_assigned``, ``scoped_response_probe_assigned``)
 call these when a cell is
 
-* intent-backed (``attack_graph`` intent, ``source=INTENT_CELL_SOURCE``, no
+* intent-backed (``planning_graph`` intent, ``source=INTENT_CELL_SOURCE``, no
   capture): the request comes from the intent's method, URL, parameter and
   location, so operator-directed tests work on inputs Prowl never observed;
 * an observed header or cookie input on a GET (no capture is needed to set
@@ -63,7 +63,7 @@ class IntentProbeToolsMixin:
 
     @staticmethod
     def _shaped_cell(cell: Optional[Dict[str, Any]]) -> bool:
-        from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+        from app.services.agent.planning_graph import INTENT_CELL_SOURCE
         from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
         if not cell:
@@ -88,7 +88,7 @@ class IntentProbeToolsMixin:
         The intent's URL is used only when it is on the scoped origin and its
         path is the cell's path; otherwise the cell's own path is used.
         """
-        from app.services.agent.attack_graph import get_intent
+        from app.services.agent.planning_graph import get_intent
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.parameter_inventory import _origin
 
@@ -376,7 +376,7 @@ class IntentProbeToolsMixin:
         intent target already carries (query field or path segment). ``value``
         is '' when none exists. Values never enter receipts; ``source`` does.
         """
-        from app.services.agent.attack_graph import get_intent
+        from app.services.agent.planning_graph import get_intent
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.parameter_inventory import _origin
         from app.services.agent.scoped_assessment import intent_request
@@ -502,7 +502,7 @@ class IntentProbeToolsMixin:
         completes it. A probe without a signal completes the intent, not the
         coverage cell: the cell's verdict is recorded separately.
         """
-        from app.services.agent import attack_graph as graph
+        from app.services.agent import planning_graph as graph
 
         intent_id = str(cell.get("intent_id") or "")
         intent = graph.get_intent(brain, intent_id) if intent_id else None

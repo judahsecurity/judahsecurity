@@ -50,7 +50,7 @@ def record_parser_facts(manager: Any, tool_name: str, parsed: Optional[Dict[str,
     """Record parsed observations as ``parser`` facts. Returns the fact ids."""
     if not isinstance(parsed, dict) or not parsed.get("observations"):
         return []
-    from app.services.agent.attack_graph import LineageError, ensure_origin_fact, record_fact
+    from app.services.agent.planning_graph import LineageError, ensure_origin_fact, record_fact
     from app.services.agent.engagement_brain import engagement_brain_from_dict
 
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))

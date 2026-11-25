@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
-from app.services.agent import attack_graph as graph
+from app.services.agent import planning_graph as graph
 from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
 from app.services.agent.scoped_assessment import intent_request as ir
 from app.services.agent.scoped_assessment.injection_probe import NOSQL_SEQUENCE

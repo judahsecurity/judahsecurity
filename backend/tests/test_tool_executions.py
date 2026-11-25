@@ -180,7 +180,7 @@ async def test_orchestrator_backgrounds_slow_scanner_and_announces_completion(mo
     monkeypatch.setattr(settings, "AGENT_TOOL_WAIT_SECONDS", 1, raising=False)
     monkeypatch.setattr(tool_executions, "wait_seconds", lambda: 0.05)
     monkeypatch.setattr(evograph, "record_step", lambda **_kwargs: None)
-    monkeypatch.setattr(evograph, "get_session_chain", lambda _session_id: {})
+    monkeypatch.setattr(evograph, "get_session_chain", lambda _session_id, _org_id: {})
 
     release = asyncio.Event()
 

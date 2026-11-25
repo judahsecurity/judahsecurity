@@ -1,0 +1,365 @@
+'use client';
+
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { Controls, ReactFlow, type Edge, type Node, type ReactFlowInstance } from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import Link from 'next/link';
+import { ExternalLink, Maximize2, Route, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
+import { AGENT_NODE_SIZE, agentPathNodeTypes } from './AgentPathNodes';
+import { layoutAttackGraph } from './layout';
+import {
+  KIND_META,
+  STATUS_STYLE,
+  type AgentAttackGraphData,
+  type AgentGraphEvidence,
+  type AgentGraphKind,
+  type AgentGraphNode,
+  type AgentGraphStatus,
+  foldEndpoints,
+  provenOnly,
+} from './agentGraph';
+
+/** Below this zoom node labels are unreadable; pan instead of shrinking further. */
+const MIN_READABLE_ZOOM = 0.62;
+
+function toFlow(graph: AgentAttackGraphData): { nodes: Node[]; edges: Edge[] } {
+  const rawNodes: Node[] = graph.nodes.map((n) => ({
+    id: n.id,
+    type: 'agent',
+    position: { x: 0, y: 0 },
+    data: { ...n },
+  }));
+  const edges: Edge[] = graph.edges.map((e) => {
+    const s = STATUS_STYLE[e.status] || STATUS_STYLE.inferred;
+    return {
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      type: 'default',
+      style: {
+        stroke: s.edge,
+        strokeWidth: e.status === 'proven' ? 1.75 : 1.25,
+        strokeDasharray: s.dash,
+        opacity: s.opacity,
+      },
+    };
+  });
+  const nodes = layoutAttackGraph(rawNodes, edges, {
+    sizeOf: () => AGENT_NODE_SIZE,
+    nodesep: 28,
+    ranksep: 40,
+    align: null,
+  });
+  return { nodes, edges };
+}
+
+function Legend({ graph }: { graph: AgentAttackGraphData }) {
+  const kinds = Array.from(new Set(graph.nodes.map((n) => n.kind))).filter(
+    (k) => k !== 'action'
+  ) as AgentGraphKind[];
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+      {kinds.map((k) => (
+        <span key={k} className="flex items-center gap-1">
+          <span className="h-2 w-2 rounded-full" style={{ background: KIND_META[k].color }} />
+          {KIND_META[k].label}
+        </span>
+      ))}
+      <span className="mx-1 h-3 w-px bg-border" />
+      {(Object.keys(STATUS_STYLE) as AgentGraphStatus[]).map((s) => (
+        <span key={s} className="flex items-center gap-1" title={STATUS_STYLE[s].hint}>
+          <svg width="16" height="6" aria-hidden>
+            <line
+              x1="0"
+              y1="3"
+              x2="16"
+              y2="3"
+              stroke={STATUS_STYLE[s].edge}
+              strokeWidth={1.75}
+              strokeDasharray={STATUS_STYLE[s].dash}
+              opacity={STATUS_STYLE[s].opacity}
+            />
+          </svg>
+          {STATUS_STYLE[s].label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function Inspector({ node, onClose }: { node: AgentGraphNode; onClose: () => void }) {
+  const kind = KIND_META[node.kind];
+  const status = STATUS_STYLE[node.status];
+  const ev = node.evidence;
+  return (
+    <div className="absolute bottom-2 right-2 top-2 z-10 flex w-[280px] flex-col overflow-hidden rounded-lg border border-border bg-card/95 shadow-xl backdrop-blur">
+      <div className="flex items-start justify-between gap-2 border-b border-border px-3 py-2">
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase tracking-wide" style={{ color: kind.color }}>
+            {kind.label} · {status.label}
+          </p>
+          <p className="mt-0.5 break-words text-xs font-medium text-foreground">
+            {node.description || node.title}
+          </p>
+        </div>
+        <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" onClick={onClose}>
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <div className="flex-1 space-y-2.5 overflow-y-auto px-3 py-2 text-[11px]">
+        <p className="text-muted-foreground">{status.hint}.</p>
+        {node.finding_id ? (
+          <Link
+            href={`/findings?id=${node.finding_id}`}
+            className="flex items-center gap-1 text-primary hover:underline"
+          >
+            Open finding #{node.finding_id}
+            <ExternalLink className="h-3 w-3" />
+          </Link>
+        ) : null}
+        {node.verification ? <Field label="Verification" value={node.verification.replace(/_/g, ' ')} /> : null}
+        {node.host ? <Field label="Host" value={node.host} mono /> : null}
+        {node.severity ? <Field label="Severity" value={node.severity} /> : null}
+        {node.occurrences && node.occurrences > 1 ? (
+          <Field label="Seen" value={`${node.occurrences} times by the agent`} />
+        ) : null}
+        {ev ? <EvidenceFields ev={ev} title={node.finding_id ? 'Proof' : 'Step'} /> : null}
+        {node.step_evidence ? <EvidenceFields ev={node.step_evidence} title="First reported" /> : null}
+      </div>
+    </div>
+  );
+}
+
+function EvidenceFields({ ev, title }: { ev: AgentGraphEvidence; title: string }) {
+  const where = ev.iteration ? `#${ev.iteration} · ${ev.phase || 'unknown phase'}` : ev.phase;
+  return (
+    <div className="space-y-2.5 border-t border-border pt-2.5">
+      <Field label={title} value={where || '—'} />
+      {ev.tool ? <Field label="Tool" value={ev.tool} mono /> : null}
+      {ev.thought ? <Field label={ev.iteration ? 'Agent reasoning' : 'Not demonstrated'} value={ev.thought} /> : null}
+      {ev.args ? <Field label="Request" value={ev.args} mono block /> : null}
+      {ev.output ? <Field label="Result" value={ev.output} mono block /> : null}
+    </div>
+  );
+}
+
+function Field({
+  label,
+  value,
+  mono,
+  block,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  block?: boolean;
+}) {
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p
+        className={cn(
+          'mt-0.5 break-words text-foreground',
+          mono && 'font-mono text-[10.5px]',
+          block && 'max-h-40 overflow-y-auto whitespace-pre-wrap rounded border border-border bg-muted/40 px-2 py-1'
+        )}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function Canvas({
+  graph,
+  className,
+  onExpand,
+}: {
+  graph: AgentAttackGraphData;
+  className?: string;
+  onExpand?: () => void;
+}) {
+  const flow = useMemo(() => toFlow(graph), [graph]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = graph.nodes.find((n) => n.id === selectedId) || null;
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+
+  // Fit when the graph fits legibly; otherwise start readable at the Internet
+  // origin and let the user pan right along the path.
+  // Computed from dagre's positions rather than fitView(), which is async in
+  // React Flow 12 and can't be inspected before it applies.
+  const onInit = useCallback(
+    (rf: ReactFlowInstance<Node, Edge>) => {
+      const box = boxRef.current;
+      if (!box || flow.nodes.length === 0) return;
+      const { width: nw, height: nh } = AGENT_NODE_SIZE;
+      const xs = flow.nodes.map((n) => n.position.x);
+      const ys = flow.nodes.map((n) => n.position.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs) + nw;
+      const minY = Math.min(...ys), maxY = Math.max(...ys) + nh;
+      const pad = 32;
+      const fit = Math.min(
+        (box.clientWidth - pad * 2) / (maxX - minX),
+        (box.clientHeight - pad * 2) / (maxY - minY),
+        1.1
+      );
+      setOverflowing(fit < MIN_READABLE_ZOOM);
+      if (fit >= MIN_READABLE_ZOOM) {
+        rf.setViewport({
+          zoom: fit,
+          x: (box.clientWidth - (maxX - minX) * fit) / 2 - minX * fit,
+          y: (box.clientHeight - (maxY - minY) * fit) / 2 - minY * fit,
+        });
+        return;
+      }
+      const origin = flow.nodes.find((n) => n.id === 'origin') || flow.nodes[0];
+      const zoom = MIN_READABLE_ZOOM;
+      rf.setViewport({
+        zoom,
+        x: pad - origin.position.x * zoom,
+        y: box.clientHeight / 2 - (origin.position.y + 20) * zoom,
+      });
+    },
+    [flow]
+  );
+  const nodes: Node[] = useMemo(
+    () => flow.nodes.map((n) => ({ ...n, selected: n.id === selectedId })),
+    [flow, selectedId]
+  );
+
+  return (
+    <div ref={boxRef} className={cn('relative h-full w-full bg-card', className)}>
+      <ReactFlow
+        key={flow.nodes.length}
+        nodes={nodes}
+        edges={flow.edges}
+        nodeTypes={agentPathNodeTypes}
+        onInit={onInit}
+        minZoom={0.2}
+        maxZoom={1.75}
+        proOptions={{ hideAttribution: true }}
+        nodesConnectable={false}
+        nodesDraggable={false}
+        onNodeClick={(_, n) => setSelectedId(n.id === selectedId ? null : n.id)}
+        onPaneClick={() => setSelectedId(null)}
+        panOnScroll
+      >
+        <Controls
+          showInteractive={false}
+          position="bottom-left"
+          className="!m-2 !overflow-hidden !rounded-md !border !border-border !bg-card !shadow-none [&>button]:!border-border [&>button]:!bg-transparent [&>button]:!fill-foreground"
+        />
+      </ReactFlow>
+      {overflowing && onExpand && !selected ? (
+        <div className="pointer-events-none absolute inset-y-0 right-0 flex w-28 items-end justify-end bg-gradient-to-l from-card via-card/70 to-transparent p-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            className="pointer-events-auto h-6 gap-1 px-2 text-[10px]"
+            onClick={onExpand}
+          >
+            <Maximize2 className="h-3 w-3" />
+            Full path
+          </Button>
+        </div>
+      ) : null}
+      {selected ? <Inspector node={selected} onClose={() => setSelectedId(null)} /> : null}
+    </div>
+  );
+}
+
+export function AgentAttackGraph({
+  graph,
+  className,
+}: {
+  graph: AgentAttackGraphData | null | undefined;
+  className?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [onlyProven, setOnlyProven] = useState(false);
+  const meta = graph?.meta || {};
+  const shown = useMemo(
+    () => (graph && onlyProven ? provenOnly(graph) : graph),
+    [graph, onlyProven]
+  );
+  const compact = useMemo(() => (shown ? foldEndpoints(shown) : shown), [shown]);
+
+  if (!graph || graph.nodes.length === 0) {
+    return (
+      <div className={cn('flex flex-1 items-center justify-center p-6 text-center', className)}>
+        <div>
+          <Route className="mx-auto mb-2 h-8 w-8 text-muted-foreground opacity-40" />
+          <p className="text-xs text-muted-foreground">No attack path yet</p>
+          <p className="mt-1 text-[10px] text-muted-foreground/70">
+            The path appears when the agent confirms a vulnerability or captures access.
+            {meta.failed_attempts ? ` ${meta.failed_attempts} failed attempts so far.` : ''}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const summary = [
+    `${meta.hosts ?? 0} host${meta.hosts === 1 ? '' : 's'}`,
+    `${meta.actions ?? 0} actions`,
+    `${meta.capabilities ?? 0} captured`,
+    `${meta.proven ?? 0} proven`,
+    ...(meta.hidden ? [`${meta.hidden} low-certainty hidden`] : []),
+  ].join(' · ');
+
+  return (
+    <div className={cn('flex min-h-0 flex-1 flex-col', className)}>
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-1.5">
+        <span className="font-mono text-[10px] text-muted-foreground">{summary}</span>
+        <div className="flex items-center gap-1">
+          {meta.proven ? (
+            <Button
+              variant={onlyProven ? 'secondary' : 'ghost'}
+              size="sm"
+              className="h-6 px-2 text-[10px]"
+              onClick={() => setOnlyProven((v) => !v)}
+            >
+              Proven paths
+            </Button>
+          ) : null}
+          <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6"
+          title="Expand"
+          onClick={() => setExpanded(true)}
+        >
+            <Maximize2 className="h-3 w-3" />
+          </Button>
+        </div>
+      </div>
+      <div className="min-h-[360px] flex-1">
+        <Canvas graph={compact!} onExpand={() => setExpanded(true)} />
+      </div>
+      <div className="border-t border-border px-3 py-1.5">
+        <Legend graph={compact!} />
+      </div>
+
+      <Dialog open={expanded} onOpenChange={setExpanded}>
+        <DialogContent className="flex h-[85vh] max-w-[92vw] flex-col gap-3 p-5">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Route className="h-4 w-4 text-primary" />
+            Attack path
+            <span className="ml-2 font-mono text-[11px] font-normal text-muted-foreground">{summary}</span>
+          </DialogTitle>
+          {meta.objective ? (
+            <p className="-mt-1 line-clamp-2 text-xs text-muted-foreground">{meta.objective}</p>
+          ) : null}
+          <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
+            {expanded ? <Canvas graph={shown!} /> : null}
+          </div>
+          <Legend graph={shown!} />
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

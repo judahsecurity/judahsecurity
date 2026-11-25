@@ -324,7 +324,7 @@ def _record_graph_fact(
     fact; a silent window is an ``observation`` so the intent can still be
     completed with a result. Neither is proof; the evidence records are.
     """
-    from app.services.agent import attack_graph
+    from app.services.agent import planning_graph
     from app.services.agent.engagement_brain import engagement_brain_from_dict
 
     try:
@@ -333,7 +333,7 @@ def _record_graph_fact(
             brain.target = str(getattr(manager, "_fallback_target", "") or "") or url
         parent = ""
         if intent_id:
-            if not attack_graph.get_intent(brain, intent_id):
+            if not planning_graph.get_intent(brain, intent_id):
                 return {"error": f"unknown intent {intent_id}; fact not recorded"}
             parent = intent_id
         elif coverage_cell_id:
@@ -349,7 +349,7 @@ def _record_graph_fact(
             summary = f"Out-of-band callback to {domain} after planting it in {where}"
         else:
             summary = f"No out-of-band callback to {domain} within the polling window for {where}"
-        fact = attack_graph.record_fact(
+        fact = planning_graph.record_fact(
             brain,
             kind="callback" if observed else "observation",
             summary=summary,

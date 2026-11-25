@@ -98,6 +98,9 @@ class FindingView:
     oracle_scenario: str = ""
     attack_path_class: str = ""
     validation_verdict: Optional[str] = None
+    verification_level: Optional[str] = None
+    exposed: bool = False  # asset is public and live
+    known_exploited: bool = False  # CISA/VulnCheck KEV or other exploitation sources
     detected_at: Optional[datetime] = None
     assigned_to: Optional[str] = None
 
@@ -560,6 +563,85 @@ def build_graph(group: Sequence[FindingView]) -> Tuple[List[Dict[str, Any]], Lis
     return list(nodes.values()), uniq_edges, narrative
 
 
+def _known_exploited(meta: Dict[str, Any]) -> bool:
+    delphi = meta.get("delphi") if isinstance(meta.get("delphi"), dict) else {}
+    return bool(delphi.get("kev") or delphi.get("vulncheck_kev") or delphi.get("kev_sources"))
+
+
+_CLOSED_STATUSES = {"resolved", "mitigated", "accepted"}
+
+# What a path reaches, worst first. Points and wording are shown to users.
+_IMPACT_POINTS = {
+    "rce": (25, "Reaches code execution"),
+    "data": (20, "Reaches sensitive data"),
+    "identity": (20, "Gains privileged access"),
+    "credential": (15, "Captures credentials"),
+}
+
+PRIORITY_TIERS = ((65, "fix_now"), (35, "high"), (0, "monitor"))
+
+
+def path_priority(group: Sequence[FindingView]) -> Dict[str, Any]:
+    """Explainable 0-100 priority for an attack path.
+
+    Proof dominates (a verified exploit outranks a scary-sounding guess),
+    then what the path reaches, then exposure, known exploitation and
+    severity. Every point awarded comes with a human-readable reason.
+    """
+    from app.services.agent.attack_graph import classify_capability
+
+    reasons: List[str] = []
+    score = 0
+    live = [r for r in group if r.status not in _CLOSED_STATUSES]
+    rows = live or list(group)
+
+    verified = any(
+        (r.verification_level == "exploit_verified" or r.validation_verdict == "confirmed")
+        and r.validation_verdict != "false_positive"
+        for r in rows
+    )
+    if verified:
+        score += 35
+        reasons.append("Exploit verified")
+    elif any(r.has_chain for r in rows):
+        score += 20
+        reasons.append("Exploit chain demonstrated")
+
+    impact_kinds = set()
+    for r in rows:
+        cap = classify_capability(" ".join((r.title or "", r.description or "", r.impact or "")))
+        if cap:
+            impact_kinds.add(cap[0])
+    worst = max(impact_kinds, key=lambda k: _IMPACT_POINTS[k][0], default=None)
+    if worst:
+        pts, why = _IMPACT_POINTS[worst]
+        score += pts
+        reasons.append(why)
+
+    if any(r.exposed for r in rows):
+        score += 12
+        reasons.append("Internet-exposed")
+    if any(r.known_exploited for r in rows):
+        score += 15
+        reasons.append("Known exploited in the wild")
+
+    top = max((_SEV_RANK.get(r.severity, 0) for r in rows), default=0)
+    sev_points = {4: 15, 3: 10, 2: 5}.get(top, 0)
+    if sev_points:
+        score += sev_points
+    hosts = {r.host_key for r in rows}
+    if len(hosts) > 1:
+        score += 3
+        reasons.append(f"Spans {len(hosts)} hosts")
+
+    if not live:
+        score = min(score, 20)
+        reasons.insert(0, "All findings resolved")
+    score = min(score, 100)
+    tier = next(name for floor, name in PRIORITY_TIERS if score >= floor)
+    return {"score": score, "tier": tier, "reasons": reasons}
+
+
 def _finding_view(vuln: Vulnerability) -> FindingView:
     asset = vuln.asset
     meta = vuln.metadata_ if isinstance(vuln.metadata_, dict) else {}
@@ -598,6 +680,9 @@ def _finding_view(vuln: Vulnerability) -> FindingView:
             oracle.get("attack_path_class") or getattr(vuln, "oracle_attack_path", None) or ""
         ),
         validation_verdict=vuln.last_validation_verdict,
+        verification_level=getattr(vuln, "verification_level", None),
+        exposed=bool(asset is not None and getattr(asset, "is_public", False) and getattr(asset, "is_live", False)),
+        known_exploited=_known_exploited(meta),
         detected_at=vuln.first_detected or vuln.created_at,
         assigned_to=vuln.assigned_to,
     )
@@ -630,6 +715,14 @@ def campaigns_from_views(rows: Sequence[FindingView]) -> List[Dict[str, Any]]:
             "timeframe": latest.isoformat() if latest else None,
             "severity": ranked[0].severity if ranked else "medium",
             "demonstrated": any(r.has_chain for r in group),
+            # Same bar as the agent attack graph's "proven": reproduced by the
+            # independent verifier, or confirmed by an analyst.
+            "priority": path_priority(group),
+            "verified": any(
+                r.verification_level == "exploit_verified" or r.validation_verdict == "confirmed"
+                for r in group
+                if r.validation_verdict != "false_positive"
+            ),
             "status_counts": counts,
             "finding_ids": [r.id for r in group],
             "session_id": sid,
@@ -798,7 +891,10 @@ def build_workspace(db: Session, organization_id: int) -> Dict[str, Any]:
     rows = [_finding_view(v) for v in vulns]
     return {
         "organization": {"id": org.id, "name": org.name, "domain": org.domain},
-        "paths": campaigns_from_views(rows),
+        "paths": sorted(
+            campaigns_from_views(rows),
+            key=lambda c: (-c["priority"]["score"], c["id"]),
+        ),
         "capabilities": _capabilities(db, organization_id),
         "signatures": _signatures(rows),
         "red_team": _red_team(db, organization_id),

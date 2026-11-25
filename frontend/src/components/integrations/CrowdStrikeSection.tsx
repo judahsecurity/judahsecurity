@@ -137,6 +137,13 @@ export function CrowdStrikeSection() {
               {item.last_sync_at && ` · Last sync ${new Date(item.last_sync_at).toLocaleString()}`}
             </p>
             {item.last_sync_ok && item.last_sync_stats && <p className="text-xs text-muted-foreground">{item.last_sync_stats.assets_created || 0} new assets · {item.last_sync_stats.vulns_created || 0} new CVEs</p>}
+            {item.last_sync_stats?.graph_projection && (
+              <p className={`text-xs ${item.last_sync_stats.graph_projection.ok ? 'text-green-400' : 'text-red-400'}`}>
+                {item.last_sync_stats.graph_projection.ok
+                  ? `Graph: ${item.last_sync_stats.graph_projection.assets} assets, ${item.last_sync_stats.graph_projection.vulnerabilities} findings.`
+                  : `Graph sync failed: ${item.last_sync_stats.graph_projection.error || 'unknown error'}`}
+              </p>
+            )}
             {item.last_error && !item.last_sync_ok && <p className="text-xs text-red-400">{item.last_error}</p>}
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="outline" disabled={busyId === item.id || !item.is_active} onClick={() => void run(item, 'sync')}><Download className="h-4 w-4 mr-2" />Sync now</Button>

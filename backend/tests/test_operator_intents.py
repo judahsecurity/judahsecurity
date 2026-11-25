@@ -18,7 +18,7 @@ from app.models.organization import Organization  # noqa: F401 - FK metadata
 from app.models.user import User  # noqa: F401 - FK metadata
 from app.models.agent_autonomy_work import AgentCandidateInbox
 from app.models.agent_conversation import AgentConversation
-from app.services.agent import attack_graph as graph
+from app.services.agent import planning_graph as graph
 from app.services.agent import run_snapshot
 from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
 

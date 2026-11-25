@@ -36,6 +36,16 @@ export interface AttackNarrativeStep {
   finding_id?: number | null;
 }
 
+export type PriorityTier = 'fix_now' | 'high' | 'monitor';
+
+export interface PathPriority {
+  /** 0-100; proof first, then impact reached, exposure, known exploitation, severity. */
+  score: number;
+  tier: PriorityTier;
+  /** Why it scored this way, strongest first. */
+  reasons: string[];
+}
+
 export interface AttackPath {
   id: string;
   title: string;
@@ -45,6 +55,9 @@ export interface AttackPath {
   timeframe?: string | null;
   severity: string;
   demonstrated: boolean;
+  /** Exploit verified by the independent verifier or an analyst. */
+  verified?: boolean;
+  priority?: PathPriority;
   status_counts: Record<string, number>;
   finding_ids: number[];
   session_id?: string | null;

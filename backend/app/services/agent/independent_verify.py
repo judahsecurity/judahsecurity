@@ -950,7 +950,7 @@ async def _verify_scoped_response_candidate(
     import secrets
     from urllib.parse import urlsplit
 
-    from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+    from app.services.agent.planning_graph import INTENT_CELL_SOURCE
     from app.services.agent.evidence_store import evidence_store
     from app.services.agent.proof_policy import validate_proof
 
@@ -1221,7 +1221,7 @@ async def _verify_scoped_injection_candidate(
     if claim not in _INJECTION_PROOF_KINDS:
         return None
     store = evidence_store(tools_manager)
-    from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+    from app.services.agent.planning_graph import INTENT_CELL_SOURCE
 
     shaped = getattr(tools_manager, "_shaped_cell", lambda _cell: False)
     cell = next((row for row in _brain(tools_manager).coverage_cells
@@ -1698,7 +1698,7 @@ async def _verify_scoped_sql_candidate(
                     raw["coverage_cell_id"] = cand.coverage_cell_id
             cell["candidate_id"] = cand.id
             tools_manager._engagement_brain = brain.to_dict()
-    from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+    from app.services.agent.planning_graph import INTENT_CELL_SOURCE
 
     if (cell and cell.get("source") == INTENT_CELL_SOURCE and cell.get("test_type") == "sqli"
             and getattr(tools_manager, "_shaped_cell", lambda _cell: False)(cell)):
@@ -2127,7 +2127,7 @@ async def _verify_scoped_browser_xss_candidate(
                     raw["coverage_cell_id"] = cand.coverage_cell_id
             cell["candidate_id"] = cand.id
             tools_manager._engagement_brain = brain.to_dict()
-    from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+    from app.services.agent.planning_graph import INTENT_CELL_SOURCE
 
     # Intent-backed GET query/fragment input: the template must be exactly what
     # the hunter's builder makes for this cell; the replay reuses it.

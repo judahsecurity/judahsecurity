@@ -1,4 +1,4 @@
-"""Facts-and-intents graph tools (attack_graph.py) for the Prowl agent.
+"""Facts-and-intents graph tools (planning_graph.py) for the Prowl agent.
 
 Mixin for ASMToolsManager; declared with tool specs (tool_specs.py).
 """
@@ -40,7 +40,7 @@ class AttackGraphToolsMixin:
 
     async def graph_overview(self, **_kwargs: Any) -> str:
         """Planner snapshot of facts, open/claimed intents with lineage and finding count."""
-        from app.services.agent.attack_graph import ensure_origin_fact, overview
+        from app.services.agent.planning_graph import ensure_origin_fact, overview
 
         brain = self._graph_brain()
         if brain.target:
@@ -52,7 +52,7 @@ class AttackGraphToolsMixin:
                           evidence_ids: Any = None, parents: Any = None, source: str = "",
                           **_kwargs: Any) -> str:
         """Record an observation as a fact (cite parent fact/intent/finding ids)."""
-        from app.services.agent.attack_graph import LineageError, record_fact
+        from app.services.agent.planning_graph import LineageError, record_fact
 
         if target:
             denied = self._graph_scope(target) if "://" in target else None
@@ -102,7 +102,7 @@ class AttackGraphToolsMixin:
                          identity: str = "", source_capture_id: str = "",
                          baseline_value: Any = None, **_kwargs: Any) -> str:
         """Plan one test; it must cite an existing fact or finding."""
-        from app.services.agent.attack_graph import LineageError, add_intent, record_fact
+        from app.services.agent.planning_graph import LineageError, add_intent, record_fact
 
         denied = self._graph_scope(target)
         if denied:
@@ -137,7 +137,7 @@ class AttackGraphToolsMixin:
 
     async def claim_intent(self, intent_id: str, worker: str = "agent", **_kwargs: Any) -> str:
         """Claim one open intent before working it."""
-        from app.services.agent.attack_graph import claim_intent
+        from app.services.agent.planning_graph import claim_intent
 
         brain = self._graph_brain()
         try:
@@ -150,7 +150,7 @@ class AttackGraphToolsMixin:
     async def complete_intent(self, intent_id: str, result_facts: Any, worker: str = "agent",
                               status: str = "done", note: str = "", **_kwargs: Any) -> str:
         """Close a claimed intent, citing the facts its work produced."""
-        from app.services.agent.attack_graph import LineageError, complete_intent
+        from app.services.agent.planning_graph import LineageError, complete_intent
 
         brain = self._graph_brain()
         try:

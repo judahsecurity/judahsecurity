@@ -186,7 +186,7 @@ class ScopedProbeToolsMixin:
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cell = next((row for row in brain.coverage_cells
                      if row.get("id") == coverage_cell_id), None)
-        from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+        from app.services.agent.planning_graph import INTENT_CELL_SOURCE
 
         if (cell and self._shaped_cell(cell)
                 and (cell.get("source") == INTENT_CELL_SOURCE

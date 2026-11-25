@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import settings
-from app.services.agent.attack_graph import FACT_KINDS
+from app.services.agent.planning_graph import FACT_KINDS
 from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
 from app.services.agent.parser_facts import record_parser_facts, with_parsed_summary
 from app.services.mcp.server import MCPServer

@@ -3,7 +3,7 @@
 ``POST /agent/sessions/{id}/intents`` names one test (target URL, coverage
 class, parameter, location, method, identity, note). It becomes an
 ``operator`` fact plus an intent (``created_by="operator"``) in the session's
-engagement brain. ``attack_graph.add_intent`` backs the intent with a coverage
+engagement brain. ``planning_graph.add_intent`` backs the intent with a coverage
 cell, so Prowl's leased scoped probes can work an input Prowl never observed.
 
 Same intake rules as external candidates (``external_candidates``):
@@ -11,7 +11,7 @@ Same intake rules as external candidates (``external_candidates``):
 * the URL must be in the session's own seed scope and on the seed origin
   (probes only run there), without credentials or a fragment;
 * the class must be a coverage class; the location one of
-  ``attack_graph.INTENT_LOCATIONS``;
+  ``planning_graph.INTENT_LOCATIONS``;
 * the note is untrusted text, wrapped like ``CLAIM_HEADER`` and never read as
   instructions;
 * ``baseline_value`` (optional) is the input's ordinary value: 1-512 printable
@@ -137,7 +137,7 @@ def validated_intent(seed: str, *, target: str, test_type: str, parameter: str =
                      location: str = "", method: str = "GET", identity: str = "",
                      note: str = "", baseline_value: Any = None) -> Dict[str, Any]:
     """Scope/class/location checks + sanitization. Returns the inert payload."""
-    from app.services.agent.attack_graph import INTENT_LOCATIONS, intent_id_for, normalize_test_type
+    from app.services.agent.planning_graph import INTENT_LOCATIONS, intent_id_for, normalize_test_type
     from app.services.agent.external_candidates import (
         IntakeError, assert_in_session_scope, clean_text, coverage_classes,
     )
@@ -243,7 +243,7 @@ def is_intent_payload(payload: Any) -> bool:
 
 def apply_intent_payload(brain: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Operator fact + operator intent (with its coverage cell). Idempotent by intent id."""
-    from app.services.agent import attack_graph as graph
+    from app.services.agent import planning_graph as graph
 
     existing = graph.get_intent(brain, payload["intent_id"])
     if existing is not None:

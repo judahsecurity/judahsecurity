@@ -132,7 +132,7 @@ class EngagementBrain:
     exhausted_techniques: Dict[str, List[str]] = field(default_factory=dict)
     effective_payloads: Dict[str, List[str]] = field(default_factory=dict)
     prior_target_memory: Dict[str, Any] = field(default_factory=dict)
-    # Facts and intents with lineage (attack_graph.py). Planning state, not proof.
+    # Facts and intents with lineage (planning_graph.py). Planning state, not proof.
     facts: List[Dict[str, Any]] = field(default_factory=list)
     intents: List[Dict[str, Any]] = field(default_factory=list)
 

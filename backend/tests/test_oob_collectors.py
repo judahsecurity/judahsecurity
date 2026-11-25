@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from app.services import interactsh_service, oob_collectors
-from app.services.agent import attack_graph as g
+from app.services.agent import planning_graph as g
 from app.services.agent.evidence_store import evidence_store
 from app.services.agent.oob_callback_workflow import (
     CALLBACK_HOST_PLACEHOLDER,

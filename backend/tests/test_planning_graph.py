@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app.services.agent import attack_graph as g
+from app.services.agent import planning_graph as g
 from app.services.agent.assessment_scope import register_scope
 from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
 from app.services.agent.tools import ASMToolsManager

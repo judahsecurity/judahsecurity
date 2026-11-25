@@ -440,6 +440,29 @@ export interface CensysSyncResult {
   risks_seen: number;
 }
 
+export interface IntegrationGraphProjection {
+  ok: boolean;
+  assets: number;
+  vulnerabilities: number;
+  endpoints: number;
+  direct_issue_links: number;
+  resource_links: number;
+  error?: string;
+  completed_at?: string;
+}
+
+export interface WizLastSyncStats {
+  [key: string]: unknown;
+  sync_in_progress?: boolean;
+  endpoints_seen?: number;
+  ai_endpoints_seen?: number;
+  virtual_machines_seen?: number;
+  assets_created?: number;
+  vulns_created?: number;
+  findings_truncated?: boolean;
+  graph_projection?: IntegrationGraphProjection;
+}
+
 export interface WizIntegration {
   id: number;
   organization_id: number;
@@ -458,7 +481,7 @@ export interface WizIntegration {
   last_sync_at?: string;
   last_sync_ok?: boolean;
   next_sync_at?: string;
-  last_sync_stats?: Record<string, number | boolean | string | null>;
+  last_sync_stats?: WizLastSyncStats;
   last_error?: string;
   created_at: string;
   updated_at: string;
@@ -569,7 +592,12 @@ export interface CrowdStrikeIntegration {
   last_test_ok?: boolean;
   last_sync_at?: string;
   last_sync_ok?: boolean;
-  last_sync_stats?: Record<string, number>;
+  last_sync_stats?: {
+    [key: string]: unknown;
+    assets_created?: number;
+    vulns_created?: number;
+    graph_projection?: IntegrationGraphProjection;
+  };
   last_error?: string;
 }
 
@@ -2693,6 +2721,14 @@ class ApiClient {
     return response.data;
   }
 
+  /** Org-scoped entity attack graph for an agent session (any member of the org). */
+  async getAttackSessionGraph(sessionId: string, organizationId?: number) {
+    const response = await this.client.get(`/attacks/sessions/${encodeURIComponent(sessionId)}/graph`, {
+      params: organizationId ? { organization_id: organizationId } : undefined,
+    });
+    return response.data;
+  }
+
   async getAttackWorkspace(organizationId?: number) {
     const response = await this.client.get('/attacks/workspace', {
       params: organizationId ? { organization_id: organizationId } : undefined,
@@ -2932,6 +2968,11 @@ class ApiClient {
     const response = await this.client.get(`/agent/sessions/${sessionId}/chain`, {
       params: includeAttackPaths ? { include_attack_paths: true } : undefined,
     });
+    return response.data;
+  }
+
+  async getAgentAttackGraph(sessionId: string) {
+    const response = await this.client.get(`/agent/sessions/${sessionId}/attack-graph`);
     return response.data;
   }
 

@@ -9,20 +9,31 @@ const SIZE: Record<AttackNodeKind, { width: number; height: number }> = {
   vulnerability: { width: 268, height: 92 },
 };
 
-export function layoutAttackGraph(nodes: Node[], edges: Edge[]): Node[] {
+type NodeSize = { width: number; height: number };
+
+function defaultSize(node: Node): NodeSize {
+  const kind = (node.type as AttackNodeKind) || 'technique';
+  return SIZE[kind] || SIZE.technique;
+}
+
+export function layoutAttackGraph(
+  nodes: Node[],
+  edges: Edge[],
+  opts: { sizeOf?: (node: Node) => NodeSize; nodesep?: number; ranksep?: number; /** null = centered ranks (symmetric fan-out). */ align?: 'UL' | 'UR' | 'DL' | 'DR' | null } = {}
+): Node[] {
+  const sizeOf = opts.sizeOf || defaultSize;
   const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
   g.setGraph({
     rankdir: 'LR',
-    nodesep: 56,
-    ranksep: 88,
+    nodesep: opts.nodesep ?? 56,
+    ranksep: opts.ranksep ?? 88,
     marginx: 48,
     marginy: 48,
-    align: 'UL',
+    ...(opts.align === null ? {} : { align: opts.align ?? 'UL' }),
   });
 
   nodes.forEach((node) => {
-    const kind = (node.type as AttackNodeKind) || 'technique';
-    const size = SIZE[kind] || SIZE.technique;
+    const size = sizeOf(node);
     g.setNode(node.id, { width: size.width, height: size.height });
   });
   edges.forEach((edge) => g.setEdge(edge.source, edge.target));
@@ -30,8 +41,7 @@ export function layoutAttackGraph(nodes: Node[], edges: Edge[]): Node[] {
 
   return nodes.map((node) => {
     const pos = g.node(node.id);
-    const kind = (node.type as AttackNodeKind) || 'technique';
-    const size = SIZE[kind] || SIZE.technique;
+    const size = sizeOf(node);
     return {
       ...node,
       position: {
