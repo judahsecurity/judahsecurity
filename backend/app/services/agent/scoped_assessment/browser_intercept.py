@@ -577,6 +577,11 @@ async def check_intercept_xss(spec: Dict[str, Any], *, allowed_origins: list,
                     method = request.method.upper()
                     if state["seen"] > MAX_REQUESTS or not in_origin:
                         raise InterceptError("blocked")
+                    if state["redirect_refused"]:
+                        # After a refused redirect the probe is over. Some browser
+                        # builds retry the aborted navigation on their own; that
+                        # retry (and its redirect) must not reach the target.
+                        raise InterceptError("blocked")
                     if not state["mutated"] and request_matches(
                             spec, url=request.url, method=method,
                             resource_type=request.resource_type,
