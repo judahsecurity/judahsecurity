@@ -168,6 +168,8 @@ class ScopedProbeToolsMixin:
         Browser links and forms do not always yield a private XHR capture. The
         scoped browser/SQLi tools can still test those exact observed inputs;
         this adapter binds their evidence to the assigned coverage cell.
+        Intent-backed xss/sqli cells are built from the intent instead
+        (``_shaped_input_probe_assigned``).
         """
         import time
         from urllib.parse import parse_qsl, urlsplit
@@ -184,6 +186,13 @@ class ScopedProbeToolsMixin:
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cell = next((row for row in brain.coverage_cells
                      if row.get("id") == coverage_cell_id), None)
+        from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+
+        if (cell and cell.get("source") == INTENT_CELL_SOURCE and self._shaped_cell(cell)
+                and cell.get("test_type") in {"xss", "sqli"}):
+            # Intent-backed input Prowl never observed: built from the intent.
+            return await self._shaped_input_probe_assigned(
+                brain, cell, coverage_lease_id, technique, variant)
         location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
         method = str((cell or {}).get("method") or "").upper()
         form_xss = bool(cell and cell.get("test_type") == "xss"
@@ -974,8 +983,9 @@ class ScopedProbeToolsMixin:
 
         Observed GET query inputs use their observed baseline. Intent-backed
         cells (no capture) and observed header/cookie inputs are built from the
-        intent or cell (query, header, cookie, form or JSON body; POST only on
-        body_replay_paths). Unsupported shapes stay open, never tested_clean.
+        intent or cell (query, header, cookie, form/JSON/XML body, one path
+        segment; POST only on body_replay_paths, PUT/PATCH/DELETE only on
+        write_method_paths). Unsupported shapes stay open, never tested_clean.
         """
         import secrets
         import time
@@ -1233,8 +1243,9 @@ class ScopedProbeToolsMixin:
         operator-differential (NoSQL) proofs only. Observed GET query inputs,
         operator-approved, browser-captured POST bodies (form or JSON), observed
         GET header/cookie inputs, and intent-backed cells (query, header,
-        cookie, form or JSON body built from the intent; POST only on
-        body_replay_paths) are supported. Unsupported shapes stay open. The model chooses the leased cell; payloads, factors, and
+        cookie, form/JSON/XML body or one path segment built from the intent;
+        POST only on body_replay_paths, PUT/PATCH/DELETE only on
+        write_method_paths) are supported. Unsupported shapes stay open. The model chooses the leased cell; payloads, factors, and
         requests are fixed here.
         """
         import secrets

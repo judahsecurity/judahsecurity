@@ -123,6 +123,7 @@ class ASMToolsManager(
     _scoped_csrf_action_paths = SessionValue(set)
     _scoped_csrf_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
+    _scoped_write_method_paths = SessionValue(set)
     _scoped_auth_login_path = SessionValue(lambda: "")
     _scoped_assessment_started = SessionValue(lambda: False)
     _scoped_assessment_partial_reason = SessionValue(lambda: "")

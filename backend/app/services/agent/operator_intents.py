@@ -53,6 +53,38 @@ def wrapped_note(note: str) -> str:
     return f"{NOTE_HEADER}\n{note}\n{NOTE_FOOTER}"
 
 
+def _check_shape(klass: str, location: str, parameter: str, method: str, target: str) -> None:
+    """Reject combinations no probe can ever run; the rest is checked when leased.
+
+    Classes without a request builder here (authz, ssrf, ...) are still valid
+    planning state, so only contradictions are refused at intake.
+    """
+    from app.services.agent.external_candidates import IntakeError
+    from app.services.agent.scoped_assessment import intent_request as ir
+
+    if location == "fragment" and klass != "xss":
+        raise IntakeError(422, "location fragment is client-side only (the server never "
+                               "receives it); it is supported for test_type xss")
+    if location in ir.BODY_LOCATIONS and method == "GET":
+        raise IntakeError(422, "body locations need method POST, PUT, PATCH or DELETE")
+    if klass == "xss" and location in {"query", "fragment"} and method != "GET":
+        raise IntakeError(422, "xss on query/fragment is a browser GET navigation; use GET")
+    if location == "path":
+        reason = ir.shape_error("ssti", "GET", "path", parameter)
+        try:
+            if reason:
+                raise ir.UnsupportedShape(reason)
+            ir.path_segment_index(target, parameter)
+        except ir.UnsupportedShape as exc:
+            raise IntakeError(422, "path parameter must be a 0-based segment index or the "
+                                   f"exact literal of one segment of the target ({exc})") from None
+    if location == "body_xml":
+        reason = ir.shape_error("ssti", "POST", "body_xml", parameter)
+        if reason:
+            raise IntakeError(422, "body_xml parameter must be an element name or a "
+                                   f"/slash/path of up to 5 element names ({reason})")
+
+
 def validated_intent(seed: str, *, target: str, test_type: str, parameter: str = "",
                      location: str = "", method: str = "GET", identity: str = "",
                      note: str = "") -> Dict[str, Any]:
@@ -98,6 +130,7 @@ def validated_intent(seed: str, *, target: str, test_type: str, parameter: str =
     clean_method = str(method or "GET").strip().upper()
     if clean_method not in INTENT_METHODS:
         raise IntakeError(422, f"method must be one of {list(INTENT_METHODS)}")
+    _check_shape(klass, clean_location, clean_param, clean_method, clean_target)
     clean_identity = str(identity or "").strip()
     if clean_identity and not _IDENTITY.fullmatch(clean_identity):
         raise IntakeError(422, "identity must be a registered identity name")

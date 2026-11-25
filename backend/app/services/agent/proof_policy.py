@@ -275,6 +275,12 @@ def validate_proof(
             or first.get("source_artifact_id") != second.get("source_artifact_id")
         ):
             return False, "Independent browser GET replay must use the same observed request"
+        if kind in {"string_boolean_sqli", "string_error_sqli", "string_time_sqli",
+                    "string_union_sqli"} and any(
+            first.get(key) != second.get(key)
+            for key in ("method", "location", "intent_request", "request_context")
+        ):
+            return False, "Independent SQLi replay must use the same request shape"
         if kind in {"scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed"}:
             expected_type = {
                 "scoped_response_crlf": "crlf",

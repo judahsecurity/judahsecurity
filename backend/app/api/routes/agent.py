@@ -103,8 +103,28 @@ class OwnerOnlyResource(BaseModel):
         return self
 
 
+class WriteMethodPath(BaseModel):
+    """One operator-approved PUT/PATCH/DELETE target for intent-backed probes."""
+
+    method: Literal["PUT", "PATCH", "DELETE"]
+    path: str = Field(min_length=2, max_length=256)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, path: str) -> str:
+        if (not path.startswith("/") or path.startswith("//") or path == "/"
+                or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
+            raise ValueError("Approved write and cleanup paths must be exact absolute paths without query values")
+        return path
+
+
 class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
+    # Exact (method, path) approvals for intent-backed probes that send PUT,
+    # PATCH or DELETE. A DELETE path must also be an approved cleanup path
+    # (stored_xss/race/csrf_cleanup_paths): DELETE is only ever sent to an
+    # endpoint the operator designated for removing Prowl's own canaries.
+    write_method_paths: list[WriteMethodPath] = Field(default_factory=list, max_length=8)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
     # Operator-approved state-changing actions for the race and CSRF proofs.
     # Each needs a matching cleanup path that accepts the __PROWL_NONCE__ canary.
@@ -143,6 +163,16 @@ class AgentAssessmentPolicy(BaseModel):
                     or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Approved write and cleanup paths must be exact absolute paths without query values")
         return paths
+
+    @model_validator(mode="after")
+    def validate_write_methods(self):
+        cleanup = (set(self.stored_xss_cleanup_paths) | set(self.race_cleanup_paths)
+                   | set(self.csrf_cleanup_paths))
+        for row in self.write_method_paths:
+            if row.method == "DELETE" and row.path not in cleanup:
+                raise ValueError("A DELETE write_method_paths entry must also be an approved "
+                                 "cleanup path (stored_xss/race/csrf_cleanup_paths)")
+        return self
 
 
 class AgentQueryRequest(BaseModel):

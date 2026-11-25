@@ -36,6 +36,7 @@ from .sqli_string import (
     _observed_value,
     and_fallback_eligible,
     observed_query_encoding,
+    request_shape_valid,
 )
 
 # One fixed, bounded delay. Kept well under observe_get's 15s socket timeout so a
@@ -144,7 +145,7 @@ def time_followup_eligible(or_result: dict) -> bool:
 def time_sql_proof_valid(result: dict) -> bool:
     if (result.get("operation") != "sqli_time_string"
             or result.get("proof_recipe") != "string_time_v1"
-            or result.get("method") != "GET" or result.get("location") != "query"
+            or not request_shape_valid(result)
             or not result.get("target") or not result.get("parameter")
             or result.get("sql_family") not in FAMILIES
             or result.get("input_encoding", "plain") not in {"plain", "base64"}

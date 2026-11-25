@@ -957,7 +957,7 @@ async def _verify_scoped_response_candidate(
                  and row.get("test_type") == claim
                  and (row.get("source") == "parameter_inventory"
                       or (row.get("source") == INTENT_CELL_SOURCE and shaped(row)))
-                 and row.get("method") in ({"GET", "POST"} if shaped(row) else {"GET"})
+                 and row.get("method") in (_SHAPED_METHODS if shaped(row) else {"GET"})
                  and row.get("path") == (urlsplit(cand.target).path or "/")), None)
     identity = str(cand.identity or "anonymous")
     hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
@@ -1132,6 +1132,10 @@ def _confirm_or_explain(tools_manager: Any, store: Any, cand: FindingCandidate, 
     return False, why or fresh_why or "Proof policy rejected the replay"
 
 
+# Methods an intent-backed (shaped) cell may carry; the replay re-checks the
+# operator's exact approval (body_replay_paths / write_method_paths).
+_SHAPED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+
 _INJECTION_PROOF_KINDS = {
     "nosql": "scoped_nosql_operator",
     "ssti": "scoped_ssti_eval",
@@ -1162,7 +1166,7 @@ async def _verify_scoped_injection_candidate(
                  and row.get("test_type") == claim
                  and (row.get("source") == "parameter_inventory"
                       or (row.get("source") == INTENT_CELL_SOURCE and shaped(row)))
-                 and row.get("method") in {"GET", "POST"}
+                 and row.get("method") in (_SHAPED_METHODS if shaped(row) else {"GET", "POST"})
                  and row.get("path") == (urlsplit(cand.target).path or "/")), None)
     identity = str(cand.identity or "anonymous")
     hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
@@ -1627,6 +1631,11 @@ async def _verify_scoped_sql_candidate(
                     raw["coverage_cell_id"] = cand.coverage_cell_id
             cell["candidate_id"] = cand.id
             tools_manager._engagement_brain = brain.to_dict()
+    from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+
+    if (cell and cell.get("source") == INTENT_CELL_SOURCE and cell.get("test_type") == "sqli"
+            and getattr(tools_manager, "_shaped_cell", lambda _cell: False)(cell)):
+        return await _verify_scoped_intent_sql_candidate(tools_manager, cand, run, cell)
     if cell and cell.get("method") == "POST":
         return await _verify_scoped_post_sql_candidate(tools_manager, cand, run, cell)
     if not cell or cell.get("source") != "parameter_inventory" or (
@@ -1742,6 +1751,80 @@ async def _verify_scoped_sql_candidate(
         "verifier_summary": failure, "key_findings": [], "tool_calls": 1,
         "error": None,
     }
+
+
+async def _verify_scoped_intent_sql_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any, cell: dict,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the hunter's string SQLi recipe on an intent-built input.
+
+    Same request builder as the hunter (``_run_shaped_sqli``): same method,
+    location and input, the hunter's recipe and SQL family, fresh nonces. The
+    operator's method approval is re-checked by the builder.
+    """
+    import logging
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+
+    location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+    target = urlsplit(cand.target)
+    identity = str(cell.get("identity") or "anonymous")
+    identity = "anonymous" if identity in {"", "unspecified"} else identity
+    if (not separator or not parameter or target.scheme not in {"http", "https"}
+            or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
+            or (target.path or "/") != cell.get("path") or target.query or target.fragment
+            or (cand.identity and cand.identity != identity)
+            or (cand.parameter and cand.parameter != cell.get("parameter"))):
+        return None
+    store = evidence_store(tools_manager)
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_string_sqli"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("parameter") == parameter
+                   and store.records[eid].get("payload", {}).get("intent_request") is True
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    if hunter is None:
+        return None
+    hunter_id, receipt = hunter
+    payload = receipt["payload"]
+    recipe = str(payload.get("proof_recipe") or "")
+    kind = ("string_error_sqli" if recipe == "string_error_v1" else
+            "string_time_sqli" if recipe == "string_time_v1" else "string_boolean_sqli")
+    failure = "Fresh SQLi replay did not reproduce the hunter proof"
+    try:
+        replay = await tools_manager._run_shaped_sqli(
+            cell, identity, scoped_origin=f"{target.scheme}://{target.netloc}",
+            recipe=recipe, family=str(payload.get("sql_family") or ""),
+        )
+        if replay.get("request_context") != payload.get("request_context"):
+            raise ValueError("Intent SQLi request shape changed")
+        artifact_id = store.record(
+            "scoped_string_sqli", replay, target=cand.target, identity=identity,
+            coverage_cell_id=cand.coverage_cell_id, test_type="sqli",
+            success=replay["proof_confirmed"],
+        )
+        if replay.get("proof_confirmed") is True:
+            proof = {"kind": kind, "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+            confirmed, failure = _confirm_or_explain(
+                tools_manager, store, cand, run, proof, artifact_id,
+                "Fresh scoped SQLi controls reproduced the candidate on the intent input.",
+            )
+            if confirmed:
+                return {"candidate_id": cand.id, "title": cand.title, "status": "confirmed",
+                        "verifier_summary": "Fresh scoped SQLi proof matched the hunter receipt",
+                        "key_findings": [], "tool_calls": 1, "error": None}
+        else:
+            failure = "Fresh SQLi controls did not confirm injection"
+    except Exception:
+        logging.getLogger(__name__).exception("Intent SQLi verifier replay failed")
+        failure = "Scoped SQLi replay failed before verification completed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+            "verifier_summary": failure, "key_findings": [], "tool_calls": 1, "error": None}
 
 
 async def _verify_scoped_post_sql_candidate(
@@ -1865,6 +1948,15 @@ async def _verify_scoped_browser_xss_candidate(
                     raw["coverage_cell_id"] = cand.coverage_cell_id
             cell["candidate_id"] = cand.id
             tools_manager._engagement_brain = brain.to_dict()
+    from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+
+    # Intent-backed GET query/fragment input: the template must be exactly what
+    # the hunter's builder makes for this cell; the replay reuses it.
+    intent_xss = bool(cell and cell.get("source") == INTENT_CELL_SOURCE
+                      and cell.get("test_type") == "xss" and cell.get("method") == "GET"
+                      and getattr(tools_manager, "_shaped_cell", lambda _cell: False)(cell)
+                      and str(cell.get("parameter") or "").partition(":")[0]
+                      in {"query", "fragment"})
     dom_xss = bool(cell and cell.get("source") == "js_inventory"
                    and cell.get("test_type") == "dom_xss"
                    and cell.get("method") == "GET"
@@ -1874,7 +1966,7 @@ async def _verify_scoped_browser_xss_candidate(
                       and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
                       and cell.get("test_type") == "stored_xss"
                       and cell.get("method") == "POST")
-    if not cell or not (dom_xss or stored_xss or (cell.get("source") == "parameter_inventory"
+    if not cell or not (dom_xss or stored_xss or intent_xss or (cell.get("source") == "parameter_inventory"
                     and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
                     and cell.get("test_type") == "xss" and cell.get("method") in {"GET", "POST"})):
         return None
@@ -1890,7 +1982,10 @@ async def _verify_scoped_browser_xss_candidate(
     form_xss = cell.get("method") == "POST" and location == "body_form" and not post_xhr_xss
     target = urlsplit(cand.target)
     identity = str(cell.get("identity") or "anonymous")
-    if (not (dom_xss or (location == "query" and not form_xss) or form_xss or post_xhr_xss)
+    if intent_xss and identity in {"", "unspecified"}:
+        identity = "anonymous"
+    if (not (dom_xss or intent_xss or (location == "query" and not form_xss) or form_xss
+             or post_xhr_xss)
             or (not dom_xss and (not separator or not parameter))
             or target.scheme not in {"http", "https"}
             or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
@@ -1947,6 +2042,11 @@ async def _verify_scoped_browser_xss_candidate(
                     or "__PROWL_NONCE__" not in str(proof.get("form_payload_template") or "")
                     or parsed.query or parsed.fragment
                     or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)):
+                continue
+        elif intent_xss:
+            if (proof.get("operation") != "check_xss" or xhr_xss
+                    or not tools_manager._shaped_xss_template_matches(
+                        cell, template, f"{target.scheme}://{target.netloc}")):
                 continue
         elif dom_xss:
             if (proof.get("operation") != "check_xss" or xhr_xss

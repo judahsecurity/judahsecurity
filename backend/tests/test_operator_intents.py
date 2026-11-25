@@ -233,7 +233,8 @@ def test_plan_requests_per_location():
                          {"name": "lang", "value": "en", "domain": "app.example.com", "path": "/"}]}
     plan = lambda location, parameter, method="GET", url=T + "/p?a=1&q=old": ir.plan_requests(  # noqa: E731
         method=method, url=url, location=location, parameter=parameter,
-        values={"control": "c", "probe": "{{7*7}};x"}, state=state, test_type="ssti")
+        values={"control": "c", "probe": "{{7*7}};x"}, state=state, test_type="ssti",
+        write_approved=method != "GET")
 
     query = plan("query", "q")
     assert parse_qs(urlsplit(query["probe"].url).query) == {"a": ["1"], "q": ["{{7*7}};x"]}
@@ -273,11 +274,19 @@ def test_plan_requests_per_location():
     ("cookie", "session", "GET", "ssti", "protected_cookie"),
     ("cookie", "csrftoken", "GET", "ssti", "protected_cookie"),
     ("body_json", "name", "GET", "ssti", "body_requires_post"),
-    ("query", "q", "PUT", "ssti", "method_unsupported"),
-    ("path", "id", "GET", "ssti", "location_unsupported"),
-    ("body_xml", "doc", "POST", "path_traversal", "location_unsupported"),
-    ("fragment", "x", "GET", "open_redirect", "location_unsupported"),
+    ("query", "q", "TRACE", "ssti", "method_unsupported"),
+    ("path", "a/b", "GET", "ssti", "path_segment_unsupported"),
+    ("path", "..", "GET", "ssti", "path_segment_unsupported"),
+    ("body_xml", "xmlns", "POST", "path_traversal", "xml_field_unsupported"),
+    ("body_xml", "1bad", "POST", "ssti", "xml_field_unsupported"),
+    ("body_xml", "doc", "POST", "nosql", "location_unsupported"),
+    ("fragment", "x", "GET", "open_redirect", "fragment_client_side_only"),
+    ("fragment", "x", "GET", "sqli", "fragment_client_side_only"),
     ("header", "X-Q", "GET", "nosql", "location_unsupported"),
+    ("header", "X-Q", "GET", "xss", "location_unsupported"),
+    ("body_form", "q", "POST", "xss", "location_unsupported"),
+    ("query", "q", "POST", "xss", "xss_requires_get_navigation"),
+    ("body_xml", "doc", "GET", "sqli", "body_requires_post"),
     ("query", "", "GET", "ssti", "parameter_required"),
 ])
 def test_unsupported_shapes_are_named(location, parameter, method, test_type, reason):
@@ -286,7 +295,8 @@ def test_unsupported_shapes_are_named(location, parameter, method, test_type, re
     assert ir.shape_error(test_type, method, location, parameter) == reason
     with pytest.raises(ir.UnsupportedShape):
         ir.plan_requests(method=method, url=T + "/p", location=location, parameter=parameter,
-                         values={"control": "c"}, state=None, test_type=test_type)
+                         values={"control": "c"}, state=None, test_type=test_type,
+                         write_approved=True)
 
 
 def test_session_cookie_of_identity_is_never_overridden():
@@ -322,7 +332,7 @@ def test_nosql_steps_for_query_form_and_json():
     assert "user%5B%24ne%5D=prowlabcd1234" in q["true_first"].url
     j = ir.injection_requests(method="POST", url=T + "/login", location="body_json",
                               parameter="user", test_type="nosql", nonce="abcd1234",
-                              factors=(0, 0), state=None)
+                              factors=(0, 0), state=None, write_approved=True)
     assert json.loads(j["false_first"].body) == {"user": {"$eq": "prowlabcd1234"}}
 
 
@@ -481,12 +491,20 @@ async def test_crlf_header_and_redirect_json_intents(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool,test_type,location,parameter,method", [
+    # Path segment the target does not have: plan-time refusal.
     ("scoped_injection_probe_assigned", "ssti", "path", "id", "GET"),
-    ("scoped_injection_probe_assigned", "path_traversal", "body_xml", "doc", "POST"),
+    ("scoped_injection_probe_assigned", "ssti", "path", "7", "GET"),
+    ("scoped_injection_probe_assigned", "nosql", "body_xml", "doc", "POST"),
     ("scoped_injection_probe_assigned", "ssti", "header", "Authorization", "GET"),
+    ("scoped_injection_probe_assigned", "ssti", "fragment", "x", "GET"),
     ("scoped_response_probe_assigned", "crlf", "header", "Host", "GET"),
-    ("scoped_response_probe_assigned", "open_redirect", "query", "next", "PUT"),
+    ("scoped_response_probe_assigned", "open_redirect", "fragment", "*", "GET"),
     ("scoped_injection_probe_assigned", "nosql", "cookie", "role", "GET"),
+    ("scoped_input_probe_assigned", "xss", "header", "X-Name", "GET"),
+    ("scoped_input_probe_assigned", "xss", "path", "0", "GET"),
+    ("scoped_input_probe_assigned", "xss", "body_json", "name", "POST"),
+    ("scoped_input_probe_assigned", "sqli", "fragment", "q", "GET"),
+    ("scoped_input_probe_assigned", "sqli", "path", "missing", "GET"),
 ])
 async def test_unsupported_intent_shapes_stay_open_and_block_the_intent(
         monkeypatch, tool, test_type, location, parameter, method):
