@@ -33,6 +33,7 @@ SPEC_MODULES: Tuple[str, ...] = (
     "app.services.agent.tools_ported_probes",
     "app.services.agent.tools_brain",
     "app.services.agent.tools_request_mutation",
+    "app.services.agent.tools_graph",
 )
 
 

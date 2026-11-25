@@ -1636,6 +1636,9 @@ for _profile in DEFAULT_SPECIALISTS:
     # Specialists that log approaches can also record what the WAF blocked.
     if "log_engagement_approach" in _profile.allowed_tools:
         _extra.append("record_defense_profile")
+    # Workers claim and complete planned intents; only the main agent adds them.
+    if "submit_finding_candidate" in _profile.allowed_tools:
+        _extra.extend(("graph_overview", "record_fact", "claim_intent", "complete_intent"))
     # Lanes that compare live requests can also diff stored exchanges for free.
     if "compare_requests" in _profile.allowed_tools:
         _extra.append("diff_stored_exchanges")
