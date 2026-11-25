@@ -398,18 +398,27 @@ class WizClient:
         """Stream complete endpoint pages; stable Wiz IDs deduplicate moving pages."""
         cursor: Optional[str] = None
         seen: set[str] = set()
+        page_size = self.PAGE_SIZE
         for _ in range(self.ENDPOINT_MAX_PAGES):
-            remaining = limit - len(seen) if limit is not None else self.PAGE_SIZE
+            remaining = limit - len(seen) if limit is not None else page_size
             if remaining <= 0:
                 return
-            data = await self.graphql(
-                APPLICATION_ENDPOINTS_QUERY,
-                {
-                    "first": min(self.PAGE_SIZE, remaining),
-                    "after": cursor,
-                    "filterBy": {"id": {"equals": ids}} if ids is not None else {},
-                },
-            )
+            while True:
+                try:
+                    data = await self.graphql(
+                        APPLICATION_ENDPOINTS_QUERY,
+                        {
+                            "first": min(page_size, remaining),
+                            "after": cursor,
+                            "filterBy": {"id": {"equals": ids}} if ids is not None else {},
+                        },
+                    )
+                    break
+                except WizApiError as exc:
+                    if "'first' must be less than or equal" not in str(exc) or page_size == 1:
+                        raise
+                    page_size = max(1, page_size // 2)
+                    logger.warning("Wiz application endpoint page size reduced to %s after API limit error", page_size)
             connection = data.get("applicationEndpoints") or {}
             nodes = connection.get("nodes")
             if not isinstance(nodes, list):
@@ -1140,6 +1149,7 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = False
         integration.last_error = str(exc)[:1000]
+        integration.last_sync_stats = {**stats.as_dict(), "sync_in_progress": False}
         db.commit()
         return {"ok": False, "message": f"Sync failed: {exc}", **stats.as_dict()}
 
@@ -1175,3 +1185,7 @@ async def sync_integration_background(integration_id: int) -> None:
         integration = db.query(WizIntegration).filter_by(id=integration_id).first()
         if integration is not None:
             await sync_integration(db, integration)
+            from app.services.integration_graph_service import project_and_record_graph
+            await asyncio.to_thread(
+                project_and_record_graph, integration.organization_id, "wiz", integration.id
+            )
