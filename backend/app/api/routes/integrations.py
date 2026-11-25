@@ -19,7 +19,7 @@ from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowInte
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.wiz_integration import WizApplicationEndpoint, WizIntegration
 from app.models.tenable_integration import TenableVmIntegration
-from app.models.crowdstrike_integration import CrowdStrikeAssetLink, CrowdStrikeIntegration
+from app.models.crowdstrike_integration import CrowdStrikeIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
 from app.models.panorama_integration import (
@@ -1288,12 +1288,10 @@ async def sync_crowdstrike_integration(
         raise HTTPException(status_code=400, detail="This CrowdStrike connection is disabled.")
     result = await crowdstrike_service.sync_integration(db, integration)
     if result["ok"]:
-        from app.services.graph_service import sync_organization_background
-        asset_values = [value for (value,) in db.query(Asset.value).join(
-            CrowdStrikeAssetLink, CrowdStrikeAssetLink.asset_id == Asset.id
-        ).filter(CrowdStrikeAssetLink.integration_id == integration.id).distinct().all()]
-        if asset_values:
-            background_tasks.add_task(sync_organization_background, integration.organization_id, asset_values)
+        from app.services.integration_graph_service import project_and_record_graph
+        background_tasks.add_task(
+            project_and_record_graph, integration.organization_id, "crowdstrike", integration.id
+        )
     return CrowdStrikeSyncResult(**result)
 
 

@@ -55,7 +55,9 @@ import {
   Crosshair,
   Sparkles,
   Code2,
+  ArrowRight,
 } from 'lucide-react';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
@@ -478,6 +480,14 @@ function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing,
             {severityBadge(entry.severity)}
           </SheetTitle>
         </SheetHeader>
+
+        <Link
+          href={`/threat-intel/${encodeURIComponent(entry.cve_id)}`}
+          className="mb-4 mt-2 flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-primary hover:bg-primary/10"
+        >
+          Am I affected? See impact on your assets and agent validation
+          <ArrowRight className="h-4 w-4" />
+        </Link>
 
         <div className="space-y-4 text-sm">
           {/* Description */}

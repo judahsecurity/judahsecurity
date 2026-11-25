@@ -41,3 +41,33 @@ def get_attack_workspace(
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     return build_workspace(db, org_id)
+
+
+@router.get("/sessions/{session_id}/graph")
+def get_attack_session_graph(
+    session_id: str,
+    organization_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Entity attack path for an agent session, visible to the whole org.
+
+    /agent/sessions/{id}/attack-graph is owner-only; this read is for the
+    org-wide /attacks page, so it checks that the session belongs to the
+    caller's organization instead of to the caller. Evidence is redacted
+    by the graph builder.
+    """
+    from app.models.agent_conversation import AgentConversation
+    from app.services.agent import evograph
+    from app.services.agent.attack_graph import attach_verified_graph
+
+    org_id = _resolve_org_id(current_user, organization_id)
+    conv = (
+        db.query(AgentConversation)
+        .filter(AgentConversation.session_id == session_id, AgentConversation.organization_id == org_id)
+        .first()
+    )
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    chain = attach_verified_graph(evograph.get_session_chain(session_id, org_id), org_id, session_id, db)
+    return chain.get("attack_graph") or {"nodes": [], "edges": [], "meta": {}}

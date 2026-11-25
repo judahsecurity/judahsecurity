@@ -1425,6 +1425,29 @@ async def analyze_kev_cve(
     return result
 
 
+_CVE_ID = re.compile(r"^CVE-\d{4}-\d{4,}$", re.I)
+
+
+@router.get("/cve/{cve_id}/impact")
+def get_cve_impact(
+    cve_id: str,
+    organization_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Am I affected? Assets in this organization with findings for the CVE,
+    their internet exposure, and the strongest agent validation per asset.
+    Local data only — no external enrichment calls."""
+    from app.services.cve_impact import build_cve_impact
+
+    if not _CVE_ID.match(cve_id.strip()):
+        raise HTTPException(status_code=400, detail="Expected a CVE id like CVE-2024-12345")
+    org_id = resolve_organization_id(current_user, organization_id) or getattr(current_user, "organization_id", None)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="Select an organization")
+    return build_cve_impact(db, org_id, cve_id)
+
+
 @router.get("/stats")
 async def get_threat_intel_stats(
     organization_id: Optional[int] = Query(None),

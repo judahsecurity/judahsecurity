@@ -1,0 +1,274 @@
+"""Entity attack graph built from an EvoGraph session chain."""
+
+from app.services.agent.attack_graph import (
+    MAX_NODES,
+    build_attack_graph,
+    classify_capability,
+    extract_targets,
+)
+
+
+def _step(iteration, phase, tool, args, success, findings=(), output="", failures=()):
+    return {
+        "id": f"step-{iteration}",
+        "type": "step",
+        "properties": {
+            "iteration": iteration,
+            "phase": phase,
+            "tool_name": tool,
+            "tool_args": args,
+            "output_summary": output,
+            "success": success,
+            "thought": "",
+            "findings": list(findings),
+            "failures": list(failures),
+        },
+    }
+
+
+def _chain(*steps):
+    return {
+        "nodes": [{"id": "chain-abc", "type": "chain"}, *steps],
+        "edges": [],
+        "meta": {"session_id": "abc", "objective": "test", "status": "completed"},
+    }
+
+
+def _by_kind(graph, kind):
+    return [n for n in graph["nodes"] if n["kind"] == kind]
+
+
+def _edge_set(graph):
+    return {(e["source"], e["target"]) for e in graph["edges"]}
+
+
+def test_classify_requires_gain_for_weak_nouns():
+    assert classify_capability("Missing CSRF token on login form") is None
+    assert classify_capability("Admin panel found at /admin") is None
+    assert classify_capability("Hard-coded AWS access key in main.js") == ("credential", "Credential")
+    assert classify_capability("Leaked database password in .env") == ("credential", "Credential")
+    assert classify_capability("Authentication bypass via JWT none alg") == ("identity", "Privileged access")
+    assert classify_capability("Command injection in ping parameter") == ("rce", "Code execution")
+    assert classify_capability("Dumped customer records from database") == ("data", "Sensitive data")
+
+
+def test_extract_targets_from_stringified_args():
+    assert extract_targets("{'url': 'https://app.example.com/api/v1/users?id=1'}") == (
+        "app.example.com",
+        "/api/v1/users",
+    )
+    assert extract_targets("{'target': 'api.example.com', 'ports': '1-1000'}") == ("api.example.com", None)
+    assert extract_targets("") == (None, None)
+
+
+def test_empty_chain_yields_empty_graph():
+    graph = build_attack_graph({"nodes": [], "edges": [], "meta": {}})
+    assert graph["nodes"] == []
+    assert graph["edges"] == []
+
+
+def test_recon_noise_is_not_drawn():
+    graph = build_attack_graph(_chain(
+        _step(1, "informational", "nmap", "{'target': 'app.example.com'}", True,
+              [{"type": "actionable", "severity": "medium", "description": "Port 443 open"}]),
+    ))
+    assert graph["nodes"] == []
+
+
+def test_credential_reuse_chains_to_data_access():
+    graph = build_attack_graph(_chain(
+        _step(1, "informational", "http_request", "{'url': 'https://app.example.com/static/main.js'}", True,
+              [{"type": "vulnerability", "severity": "high",
+                "description": "Hard-coded API key exposed in main.js"}]),
+        _step(2, "exploitation", "http_request",
+              "{'url': 'https://app.example.com/api/export', 'headers': {'Authorization': 'Bearer abc.def'}}",
+              True,
+              [{"type": "vulnerability", "severity": "high",
+                "description": "Exported customer records from database using leaked key"}]),
+    ))
+
+    origin = _by_kind(graph, "origin")
+    hosts = _by_kind(graph, "host")
+    creds = _by_kind(graph, "credential")
+    data = _by_kind(graph, "data")
+    actions = _by_kind(graph, "action")
+    assert len(origin) == 1 and len(hosts) == 1
+    assert len(creds) == 1 and len(data) == 1 and len(actions) == 2
+
+    edges = _edge_set(graph)
+    assert ("origin", hosts[0]["id"]) in edges
+    # The second action is reached through its endpoint *and* the captured credential.
+    assert (creds[0]["id"], actions[1]["id"]) in edges
+    assert ("endpoint:app.example.com/api/export", actions[1]["id"]) in edges
+    assert creds[0]["title"] == "API key"
+    # No dangling endpoints: every endpoint leads somewhere.
+    for ep in _by_kind(graph, "endpoint"):
+        assert any(e["source"] == ep["id"] for e in graph["edges"])
+    assert (actions[1]["id"], data[0]["id"]) in edges
+
+    # Steps alone never prove anything: the tool ran, the model read the output.
+    assert all(n["status"] != "proven" for n in graph["nodes"])
+    assert actions[1]["status"] == "observed"
+    assert graph["meta"]["proven"] == 0
+    assert graph["meta"]["capabilities"] == 2
+
+
+def test_no_auth_material_means_no_invented_chain():
+    graph = build_attack_graph(_chain(
+        _step(1, "informational", "http_request", "{'url': 'https://app.example.com/.env'}", True,
+              [{"type": "vulnerability", "severity": "high", "description": "Leaked database password in .env"}]),
+        _step(2, "exploitation", "sqlmap", "{'url': 'https://app.example.com/search'}", True,
+              [{"type": "vulnerability", "severity": "critical", "description": "SQL injection in q parameter"}]),
+    ))
+    cred = _by_kind(graph, "credential")[0]
+    sqli = [n for n in _by_kind(graph, "action") if "SQL" in n["title"]][0]
+    assert all(e["source"] != cred["id"] for e in graph["edges"] if e["target"] == sqli["id"])
+    assert cred["title"] == "Password"
+    assert any(e["source"].startswith("endpoint:") and e["target"] == sqli["id"] for e in graph["edges"])
+
+
+def test_failed_step_is_inferred_and_evidence_is_redacted():
+    graph = build_attack_graph(_chain(
+        _step(1, "exploitation", "http_request",
+              "{'url': 'https://app.example.com/login', 'headers': {'Authorization': 'Bearer s3cr3tvalue'}}",
+              False,
+              [{"type": "vulnerability", "severity": "high", "description": "Authentication bypass via header"}],
+              failures=[{"tool": "http_request", "error": "403", "lesson": ""}]),
+    ))
+    action = _by_kind(graph, "action")[0]
+    assert action["status"] == "inferred"
+    assert "s3cr3tvalue" not in action["evidence"]["args"]
+    assert graph["meta"]["failed_attempts"] == 1
+
+
+def _proof(fid, title, host="app.example.com", url=None, level="exploit_verified", verdict=None,
+           description="", headers=""):
+    chain = []
+    if url:
+        chain.append({"tool": "execute_curl", "display_tool": "curl",
+                      "args": f"{{'url': '{url}'{headers}}}", "outcome": "200 OK"})
+    return {"id": fid, "title": title, "description": description, "impact": "",
+            "severity": "critical", "host": host, "verification_level": level,
+            "verdict": verdict, "chain": chain}
+
+
+def test_verified_finding_promotes_matching_step_action_and_path():
+    chain = _chain(
+        _step(1, "exploitation", "sqlmap", "{'url': 'https://app.example.com/search'}", True,
+              [{"type": "vulnerability", "severity": "high", "description": "SQL injection in search q parameter"}]),
+    )
+    graph = build_attack_graph(chain, proofs=[
+        _proof(42, "SQL injection in search endpoint q parameter", url="https://app.example.com/search?q=1"),
+    ])
+    actions = _by_kind(graph, "action")
+    assert len(actions) == 1, "proof should merge into the step action, not duplicate it"
+    action = actions[0]
+    assert action["status"] == "proven"
+    assert action["finding_id"] == 42
+    assert action["step_evidence"]["tool"] == "sqlmap"
+    # The way in is proven too.
+    ep = graph["nodes"][[n["id"] for n in graph["nodes"]].index("endpoint:app.example.com/search")]
+    assert ep["status"] == "proven"
+    assert {e["status"] for e in graph["edges"]} == {"proven"}
+    assert graph["meta"]["proven"] == 1 and graph["meta"]["published"] == 1
+
+
+def test_unverified_and_false_positive_findings():
+    graph = build_attack_graph(_chain(), proofs=[
+        _proof(1, "Reflected XSS in name parameter", url="https://app.example.com/hello", level=None),
+        _proof(2, "Open redirect in next parameter", url="https://app.example.com/login",
+               verdict="false_positive"),
+    ])
+    actions = _by_kind(graph, "action")
+    assert [a["finding_id"] for a in actions] == [1]
+    assert actions[0]["status"] == "observed"
+
+
+def test_verified_proof_using_captured_credential_proves_it():
+    chain = _chain(
+        _step(1, "informational", "http_request", "{'url': 'https://app.example.com/main.js'}", True,
+              [{"type": "vulnerability", "severity": "high", "description": "Hard-coded API key exposed in main.js"}]),
+    )
+    graph = build_attack_graph(chain, proofs=[
+        _proof(7, "Exported customer records from orders database", url="https://app.example.com/api/export",
+               headers=", 'headers': {'X-Api-Key': '[redacted]'}"),
+    ])
+    cred = _by_kind(graph, "credential")[0]
+    data = _by_kind(graph, "data")[0]
+    assert cred["status"] == "proven"
+    assert data["status"] == "proven"
+    assert (cred["id"], "finding:7") in _edge_set(graph)
+
+
+def test_speculative_wording_is_inferred():
+    graph = build_attack_graph(_chain(
+        _step(1, "informational", "httpx", "{'url': 'https://app.example.com/'}", True,
+              [{"type": "vulnerability", "severity": "high",
+                "description": "Apache 2.4.49 may be vulnerable to path traversal"}]),
+    ))
+    assert _by_kind(graph, "action")[0]["status"] == "inferred"
+
+
+def test_repeated_sightings_are_merged():
+    steps = [
+        _step(i, "informational", "http_request", "{'url': 'https://app.example.com/search'}", True,
+              [{"type": "vulnerability", "severity": "high", "description": "SQL injection in q parameter"}])
+        for i in range(1, 6)
+    ]
+    graph = build_attack_graph(_chain(*steps))
+    actions = _by_kind(graph, "action")
+    assert len(actions) == 1
+    assert actions[0]["occurrences"] == 5
+
+
+def test_large_graphs_hide_least_certain_actions_first():
+    steps = [
+        _step(i, "informational", "httpx", f"{{'url': 'https://h{i}.example.com/p{i}'}}", True,
+              [{"type": "vulnerability", "severity": "low", "description": f"Possible issue number {i} on host"}])
+        for i in range(1, 80)
+    ]
+    graph = build_attack_graph(_chain(*steps), proofs=[
+        _proof(9, "Remote code execution via upload", host="h1.example.com", url="https://h1.example.com/upload"),
+    ])
+    assert len(graph["nodes"]) <= MAX_NODES
+    assert graph["meta"]["hidden"] > 0
+    assert any(n.get("finding_id") == 9 for n in graph["nodes"])
+    # No dangling hosts/endpoints after pruning.
+    sources = {e["source"] for e in graph["edges"]}
+    for n in graph["nodes"]:
+        if n["kind"] in ("host", "endpoint"):
+            assert n["id"] in sources
+
+
+def test_proof_does_not_redraw_the_credential_it_used():
+    chain = _chain(
+        _step(1, "informational", "http_request", "{'url': 'https://app.example.com/main.js'}", True,
+              [{"type": "vulnerability", "severity": "high", "description": "Hard-coded API key exposed in main.js"}]),
+        _step(2, "exploitation", "http_request",
+              "{'url': 'https://api.example.com/admin/users', 'headers': {'X-Api-Key': '[redacted]'}}", True,
+              [{"type": "vulnerability", "severity": "critical",
+                "description": "Privilege escalation: leaked key grants admin access"}]),
+    )
+    graph = build_attack_graph(chain, proofs=[
+        _proof(5, "Leaked API key grants admin access to user API", host="api.example.com",
+               url="https://api.example.com/admin/users", headers=", 'headers': {'X-Api-Key': '[redacted]'}"),
+    ])
+    assert len(_by_kind(graph, "credential")) == 1
+    identity = _by_kind(graph, "identity")[0]
+    assert identity["title"] == "Admin access"
+    assert identity["status"] == "proven"
+
+
+def test_proof_merges_into_best_matching_action():
+    chain = _chain(
+        _step(1, "informational", "http_request", "{'url': 'https://app.example.com/preview'}", True,
+              [{"type": "vulnerability", "severity": "high", "description": "SSRF in link preview reaches instance metadata"}]),
+        _step(2, "exploitation", "http_request", "{'url': 'https://app.example.com/preview'}", True,
+              [{"type": "vulnerability", "severity": "critical", "description": "Obtained AWS credentials for web-role via SSRF"}]),
+    )
+    graph = build_attack_graph(chain, proofs=[
+        _proof(6, "SSRF in link preview returns AWS credentials for web-role", url="https://app.example.com/preview"),
+    ])
+    by_finding = {n.get("finding_id"): n for n in _by_kind(graph, "action")}
+    assert by_finding[6]["step_evidence"]["iteration"] == 2
+    assert _by_kind(graph, "credential")[0]["status"] == "proven"

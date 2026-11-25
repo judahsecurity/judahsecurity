@@ -5,6 +5,8 @@ import json
 import httpx
 import pytest
 
+from app.core.config import settings
+
 from app.services.agent.assessment_scope import register_scope
 from app.services.agent.coverage_cells import migrate_coverage_cells
 from app.services.agent.engagement_brain import (
@@ -24,6 +26,25 @@ from app.services.agent.tools import (
 async def test_two_verified_users_route_only_vulnerable_match_to_proof(
     monkeypatch, patched
 ):
+    await _run_two_user_boundary(monkeypatch, patched)
+
+
+@pytest.mark.asyncio
+async def test_boundary_output_over_cap_stays_valid_json(monkeypatch):
+    """An over-cap result must be compacted, never sliced into invalid JSON."""
+    # Large enough for compare_requests' full output (~3.2k here), too small
+    # for the boundary result built on top of it (~4.5k).
+    monkeypatch.setattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 4000)
+    result, escalation_id = await _run_two_user_boundary(
+        monkeypatch, False, full_assertions=False
+    )
+    assert result["output_compacted"] is True
+    assert result["verdict"] == "LIKELY_IMPACT"
+    assert result["proof_escalation"]["id"] == escalation_id
+    assert "engagement_brain" not in result
+
+
+async def _run_two_user_boundary(monkeypatch, patched, full_assertions=True):
     original = httpx.AsyncClient
     calls = []
 
@@ -113,22 +134,25 @@ async def test_two_verified_users_route_only_vulnerable_match_to_proof(
         )
         manager._engagement_brain = brain.to_dict()
 
-        result = json.loads(
-            await manager.test_authorization_boundary(
-                "https://app.test/orders/order-a",
-                "A",
-                "B",
-                "owner_id",
-                matrix["hypothesis_id"],
-                cell["id"],
-            )
+        raw = await manager.test_authorization_boundary(
+            "https://app.test/orders/order-a",
+            "A",
+            "B",
+            "owner_id",
+            matrix["hypothesis_id"],
+            cell["id"],
         )
+        assert len(raw) <= settings.AGENT_TOOL_OUTPUT_MAX_CHARS
+        result = json.loads(raw)
+        resumed = engagement_brain_from_dict(manager._engagement_brain)
+        if not full_assertions:
+            return result, resumed.proof_escalations[0]["id"]
+        assert "engagement_brain" not in result
         assert result["baseline"]["request"]["identity"] == "A"
         assert result["mutant"]["request"]["identity"] == "B"
         assert result["baseline"]["trace"].get("coverage_cell_id") == ""
         assert result["mutant"]["trace"]["coverage_cell_id"] == cell["id"]
 
-        resumed = engagement_brain_from_dict(manager._engagement_brain)
         if patched:
             assert result["verdict"] == "MUTANT_DENIED"
             assert "proof_escalation" not in result

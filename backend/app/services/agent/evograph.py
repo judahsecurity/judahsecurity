@@ -351,11 +351,16 @@ def get_prior_chain_context(
         return ""
 
 
-def get_session_chain(session_id: str) -> Dict[str, Any]:
+def get_session_chain(session_id: str, organization_id: Optional[int]) -> Dict[str, Any]:
     """
-    Fetch the full attack chain graph for a session.
+    Fetch the full attack chain graph for a session owned by ``organization_id``.
     Returns nodes and edges suitable for frontend force-graph visualization.
+
+    The chain is matched on session_id *and* organization_id, so a session id
+    from another tenant yields the empty shape, same as a missing one.
     """
+    if organization_id is None:
+        return {"nodes": [], "edges": [], "meta": {}}
     driver = _get_driver()
     if not driver:
         return {"nodes": [], "edges": [], "meta": {}}
@@ -364,12 +369,12 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
         with driver.session() as s:
             chain = s.run(
                 """
-                MATCH (c:AgentChain {session_id: $sid})
+                MATCH (c:AgentChain {session_id: $sid, organization_id: $org})
                 RETURN c.objective AS objective, c.status AS status,
                        c.mode AS mode, c.started_at AS started_at,
                        c.step_count AS step_count, c.final_phase AS final_phase
                 """,
-                sid=session_id,
+                sid=session_id, org=organization_id,
             ).single()
 
             if not chain:
@@ -377,7 +382,7 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
 
             steps = s.run(
                 """
-                MATCH (c:AgentChain {session_id: $sid})-[:HAS_STEP]->(step:ChainStep)
+                MATCH (c:AgentChain {session_id: $sid, organization_id: $org})-[:HAS_STEP]->(step:ChainStep)
                 OPTIONAL MATCH (step)-[:PRODUCED]->(f:ChainFinding)
                 OPTIONAL MATCH (step)-[:FAILED_WITH]->(fail:ChainFailure)
                 RETURN step.iteration AS iteration, step.phase AS phase,
@@ -389,7 +394,7 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
                        collect(DISTINCT {tool: fail.tool_name, error: fail.error, lesson: fail.lesson}) AS failures
                 ORDER BY step.iteration
                 """,
-                sid=session_id,
+                sid=session_id, org=organization_id,
             ).data()
 
             nodes: List[Dict[str, Any]] = []
@@ -457,7 +462,7 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
 
                 prev_step_id = step_id
 
-            return {
+            result: Dict[str, Any] = {
                 "nodes": nodes,
                 "edges": edges,
                 "meta": {
@@ -468,6 +473,13 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
                     "final_phase": chain.get("final_phase"),
                 },
             }
+            try:
+                from app.services.agent.attack_graph import build_attack_graph
+
+                result["attack_graph"] = build_attack_graph(result)
+            except Exception as e:
+                logger.debug(f"EvoGraph attack_graph build error: {e}")
+            return result
 
     except Exception as e:
         logger.debug(f"EvoGraph get_session_chain error: {e}")

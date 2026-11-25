@@ -13,6 +13,9 @@ import {
 import { cn } from '@/lib/utils';
 import { TrustBoundaryMap, TRUST_COLORS } from './TrustBoundaryMap';
 import type { AgentRunLedger } from './RunLedgerPanel';
+import { AgentAttackGraph } from '@/components/attacks/AgentAttackGraph';
+import { ProofFunnel } from './ProofFunnel';
+import type { AgentAttackGraphData } from '@/components/attacks/agentGraph';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
   ssr: false,
@@ -57,6 +60,8 @@ export interface ChainData {
     final_phase?: string;
   };
   attack_paths?: AttackPath[];
+  /** Entity-centric path (Internet → host → action → capability) built server-side. */
+  attack_graph?: AgentAttackGraphData;
 }
 
 interface AttackScenarioPanelProps {
@@ -95,7 +100,7 @@ function stageColorForPhase(phase?: string): string {
   return PHASE_COLORS[(phase || '').toLowerCase()] || TRUST_COLORS.gray;
 }
 
-type ViewMode = 'map' | 'timeline' | 'graph';
+type ViewMode = 'path' | 'map' | 'timeline' | 'graph';
 
 export function AttackScenarioPanel({
   chainData,
@@ -251,7 +256,7 @@ export function AttackScenarioPanel({
     <Card
       className={cn(
         'shrink-0 flex flex-col max-h-[calc(100vh-200px)] overflow-hidden border-border/60 bg-card transition-[width] duration-300',
-        viewMode === 'map' ? 'w-[560px]' : 'w-[460px]'
+        viewMode === 'path' ? 'w-[640px]' : viewMode === 'map' ? 'w-[560px]' : 'w-[460px]'
       )}
     >
       <CardHeader className="pb-2 px-3 pt-3">
@@ -276,6 +281,7 @@ export function AttackScenarioPanel({
             )}
             <div className="flex border rounded-md overflow-hidden">
               {([
+                ['path', 'Path'],
                 ['map', 'Map'],
                 ['timeline', 'Timeline'],
                 ['graph', 'Force'],
@@ -310,6 +316,13 @@ export function AttackScenarioPanel({
 
       <CardContent className="p-0 flex-1 overflow-hidden flex flex-col">
         {!isEmpty && (
+          <ProofFunnel
+            run={runLedger}
+            verified={chainData?.attack_graph?.meta?.proven || 0}
+            className="border-b"
+          />
+        )}
+        {!isEmpty && viewMode !== 'path' && (
           <div className="flex flex-wrap gap-x-3 gap-y-1 px-3 py-1.5 border-b text-[10px] text-muted-foreground font-mono">
             {viewMode === 'map' ? (
               <span>{runLedger?.scenario_surface?.items?.length || 0} surface observations · {runLedger?.hypotheses?.length || 0} scenarios</span>
@@ -342,6 +355,11 @@ export function AttackScenarioPanel({
           <div className="flex-1 flex items-center justify-center p-6">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>
+        )}
+
+        {/* Entity attack path: Internet → host → action → captured capability */}
+        {viewMode === 'path' && !isEmpty && (
+          <AgentAttackGraph graph={chainData?.attack_graph} className="min-h-[420px]" />
         )}
 
         {/* Evidence-led external assessment map */}

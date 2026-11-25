@@ -114,3 +114,6 @@ backups/
 
 # Local Prowl lab runs (harness/scripts/prowl_lab_scan.sh)
 /runs/
+
+# TypeScript incremental build cache
+*.tsbuildinfo

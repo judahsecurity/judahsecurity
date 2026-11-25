@@ -407,6 +407,41 @@ def test_socks_resolves_in_scope_hostname(socks):
     assert code == 2
 
 
+def _dual_stack_resolver(name):
+    """getaddrinfo that answers `name` IPv6-first, as glibc does for a
+    dual-stack /etc/hosts entry (e.g. GitHub's Ubuntu runners for localhost)."""
+    real = socket.getaddrinfo
+
+    def fake(host, port, *args, **kwargs):
+        if host == name:
+            return [
+                (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+            ]
+        return real(host, port, *args, **kwargs)
+
+    return fake
+
+
+def test_egress_keeps_every_checked_address_in_resolver_order(monkeypatch):
+    monkeypatch.setattr(egress, "ALLOW_PRIVATE", True)
+    monkeypatch.setattr(egress.socket, "getaddrinfo", _dual_stack_resolver("dual.test"))
+    assert egress.resolve_checked_all("dual.test", 80, ["dual.test"]) == (["::1", "127.0.0.1"], "")
+    monkeypatch.setattr(egress, "ALLOW_PRIVATE", False)
+    assert egress.resolve_checked_all("dual.test", 80, ["dual.test"])[0] == []
+
+
+def test_socks_falls_back_to_ipv4_when_ipv6_is_closed(socks, monkeypatch):
+    # The target listens on 127.0.0.1 only; the name resolves to ::1 first.
+    port, target_port, job = socks
+    monkeypatch.setattr(egress.socket, "getaddrinfo", _dual_stack_resolver("dual.test"))
+    job["allowed"].append("dual.test")
+    sock, code = _socks_connect(port, "socks-token", "dual.test", target_port)
+    assert code == 0 and sock.recv(64).startswith(b"SSH-2.0")
+    sock.close()
+    assert job["tcp"]["dual.test:%d" % target_port]["reason"] == "open"
+
+
 # --- operator method policy enforced by probe-egress ---------------------------
 
 import base64 as _b64
