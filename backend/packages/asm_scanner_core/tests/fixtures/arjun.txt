@@ -1,0 +1,10 @@
+    _
+   /_| _ '
+  (  |/ /(//) v2.2.6
+      _/
+
+[*] Probing the target for stability
+[*] Analysing HTTP response for anomalies
+[*] Analysing HTTP response for potential parameter names
+[*] Logicforcing the URL endpoint
+[+] Parameters found: user, redirect

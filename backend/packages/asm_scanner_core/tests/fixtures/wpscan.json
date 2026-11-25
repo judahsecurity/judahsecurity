@@ -1,0 +1,26 @@
+[note] WPSCAN_API_TOKEN is not set; rewrote vp/vt → p/t so the scan could run without CVE mapping.
+{
+  "banner": {"description": "WordPress Security Scanner by the WPScan Team", "version": "3.8.25"},
+  "start_time": 1763625600,
+  "target_url": "https://blog.example.test/",
+  "target_ip": "203.0.113.20",
+  "effective_url": "https://blog.example.test/",
+  "interesting_findings": [
+    {"url": "https://blog.example.test/", "to_s": "Headers", "type": "headers", "found_by": "Headers (Passive Detection)", "confidence": 100, "interesting_entries": ["Server: nginx"]},
+    {"url": "https://blog.example.test/xmlrpc.php", "to_s": "XML-RPC seems to be enabled: https://blog.example.test/xmlrpc.php", "type": "xmlrpc", "found_by": "Direct Access (Aggressive Detection)", "confidence": 100},
+    {"url": "https://blog.example.test/wp-content/debug.log", "to_s": "Debug Log found: https://blog.example.test/wp-content/debug.log", "type": "debug_log", "found_by": "Direct Access (Aggressive Detection)", "confidence": 100}
+  ],
+  "version": {"number": "5.8.1", "release_date": "2021-09-09", "status": "insecure", "found_by": "Rss Generator (Passive Detection)", "confidence": 100,
+    "vulnerabilities": [
+      {"title": "WordPress < 5.8.3 - SQL Injection via WP_Query", "fixed_in": "5.8.3", "references": {"cve": ["2022-21661"], "url": []}, "vuln_type": "SQLI", "cvss": {"score": 7.5, "vector": "AV:N"}}
+    ]},
+  "main_theme": {"slug": "twentytwentyone", "location": "https://blog.example.test/wp-content/themes/twentytwentyone/", "outdated": true,
+    "version": {"number": "1.4", "confidence": 80}, "vulnerabilities": []},
+  "plugins": {
+    "contact-form-7": {"slug": "contact-form-7", "outdated": true, "version": {"number": "5.3.1", "confidence": 100},
+      "vulnerabilities": [{"title": "Contact Form 7 < 5.3.2 - Unrestricted File Upload", "fixed_in": "5.3.2", "references": {"cve": ["2020-35489"]}, "vuln_type": "UPLOAD"}]},
+    "akismet": {"slug": "akismet", "outdated": false, "version": {"number": "5.0"}, "vulnerabilities": []}
+  },
+  "users": {"admin": {"id": 1}},
+  "stop_time": 1763625700
+}

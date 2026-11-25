@@ -141,3 +141,15 @@ Known bugs found during the audit:
 
 Most parsers on both sides are untested: add golden-output tests per tool
 before moving it.
+
+Parser registry (ported): `asm_scanner_core.parsers` holds pure parsers for
+nikto, wafw00f, cmseek, wpscan, testssl, tlsx, httpx (security headers + CORS),
+sqlmap, arjun, xsstrike and katana (`-fx` forms), each returning a
+`ParsedResult` (status ok | partial | inconclusive | unavailable, typed
+observations, counts). Golden tests: `backend/packages/asm_scanner_core/tests`
+(run in the backend suite via `backend/tests/test_scanner_parsers_golden.py`).
+Prowl's `MCPServer.call_tool` attaches `result["parsed"]` before Augur; the
+agent tool layer prefixes a short summary to the model-facing output and
+records each observation as a `parser` attack-graph fact (planning state, not
+proof). Vanguard bugs fixed in the port are listed in each parser's docstring;
+Vanguard's own `run_*` still parse independently until they switch over.

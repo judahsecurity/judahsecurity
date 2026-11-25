@@ -1,0 +1,2 @@
+[{"url": "https://shop.example.test", "detected": true, "firewall": "Cloudflare", "manufacturer": "Cloudflare Inc."},
+ {"url": "https://plain.example.test", "detected": false, "firewall": "None", "manufacturer": "None"}]

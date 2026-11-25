@@ -2797,6 +2797,89 @@ class MCPServer:
         names = set(self._HANDLER_BINARY.keys()) | {"execute_httpx"}
         return sorted(n for n in names if not self.tool_binary_available(n))
 
+    # Bounds for the structured parse attached to a tool result.
+    _PARSED_MAX_OBSERVATIONS = 25
+    _PARSED_MAX_JSON_FILE = 5_000_000
+
+    @staticmethod
+    def _arg_value(parsed_args: List[str], flags: tuple) -> str:
+        for i, token in enumerate(parsed_args):
+            for flag in flags:
+                if token == flag and i + 1 < len(parsed_args):
+                    return parsed_args[i + 1]
+                if token.startswith(flag + "="):
+                    return token.split("=", 1)[1]
+        return ""
+
+    def _parsed_scanner_summary(
+        self, name: str, arguments: Dict[str, Any], result: Dict[str, Any], started_wall: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Run the asm_scanner_core parser for ``name`` on the raw output.
+
+        Returns a bounded, redacted dict (status, counts, observations) or None
+        when no parser is registered. Observations are leads, never findings.
+        """
+        try:
+            from asm_scanner_core.parsers import get_parser, parse_tool_output
+        except ImportError:
+            return None
+        if get_parser(name) is None or result.get("tool_unavailable"):
+            return None
+        try:
+            raw_args = arguments.get("args", "") if isinstance(arguments.get("args"), str) else ""
+            try:
+                parsed_args = self._parse_args(raw_args) if raw_args else []
+            except Exception:
+                parsed_args = []
+            output = str(result.get("output") or "")
+            text = output if output.strip() else str(result.get("stderr") or result.get("error") or "")
+            timed_out = bool(result.get("timed_out"))
+            exit_code = result.get("exit_code")
+            if timed_out or not isinstance(exit_code, int) or isinstance(exit_code, bool):
+                exit_code = None
+            elif exit_code == -1 and "command not found" in text.lower():
+                exit_code = 127
+            context: Dict[str, Any] = {
+                "target": self._arg_value(parsed_args, ("-u", "--url", "--target")),
+            }
+            if name == "execute_testssl":
+                context["json_text"] = self._read_testssl_json(parsed_args, started_wall)
+            parsed = parse_tool_output(name, text, exit_code, timed_out=timed_out, **context)
+            if parsed is None:
+                return None
+            if parsed.status == "ok" and "\n\n... (truncated," in output:
+                parsed.status = "partial"
+                parsed.reason = "tool output was truncated before parsing"
+            summary = parsed.to_dict(max_observations=self._PARSED_MAX_OBSERVATIONS)
+            summary["note"] = ("Parsed scanner observations are leads for planning; "
+                               "they are not findings or proof.")
+            try:
+                from app.services.agent.observability import redact_value
+
+                summary = redact_value(summary)
+            except Exception:
+                pass
+            return summary
+        except Exception:
+            logger.exception("scanner parser failed for %s", name)
+            return None
+
+    def _read_testssl_json(self, parsed_args: List[str], started_wall: float) -> str:
+        """Read the JSON file testssl wrote in this call (``--jsonfile[-pretty] PATH``)."""
+        path = self._arg_value(parsed_args, ("--jsonfile", "--jsonfile-pretty"))
+        if not path or path == "-":
+            return ""
+        try:
+            stat = os.stat(path)
+            # Only a file written by this run, and only a bounded amount of it.
+            if stat.st_mtime + 1 < started_wall or stat.st_size > self._PARSED_MAX_JSON_FILE:
+                return ""
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read(self._PARSED_MAX_JSON_FILE)
+        except OSError:
+            return ""
+        return text if text.lstrip()[:1] in ("[", "{") else ""
+
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """
         Aegis chokepoint for every tool invocation.
@@ -2901,6 +2984,7 @@ class MCPServer:
 
         # 4. Handler
         start = time.monotonic()
+        started_wall = time.time()
         try:
             result = await tool.handler(**arguments)
         except Exception as e:
@@ -2926,6 +3010,13 @@ class MCPServer:
             post_result = lictor.run_post(post_ctx)
             if post_result.modified_result is not None:
                 result = post_result.modified_result
+
+        # 5b. Structured parse of the raw scanner output (before Augur may
+        # replace ``output`` with its reading). Adds ``result["parsed"]`` only;
+        # the raw output is left untouched.
+        parsed_summary = self._parsed_scanner_summary(name, arguments, result, started_wall)
+        if parsed_summary is not None:
+            result["parsed"] = parsed_summary
 
         # 6. Augur — smart output interpretation + next-step pivots
         # Incomplete scanner output is a lead for review, not a completed

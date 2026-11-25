@@ -1,0 +1,4 @@
+[*] Checking https://plain.example.test
+[+] Generic Detection results:
+[-] No WAF detected by the generic detection
+[~] Number of requests: 7
