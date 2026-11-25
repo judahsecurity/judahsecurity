@@ -490,6 +490,9 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - REDIS_URL=redis://redis:6379/0
       - SCHEDULE_CHECK_INTERVAL=${SCHEDULE_CHECK_INTERVAL:-60}
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
     depends_on:
       db:
         condition: service_healthy

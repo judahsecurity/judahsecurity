@@ -238,6 +238,19 @@ async def test_application_endpoint_and_direct_issue_pagination():
 
 
 @pytest.mark.asyncio
+async def test_application_endpoints_retry_with_smaller_page_after_wiz_limit_error():
+    client = WizClient("https://api.us17.app.wiz.io/graphql", "client", "secret")
+    client.graphql = AsyncMock(side_effect=[
+        WizApiError("Wiz GraphQL error: 'first' must be less than or equal to 1000"),
+        {"applicationEndpoints": {"nodes": [{"id": "endpoint-1"}],
+                                  "pageInfo": {"hasNextPage": False}}},
+    ])
+    pages = [page async for page in client.iter_application_endpoints()]
+    assert pages == [[{"id": "endpoint-1"}]]
+    assert [call.args[1]["first"] for call in client.graphql.await_args_list] == [100, 50]
+
+
+@pytest.mark.asyncio
 async def test_endpoint_import_is_idempotent_and_preserves_direct_issue_links():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
