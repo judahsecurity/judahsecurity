@@ -38,7 +38,8 @@ PROOFS_BY_CLASS = {
     "ssti": frozenset({"scoped_ssti_eval"}),
     "nosql": frozenset({"scoped_nosql_operator"}),
     # Blind command injection: a correlated DNS lookup from a server-owned
-    # nslookup payload (cmdi_shell on run_oob_callback_workflow).
+    # nslookup/curl/wget payload (cmdi_shell [+ cmdi_command] on
+    # run_oob_callback_workflow).
     "command_injection": frozenset({"scoped_cmdi_eval", "oob_callback"}),
     "path_traversal": frozenset({"scoped_traversal_read"}),
     "csrf": frozenset({"scoped_csrf_state_change"}),
@@ -643,7 +644,7 @@ def validate_proof(
             )
         events = p.get("interactions") or []
         if not any(
-            e.get("protocol") in ("dns", "http", "smtp")
+            e.get("protocol") in ("dns", "http", "smtp", "ldap")
             and domain.split(".")[0] in str(e.get("unique_id") or "")
             for e in events
         ):
@@ -651,13 +652,12 @@ def validate_proof(
         claim_class = (getattr(candidate, "vulnerability_class", "")
                        or inferred_vulnerability_class(candidate))
         if claim_class == "command_injection":
-            from app.services.agent.scoped_assessment.cmdi_oob import LOOKUP_COMMAND
+            from app.services.agent.oob_payload_templates import cmdi_callback_in_request
 
-            # The callback must come from the injected lookup, not from a URL
-            # fetch of the planted host (which would be SSRF, not command injection).
-            if not re.search(re.escape(LOOKUP_COMMAND) + r"(?:\s|\+)+[\w.-]*" + re.escape(domain),
-                             request_text):
-                return False, "Command injection callback must follow the server-owned nslookup payload"
+            # The callback must come from the injected nslookup/curl/wget, not
+            # from a URL fetch of the planted host (SSRF) or a JNDI lookup.
+            if not cmdi_callback_in_request(request_text, domain):
+                return False, "Command injection callback must follow the server-owned nslookup/curl/wget payload"
         if claim_class == "xxe":
             hunter_id = proof.get("hunter_artifact_id")
             hunter = (store.records.get(hunter_id)
