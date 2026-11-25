@@ -388,6 +388,7 @@ class ASMToolsManager(
             "run_poc_python": self.run_custom_probe,
             "sandbox_shell": self.sandbox_shell,
             "list_captured_requests": self.list_captured_requests,
+            "diff_stored_exchanges": self.diff_stored_exchanges,
             "plan_intruder_mutations": self.plan_intruder_mutations,
             "run_intruder_batch": self.run_intruder_batch,
             "mutate_captured_request": self.mutate_captured_request,

@@ -15,6 +15,14 @@ from app.services.agent.evidence_store import origin, redact_artifact
 from app.services.agent.runtime_mapper import normalize_request
 
 
+def _known_classes(classes):
+    """Keep only stable response labels (never free text) on a capture."""
+    from app.services.agent.response_classification import RESPONSE_CLASSES
+
+    present = {str(value) for value in (classes or ())}
+    return [label for label in RESPONSE_CLASSES if label in present]
+
+
 class RequestCaptureStore:
     def __init__(self, limit=200):
         self._records = OrderedDict()
@@ -43,6 +51,7 @@ class RequestCaptureStore:
         proof_escalation_id="",
         verifier_run_id="",
         finding_id="",
+        response_classes=(),
     ):
         """Return safe metadata, or None when faithful replay is unsupported."""
         try:
@@ -161,6 +170,7 @@ class RequestCaptureStore:
                 "body_format": body_format,
                 "protocol": protocol,
                 "graphql_kind": graphql_kind,
+                "response_classes": _known_classes(response_classes),
             }
             self._records[capture_id] = row
             while len(self._records) > self.limit:
@@ -204,11 +214,23 @@ class RequestCaptureStore:
             if operation_id is None or row["operation_id"] == operation_id
         ])
 
-    def list(self, operation_id=None):
+    def classify(self, capture_id, classes):
+        """Merge response labels from a replay of this capture; False when unknown."""
+        row = self._records.get(capture_id)
+        if row is None:
+            return False
+        row["response_classes"] = _known_classes(
+            [*(row.get("response_classes") or []), *(classes or [])]
+        )
+        return True
+
+    def list(self, operation_id=None, classification=None):
         return [
             self.describe(row)
             for row in self._records.values()
-            if operation_id is None or row["operation_id"] == operation_id
+            if (operation_id is None or row["operation_id"] == operation_id)
+            and (not classification
+                 or classification in (row.get("response_classes") or []))
         ]
 
     def get(self, capture_id):

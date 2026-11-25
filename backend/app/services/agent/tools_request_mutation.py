@@ -26,6 +26,7 @@ class RequestMutationToolsMixin:
         evidence store, readable with read_evidence/search_evidence.
         """
         from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.response_classification import classify_response
 
         store = evidence_store(self)
         index: List[Dict[str, Any]] = []
@@ -34,9 +35,10 @@ class RequestMutationToolsMixin:
             response = exchange.get("response") if isinstance(exchange.get("response"), dict) else {}
             url = str(request.get("url") or "")
             body = str(response.get("body") or "")
+            classes = classify_response(request, response)
             payload = {
                 "request": {**request, "body_len": request.get("length", 0)},
-                "response": {**response, "body_preview": body[:4000]},
+                "response": {**response, "body_preview": body[:4000], "classes": classes},
                 "source": "custom_probe",
             }
             status = response.get("status") or 0
@@ -45,7 +47,8 @@ class RequestMutationToolsMixin:
                 success=isinstance(status, int) and 0 < status < 400,
             )
             index.append({"evidence_id": evidence_id, "method": request.get("method"),
-                          "url": url, "status": status, "length": response.get("length")})
+                          "url": url, "status": status, "length": response.get("length"),
+                          "classes": classes})
         return index
 
     async def run_custom_probe(
@@ -178,11 +181,61 @@ class RequestMutationToolsMixin:
             hosts.append(str(cmap.get("target")))
         return hosts
 
-    async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:
-        """Index captured XHR/API samples from the capability map for mutate_captured_request."""
+    def _remember_sample_classes(self, sample_ref: str, capture_id: str, classes: List[str]) -> None:
+        """Keep response labels seen when replaying a sample (labels only, bounded)."""
+        from app.services.agent.request_capture import _known_classes
+
+        labels = _known_classes(classes)
+        if not labels:
+            return
+        if capture_id and self._capture_requests().classify(capture_id, labels):
+            return
+        if not sample_ref:
+            return
+        store = getattr(self, "_sample_response_classes", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._sample_response_classes = store
+        store[sample_ref] = _known_classes([*(store.pop(sample_ref, None) or []), *labels])
+        while len(store) > 500:
+            store.pop(next(iter(store)))
+
+    def _sample_classes(self, raw: Dict[str, Any], row: Dict[str, Any]) -> List[str]:
+        from app.services.agent.request_capture import _known_classes
+        from app.services.agent.response_classification import classify_response
+
+        # Crawl samples carry status/failed but no body: status labels only.
+        observed = classify_response({}, {
+            "status": raw.get("status"), "failed": raw.get("failed"),
+        }) if raw.get("status") is not None or raw.get("failed") else []
+        stored: List[str] = []
+        capture_id = str(row.get("capture_id") or "")
+        if capture_id:
+            try:
+                stored = list(self._capture_requests().get(capture_id).get("response_classes") or [])
+            except ValueError:
+                stored = []
+        remembered = (getattr(self, "_sample_response_classes", None) or {}).get(row["sample_ref"]) or []
+        return _known_classes([*observed, *stored, *remembered])
+
+    async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None,
+                                     classification: str = "", **kwargs: Any) -> str:
+        """Index captured XHR/API samples from the capability map for mutate_captured_request.
+
+        Each sample lists response classes (sql_error, template_error,
+        filter_blocked, input_reflected, debug_error, rate_limited, ...) seen
+        when it was captured or replayed; ``classification`` keeps only
+        samples with that class.
+        """
         from app.services.agent.request_mutate import sample_reference, samples_from_map, summarize_samples
         from app.services.agent.pilot_policy import current_pilot
+        from app.services.agent.response_classification import RESPONSE_CLASSES, adaptive_hints
         from urllib.parse import urlsplit, urlunsplit
+
+        classification = str(classification or "").strip().lower()
+        if classification and classification not in RESPONSE_CLASSES:
+            return json.dumps({"ok": False, "error": "unknown classification",
+                               "classifications": list(RESPONSE_CLASSES)})
 
         cmap = self._identity_captures.get(identity, {}) if identity is not None else (getattr(self, "_capability_map", None) or {})
         origin = ""
@@ -200,7 +253,16 @@ class RequestMutationToolsMixin:
             samples.sort(key=lambda sample: (not bool(urlsplit(sample["url"]).query), sample["url"]))
         else:
             samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
-        rows = summarize_samples(samples, fallback_origin=origin, limit=max(1, min(int(limit or 40), 80)))
+        cap = max(1, min(int(limit or 40), 80))
+        rows = summarize_samples(samples, fallback_origin=origin,
+                                 limit=len(samples) if classification else cap)
+        for row in rows:
+            row["classes"] = self._sample_classes(samples[row["index"]], row)
+            hints = adaptive_hints(row["classes"])
+            if hints:
+                row["adaptive_hints"] = hints
+        if classification:
+            rows = [row for row in rows if classification in row["classes"]][:cap]
         if pilot is not None:
             for row in rows:
                 parts = urlsplit(row["url"])
@@ -210,6 +272,7 @@ class RequestMutationToolsMixin:
             "count": len(rows),
             "origin": origin,
             "identity": identity,
+            "classification": classification or None,
             "samples": rows,
             "next": (
                 "mutate_captured_request(sample_ref='req-...', location='query|header|body_json|body_form|path|method', "
@@ -222,6 +285,56 @@ class RequestMutationToolsMixin:
                 "are separate inventories; inspect an observed same-origin link or try a different page."
             ),
         }, indent=2)[:_tool_output_max_chars()]
+
+    async def diff_stored_exchanges(self, baseline_id: str, candidate_id: str, **kwargs: Any) -> str:
+        """Diff two recorded HTTP exchanges by id without sending anything.
+
+        Ids are http_exchange evidence ids (from replay_http_request,
+        compare_requests, mutate_captured_request, custom probes) or capture
+        ids (resolved to the exchange that created the capture). Returns
+        status, length, body similarity, timing, response-header name deltas
+        and class deltas. A difference is a lead, not a finding.
+        """
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.response_classification import diff_exchanges
+
+        store = evidence_store(self)
+
+        def resolve(ref: str) -> tuple[Optional[Dict[str, Any]], str]:
+            ref = str(ref or "").strip()
+            record = store.records.get(ref) if ref else None
+            if record is None and ref:
+                try:
+                    capture = self._capture_requests().get(ref)
+                except ValueError:
+                    capture = None
+                evidence_id = str((capture or {}).get("evidence_id") or "")
+                record = store.records.get(evidence_id) if evidence_id else None
+            if record is None or record.get("kind") != "http_exchange":
+                return None, ref
+            return record, record["id"]
+
+        baseline, baseline_ref = resolve(baseline_id)
+        candidate, candidate_ref = resolve(candidate_id)
+        if baseline is None or candidate is None:
+            return json.dumps({
+                "ok": False,
+                "error": "Unknown or expired http_exchange evidence or capture id",
+                "missing": [ref for ref, row in ((baseline_ref, baseline), (candidate_ref, candidate))
+                            if row is None],
+            })
+        if baseline.get("truncated") or candidate.get("truncated"):
+            return json.dumps({"ok": False, "error": "An exchange was too large to store; re-run a bounded request"})
+        diff = diff_exchanges(baseline.get("payload") or {}, candidate.get("payload") or {})
+        return json.dumps({
+            "ok": True,
+            "baseline_evidence_id": baseline_ref,
+            "candidate_evidence_id": candidate_ref,
+            "same_target": baseline.get("target") == candidate.get("target"),
+            **diff,
+            "note": "Computed from stored, redacted exchanges; nothing was sent. "
+                    "A difference is a lead; prove it with the class-specific tool.",
+        }, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def plan_intruder_mutations(
         self,
@@ -433,6 +546,11 @@ class RequestMutationToolsMixin:
             try:
                 result = json.loads(compared)
                 if isinstance(result, dict):
+                    labels = result.get("classification") or {}
+                    self._remember_sample_classes(
+                        source_ref, str(sample.get("capture_id") or ""),
+                        [*(labels.get("baseline") or []), *(labels.get("mutant") or [])],
+                    )
                     result["source_sample_ref"] = source_ref
                     if source_capture_id:
                         result["source_capture_id"] = source_capture_id
@@ -453,6 +571,10 @@ class RequestMutationToolsMixin:
                 hypothesis_id=hypothesis_id,
             )
             exchange.pop("_body_text", None)
+            self._remember_sample_classes(
+                source_ref, str(sample.get("capture_id") or ""),
+                list((exchange.get("response") or {}).get("classes") or []),
+            )
             return json.dumps({
                 "ok": True,
                 "source_sample_ref": source_ref,
@@ -462,6 +584,8 @@ class RequestMutationToolsMixin:
                 "sent": mutant,
                 "response": exchange.get("response"),
                 "request": exchange.get("request"),
+                "evidence_id": exchange.get("evidence_id"),
+                "adaptive_hints": exchange.get("adaptive_hints") or [],
             }, indent=2)[:_tool_output_max_chars()]
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"mutate send failed: {exc}"})

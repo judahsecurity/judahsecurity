@@ -289,6 +289,10 @@ class HttpIdentityToolsMixin:
         from app.services.agent.brain_memory import observe_response
         observe_response(self, method=method, url=url, status=resp.status_code,
                          headers=dict(resp.headers), body=body_text)
+        from app.services.agent.response_classification import adaptive_hints, classify_response
+
+        # Labels only: safe on the evidence record, the capture and tool output.
+        exchange["response"]["classes"] = classify_response(exchange["request"], exchange["response"])
         await self.map_application_traffic([dict(method=method, url=url, headers=hdrs, body=raw_body)],
                                            identity=label, source="http_exchange")
         if not trace.get("operation_id"):
@@ -322,15 +326,18 @@ class HttpIdentityToolsMixin:
                 tenant=trace.get("tenant", ""),
                 parameter=trace.get("parameter", ""),
                 test_type=trace.get("test_type", ""),
-                proof_escalation_id=trace.get("proof_escalation_id", ""))
+                proof_escalation_id=trace.get("proof_escalation_id", ""),
+                response_classes=exchange["response"]["classes"])
             if capture:
                 self._queue_captured_authorization_leads()
         from app.services.agent.evidence_store import redact_artifact
         public = redact_artifact(exchange)
         public["response"].pop("body", None)
         public["request"].pop("body", None)
+        hints = adaptive_hints(exchange["response"]["classes"])
         return {
             **public,
+            **({"adaptive_hints": hints} if hints else {}),
             "evidence_id": artifact_id,
             "capture": capture,
             "trace": {**trace, "coverage_cell_id": coverage_cell_id},
@@ -411,6 +418,8 @@ class HttpIdentityToolsMixin:
                 "response": exchange["response"],
                 "note": note,
             }
+            if exchange.get("adaptive_hints"):
+                out["adaptive_hints"] = exchange["adaptive_hints"]
             return json.dumps(out, indent=2)[:_tool_output_max_chars()]
         except Exception as exc:
             return f"Error replaying request: {exc}"
@@ -646,6 +655,15 @@ class HttpIdentityToolsMixin:
                 "delta": elapsed_delta,
             },
             "interest_fields": {"baseline": b_fields, "mutant": m_fields, "deltas": field_deltas},
+            # Response labels are leads for the next probe; they do not feed
+            # the verdict or signal escalation above.
+            "classification": {
+                "baseline": base_ex["response"].get("classes") or [],
+                "mutant": mut_ex["response"].get("classes") or [],
+                "added": sorted(set(mut_ex["response"].get("classes") or [])
+                                - set(base_ex["response"].get("classes") or [])),
+            },
+            "adaptive_hints": mut_ex.get("adaptive_hints") or [],
             "baseline": base_ex,
             "mutant": mut_ex,
             "notes": rewrite_notes or None,
@@ -726,7 +744,8 @@ class HttpIdentityToolsMixin:
                 out[key] = {
                     "evidence_id": exchange.get("evidence_id"),
                     "request": {field: request.get(field) for field in ("method", "url", "identity")},
-                    "response": {field: response.get(field) for field in ("status", "length", "elapsed_s")},
+                    "response": {field: response.get(field)
+                                 for field in ("status", "length", "elapsed_s", "classes")},
                     "trace": exchange.get("trace") or {},
                 }
             out["output_compacted"] = True

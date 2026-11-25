@@ -404,7 +404,8 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **mcp_call**: Invoke a tool on an attached MCP server. Args: **server**, **tool**, **arguments** (object).
 - **run_custom_probe** / **run_poc_python**: Sandboxed Python HTTP PoC (json/re/httpx only). In-scope hosts plus Interactsh/OAST. Never metadata/localhost. Args: **source** (Python that prints results), allowed_hosts (optional), timeout_sec (default 20). Not a shell.
 - **sandbox_shell**: Run a shell command in the isolated probe runner when enabled (bash, curl, jq, sqlmap, ffuf, python with requests/httpx/pyjwt). Args: command, allowed_hosts (optional), timeout_sec (default 60, max 120). Only in-scope hosts and OAST are reachable, over HTTP(S); every exchange is recorded as evidence. Pass ffuf -x "$PROBE_PROXY" and sqlmap --proxy="$PROBE_PROXY". For non-HTTP TCP prefix with proxychains4 (e.g. proxychains4 nmap -sT -Pn -sV -p 22,6379 host; connect scans only, logged under tcp). Destructive flags (--os-shell, --dump-all, --risk=3, brute/dos/exploit NSE scripts, brute-force tools) are refused.
-- **list_captured_requests**: Index XHR/API samples from the crawl map. Use its sample_ref with mutate_captured_request so later map changes cannot switch the request being tested.
+- **list_captured_requests**: Index XHR/API samples from the crawl map. Use its sample_ref with mutate_captured_request so later map changes cannot switch the request being tested. Each sample lists response classes seen on capture or replay (sql_error, template_error, debug_error, filter_blocked, input_reflected, access_denied, rate_limited, ...) with adaptive_hints; classification="sql_error" keeps only those samples.
+- **diff_stored_exchanges**: Diff two recorded exchanges by evidence_id (or capture id) without re-sending: status, length, body similarity, timing, response-header name deltas, class deltas. Args: baseline_id, candidate_id. A difference is a lead, not proof.
 - **plan_intruder_mutations**: Build a dry-run, bounded queue of one-field authorization, boundary, injection-canary, and URL-fetch mutations from captured requests. Read-only methods only by default. Review this before active execution.
 - **run_intruder_batch**: Execute up to 12 planned differential mutations at a bounded rate. Always confirmation-gated; state-changing methods remain excluded unless allow_state_change=true is explicitly approved. A difference is a lead, not a confirmed finding.
 - **mutate_captured_request**: Change ONE field on a captured request and send (baseline vs mutant). Args: sample_index, location (query|header|cookie|body_json|body_form|path|method), field, value, compare (default true). location=cookie changes one cookie by name and keeps the rest (session/CSRF cookies are refused); location=path with field=path[N] replaces the Nth path segment. Plant Interactsh URLs for SSRF — not 169.254.169.254.
@@ -826,6 +827,7 @@ TOOL_PHASE_MAP = {
     "sandbox_shell": ["informational", "exploitation", "post_exploitation"],
     "run_poc_python": ["informational", "exploitation", "post_exploitation"],
     "list_captured_requests": ["informational", "exploitation", "post_exploitation"],
+    "diff_stored_exchanges": ["informational", "exploitation", "post_exploitation"],
     "plan_intruder_mutations": ["informational", "exploitation", "post_exploitation"],
     "run_intruder_batch": ["informational", "exploitation", "post_exploitation"],
     "mutate_captured_request": ["informational", "exploitation", "post_exploitation"],
