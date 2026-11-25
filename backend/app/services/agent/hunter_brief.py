@@ -14,9 +14,9 @@ OOB_SPECIALISTS = frozenset({"ssrf", "injection", "sqli", "js_secrets"})
 
 def _live_oob_lines() -> list[str]:
     try:
-        from app.services.interactsh_service import ensure_session
+        from app.services.oob_collectors import oob_ensure_session
 
-        oob = ensure_session()
+        oob = oob_ensure_session()
     except Exception as exc:  # noqa: BLE001
         return [
             "- SSRF/OOB: execute_interactsh register → plant payload_url → poll "
@@ -29,7 +29,7 @@ def _live_oob_lines() -> list[str]:
             f"({err}). Never Canarytokens; never 169.254.169.254 / localhost."
         ]
     return [
-        f"- LIVE Interactsh session_id={oob.get('session_id')} "
+        f"- LIVE OOB session_id={oob.get('session_id')} "
         f"payload_url={oob.get('payload_url')} mail={oob.get('payload_email')}",
         f"- Plant that URL/email, then execute_interactsh poll {oob.get('session_id')}. "
         "Never Canarytokens; never 169.254.169.254 / localhost.",

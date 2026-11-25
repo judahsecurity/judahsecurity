@@ -514,3 +514,81 @@ def test_tool_validates_template_choices():
     out = json.loads(asyncio.run(manager.run_oob_callback_workflow(
         url=T + "/ping?host=a", field="host", cmdi_shell="windows_separator", cmdi_command="wget")))
     assert out["success"] is False and "wget" in out["error"]
+
+
+# ---------------------------------------------------------------- facade (other callers)
+
+def _use_http_poll(monkeypatch, collector):
+    monkeypatch.setattr(oob_collectors, "get_collector", lambda *a, **k: collector)
+
+
+def test_execute_interactsh_uses_the_operator_collector(monkeypatch):
+    import asyncio
+    import json as _json
+
+    from app.services.mcp.server import MCPServer
+
+    collector = _collector()
+    _use_http_poll(monkeypatch, collector)
+    server = MCPServer.__new__(MCPServer)
+    reg = asyncio.run(server._execute_interactsh("register -s evil.example -t stolen"))
+    body = _json.loads(reg["output"])
+    assert reg["success"] and body["provider"] == "http_poll"
+    assert body["payload_domain"].endswith("." + DOMAIN) and body["session_id"].startswith("hp-")
+    listed = _json.loads(asyncio.run(server._execute_interactsh("list"))["output"])
+    assert listed["count"] == 1
+    assert _json.loads(asyncio.run(server._execute_interactsh("health"))["output"])["success"]
+    polled = asyncio.run(server._execute_interactsh(f"poll {body['session_id']}"))
+    assert _json.loads(polled["output"])["provider"] == "http_poll"
+    assert asyncio.run(server._execute_interactsh(f"stop {body['session_id']}"))["success"]
+
+
+def test_model_server_and_token_only_reach_interactsh(monkeypatch):
+    from app.services import interactsh_service
+
+    seen = []
+    monkeypatch.setattr(interactsh_service, "register",
+                        lambda server=None, token=None: seen.append((server, token)) or {"success": True})
+    _use_http_poll(monkeypatch, oob_collectors._INTERACTSH)
+    oob_collectors.oob_register("s.example", "t1")
+    assert seen == [("s.example", "t1")]
+    collector = _collector()
+    _use_http_poll(monkeypatch, collector)
+    reg = oob_collectors.oob_register("s.example", "t1")
+    assert reg["provider"] == "http_poll" and seen == [("s.example", "t1")]
+
+
+def test_poll_and_stop_route_by_session_id(monkeypatch):
+    from app.services import interactsh_service
+
+    monkeypatch.setattr(interactsh_service, "poll", lambda sid: {"success": True, "via": "interactsh"})
+    collector = _collector()
+    _use_http_poll(monkeypatch, collector)
+    assert oob_collectors.oob_poll("ish-123")["via"] == "interactsh"
+    reg = collector.register()
+    assert oob_collectors.oob_poll(reg["session_id"])["provider"] == "http_poll"
+
+
+def test_ensure_session_reuses_one_shared_probe(monkeypatch):
+    collector = _collector()
+    _use_http_poll(monkeypatch, collector)
+    first = oob_collectors.oob_ensure_session()
+    second = oob_collectors.oob_ensure_session()
+    assert first["session_id"] == second["session_id"] and second["reused"] is True
+    collector.stop(first["session_id"])
+    assert oob_collectors.oob_ensure_session()["session_id"] != first["session_id"]
+
+
+def test_hunter_brief_and_payload_hints_use_the_operator_collector(monkeypatch):
+    from app.services.agent.hunter_brief import _live_oob_lines
+    from app.services.agent.injection_payloads import generate_payloads
+
+    collector = _collector()
+    _use_http_poll(monkeypatch, collector)
+    lines = "\n".join(_live_oob_lines())
+    assert "LIVE OOB session_id=hp-" in lines and DOMAIN in lines
+    out = generate_payloads("ssrf", max_payloads=200)
+    assert out["interactsh"]["session_id"].startswith("hp-")
+    assert out["collaborator_url"].endswith("." + DOMAIN)
+    assert any(out["collaborator_url"] in p for p in out["payloads"])
+    assert not any("COLLABORATOR" in p for p in out["payloads"])

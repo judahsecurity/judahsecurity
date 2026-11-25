@@ -2597,7 +2597,9 @@ class MCPServer:
 
     async def _execute_interactsh(self, args: str) -> Dict[str, Any]:
         """OOB collaborator: health/register/ensure/poll/list/stop sessions."""
-        from app.services import interactsh_service as ish
+        # The operator-configured collector (AEGIS_OOB_PROVIDER); server/token
+        # flags only ever reach interactsh.
+        from app.services import oob_collectors as ish
 
         parts = self._parse_args(args)
         sub = (parts[0].lower() if parts else "register")
@@ -2613,23 +2615,23 @@ class MCPServer:
 
         try:
             if sub == "health":
-                result = await asyncio.to_thread(ish.health)
+                result = await asyncio.to_thread(ish.oob_health)
             elif sub == "register":
                 server, token = _server_token(parts[1:])
-                result = await asyncio.to_thread(ish.register, server, token)
+                result = await asyncio.to_thread(ish.oob_register, server, token)
             elif sub in ("ensure", "session"):
                 server, token = _server_token(parts[1:])
-                result = await asyncio.to_thread(ish.ensure_session, server, token)
+                result = await asyncio.to_thread(ish.oob_ensure_session, server, token)
             elif sub == "poll":
                 if len(parts) < 2:
                     return {"success": False, "output": "", "error": "poll requires a session_id", "exit_code": -1}
-                result = await asyncio.to_thread(ish.poll, parts[1])
+                result = await asyncio.to_thread(ish.oob_poll, parts[1])
             elif sub == "list":
-                result = await asyncio.to_thread(ish.list_sessions)
+                result = await asyncio.to_thread(ish.oob_list_sessions)
             elif sub == "stop":
                 if len(parts) < 2:
                     return {"success": False, "output": "", "error": "stop requires a session_id", "exit_code": -1}
-                result = await asyncio.to_thread(ish.stop, parts[1])
+                result = await asyncio.to_thread(ish.oob_stop, parts[1])
             else:
                 return {
                     "success": False, "output": "",

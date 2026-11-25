@@ -88,6 +88,23 @@ class InteractshCollector:
 
         return interactsh_service.stop(session_id)
 
+    def ensure_session(self, server: str | None = None, token: str | None = None) -> dict[str, Any]:
+        from app.services import interactsh_service
+
+        if server is None and token is None:
+            return interactsh_service.ensure_session()
+        return interactsh_service.ensure_session(server, token)
+
+    def list_sessions(self) -> dict[str, Any]:
+        from app.services import interactsh_service
+
+        return interactsh_service.list_sessions()
+
+    def health(self) -> dict[str, Any]:
+        from app.services import interactsh_service
+
+        return interactsh_service.health()
+
 
 # ---------------------------------------------------------------- http_poll
 
@@ -272,6 +289,34 @@ class HttpPollCollector:
             "uncorrelated_dropped": dropped,
         }
 
+    def ensure_session(self, server: str | None = None, token: str | None = None) -> dict[str, Any]:
+        """Reuse one shared live probe (for briefs and payload hints), else register one."""
+        with self._lock:
+            self._reap_locked()
+            shared = self._probes.get(getattr(self, "_shared_id", ""))
+        if shared is not None:
+            return {"success": True, "provider": self.name, "session_id": shared.session_id,
+                    "payload_domain": shared.payload_domain,
+                    "payload_url": f"http://{shared.payload_domain}/",
+                    "payload_email": f"aegis@{shared.payload_domain}",
+                    "server": "operator http_poll collector", "reused": True}
+        result = self.register()
+        if result.get("success"):
+            self._shared_id = result["session_id"]
+        return result
+
+    def list_sessions(self) -> dict[str, Any]:
+        with self._lock:
+            self._reap_locked()
+            rows = [{"session_id": p.session_id, "payload_domain": p.payload_domain,
+                     "age_seconds": int(time.time() - p.created_at)} for p in self._probes.values()]
+        return {"success": True, "provider": self.name, "sessions": rows, "count": len(rows)}
+
+    def health(self) -> dict[str, Any]:
+        error = self.config_error()
+        return {"success": not error, "provider": self.name,
+                **({"error": error} if error else {"domain": self.domain})}
+
     def stop(self, session_id: str) -> dict[str, Any]:
         with self._lock:
             ok = self._probes.pop(session_id, None) is not None
@@ -324,7 +369,56 @@ def get_collector(settings: Any = None, *, transport: Transport | None = None) -
         return _HTTP_POLL
 
 
+# ---------------------------------------------------------------- facade
+# For callers outside the callback workflow (execute_interactsh, hunter briefs,
+# payload hints). Model-supplied server/token only reach interactsh; poll/stop
+# route by session id so a probe is always read from the collector that issued it.
+
+def _for_session(session_id: str) -> Any:
+    if str(session_id or "").startswith("hp-"):
+        collector = get_collector()
+        if isinstance(collector, HttpPollCollector):
+            return collector
+    return _INTERACTSH
+
+
+def _interactsh_args(collector: Any, server: str | None, token: str | None) -> tuple:
+    return (server, token) if collector is _INTERACTSH else (None, None)
+
+
+def oob_register(server: str | None = None, token: str | None = None) -> dict[str, Any]:
+    collector = get_collector()
+    return collector.register(*_interactsh_args(collector, server, token))
+
+
+def oob_ensure_session(server: str | None = None, token: str | None = None) -> dict[str, Any]:
+    collector = get_collector()
+    return collector.ensure_session(*_interactsh_args(collector, server, token))
+
+
+def oob_poll(session_id: str) -> dict[str, Any]:
+    return _for_session(session_id).poll(session_id)
+
+
+def oob_stop(session_id: str) -> dict[str, Any]:
+    return _for_session(session_id).stop(session_id)
+
+
+def oob_list_sessions() -> dict[str, Any]:
+    return get_collector().list_sessions()
+
+
+def oob_health() -> dict[str, Any]:
+    return get_collector().health()
+
+
 __all__ = [
+    "oob_ensure_session",
+    "oob_health",
+    "oob_list_sessions",
+    "oob_poll",
+    "oob_register",
+    "oob_stop",
     "PROVIDERS",
     "CallbackCollector",
     "HttpPollCollector",
