@@ -42,6 +42,7 @@ from app.api.routes import custom_templates as custom_templates_router
 from app.api.routes import remediation as remediation_router
 from app.api.routes import exceptions as exceptions_router
 from app.api.routes import github_secrets as github_secrets_router
+from app.api.routes import credential_exposure as credential_exposure_router
 from app.api.routes import agent_knowledge as agent_knowledge_router
 from app.api.routes import agent_confirmations as agent_confirmations_router
 from app.api.routes import agent_skills as agent_skills_router
@@ -215,6 +216,7 @@ app.include_router(custom_templates_router.router, prefix=settings.API_PREFIX)
 app.include_router(remediation_router.router, prefix=settings.API_PREFIX)
 app.include_router(exceptions_router.router, prefix=settings.API_PREFIX)
 app.include_router(github_secrets_router.router, prefix=settings.API_PREFIX)
+app.include_router(credential_exposure_router.router, prefix=settings.API_PREFIX)
 app.include_router(agent_knowledge_router.router, prefix=settings.API_PREFIX)
 app.include_router(agent_confirmations_router.router, prefix=settings.API_PREFIX)
 app.include_router(agent_skills_router.router, prefix=settings.API_PREFIX)

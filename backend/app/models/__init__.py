@@ -69,8 +69,12 @@ from app.models.tenable_integration import TenableVmIntegration
 from app.models.crowdstrike_integration import CrowdStrikeIntegration, CrowdStrikeAssetLink
 from app.models.exposure_evidence import FindingSourceEvidence, ExposurePath, ExposurePathStep
 from app.models.netbrain_integration import NetBrainIntegration
+from app.models.identity import Identity, IdentitySourceSync, CredentialExposure
 
 __all__ = [
+    "Identity",
+    "IdentitySourceSync",
+    "CredentialExposure",
     "User",
     "UserRole",
     "Organization",

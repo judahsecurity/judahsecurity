@@ -7680,26 +7680,28 @@ class ScannerWorker:
                 dom_result = await service.check_domain_breach_exposure(domain)
                 results["domain"] = dom_result.to_dict()
 
-            # Per-email checks (if provided or extracted from assets)
+            # Per-email checks. Without an explicit list, check the riskiest
+            # identities from the system of record first, then email assets.
             if not explicit_emails and organization_id:
-                # Pull discovered email-like assets from DB
-                email_assets = (
-                    db.query(Asset)
-                    .filter(
-                        Asset.organization_id == organization_id,
-                        Asset.asset_type == AssetType.OTHER,
-                        Asset.value.like("%@%"),
-                    )
-                    .limit(50)
-                    .all()
+                from app.services.credential_exposure_service import emails_to_check
+
+                explicit_emails = emails_to_check(
+                    db, organization_id, int(config.get("max_emails", 50))
                 )
-                explicit_emails = [a.value for a in email_assets if "@" in a.value]
 
             if explicit_emails:
                 email_results = await service.batch_check_emails(explicit_emails[:50])
                 results["emails"] = {
                     email: r.to_dict() for email, r in email_results.items()
                 }
+                if organization_id:
+                    from app.services.credential_exposure_service import (
+                        ingest_email_breach_results,
+                    )
+
+                    results["exposures"] = ingest_email_breach_results(
+                        db, organization_id, results["emails"]
+                    )
 
             breached_count = sum(
                 1 for r in results.get("emails", {}).values() if r.get("breached")

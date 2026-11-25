@@ -53,6 +53,8 @@ ROUTE_PERMISSIONS: Tuple[Tuple[FrozenSet[str], "re.Pattern[str]", str], ...] = t
         ({"POST", "PUT", "PATCH", "DELETE"}, r"^/(vulnerabilities|exceptions)(/|$)", "findings.edit"),
         ({"GET", "POST"}, r"^/reports/(assets/[^/]+/report|findings/report)$", "reports.export"),
         ({"POST", "PUT", "PATCH", "DELETE"}, r"^/integrations(/|$)", "integrations.manage"),
+        ({"POST"}, r"^/credential-exposure/identities/sync(/|$)", "integrations.manage"),
+        ({"POST", "PUT", "PATCH", "DELETE"}, r"^/credential-exposure(/|$)", "findings.edit"),
         ({"PUT", "POST", "PATCH", "DELETE"}, r"^/organizations/[^/]+/(settings|discovery-settings"
          r"|notifications)(/|$)", "settings.edit"),
         ({"POST", "PUT", "PATCH", "DELETE"}, r"^/(users|roles)(/|$)", "users.manage"),
