@@ -620,7 +620,8 @@ These tools implement specialized offensive test workflows and require the explo
 - **get_methodology_progress**: Assessment checklist — ready_for_coverage_spray / ready_to_complete / blockers. Also lists open procedure packs.
 - **lookup_methodology_procedure**: Load short Burp-style HOW-TO packs for a methodology_id (CSRF, IDOR, XSS, session tokens, …). Call when an open card needs concrete steps. Args: methodology_id or methodology_ids.
 - **ingest_urls_into_map**: Merge katana/gau/wayback/httpx URL lists into the capability map and refresh methodologies.
-- **add_engagement_credential** / **log_engagement_approach** / **get_engagement_brain**: Persist creds, tried approaches, inspect brain + checklist.
+- **add_engagement_credential** / **log_engagement_approach** / **get_engagement_brain**: Persist creds, tried approaches, inspect brain + checklist. log_engagement_approach(category=sqli|xss|…) marks a failed technique exhausted for that endpoint+category; result=success with payload=… saves an effective payload.
+- **record_defense_profile**: Record/read the WAF profile (vendor, blocked_patterns, bypass_confirmed, bypass_failed) plus exhausted techniques, effective payloads and prior-run memory for this origin (context only, never proof). HTTP responses update block signatures automatically.
 """
 
     exploitation_tools = """
@@ -937,6 +938,7 @@ TOOL_PHASE_MAP = {
     "log_engagement_approach": ["informational", "exploitation", "post_exploitation"],
     "add_engagement_credential": ["informational", "exploitation", "post_exploitation"],
     "get_engagement_brain": ["informational", "exploitation", "post_exploitation"],
+    "record_defense_profile": ["informational", "exploitation", "post_exploitation"],
     "get_methodology_progress": ["informational", "exploitation", "post_exploitation"],
     "lookup_methodology_procedure": ["informational", "exploitation", "post_exploitation"],
     "ingest_urls_into_map": ["informational", "exploitation", "post_exploitation"],

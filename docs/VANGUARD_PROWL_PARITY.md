@@ -88,6 +88,13 @@ class, diff of stored request ids.
 
 Brain: WAF profile, exhausted techniques per endpoint, effective payloads,
 cross-run memory keyed by target. Fan-out: `cross_validated` agreement flag.
+Ported to `brain_memory.py`: `defense_profile` (fed from every `_http_exchange`
+response, plus `record_defense_profile`), `exhausted_techniques` /
+`effective_payloads` (via `log_engagement_approach(category=, payload=)`),
+cross-run memory in `AEGIS_TARGET_MEMORY_DIR/<org_id>/<sha256(origin)>.json`
+(0600, atomic replace, org id and origin re-checked on load, redacted and
+bounded, loaded as `prior_target_memory`: context, never proof), and
+`FindingCandidate.corroborated_by` for same-root-cause agreement (triage only).
 
 Probes: ad-hoc probing of an arbitrary URL/location (every Prowl scoped probe
 needs a leased cell); header/cookie/JSON locations for SSTI/cmdi/traversal/

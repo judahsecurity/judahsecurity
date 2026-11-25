@@ -286,6 +286,9 @@ class HttpIdentityToolsMixin:
                          "body": body_text, "body_preview": body_text[:4000], "length": len(resp.content),
                          "elapsed_s": round(_time.monotonic() - start, 3)},
         }
+        from app.services.agent.brain_memory import observe_response
+        observe_response(self, method=method, url=url, status=resp.status_code,
+                         headers=dict(resp.headers), body=body_text)
         await self.map_application_traffic([dict(method=method, url=url, headers=hdrs, body=raw_body)],
                                            identity=label, source="http_exchange")
         if not trace.get("operation_id"):

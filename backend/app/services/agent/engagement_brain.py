@@ -125,6 +125,13 @@ class EngagementBrain:
     observation_events: List[Dict[str, Any]] = field(default_factory=list)
     followup_proposals: List[Dict[str, Any]] = field(default_factory=list)
     assignment_chains: List[Dict[str, Any]] = field(default_factory=list)
+    # Attack memory (brain_memory.py): WAF/defense profile, exhausted
+    # techniques per "endpoint::category", effective payloads per category,
+    # and prior-run context for this origin (never proof).
+    defense_profile: Dict[str, Any] = field(default_factory=dict)
+    exhausted_techniques: Dict[str, List[str]] = field(default_factory=dict)
+    effective_payloads: Dict[str, List[str]] = field(default_factory=dict)
+    prior_target_memory: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -157,6 +164,10 @@ class EngagementBrain:
             "observation_events": list(self.observation_events or []),
             "followup_proposals": list(self.followup_proposals or []),
             "assignment_chains": list(self.assignment_chains or []),
+            "defense_profile": dict(self.defense_profile or {}),
+            "exhausted_techniques": dict(self.exhausted_techniques or {}),
+            "effective_payloads": dict(self.effective_payloads or {}),
+            "prior_target_memory": dict(self.prior_target_memory or {}),
         }
 
 
@@ -3013,6 +3024,11 @@ def format_engagement_brain_for_prompt(
     redact_secrets: bool = True,
 ) -> str:
     brain = engagement_brain_from_dict(data)
+    try:
+        from app.services.agent.brain_memory import format_attack_memory_for_prompt
+        attack_memory = format_attack_memory_for_prompt(brain)
+    except Exception:
+        attack_memory = ""
     if (
         not brain.hypotheses
         and not brain.credentials
@@ -3025,12 +3041,14 @@ def format_engagement_brain_for_prompt(
             "(code), call build_threat_model then sync_engagement_brain (or fireteam_dispatch) "
             "so threats and methodology cards aim hunters. Use compare_requests for "
             "differential proof. On confirmed findings call queue_finding_followups."
-        )
+        ) + ("\n" + attack_memory if attack_memory else "")
 
     lines = [
         f"Phase: {brain.phase}  target={brain.target or '?'}",
         f"Identities: {', '.join(brain.identities) or 'anonymous'}",
     ]
+    if attack_memory:
+        lines.append(attack_memory)
 
     if brain.threat_model:
         try:
@@ -3121,7 +3139,9 @@ def format_engagement_brain_for_prompt(
         )
         for c in pending_cands[:6]:
             if isinstance(c, dict):
-                lines.append(f"  - [{c.get('severity')}] {c.get('title')} id={c.get('id')}")
+                agreed = c.get("corroborated_by") or []
+                agreed_bit = f" also reported by {', '.join(agreed[:3])}" if agreed else ""
+                lines.append(f"  - [{c.get('severity')}] {c.get('title')} id={c.get('id')}{agreed_bit}")
 
     pending_ras = [
         r for r in (brain.pending_risk_assessments or [])

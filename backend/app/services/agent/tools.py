@@ -333,6 +333,7 @@ class ASMToolsManager(
             "log_engagement_approach": self.log_engagement_approach,
             "add_engagement_credential": self.add_engagement_credential,
             "get_engagement_brain": self.get_engagement_brain,
+            "record_defense_profile": self.record_defense_profile,
             "get_methodology_progress": self.get_methodology_progress,
             "lookup_methodology_procedure": self.lookup_methodology_procedure,
             "ingest_urls_into_map": self.ingest_urls_into_map,

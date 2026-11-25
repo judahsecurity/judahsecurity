@@ -69,6 +69,9 @@ class FindingCandidate:
     review_status: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     verified_at: str = ""
+    # Other specialists that independently submitted the same root cause.
+    # Triage context only: verdicts and publication never read it.
+    corroborated_by: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -2385,6 +2388,7 @@ def submit_candidate(
 ) -> FindingCandidate:
     vulnerability_class = str(vulnerability_class or "").strip().lower()
     challenge = dict(challenge or {})
+    submitter = str(specialist or "")
     if coverage_cell_id and not proof_escalation_id:
         proof_escalation_id = next(
             (
@@ -2456,6 +2460,10 @@ def submit_candidate(
                     brain.verification_receipts.pop(
                         verify_receipt_key(c.title, c.target), None
                     )
+                if root_cause and c.root_cause == root_cause:
+                    from app.services.agent.brain_memory import record_corroboration
+
+                    record_corroboration(c, submitter)
                 for name, value in (
                     ("hypothesis_id", hypothesis_id), ("threat_id", threat_id),
                     ("specialist", specialist), ("operation_id", operation_id),

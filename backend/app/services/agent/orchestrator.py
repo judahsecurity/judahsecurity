@@ -1085,6 +1085,12 @@ class AgentOrchestrator:
                 out["current_phase"] = snap["current_phase"]
         except Exception:
             logger.debug("run snapshot resume skipped", exc_info=True)
+        if seed and org_id:
+            try:
+                from app.services.agent.brain_memory import attach_prior_memory
+                out["engagement_brain"] = attach_prior_memory(out.get("engagement_brain"), org_id, seed)
+            except Exception:
+                logger.debug("prior target memory load skipped", exc_info=True)
         # Hand off recent first-party takeover scanner observations to opted-in
         # scheduled hunts. They remain leads until the normal proof gate runs.
         try:
@@ -2619,6 +2625,7 @@ class AgentOrchestrator:
             "add_engagement_credential",
             "log_engagement_approach",
             "get_engagement_brain",
+            "record_defense_profile",
             "build_threat_model",
             "get_threat_model",
             "update_threat_model",
@@ -4311,6 +4318,17 @@ class AgentOrchestrator:
             )
         except Exception:
             logger.debug("palace engagement brain persist skipped", exc_info=True)
+        try:
+            from app.services.agent.brain_memory import save_target_memory
+
+            state = final_state if isinstance(final_state, dict) else {}
+            target = str((state.get("target_info") or {}).get("primary_target")
+                         or (state.get("engagement_brain") or {}).get("target")
+                         or (state.get("capability_map") or {}).get("target") or "")
+            save_target_memory(organization_id, target, state.get("engagement_brain"),
+                               session_id=session_id)
+        except Exception:
+            logger.debug("target memory persist skipped", exc_info=True)
         try:
             from app.services.agent.run_snapshot import save_run_snapshot
 

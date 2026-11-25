@@ -306,8 +306,20 @@ class EngagementBrainToolsMixin:
         target: str = "",
         result: str = "failed",
         detail: str = "",
+        category: str = "",
+        payload: str = "",
     ) -> str:
-        """Record an approach tried so the agent does not blindly repeat failures."""
+        """Record an approach tried so the agent does not blindly repeat failures.
+
+        With ``category`` (sqli, xss, ssti, ...): a failed or inconclusive result
+        marks ``technique`` exhausted for (target endpoint, category); a success
+        with ``payload`` saves it as an effective payload for the category.
+        """
+        from app.services.agent.brain_memory import (
+            add_effective_payload,
+            get_exhausted,
+            mark_exhausted,
+        )
         from app.services.agent.engagement_brain import (
             engagement_brain_from_dict,
             log_approach,
@@ -321,10 +333,51 @@ class EngagementBrainToolsMixin:
             result=result,
             detail=detail,
         )
+        memory: Dict[str, Any] = {}
+        outcome = str(result or "").strip().lower()
+        if category:
+            if outcome == "success":
+                if payload:
+                    memory["effective_payload"] = add_effective_payload(brain, category, payload)
+            else:
+                memory["exhausted_key"] = mark_exhausted(brain, target, category, technique)
+            memory["exhausted_for_endpoint"] = get_exhausted(brain, target, category)
         self._engagement_brain = brain.to_dict()
         return json.dumps(
-            {"logged": rec.to_dict(), "engagement_brain": self._engagement_brain},
+            {"logged": rec.to_dict(), **({"attack_memory": memory} if memory else {}),
+             "engagement_brain": self._engagement_brain},
             indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def record_defense_profile(
+        self,
+        vendor: str = "",
+        detected: Optional[bool] = None,
+        blocked_patterns: Optional[List[str]] = None,
+        bypass_confirmed: Optional[List[str]] = None,
+        bypass_failed: Optional[List[str]] = None,
+    ) -> str:
+        """Record or read the target's WAF/defense profile and attack memory.
+
+        Called with no arguments it only reads. Responses seen by HTTP tools
+        update block signatures automatically; use this for what the agent
+        learned (vendor, patterns that trip the filter, bypass tiers).
+        """
+        from app.services.agent.brain_memory import attack_memory_view, update_defense_profile
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        if vendor or detected is not None or blocked_patterns or bypass_confirmed or bypass_failed:
+            update_defense_profile(
+                brain, detected=detected, vendor=vendor or "",
+                blocked_patterns=blocked_patterns, bypass_confirmed=bypass_confirmed,
+                bypass_failed=bypass_failed,
+            )
+            self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {**attack_memory_view(brain),
+             "note": "prior_target_memory is context from earlier runs, never proof."},
+            indent=2, default=str,
         )[:_tool_output_max_chars()]
 
     async def add_engagement_credential(
@@ -387,6 +440,7 @@ class EngagementBrainToolsMixin:
 
     async def get_engagement_brain(self) -> str:
         """Return the current engagement brain (hypotheses, creds redacted, next steps)."""
+        from app.services.agent.brain_memory import attack_memory_view
         from app.services.agent.engagement_brain import (
             format_engagement_brain_for_prompt,
             specialists_from_open_hypotheses,
@@ -404,6 +458,7 @@ class EngagementBrainToolsMixin:
                 "methodology_progress": progress,
                 "methodology_checklist": format_methodology_progress_for_prompt(progress),
                 "suggested_specialists": specialists_from_open_hypotheses(brain),
+                "attack_memory": attack_memory_view(brain),
                 "engagement_brain": brain.to_dict(),
             },
             indent=2,
