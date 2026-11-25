@@ -9,7 +9,8 @@ by a model tool:
   ``reproduced``, capped at high) and the ``unverified`` review tier.
 * ``aggressive`` - standard, plus observed same-origin POST paths that do not
   look destructive are approved for body replay automatically (up to the
-  policy limit of 8). Use it on staging or lab targets.
+  policy limit of 8), and the deep assessment budget unless the operator
+  chose a depth. Use it on staging or lab targets.
 """
 
 from __future__ import annotations
@@ -42,6 +43,17 @@ def normalize_strictness(value: Any) -> str:
 
 def strictness(manager: Any) -> str:
     return normalize_strictness(getattr(manager, "_verification_strictness", None))
+
+
+def depth_for_strictness(strictness_value: Any, current_mode: str | None) -> str | None:
+    """Aggressive defaults to the deep assessment budget; others keep ``current_mode``.
+
+    Only used when the operator did not pass an explicit assessment_mode. Pilot
+    and scheduled runs still fall back to standard in assessment_depth().
+    """
+    if normalize_strictness(strictness_value) == "aggressive":
+        return "deep"
+    return current_mode
 
 
 def unverified_tier_allowed(manager: Any) -> bool:

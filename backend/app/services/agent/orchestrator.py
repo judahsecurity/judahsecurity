@@ -3901,6 +3901,13 @@ class AgentOrchestrator:
         # An explicit request wins; otherwise an org may default to deep via
         # project_settings.agent.assessment_mode, else the global env default.
         effective_mode = assessment_mode or resolve_org_default_mode(organization_id)
+        if not assessment_mode:
+            # The aggressive verification profile is for staging/lab targets, so
+            # it also gets the deep budget unless the operator chose a depth.
+            from app.services.agent.verification_profile import depth_for_strictness
+
+            effective_mode = depth_for_strictness(
+                (assessment_policy or {}).get("verification_strictness"), effective_mode)
         depth_token = set_assessment_depth(effective_mode)
         register_run(session_id, this_task)
         try:

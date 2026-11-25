@@ -149,6 +149,27 @@ requested severity instead of the version-only `low` cap.
 probe's input carry an internal destination (loopback, link-local metadata such as
 `169.254.169.254`, RFC 1918) and the control's does not.
 
+### CSP-blocked XSS
+
+The reflected `check_xss` browser check records Content-Security-Policy
+violations. An init script keeps a private list of trusted
+`securitypolicyviolation` events (`isTrusted`, so page script cannot add
+entries); report-only violations are ignored. The check first loads a baseline
+of the same page with every payload-bearing input replaced by a plain token, then
+the payload page in a fresh document, and looks for an element the payload
+created (inline script text, an `on*` handler, a `javascript:` URL, a script or
+iframe `src`, an iframe `srcdoc` carrying the nonce).
+
+`csp_blocked` is true when the canary did not execute, the injected element
+exists, and either a `script-src*` violation names the nonce (blocked URI or
+report sample) or the element is inline and the payload load produced more
+inline-script violations than the baseline. `xss` accepts proof
+`scoped_browser_xss_csp_blocked` when the hunter's and a fresh verifier run both
+show it for the same template and element kind. It cannot pass as
+`scoped_browser_xss`, which still requires execution. These findings are capped
+at medium: CSP is the only control preventing execution, so a CSP bypass or a
+weaker policy elsewhere would make it exploitable.
+
 ### Verification strictness
 
 `assessment_policy.verification_strictness` (operator-set, never a model tool):
@@ -158,6 +179,12 @@ probe's input carry an internal destination (loopback, link-local metadata such 
 | `conservative` | rejected | off (verdicts still logged) | operator list only |
 | `standard` (default) | accepted as `reproduced` | on | operator list only |
 | `aggressive` | accepted as `reproduced` | on | operator list plus observed POST paths that do not look destructive, up to 8 |
+
+`aggressive` also selects the `deep` assessment budget (larger specialist turn
+budgets, more parallel specialists, 4x hunter request budgets) when the operator
+did not choose an `assessment_mode`. An explicit mode always wins, the spend cap
+(`price_limit_usd`) is unchanged, and pilot and scheduled runs keep their own
+caps.
 
 Destructive-looking paths (delete, payment, password/email change, admin/role,
 upload, send and similar) are never auto-approved.

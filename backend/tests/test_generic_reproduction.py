@@ -176,3 +176,12 @@ def test_auto_approval_only_under_aggressive_profile():
     assert set(picked) == {"/api/search", "/api/feedback"}
     assert "/api/account/delete" not in aggressive._scoped_body_replay_paths
     assert aggressive._scoped_body_replay_paths >= {"/api/existing", "/api/search"}
+
+
+def test_aggressive_profile_defaults_to_deep_depth():
+    from app.services.agent.verification_profile import depth_for_strictness
+
+    assert depth_for_strictness("aggressive", None) == "deep"
+    assert depth_for_strictness("aggressive", "standard") == "deep"
+    assert depth_for_strictness("standard", None) is None
+    assert depth_for_strictness("conservative", "deep") == "deep"

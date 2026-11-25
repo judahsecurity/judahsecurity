@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from urllib.parse import parse_qsl, quote, unquote_plus, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urlsplit, urlunsplit
 
 from .browser_runtime import launch_options
 
@@ -216,6 +216,90 @@ async def _discovery_anchor(page, target: str):
         except (TypeError, ValueError):
             continue
     return None
+
+
+# Records trusted CSP violations into a closure the page cannot write to.
+# Synthetic events dispatched by page script have isTrusted=false and are ignored.
+CSP_LISTENER_JS = """
+(() => {
+  const out = [];
+  document.addEventListener('securitypolicyviolation', (e) => {
+    if (!e.isTrusted || out.length >= 20) return;
+    out.push({
+      directive: String(e.effectiveDirective || e.violatedDirective || '').slice(0, 40),
+      blocked: String(e.blockedURI || '').slice(0, 300),
+      sample: String(e.sample || '').slice(0, 120),
+      disposition: String(e.disposition || '').slice(0, 20),
+    });
+  }, true);
+  Object.defineProperty(window, '__aegisCspViolations', {
+    value: () => out.map((v) => Object.assign({}, v)),
+    configurable: false, writable: false, enumerable: false,
+  });
+})();
+"""
+
+# An element the payload created: inline script text, an inline event handler,
+# a javascript: URL, a script/iframe src or iframe srcdoc carrying the nonce.
+INJECTED_ELEMENT_JS = """
+(nonce) => {
+  for (const el of document.querySelectorAll('*')) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'script' && (el.textContent || '').includes(nonce)) return {tag, attr: '#text', inline: true};
+    for (const a of Array.from(el.attributes)) {
+      if (!a.value.includes(nonce)) continue;
+      const name = a.name.toLowerCase();
+      if (name.startsWith('on')) return {tag, attr: name, inline: true};
+      if ((name === 'href' || name === 'src' || name === 'action' || name === 'formaction')
+          && a.value.trim().toLowerCase().startsWith('javascript:')) return {tag, attr: name, inline: true};
+      if (name === 'srcdoc' && tag === 'iframe') return {tag, attr: name, inline: true};
+      if (name === 'src' && (tag === 'script' || tag === 'iframe')) return {tag, attr: name, inline: false};
+    }
+  }
+  return null;
+}
+"""
+CSP_BASELINE_TOKEN = "aegiscspbaseline"
+
+
+def csp_baseline_url(template: str) -> str:
+    """The same page with every payload-bearing input replaced by a plain token."""
+    parts = urlsplit(template)
+    query = [(name, CSP_BASELINE_TOKEN if NONCE_MARKER in value else value)
+             for name, value in parse_qsl(parts.query, keep_blank_values=True)]
+    fragment = CSP_BASELINE_TOKEN if NONCE_MARKER in parts.fragment else parts.fragment
+    path = parts.path.replace(NONCE_MARKER, CSP_BASELINE_TOKEN)
+    return urlunsplit((parts.scheme, parts.netloc, path, urlencode(query), fragment))
+
+
+def _script_violations(rows: list[dict]) -> list[dict]:
+    # Report-only policies do not block anything, so they are not a CSP block.
+    return [row for row in rows if str(row.get("directive", "")).startswith("script-src")
+            and row.get("disposition") != "report"]
+
+
+def csp_blocked_signal(*, nonce: str, executed: bool, injected: dict | None,
+                       violations: list[dict], baseline_violations: list[dict]) -> dict:
+    """Decide whether CSP blocked an injected, nonce-bearing script.
+
+    Either the violation itself names the nonce (blocked URI or report-sample),
+    or the injected element is inline and the payload load produced more inline
+    script violations than a baseline load of the same page without the payload.
+    """
+    script_rows = _script_violations(violations)
+    baseline_inline = sum(1 for row in _script_violations(baseline_violations)
+                          if row.get("blocked") in ("inline", "eval"))
+    payload_inline = sum(1 for row in script_rows if row.get("blocked") in ("inline", "eval"))
+    named = any(nonce and (nonce in str(row.get("blocked", "")) or nonce in str(row.get("sample", "")))
+                for row in script_rows)
+    inline_delta = payload_inline - baseline_inline
+    blocked = bool(
+        not executed and injected and (
+            named or (injected.get("inline") and inline_delta > 0)
+        )
+    )
+    return {"csp_blocked": blocked, "csp_violation_names_nonce": named,
+            "csp_inline_violation_delta": inline_delta}
 
 
 async def check_browser(
@@ -496,6 +580,22 @@ async def check_browser(
 
             await context.route_web_socket("**/*", route_socket)
             page = await context.new_page()
+            csp_baseline_violations: list[dict] = []
+            if operation == "check_xss":
+                await page.add_init_script(CSP_LISTENER_JS)
+                # Baseline load without the payload, for the CSP differential.
+                baseline_target = csp_baseline_url(url)
+                assert_in_scope(baseline_target, allowed_origins)
+                try:
+                    await page.goto(baseline_target, wait_until="domcontentloaded", timeout=20_000)
+                    await page.wait_for_timeout(300)
+                    csp_baseline_violations = await page.evaluate(
+                        "() => (window.__aegisCspViolations ? window.__aegisCspViolations() : [])")
+                except Exception:  # noqa: BLE001 - the baseline only sharpens the CSP signal
+                    csp_baseline_violations = []
+                # A fragment-only change would otherwise be a same-document
+                # navigation, and the page's scripts would not run on the payload.
+                await page.goto("about:blank")
 
             def record_request(request):
                 nonlocal marker_request
@@ -1166,6 +1266,26 @@ async def check_browser(
                 )
                 result["dialog_count"] = len(dialogs)
                 result["nonce"] = nonce
+                if operation == "check_xss":
+                    try:
+                        await page.wait_for_timeout(300)
+                        csp_violations = await page.evaluate(
+                            "() => (window.__aegisCspViolations ? window.__aegisCspViolations() : [])")
+                        injected = await page.evaluate(INJECTED_ELEMENT_JS, nonce)
+                    except Exception:  # noqa: BLE001
+                        csp_violations, injected = [], None
+                    csp_violations = csp_violations if isinstance(csp_violations, list) else []
+                    result["csp_violations"] = csp_violations[:20]
+                    result["csp_baseline_violation_count"] = len(csp_baseline_violations)
+                    result["csp_header_present"] = bool(
+                        response and (response.headers.get("content-security-policy")
+                                      or response.headers.get("content-security-policy-report-only")))
+                    result["injected_element"] = injected if isinstance(injected, dict) else None
+                    result.update(csp_blocked_signal(
+                        nonce=nonce, executed=bool(result["executed"]),
+                        injected=result["injected_element"],
+                        violations=csp_violations, baseline_violations=csp_baseline_violations,
+                    ))
                 if operation in {"check_form_xss", "check_stored_xss"}:
                     result["form_action"] = form_action
                     result["form_field"] = form_field

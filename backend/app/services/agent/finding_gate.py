@@ -170,6 +170,19 @@ def cap_reproduced_severity(
     return normalized, False
 
 
+# Proof kinds whose mechanism is proven but whose impact a control still limits.
+PROOF_KIND_SEVERITY_CAP = {"scoped_browser_xss_csp_blocked": "medium"}
+_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def cap_proof_kind_severity(severity: Optional[str], proof_kind: Optional[str]) -> Tuple[str, bool]:
+    normalized = (severity or "info").strip().lower()
+    cap = PROOF_KIND_SEVERITY_CAP.get(proof_kind or "")
+    if cap and _RANK.get(normalized, 0) > _RANK[cap]:
+        return cap, True
+    return normalized, False
+
+
 def cap_version_only_cve_severity(
     title: Optional[str], description: Optional[str], severity: Optional[str]
 ) -> Tuple[str, bool]:

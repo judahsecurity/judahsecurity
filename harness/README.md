@@ -127,6 +127,40 @@ response says the task is complete. The lab is a controlled regression
 fixture; benchmark results should also be checked against representative
 authorized applications before treating them as production recall.
 
+### Real-world recall per verification tier
+
+The class lab measures whether each proof recipe works. To measure whether the
+agent finds bugs in messier applications, and whether the looser publication
+tiers (`reproduced`, `unverified`) recover real bugs or only add noise, run the
+product agent against the documented apps in
+`local_harness/benchmark/ground_truth/REAL_WORLD.json` (OWASP Juice Shop and
+VAmPI, run locally in Docker) and score the findings sink per tier:
+
+```bash
+docker run --rm -d --name aegis-juice-shop -p 3000:3000 bkimminich/juice-shop
+AEGIS_FINDINGS_SINK="$PWD/runs/real/juice-shop/findings.jsonl" \
+  AEGIS_ASSESSMENT_DATABASE_URL="$DEDICATED_ASSESSMENT_DATABASE_URL" \
+  python -m local_harness.product_agent --target http://localhost:3000 \
+  --organization-id "$LAB_ORG_ID" --user-id "$LAB_USER_ID" \
+  --verification-strictness standard --max-turns 4 --price-limit-usd 8
+python -m local_harness.benchmark.tier_report \
+  --ground-truth local_harness/benchmark/ground_truth/REAL_WORLD.json \
+  --target juice-shop --findings runs/real/juice-shop/findings.jsonl \
+  --out runs/real/juice-shop/tier_report.json
+docker rm -f aegis-juice-shop
+```
+
+The sink records each finding's `verification_level`; unverified findings are
+written too. `tier_report` judges cumulative tiers (exploit_verified, then
++reproduced, +analyst_verified, +source_verified, +unverified, +other) and
+reports recall, false positives, the defects each step added
+(`added_defects`), the false positives it added, and
+`recovered_by_looser_tiers`. The heuristic judge counts anything outside the
+documented list as a false positive, so read `added_false_positives` by hand:
+these apps have more bugs than the list. Run each target with the same model,
+budget and `verification_strictness` when comparing configurations.
+`--min-recall` (loosest tier) makes it a CI gate (exit 2).
+
 > **Authorization:** Only scan targets you are explicitly authorized to test.
 
 ---

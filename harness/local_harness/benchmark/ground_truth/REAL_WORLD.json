@@ -1,0 +1,157 @@
+{
+  "_comment": "Real-world recall corpus for the in-product agent: deliberately vulnerable apps with documented defects, run locally in Docker. Score a run with `python -m local_harness.benchmark.tier_report` to see recall per verification tier. Only the documented defects below count as expected; anything else the agent files is counted as a false positive by the heuristic judge, so read those by hand before concluding. Authenticated defects need registered test identities (see harness/README.md). Only run against these local containers.",
+  "juice-shop": {
+    "target": "http://localhost:3000",
+    "scope": "localhost",
+    "setup": {
+      "up": "docker run --rm -d --name aegis-juice-shop -p 3000:3000 bkimminich/juice-shop",
+      "down": "docker rm -f aegis-juice-shop",
+      "ready_url": "http://localhost:3000/rest/admin/application-version",
+      "ready_timeout": 180,
+      "note": "OWASP Juice Shop. Register two customer accounts for the authorization cases."
+    },
+    "expected_findings": [
+      {
+        "id": "JS-SQLI-LOGIN",
+        "category": "sqli",
+        "severity": "critical",
+        "endpoint": "/rest/user/login",
+        "description": "SQL injection in the login email field allows authentication bypass."
+      },
+      {
+        "id": "JS-SQLI-SEARCH",
+        "category": "sqli",
+        "severity": "high",
+        "endpoint": "/rest/products/search",
+        "description": "UNION-based SQL injection in the product search q parameter."
+      },
+      {
+        "id": "JS-XSS-DOM-SEARCH",
+        "category": "xss",
+        "severity": "medium",
+        "endpoint": "/",
+        "description": "DOM XSS through the client-side search route (#/search?q=) rendering markup."
+      },
+      {
+        "id": "JS-IDOR-BASKET",
+        "category": "idor",
+        "accepted_categories": [
+          "authz"
+        ],
+        "severity": "high",
+        "endpoint": "/rest/basket/{id}",
+        "description": "Any authenticated user can read another user's basket by changing the id."
+      },
+      {
+        "id": "JS-AUTHZ-REGISTER-ADMIN",
+        "category": "authz",
+        "accepted_categories": [
+          "idor",
+          "other"
+        ],
+        "severity": "high",
+        "endpoint": "/api/Users",
+        "description": "Mass assignment: registering with role=admin creates an administrator. Matched on the exact endpoint; 'mass assignment' has no category of its own."
+      },
+      {
+        "id": "JS-SSRF-PROFILE-IMAGE",
+        "category": "ssrf",
+        "severity": "high",
+        "endpoint": "/profile/image/url",
+        "description": "Profile image URL upload fetches arbitrary server-side URLs."
+      },
+      {
+        "id": "JS-XXE-UPLOAD",
+        "category": "xxe",
+        "severity": "high",
+        "endpoint": "/file-upload",
+        "description": "XML file upload is parsed with external entities enabled."
+      },
+      {
+        "id": "JS-OPEN-REDIRECT",
+        "category": "open_redirect",
+        "severity": "medium",
+        "endpoint": "/redirect",
+        "description": "The redirect allowlist check can be bypassed through the to parameter."
+      },
+      {
+        "id": "JS-INFO-FTP",
+        "category": "info_disclosure",
+        "severity": "medium",
+        "endpoint": "/ftp",
+        "description": "Directory listing of /ftp exposes confidential documents and backups."
+      },
+      {
+        "id": "JS-INFO-METRICS",
+        "category": "info_disclosure",
+        "severity": "low",
+        "endpoint": "/metrics",
+        "description": "Prometheus metrics endpoint is reachable without authentication."
+      },
+      {
+        "id": "JS-JWT-UNSIGNED",
+        "category": "auth",
+        "severity": "high",
+        "description": "Unsigned (alg: none) JWTs are accepted by authenticated endpoints."
+      }
+    ]
+  },
+  "vampi": {
+    "target": "http://localhost:5000",
+    "scope": "localhost",
+    "setup": {
+      "up": "docker run --rm -d --name aegis-vampi -e vulnerable=1 -p 5000:5000 erev0s/vampi:latest && sleep 3 && curl -fsS http://localhost:5000/createdb",
+      "down": "docker rm -f aegis-vampi",
+      "ready_url": "http://localhost:5000/",
+      "ready_timeout": 90,
+      "note": "VAmPI REST API in vulnerable mode. /createdb seeds the users and books."
+    },
+    "expected_findings": [
+      {
+        "id": "VAMPI-SQLI-USER",
+        "category": "sqli",
+        "severity": "critical",
+        "endpoint": "/users/v1/{username}",
+        "description": "SQL injection through the username path segment."
+      },
+      {
+        "id": "VAMPI-BOLA-BOOK",
+        "category": "idor",
+        "accepted_categories": [
+          "authz"
+        ],
+        "severity": "high",
+        "endpoint": "/books/v1/{book_title}",
+        "description": "Any user can read another user's book secret by title."
+      },
+      {
+        "id": "VAMPI-PASSWORD-CHANGE",
+        "category": "authz",
+        "accepted_categories": [
+          "idor"
+        ],
+        "severity": "high",
+        "endpoint": "/users/v1/{username}/password",
+        "description": "A user can change another user's password."
+      },
+      {
+        "id": "VAMPI-MASS-ASSIGN-ADMIN",
+        "category": "authz",
+        "accepted_categories": [
+          "idor",
+          "other"
+        ],
+        "severity": "high",
+        "endpoint": "/users/v1/register",
+        "description": "Mass assignment: registering with admin=true creates an administrator. Matched on the exact endpoint; 'mass assignment' has no category of its own."
+      },
+      {
+        "id": "VAMPI-INFO-DEBUG",
+        "category": "info_disclosure",
+        "severity": "high",
+        "endpoint": "/users/v1/_debug",
+        "description": "Debug endpoint returns every user including plaintext passwords."
+      }
+    ]
+  }
+}

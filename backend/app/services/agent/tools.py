@@ -90,8 +90,12 @@ def _emit_finding_to_sink(
     poc: Optional[str] = None,
     cve_id: Optional[str] = None,
     confirmed: bool = False,
+    verification_level: Optional[str] = None,
 ) -> None:
     """Append a finding to ``AEGIS_FINDINGS_SINK`` as JSONL, if configured.
+
+    ``verification_level`` (exploit_verified, reproduced, source_verified,
+    analyst_verified, unverified) lets the harness score each tier separately.
 
     Lets the local benchmark harness score the platform agent's output using
     the same sink contract the standalone Vanguard scanner uses. No-op unless
@@ -103,6 +107,8 @@ def _emit_finding_to_sink(
     try:
         url = target if str(target).startswith(("http://", "https://")) else None
         tags = ["confirmed"] if confirmed else []
+        if verification_level:
+            tags.append(verification_level)
         record = {
             "type": "vulnerability",
             "source": "aegis-agent",
@@ -112,9 +118,11 @@ def _emit_finding_to_sink(
             "title": title,
             "description": description,
             "severity": (severity or "info"),
-            "confidence": "confirmed" if confirmed else "high",
+            "confidence": ("confirmed" if confirmed else
+                           "low" if verification_level == "unverified" else "high"),
             "cve_id": (cve_id or "").strip() or None,
             "tags": tags,
+            "verification_level": verification_level,
             "raw_data": {"poc": {
                 "confirmed": confirmed,
                 "endpoint": url or target,
@@ -1692,6 +1700,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if proof.get("executed") is True:
             current["status"] = "in_focus"
             current["reason"] = "Browser execution signal; independent verification required"
+        elif proof.get("csp_blocked") is True:
+            current["status"] = "in_focus"
+            current["reason"] = ("Injected script element blocked by an enforced CSP; submit as "
+                                 "xss for scoped_browser_xss_csp_blocked verification (capped at medium) "
+                                 "or try a CSP bypass")
         self._engagement_brain = live.to_dict()
         return {"success": True, "coverage_cell_id": coverage_cell_id,
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
@@ -1700,6 +1713,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "proof_confirmed": proof.get("executed") is True,
                 "xss_trace": trace,
                 "probe_result": {"executed": proof.get("executed") is True,
+                                 "csp_blocked": proof.get("csp_blocked") is True,
                                  "request_context": request_context,
                                  "reflection_contexts": trace["rendered_contexts"],
                                  "reflection_observations": trace["render_observations"]}}
@@ -5590,6 +5604,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         )
         if not severity_capped:
             severity, severity_capped = cap_reproduced_severity(severity, verification_level)
+        cap_reason = None
+        if not severity_capped and verified is not None:
+            from app.services.agent.finding_gate import cap_proof_kind_severity
+
+            severity, severity_capped = cap_proof_kind_severity(
+                severity, getattr(verified, "confirmed_proof_kind", ""))
+            if severity_capped:
+                cap_reason = ("XSS blocked by an enforced Content-Security-Policy is capped "
+                              "at medium; CSP is the only control preventing execution")
 
         # Normalize target for asset lookup: strip scheme and path
         target_clean = (target or "").strip()
@@ -5674,9 +5697,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                            "verification_level": verification_level,
                            "severity_cap": {"requested": requested_severity,
                                             "published": severity,
-                                            "reason": ("reproduced findings are capped at high "
+                                            "reason": cap_reason or ("reproduced findings are capped at high "
                                                        "without a class-specific proof")
-                                            if verification_level == "reproduced" else
+                                            if cap_reason or verification_level == "reproduced" else
                                             "source_verified findings are "
                                             "capped at medium without a runtime proof"}
                            if severity_capped else None,
@@ -5778,6 +5801,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 poc=poc,
                 cve_id=cve_id,
                 confirmed=str(gate_msg or "").startswith("verify_ok"),
+                verification_level=verification_level,
             )
             try:
                 from app.services.chat_notifier import notify_finding

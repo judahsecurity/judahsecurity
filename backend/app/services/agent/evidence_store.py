@@ -508,6 +508,10 @@ class EvidenceStore:
                 payload = row["payload"] if isinstance(row["payload"], dict) else {}
                 if row["kind"] == "scoped_http_get":
                     proven = payload.get("status") == 200 and payload.get("directory_index") is True
+                elif (row["kind"] == "scoped_browser_check_xss"
+                      and payload.get("executed") is not True and payload.get("csp_blocked") is True):
+                    # CSP-blocked injection; only scoped_browser_xss_csp_blocked accepts it.
+                    proven = bool(payload.get("injected_element"))
                 elif row["kind"] in {"scoped_browser_check_xss", "scoped_browser_check_form_xss", "scoped_browser_check_xhr_xss", "scoped_browser_check_stored_xss"}:
                     proven = payload.get("executed") is True and (
                         (row["kind"] != "scoped_browser_check_form_xss"

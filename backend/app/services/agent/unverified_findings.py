@@ -214,6 +214,15 @@ def publish_unverified_candidate(tools_manager: Any, candidate: Any) -> Optional
             )
             db.add(vuln)
             db.commit()
+            from app.services.agent.tools import _emit_finding_to_sink
+
+            _emit_finding_to_sink(
+                title=vuln.title, description=vuln.description or "", severity=published,
+                target=candidate.target, host=asset.value,
+                evidence=getattr(candidate, "evidence", "") or None,
+                poc=getattr(candidate, "claimed_request", "") or None,
+                confirmed=False, verification_level=UNVERIFIED,
+            )
             return vuln.id
     except Exception:  # noqa: BLE001 - publication must not break verification
         logger.warning("unverified finding publication failed", exc_info=True)

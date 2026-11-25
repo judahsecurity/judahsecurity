@@ -26,7 +26,9 @@ from app.services.agent.generic_reproduction import GENERIC_KIND, SSRF_READBACK_
 PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
     "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "oob_callback"}),
-    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
+    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss",
+                      # Injected script element blocked by an enforced CSP (capped at medium).
+                      "scoped_browser_xss_csp_blocked"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback", "scoped_ssrf_readback"}),
     "xxe": frozenset({"oob_callback"}),
@@ -214,6 +216,37 @@ def _validate_hunter_verifier_pair(store, candidate, proof: dict,
     return True, ""
 
 
+def _validate_csp_blocked_xss(store, candidate, proof: dict,
+                              evidence_ids: list[str]) -> tuple[bool, str]:
+    """Hunter and fresh verifier each injected a nonce-bearing script element that
+    an enforced CSP blocked. Proves HTML injection into an executable context;
+    CSP is the only control, so it is filed at most medium."""
+    hunter_id = proof.get("hunter_artifact_id")
+    hunter = (store.records.get(hunter_id)
+              if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
+    verifier = store.records.get(proof.get("artifact_id")) if proof.get("artifact_id") in evidence_ids else None
+    if (not hunter or not verifier or hunter["id"] == verifier["id"]
+            or hunter["kind"] != "scoped_browser_check_xss" or verifier["kind"] != "scoped_browser_check_xss"
+            or hunter["created_at"] >= verifier["created_at"]):
+        return False, "Distinct ordered hunter and verifier browser receipts are required"
+    first, second = hunter["payload"], verifier["payload"]
+    if (first.get("operation") != "check_xss" or second.get("operation") != "check_xss"
+            or hunter["identity"] != verifier["identity"]
+            or first.get("target_template") != second.get("target_template")
+            or not first.get("nonce") or first.get("nonce") == second.get("nonce")):
+        return False, "Two fresh browser runs of the same payload template are required"
+    for row in (first, second):
+        injected = row.get("injected_element")
+        if row.get("csp_blocked") is not True or not isinstance(injected, dict):
+            return False, "Both runs must show an injected script element that CSP blocked"
+        if not (row.get("csp_violation_names_nonce") is True
+                or (injected.get("inline") and int(row.get("csp_inline_violation_delta") or 0) > 0)):
+            return False, "The CSP violation must be tied to the injected payload"
+    if first.get("injected_element", {}).get("attr") != second.get("injected_element", {}).get("attr"):
+        return False, "Both runs must inject the same kind of script element"
+    return True, ""
+
+
 def validate_proof(
     store, candidate, proof: dict, evidence_ids: list[str]
 ) -> tuple[bool, str]:
@@ -228,6 +261,8 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
+    if kind == "scoped_browser_xss_csp_blocked":
+        return _validate_csp_blocked_xss(store, candidate, proof, evidence_ids)
     if kind in (GENERIC_KIND, SSRF_READBACK_KIND):
         from app.services.agent.generic_reproduction import validate_replay_reproduction
 

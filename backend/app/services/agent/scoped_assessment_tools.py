@@ -762,7 +762,7 @@ class ScopedAssessmentTools:
                 self._engagement_brain = brain.to_dict()
         receipt_id = evidence_store(self).record(
             "scoped_browser_" + operation, result, target=target, identity=identity,
-            success=(bool(result.get("executed")) if operation in
+            success=(bool(result.get("executed") or result.get("csp_blocked")) if operation in
                      {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"}
                      else bool(result.get("behavior_observed")) if operation == "check_client"
                      else True),

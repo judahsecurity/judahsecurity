@@ -135,6 +135,8 @@ async def assess(args, orchestrator=None):
             max_iterations=args.max_iterations,
             price_limit_usd=args.price_limit_usd,
             assessment_mode=getattr(args, "assessment_mode", None) or "standard",
+            **({"assessment_policy": {"verification_strictness": args.verification_strictness}}
+               if getattr(args, "verification_strictness", None) else {}),
         )
         if real_runtime:
             try:
@@ -219,6 +221,14 @@ def main(argv=None):
         default="standard",
         help="standard keeps the deterministic pipeline; deep gives the model larger "
              "budgets and lets it choose steps after recon. Publication gates are unchanged.",
+    )
+    parser.add_argument(
+        "--verification-strictness",
+        choices=("conservative", "standard", "aggressive"),
+        default=None,
+        help="Operator verification profile (see docs/ASSESSMENT_RELIABILITY.md). Compare "
+             "profiles at the same --assessment-mode; this runner passes the mode explicitly, "
+             "so aggressive does not switch to deep here.",
     )
     parser.add_argument(
         "--benchmark-proof",

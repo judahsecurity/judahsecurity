@@ -1932,7 +1932,10 @@ async def _verify_scoped_browser_xss_candidate(
                 or receipt.get("identity") != identity):
             continue
         proof = receipt.get("payload")
-        if not isinstance(proof, dict) or proof.get("executed") is not True:
+        csp_only = (isinstance(proof, dict) and proof.get("executed") is not True
+                    and proof.get("csp_blocked") is True and proof.get("operation") == "check_xss"
+                    and not (stored_xss or form_xss))
+        if not isinstance(proof, dict) or (proof.get("executed") is not True and not csp_only):
             continue
         template = str(proof.get("target_template") or "")
         parsed = urlsplit(template)
@@ -2042,7 +2045,14 @@ async def _verify_scoped_browser_xss_candidate(
             if not isinstance(result, dict):
                 failure = "XSS replay returned no structured result"
                 continue
-            if result.get("executed") is not True:
+            hunter_csp_only = (hunter_proof.get("executed") is not True
+                               and hunter_proof.get("csp_blocked") is True)
+            if hunter_csp_only:
+                if result.get("csp_blocked") is not True:
+                    failure = str(result.get("error") or
+                                  "Fresh browser replay did not reproduce the CSP-blocked injection")[:300]
+                    continue
+            elif result.get("executed") is not True:
                 failure = str(result.get("error") or "Fresh browser canary did not execute")[:300]
                 continue
             artifact_id = str(result.get("evidence_id") or "")
@@ -2051,7 +2061,8 @@ async def _verify_scoped_browser_xss_candidate(
                     or verifier.get("identity") != identity):
                 failure = "XSS replay had no fresh verifier evidence"
                 continue
-            proof = {"kind": ("scoped_browser_stored_xss" if stored_xss else
+            proof = {"kind": ("scoped_browser_xss_csp_blocked" if hunter_csp_only else
+                              "scoped_browser_stored_xss" if stored_xss else
                               "scoped_browser_form_xss" if form_xss else
                               "scoped_browser_xhr_xss" if hunter_proof.get("operation") == "check_xhr_xss"
                               else "scoped_browser_xss"),
