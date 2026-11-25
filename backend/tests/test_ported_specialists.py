@@ -259,3 +259,18 @@ def test_thin_lanes_extended_in_existing_packs():
     assert not cloud.first_party_only
     data = _map(third=["https://acme-assets.s3.amazonaws.com/logo.png"])
     assert "cloud_audit" in detect_surface_hunters(data)
+
+
+def test_ported_probe_tools_are_granted_to_their_lanes():
+    from app.services.agent.fireteam_service import _PORTED_TOOL_GRANTS, get_specialist
+    from app.services.agent.tools import ASMToolsManager
+
+    registry = ASMToolsManager().tools
+    for name, tools in _PORTED_TOOL_GRANTS.items():
+        profile = get_specialist(name)
+        assert profile is not None, name
+        for tool in tools:
+            assert tool in profile.allowed_tools and tool in registry, (name, tool)
+    injection = get_specialist("injection")
+    assert "record_defense_profile" in injection.allowed_tools
+    assert "record_defense_profile" in registry

@@ -1617,6 +1617,27 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
     ),
 ]
 
+# Lead-only probe and recon tools ported from Vanguard (tools_ported_probes.py),
+# granted to the lanes that hunt their surface. The tools enforce scope, method
+# policy and the active-testing gate themselves.
+_PORTED_TOOL_GRANTS: dict[str, tuple[str, ...]] = {
+    "grpc_api": ("probe_grpc_reflection",),
+    "nodejs_express": ("probe_server_prototype_pollution",),
+    "api_authz": ("probe_websocket_origin",),
+    "graphql_api": ("probe_graphql",),
+    "content_api": ("probe_vcs_exposure",),
+    "secrets_hunter": ("probe_vcs_exposure",),
+    "web_recon": ("fingerprint_gitlab", "detect_third_party_vendors", "query_mail_security"),
+    "m365_entra": ("query_mail_security",),
+    "okta_idp": ("query_mail_security",),
+}
+for _profile in DEFAULT_SPECIALISTS:
+    _extra = list(_PORTED_TOOL_GRANTS.get(_profile.name, ()))
+    # Specialists that log approaches can also record what the WAF blocked.
+    if "log_engagement_approach" in _profile.allowed_tools:
+        _extra.append("record_defense_profile")
+    _profile.allowed_tools.extend(t for t in _extra if t not in _profile.allowed_tools)
+
 _SPECIALISTS_BY_NAME: dict[str, SpecialistProfile] = {s.name: s for s in DEFAULT_SPECIALISTS}
 
 
