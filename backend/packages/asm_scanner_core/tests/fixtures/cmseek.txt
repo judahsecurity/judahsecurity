@@ -1,0 +1,16 @@
+[+]  Deep Scan Results  [+]
+
+[+]  CMS Detected, CMS ID: wp, Detection method: generator
+[+]  Starting WordPress DeepScan
+
+ ┏━Target: blog.example.test
+ ┃
+ ┠── CMS: WordPress
+ ┃    │
+ ┃    ╰── URL: https://wordpress.org
+ ┃
+ ┠── WordPress Version: 6.2.1
+ ┃
+ ┠──[WordPress Deepscan]
+ ┃    ├── Readme file found: https://blog.example.test/readme.html
+ ┗━Result: /opt/cmseek/Result/blog.example.test/cms.json

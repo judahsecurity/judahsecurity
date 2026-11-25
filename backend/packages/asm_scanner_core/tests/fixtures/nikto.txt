@@ -1,0 +1,16 @@
+- Nikto v2.5.0
+---------------------------------------------------------------------------
++ Target IP:          203.0.113.10
++ Target Hostname:    shop.example.test
++ Target Port:        80
++ Start Time:         2026-11-20 10:00:00 (GMT0)
+---------------------------------------------------------------------------
++ Server: Apache/2.4.29 (Ubuntu)
++ /: The anti-clickjacking X-Frame-Options header is not present.
++ /phpmyadmin/: phpMyAdmin directory found.
++ /admin/config.php.bak: Backup file found containing database credentials.
++ OSVDB-3233: /icons/README: Apache default file found.
++ 8102 requests: 0 error(s) and 4 item(s) reported on remote host
++ End Time:           2026-11-20 10:05:00 (GMT0) (300 seconds)
+---------------------------------------------------------------------------
++ 1 host(s) tested

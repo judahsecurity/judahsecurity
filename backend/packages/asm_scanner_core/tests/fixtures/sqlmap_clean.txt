@@ -1,0 +1,8 @@
+[*] starting @ 10:00:00 /2026-11-20/
+
+[10:00:01] [INFO] testing connection to the target URL
+[10:00:02] [WARNING] heuristic (basic) test shows that GET parameter 'q' might not be injectable
+[10:00:30] [WARNING] GET parameter 'q' does not seem to be injectable
+[10:00:30] [CRITICAL] all tested parameters do not appear to be injectable. Try to increase values for '--level'/'--risk' options if you wish to perform more tests.
+
+[*] ending @ 10:00:30 /2026-11-20/

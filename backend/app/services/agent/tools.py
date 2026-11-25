@@ -1408,7 +1408,9 @@ class ASMToolsManager(
                             output[:max_chars]
                             + f"\n\n... (truncated; read_evidence({payload['artifact_id']}) for remaining output)"
                         )
-                    return payload
+                    from app.services.agent.parser_facts import with_parsed_summary
+
+                    return with_parsed_summary(self, tool_name, result, payload)
                 else:
                     err = result.get("error", "Unknown error")
                     out = result.get("output", "")
@@ -1430,7 +1432,9 @@ class ASMToolsManager(
                         fail_payload["capability_map"] = capability_map
                     if result.get("exit_code") is not None:
                         fail_payload["exit_code"] = result.get("exit_code")
-                    return fail_payload
+                    from app.services.agent.parser_facts import with_parsed_summary
+
+                    return with_parsed_summary(self, tool_name, result, fail_payload, prefix=False)
             except Exception as e:
                 logger.error(f"MCP tool execution failed: {tool_name} - {e}")
                 err_txt = str(e)

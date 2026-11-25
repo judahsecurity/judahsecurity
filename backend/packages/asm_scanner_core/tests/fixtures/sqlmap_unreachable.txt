@@ -1,0 +1,7 @@
+[*] starting @ 10:00:00 /2026-11-20/
+
+[10:00:01] [INFO] testing connection to the target URL
+[10:00:31] [CRITICAL] unable to connect to the target URL. sqlmap is going to retry the request(s)
+[10:01:31] [CRITICAL] connection timed out to the target URL
+
+[*] ending @ 10:01:31 /2026-11-20/

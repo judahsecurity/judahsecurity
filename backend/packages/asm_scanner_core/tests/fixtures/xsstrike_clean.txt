@@ -1,0 +1,5 @@
+	XSStrike v3.1.5
+
+[+] WAF Status: Offline
+[!] Testing parameter: id
+[-] No reflection found

