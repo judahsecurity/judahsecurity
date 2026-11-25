@@ -51,7 +51,8 @@ PROOFS_BY_CLASS = {
     # version-only claims are capped at low by finding_gate.
     "known_cve": frozenset(),
     # An operator-captured test account vs two fresh random nonexistent
-    # accounts, two repeats, stable normalized difference (class_probes.py).
+    # accounts, two repeats, stable normalized difference (class_probes.py);
+    # or timing under the 10-sample rule, large effect size, two agreeing runs.
     "account_enumeration": frozenset({"scoped_account_enum_differential"}),
     # A benign nonce HTML/SVG served back from the target origin as active content.
     "file_upload": frozenset({"scoped_upload_served_active"}),
@@ -60,12 +61,15 @@ PROOFS_BY_CLASS = {
     # prove under their own class.
     "oauth": frozenset({"scoped_oauth_redirect_uri"}),
     # Cross-site WebSocket hijacking: foreign-Origin handshake with a named
-    # identity reads a value an accepted anonymous or second-identity session does not get.
+    # identity reads a value an accepted anonymous or second-identity session does not get
+    # (optionally after one read-only frame copied from the identity's own capture).
     "cswsh": frozenset({"scoped_cswsh_cross_origin_read"}),
-    # Non-destructive JSON-spaces gadget with plain-property control and reset.
+    # Non-destructive JSON-spaces or error-status gadget with plain control and reset.
     "server_prototype_pollution": frozenset({"scoped_server_pp_gadget"}),
-    # An instruction embedded in submitted data makes the model emit a token
-    # assembled from parts (no echo can match); a control does not.
+    # An instruction embedded in submitted data (or planted in an approved
+    # document field) makes the model emit a token assembled from parts (no
+    # echo can match), or fetch a fresh collector host (correlated callback);
+    # a control does not.
     "prompt_injection": frozenset({"scoped_llm_canary"}),
 }
 

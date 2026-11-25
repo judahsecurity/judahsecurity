@@ -149,12 +149,38 @@ def _header(headers: Dict[str, str], name: str) -> str:
     return next((v for k, v in headers.items() if k.lower() == name), "")
 
 
+MAX_WS_CLIENT_FRAMES = 20
+MAX_WS_FRAME_CHARS = 2048
+
+
+def ws_client_frames(messages: Any) -> List[str]:
+    """Client-sent text frames of a captured WebSocket (HAR ``_webSocketMessages``)."""
+    frames: List[str] = []
+    for message in messages if isinstance(messages, list) else []:
+        if not isinstance(message, dict) or str(message.get("type") or "") != "send":
+            continue
+        if message.get("opcode", 1) != 1:
+            continue
+        data = message.get("data")
+        if isinstance(data, str) and data and len(data) <= MAX_WS_FRAME_CHARS:
+            frames.append(data)
+        if len(frames) >= MAX_WS_CLIENT_FRAMES:
+            break
+    return frames
+
+
 def normalize_entry(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """One captured exchange in the shape the extension sends."""
     if not isinstance(raw, dict):
         return None
     method = str(raw.get("method") or "GET").upper()[:10]
     url = str(raw.get("url") or "")
+    frames = ws_client_frames(raw.get("ws_messages"))
+    # A WebSocket handshake is an HTTP GET; keep it under its http(s) URL.
+    if url.lower().startswith("wss://"):
+        url = "https://" + url[6:]
+    elif url.lower().startswith("ws://"):
+        url = "http://" + url[5:]
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname or len(url) > 8000:
         return None
@@ -177,6 +203,7 @@ def normalize_entry(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                      "body_preview": response_body[:4000], "length": len(response_body),
                      "truncated": len(response_body) > MAX_BODY_CHARS},
         "captured_at": raw.get("captured_at") or time.time(),
+        **({"ws_client_frames": frames} if frames else {}),
     }
 
 
@@ -211,6 +238,7 @@ def har_entries(har: Any) -> List[Dict[str, Any]]:
             "response_headers": response.get("headers"),
             "response_body": text, "mime_type": content.get("mimeType") or "",
             "captured_at": entry.get("startedDateTime"),
+            "ws_messages": entry.get("_webSocketMessages") or [],
         })
     return out
 
@@ -388,6 +416,24 @@ def _session_material(entries: List[Dict[str, Any]]) -> Tuple[List[Dict[str, str
     return [{"name": k, "value": v} for k, v in cookies.items()], headers
 
 
+def _stash_ws_frames(manager: Any, identity: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep raw client frames session-private; evidence gets only their digests."""
+    frames = entry.get("ws_client_frames") or []
+    if not frames:
+        return entry
+    stash = dict(getattr(manager, "_scoped_ws_client_frames", None) or {})
+    rows = list(stash.get(identity) or [])
+    rows.append({"url": entry["request"]["url"], "frames": list(frames)})
+    stash[identity] = rows[-20:]
+    manager._scoped_ws_client_frames = stash
+    clean = {k: v for k, v in entry.items() if k != "ws_client_frames"}
+    clean["ws_client_frames"] = {
+        "count": len(frames),
+        "sha256": [hashlib.sha256(f.encode()).hexdigest()[:24] for f in frames],
+    }
+    return clean
+
+
 async def apply_batches(manager: Any, batches: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Register identities, record evidence and map operations. Returns a summary."""
     from app.services.agent.assessment_scope import assert_url_in_scope
@@ -440,6 +486,7 @@ async def apply_batches(manager: Any, batches: List[Dict[str, Any]]) -> Dict[str
                     pass
             for entry in rows:
                 status = int(entry["response"].get("status") or 0)
+                entry = _stash_ws_frames(manager, identity, entry)
                 evidence_id = store.record(
                     "http_exchange", {**entry, "source": "operator_capture"},
                     target=entry["request"]["url"], identity=identity,
