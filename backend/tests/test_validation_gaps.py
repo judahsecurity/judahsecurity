@@ -444,7 +444,7 @@ def test_nmap_missing_is_tool_unavailable(monkeypatch):
     assert "not installed" in v["reasoning"] and not v.get("native_verifier")
 
 
-def test_tool_unavailable_is_not_owned_and_escalates_explicitly():
+def test_tool_unavailable_still_tries_prowl_then_is_the_answer():
     calls = []
     native = {"verdict": "needs_more_evidence", "error": "tool_unavailable:nuclei",
               "native_verifier": "template"}
@@ -457,17 +457,8 @@ def test_tool_unavailable_is_not_owned_and_escalates_explicitly():
         calls.append("prowl")
         return None
 
-    async def run_vanguard(kind):
-        calls.append("vanguard")
-        return {"verdict": "confirmed", "method": "vanguard"}
     v = asyncio.run(route_finding_validation(
-        "auto", run_native=run_native, run_prowl=run_prowl, run_vanguard=run_vanguard,
-        prowl_enabled=True, vanguard_fallback="docker"))
-    assert calls == ["native", "prowl", "vanguard"] and v["method"] == "vanguard"
-    calls.clear()
-    v = asyncio.run(route_finding_validation(
-        "auto", run_native=run_native, run_prowl=run_prowl, run_vanguard=run_vanguard,
-        prowl_enabled=True, vanguard_fallback=None))
+        "auto", run_native=run_native, run_prowl=run_prowl, prowl_enabled=True))
     assert calls == ["native", "prowl"] and v["error"] == "tool_unavailable:nuclei"
 
 
@@ -538,7 +529,7 @@ MATRIX = [
 @pytest.mark.parametrize("case, finding, tools, llm, prowl_enabled, method, verdict", MATRIX,
                          ids=[f"{m[0]}-tools_{m[2]}-llm_{'none' if m[3] is None else ('fail' if isinstance(m[3], Exception) else 'ok')}-prowl_{'on' if m[4] else 'off'}"
                               for m in MATRIX])
-def test_every_finding_kind_ends_native_or_prowl_without_vanguard(
+def test_every_finding_kind_ends_native_or_prowl(
         monkeypatch, case, finding, tools, llm, prowl_enabled, method, verdict):
     _nuclei(monkeypatch, installed=tools == "ok", fires=True)
     _nmap(monkeypatch, "open" if tools == "ok" else None)
@@ -563,12 +554,8 @@ def test_every_finding_kind_ends_native_or_prowl_without_vanguard(
         return await pr.revalidate_with_prowl(dict(finding), organization_id=5, user_id=9,
                                               native_verdict=native_holder.get("v"))
 
-    async def run_vanguard(kind):
-        raise AssertionError("Vanguard must not be needed")
-
     v = asyncio.run(route_finding_validation(
-        "auto", run_native=run_native, run_prowl=run_prowl, run_vanguard=run_vanguard,
-        prowl_enabled=prowl_enabled, vanguard_fallback=None))
+        "auto", run_native=run_native, run_prowl=run_prowl, prowl_enabled=prowl_enabled))
     v = nv.finalize_verdict(v, finding)
     assert (v["method"], v["verdict"]) == (method, verdict), (case, v.get("reasoning"))
     assert v["remediation_state"] in nv.REMEDIATION_STATES

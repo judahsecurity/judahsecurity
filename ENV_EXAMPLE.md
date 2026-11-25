@@ -158,38 +158,27 @@ ANTHROPIC_API_KEY=
 ANTHROPIC_MODEL=claude-sonnet-4-6
 
 # =============================================================================
-# Aegis Vanguard (autonomous pentest agent + on-demand finding validator)
-# Code lives in aegis-vanguard/. See aegis-vanguard/DEPLOYMENT.md.
+# On-demand finding validation (scanner worker)
 # =============================================================================
-# How the scanner worker revalidates findings:
-#   native           — replay original detector / steps_to_reproduce on the
-#                      scanner (nuclei template, TCP/HTTP probes). No Docker.
-#   docker           — `docker run aegis-vanguard:latest` (needs CLI + sock)
-#   subprocess       — run aegis-vanguard/validate_finding.py in-process
-#   auto (default)   — native first; escalate to docker/subprocess if inconclusive.
-#                      Agent findings are never re-confirmed by reachability alone.
-# native | prowl | auto | docker | subprocess (see docker-compose.yml scanner)
+#   native           — replay the original detector / steps_to_reproduce on
+#                      the scanner (nuclei template, nmap service check,
+#                      secret re-fetch, manual request replay).
+#   auto (default)   — native first; when inconclusive, Prowl's independent
+#                      verifier re-tests HTTP(S) findings. Agent findings are
+#                      never re-confirmed by reachability alone.
+#   prowl            — like auto, ignoring AEGIS_VALIDATOR_PROWL.
+# (docker / subprocess named the removed Aegis Vanguard validator and now run as auto.)
 AEGIS_VALIDATOR_MODE=auto
-# AEGIS_VALIDATOR_PROWL=true                    # auto: re-test with Prowl before Vanguard
+# AEGIS_VALIDATOR_PROWL=true
 # AEGIS_PROWL_VALIDATE_MAX_ITERATIONS=12
-AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
-# AEGIS_VANGUARD_PATH=/path/to/aegis-vanguard   # only for subprocess mode
-# AEGIS_VALIDATE_MAX_TURNS=20
 # AEGIS_VALIDATE_TIMEOUT=900
-# Agent-side (also used inside the Vanguard container):
+# Benchmark harness run metadata:
 # AEGIS_MODEL=claude-sonnet-4-6
-# AEGIS_LLM_BACKEND=auto
-# AEGIS_GUARDRAILS=true
-# AEGIS_TRACING=true
-# Optional: write traces next to harness artifacts, and/or export redacted OTLP
-# to a self-hosted Phoenix/Langfuse (never Langfuse Cloud — spans hold engagement data).
-# AEGIS_TRACES_DIR=/tmp/aegis-traces
+
+# Agent tracing: export redacted OTLP spans to a self-hosted Phoenix/Langfuse
+# (never Langfuse Cloud — spans hold engagement data).
 # OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:6006/v1/traces
 # COMPOSE_PROFILES=observability
-# If Anthropic/OpenAI credits run out, Vanguard retries on local Ollama when
-# reachable (same OLLAMA_* vars as the platform agent; disable with
-# OLLAMA_FALLBACK_ENABLED=false).
-# DOCKER_SOCK=/var/run/docker.sock   # only needed for docker mode
 
 # DeepSeek (OpenAI-compatible). Set AI_PROVIDER=deepseek to use it by default,
 # or use "deepseek:<model>" in per-organization task_models.

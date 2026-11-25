@@ -374,17 +374,13 @@ def _route(native, prowl=None):
         calls.append("prowl")
         return prowl
 
-    async def run_vanguard(kind):
-        calls.append("vanguard")
-        return {"verdict": "confirmed"}
     v = asyncio.run(route_finding_validation(
-        "auto", run_native=run_native, run_prowl=run_prowl, run_vanguard=run_vanguard,
-        prowl_enabled=True, vanguard_fallback="docker"))
+        "auto", run_native=run_native, run_prowl=run_prowl, prowl_enabled=True))
     return v, calls
 
 
 @pytest.mark.parametrize("kind", ["network_service", "secret", "manual", "template"])
-def test_auto_does_not_escalate_findings_a_native_verifier_owns(kind):
+def test_native_inconclusive_is_final_when_prowl_cannot_take_it(kind):
     v, calls = _route({"verdict": "needs_more_evidence", "native_verifier": kind})
     assert calls == ["native", "prowl"] and v["native_verifier"] == kind
 
@@ -395,6 +391,6 @@ def test_auto_still_prefers_prowl_over_native_inconclusive():
     assert calls == ["native", "prowl"] and v["method"] == "prowl_independent_verify"
 
 
-def test_auto_escalates_only_unowned_findings():
-    _, calls = _route({"verdict": "needs_more_evidence", "method": "agent_steps_replay"})
-    assert calls == ["native", "prowl", "vanguard"]
+def test_unowned_inconclusive_also_ends_after_prowl():
+    v, calls = _route({"verdict": "needs_more_evidence", "method": "agent_steps_replay"})
+    assert calls == ["native", "prowl"] and v["verdict"] == "needs_more_evidence"

@@ -412,16 +412,11 @@ services:
       - NUCLEI_MAX_RUNTIME_CAP_SECONDS=${NUCLEI_MAX_RUNTIME_CAP_SECONDS:-2700}
       - NUCLEI_MAX_TARGETS_PER_SCAN=${NUCLEI_MAX_TARGETS_PER_SCAN:-75}
       # Finding validation. auto: native replay of the original detector / steps;
-      # when inconclusive, Prowl's independent verifier re-tests HTTP(S) findings
-      # it can prove (AEGIS_VALIDATOR_PROWL=false disables); the Vanguard LLM
-      # validator (docker/subprocess) only for findings Prowl cannot take.
-      # prowl: native then Prowl, never Vanguard. native: replay only.
+      # when inconclusive, Prowl's independent verifier re-tests HTTP(S)
+      # findings (AEGIS_VALIDATOR_PROWL=false disables). prowl: same, ignoring
+      # the disable flag. native: replay only.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - AEGIS_VALIDATOR_MODE=${AEGIS_VALIDATOR_MODE:-auto}
-      - AEGIS_VANGUARD_IMAGE=${AEGIS_VANGUARD_IMAGE:-aegis-vanguard:latest}
-      - AEGIS_VANGUARD_PATH=${AEGIS_VANGUARD_PATH:-}
-      - AEGIS_MODEL=${AEGIS_MODEL:-claude-sonnet-4-6}
-      - AEGIS_VALIDATE_MAX_TURNS=${AEGIS_VALIDATE_MAX_TURNS:-20}
       - AEGIS_VALIDATE_TIMEOUT=${AEGIS_VALIDATE_TIMEOUT:-900}
       # --- Authenticated crawl credentials (optional) ---
       # Same as the backend: referenced by deep_crawl login as env:/secret: refs.
@@ -441,8 +436,6 @@ services:
       - nuclei_templates:/home/appuser/.config/nuclei
       - scan_outputs:/app/outputs
       - screenshots_data:/app/data/screenshots
-      # Host Docker daemon — required for AEGIS_VALIDATOR_MODE=docker
-      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     networks:
       - asm_network
     cap_add:
