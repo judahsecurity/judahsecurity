@@ -29,6 +29,8 @@ _TIMEOUT = 30.0
 
 AUDIENCE_EMPLOYEE = "employee"
 AUDIENCE_USER = "user"
+# Third-party services where infected employees used their work login.
+AUDIENCE_THIRD_PARTY = "third_party"
 
 
 class HudsonRockError(Exception):
@@ -64,6 +66,7 @@ class DomainStealerResult:
     stealer_families: Dict[str, int] = field(default_factory=dict)
     employee_password_strength: Dict[str, Any] = field(default_factory=dict)
     urls: List[StealerUrl] = field(default_factory=list)
+    third_party_domains: List[StealerUrl] = field(default_factory=list)
 
     def summary(self) -> Dict[str, Any]:
         top = sorted(self.urls, key=lambda u: -u.occurrence)
@@ -86,6 +89,11 @@ class DomainStealerResult:
                 {"url": u.url, "occurrence": u.occurrence}
                 for u in top if u.audience == AUDIENCE_EMPLOYEE
             ][:10],
+            "third_party_domain_count": len(self.third_party_domains),
+            "top_third_party_domains": [
+                {"domain": t.host, "occurrence": t.occurrence}
+                for t in sorted(self.third_party_domains, key=lambda t: -t.occurrence)
+            ][:15],
         }
 
 
@@ -145,6 +153,14 @@ def parse_domain_response(domain: str, data: Dict[str, Any]) -> DomainStealerRes
                 url=url[:2000], host=host, audience=audience,
                 occurrence=int(row.get("occurrence") or 0),
             ))
+    for row in data.get("thirdPartyDomains") or []:
+        domain = str(row.get("domain") or "").strip().lower().strip(".")
+        if not domain or "*" in domain or "." not in domain:
+            continue
+        result.third_party_domains.append(StealerUrl(
+            url=domain, host=domain, audience=AUDIENCE_THIRD_PARTY,
+            occurrence=int(row.get("occurrence") or 0),
+        ))
     return result
 
 

@@ -30,7 +30,7 @@ from app.models.identity import (
     Identity,
 )
 from app.models.organization import Organization
-from app.services.identity_risk import score_exposure, score_stealer_url
+from app.services.identity_risk import score_exposure, score_stealer_url, score_third_party
 from app.services.secret_safety import secret_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -443,6 +443,44 @@ def ingest_hudsonrock_domain(
         row.severity = severity
         row.login_category = category
         row.score_factors = [f.to_dict() for f in factors]
+
+    # Third-party services where employees used their work login. These sit
+    # outside the inventory, so there is no asset to match.
+    org_domains = organization_domains(db, organization_id)
+    stats["third_party"] = 0
+    for item in getattr(result, "third_party_domains", []) or []:
+        score, severity, category, factors = score_third_party(
+            domain=item.host,
+            occurrence=item.occurrence,
+            last_compromised=result.last_employee_compromised,
+            org_domains=org_domains + [result.domain],
+            now=now,
+        )
+        if category == "own_domain":
+            continue
+        row = existing.get((item.url, item.audience))
+        if row is None:
+            row = StealerUrlExposure(
+                organization_id=organization_id,
+                provider=PROVIDER_HUDSONROCK,
+                domain=result.domain,
+                url=item.url,
+                audience=item.audience,
+                first_seen_at=now,
+                status="open",
+            )
+            db.add(row)
+            existing[(item.url, item.audience)] = row
+        row.host = item.host
+        row.occurrence = item.occurrence
+        row.last_seen_at = now
+        row.last_compromised_at = result.last_employee_compromised
+        row.asset_id = None
+        row.priority_score = score
+        row.severity = severity
+        row.login_category = category
+        row.score_factors = [f.to_dict() for f in factors]
+        stats["third_party"] += 1
     db.flush()
     return stats
 

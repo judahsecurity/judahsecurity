@@ -48,6 +48,14 @@ HR_DOMAIN = {
             {"occurrence": 700, "type": "User", "url": "https://www.example.com/account/create-account"},
         ],
     },
+    "thirdPartyDomains": [
+        {"occurrence": 79, "domain": "microsoftonline.com"},
+        {"occurrence": 14, "domain": "example.com"},
+        {"occurrence": 8, "domain": "claroty.com"},
+        {"occurrence": 5, "domain": "atlassian.com"},
+        {"occurrence": 5, "domain": "com.microsoft.rdc.androidx"},
+        {"occurrence": 2, "domain": "****"},
+    ],
 }
 HR_EMAIL = {
     "message": "...",
@@ -178,7 +186,7 @@ def test_ingest_domain_matches_inventory_hosts(db):
     db.commit()
     result = hr.parse_domain_response("example.com", HR_DOMAIN)
     stats = ces.ingest_hudsonrock_domain(db, 1, result, now=NOW)
-    assert stats == {"created": 4, "refreshed": 0, "asset_matched": 1}
+    assert stats == {"created": 4, "refreshed": 0, "asset_matched": 1, "third_party": 4}
     top = db.query(StealerUrlExposure).order_by(StealerUrlExposure.priority_score.desc()).first()
     assert top.host == "idp.example.com" and top.asset_id is not None and top.login_category == "sso"
     # files.example.com belongs to another org's inventory: no cross-org match.
@@ -188,6 +196,45 @@ def test_ingest_domain_matches_inventory_hosts(db):
 
     stats = ces.ingest_hudsonrock_domain(db, 1, result, now=NOW)
     assert stats["created"] == 0 and stats["refreshed"] == 4
+
+
+@pytest.mark.parametrize(
+    "domain,category",
+    [
+        ("microsoftonline.com", "identity_provider"),
+        ("login.okta.com", "identity_provider"),
+        ("atlassian.com", "code_and_cloud"),
+        ("github.com", "code_and_cloud"),
+        ("workday.com", "business_saas"),
+        ("claroty.com", "vendor_portal"),
+        ("com.microsoft.rdc.androidx", "mobile_app"),
+        ("sso.example.com", "own_domain"),
+    ],
+)
+def test_classify_third_party(domain, category):
+    from app.services.identity_risk import classify_third_party
+
+    assert classify_third_party(domain, ["example.com"])[0] == category
+
+
+def test_third_party_rows_rank_identity_providers_first(db):
+    result = hr.parse_domain_response("example.com", HR_DOMAIN)
+    assert [t.host for t in result.third_party_domains][:2] == ["microsoftonline.com", "example.com"]
+    assert result.summary()["third_party_domain_count"] == 5
+
+    ces.ingest_hudsonrock_domain(db, 1, result, now=NOW)
+    rows = (
+        db.query(StealerUrlExposure)
+        .filter_by(audience="third_party")
+        .order_by(StealerUrlExposure.priority_score.desc())
+        .all()
+    )
+    # The org's own domain is skipped; masked entries are dropped at parse time.
+    assert [r.host for r in rows] == [
+        "microsoftonline.com", "atlassian.com", "claroty.com", "com.microsoft.rdc.androidx",
+    ]
+    assert rows[0].severity in ("high", "critical") and rows[0].asset_id is None
+    assert rows[-1].login_category == "mobile_app"
 
 
 def test_ingest_email_infections_dedup_per_machine(db):
@@ -339,6 +386,9 @@ def test_stealer_url_routes_are_org_scoped(db):
     page = routes.list_stealer_urls(audience="employee", status_filter="open", asset_matched=False,
                                     limit=50, offset=0, db=db, current_user=user1)
     assert page.total == 3 and page.items[0].login_category == "sso"
+    third = routes.list_stealer_urls(audience="third_party", status_filter="open", asset_matched=False,
+                                     limit=50, offset=0, db=db, current_user=user1)
+    assert third.items[0].host == "microsoftonline.com"
     other = routes.list_stealer_urls(audience=None, status_filter=None, asset_matched=False,
                                      limit=50, offset=0, db=db, current_user=user2)
     assert other.total == 0

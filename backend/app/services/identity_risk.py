@@ -276,3 +276,81 @@ def score_stealer_url(
 
     score = min(100, sum(f.points for f in factors))
     return score, severity_for(score), category, factors
+
+
+# ── Third-party services used with work logins ───────────────────────────────
+
+def _domain_rx(domains: Iterable[str]) -> re.Pattern[str]:
+    return re.compile(r"(?:^|\.)(?:" + "|".join(re.escape(d) for d in domains) + r")$", re.I)
+
+
+# (category, points, detail, domains). First match wins.
+THIRD_PARTY_CATEGORIES: tuple[tuple[str, int, str, re.Pattern[str]], ...] = (
+    ("identity_provider", 35,
+     "Cloud identity provider: the captured login is likely the corporate SSO account",
+     _domain_rx([
+         "microsoftonline.com", "windowsazure.com", "azure.com", "microsoft.com", "live.com",
+         "office.com", "office365.com", "okta.com", "oktapreview.com", "onelogin.com",
+         "pingidentity.com", "pingone.com", "auth0.com", "duosecurity.com", "accounts.google.com",
+     ])),
+    ("code_and_cloud", 30,
+     "Source code, CI or cloud console: direct path to code, secrets or infrastructure",
+     _domain_rx([
+         "github.com", "gitlab.com", "bitbucket.org", "atlassian.com", "atlassian.net",
+         "amazonaws.com", "aws.amazon.com", "console.cloud.google.com", "cloud.google.com",
+         "digitalocean.com", "heroku.com", "vercel.com", "jfrog.io", "docker.com",
+     ])),
+    ("business_saas", 25,
+     "Business SaaS holding company data",
+     _domain_rx([
+         "salesforce.com", "force.com", "servicenow.com", "service-now.com", "workday.com",
+         "myworkday.com", "sap.com", "successfactors.com", "slack.com", "zoom.us", "webex.com",
+         "box.com", "dropbox.com", "sharepoint.com", "docusign.com", "docusign.net",
+         "concur.com", "coupa.com", "ariba.com", "zendesk.com", "hubspot.com",
+     ])),
+    ("remote_access", 30,
+     "Remote access or VPN service",
+     _domain_rx(["zscaler.net", "zscaler.com", "citrix.com", "cloud.com", "teamviewer.com",
+                 "logmein.com", "anydesk.com", "paloaltonetworks.com"])),
+)
+
+# Mobile app identifiers look like reversed domains (com.microsoft.rdc.androidx).
+_APP_PACKAGE_RX = re.compile(r"^(?:com|org|net|io|android)\.[a-z0-9_]+\.", re.I)
+
+
+def classify_third_party(domain: str, org_domains: Iterable[str] = ()) -> tuple[str, int, str]:
+    domain = (domain or "").lower()
+    for org in org_domains:
+        org = (org or "").lower()
+        if org and (domain == org or domain.endswith("." + org)):
+            return "own_domain", 0, "Organization's own domain (covered by its login URLs)"
+    if _APP_PACKAGE_RX.match(domain):
+        return "mobile_app", 5, "Mobile app login on an infected device"
+    for category, points, detail, pattern in THIRD_PARTY_CATEGORIES:
+        if pattern.search(domain):
+            return category, points, detail
+    return "vendor_portal", 15, "Supplier, partner or vendor portal (supply-chain access)"
+
+
+def score_third_party(
+    *,
+    domain: str,
+    occurrence: int,
+    last_compromised: Optional[datetime],
+    org_domains: Iterable[str] = (),
+    now: Optional[datetime] = None,
+) -> tuple[int, str, str, list[ScoreFactor]]:
+    """Return (priority 0-100, severity, category, factors)."""
+    category, points, detail = classify_third_party(domain, org_domains)
+    factors = [ScoreFactor("third_party_category", points, detail)]
+    if category != "own_domain":
+        factors.append(ScoreFactor(
+            "work_login_reuse", 15, "Employees used their work login on this service"
+        ))
+    vol = volume_points(occurrence)
+    factors.append(ScoreFactor("volume", vol, f"{occurrence} infected machine(s) saved this login"))
+    rec, rec_detail = recency_points(last_compromised, now)
+    rec = rec // 2
+    factors.append(ScoreFactor("recency", rec, f"Latest employee infection: {rec_detail.lower()}"))
+    score = min(100, sum(f.points for f in factors))
+    return score, severity_for(score), category, factors

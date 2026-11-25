@@ -209,7 +209,7 @@ class StealerUrlExposure(Base):
     domain = Column(String(255), nullable=False)
     url = Column(String(2000), nullable=False)
     host = Column(String(255), nullable=True, index=True)
-    audience = Column(String(20), nullable=False)  # employee | user
+    audience = Column(String(20), nullable=False)  # employee | user | third_party
     occurrence = Column(Integer, nullable=False, default=0)
     login_category = Column(String(30), nullable=True)  # sso | mfa | remote_access | ...
     last_compromised_at = Column(DateTime, nullable=True)

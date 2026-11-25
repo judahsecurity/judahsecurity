@@ -264,7 +264,7 @@ class DomainSummaryOut(BaseModel):
 
 @router.get("/stealer-urls", response_model=Page)
 def list_stealer_urls(
-    audience: Optional[str] = Query(None, description="employee or user"),
+    audience: Optional[str] = Query(None, description="employee, user or third_party"),
     status_filter: Optional[str] = Query("open", alias="status"),
     asset_matched: bool = Query(False, description="Only URLs on inventory hosts"),
     limit: int = Query(50, ge=1, le=500),
