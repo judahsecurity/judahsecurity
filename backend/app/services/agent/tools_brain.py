@@ -1013,3 +1013,19 @@ class EngagementBrainToolsMixin:
             },
             indent=2,
         )[:_tool_output_max_chars()]
+
+
+# Tool specs (see tool_specs.py): registry, phase map and prompt docs come from here.
+from app.services.agent.tool_specs import ALL_PHASES, write_tool  # noqa: E402
+
+TOOL_SPECS = (
+    write_tool(
+        'record_defense_profile',
+        (
+            "Record/read the WAF profile (vendor, blocked_patterns, bypass_confirmed, bypass_failed) "
+            "plus exhausted techniques, effective payloads and prior-run memory for this origin "
+            "(context only, never proof). HTTP responses update block signatures automatically. "
+        ),
+        phases=ALL_PHASES, section='Engagement Memory',
+    ),
+)

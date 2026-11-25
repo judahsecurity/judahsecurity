@@ -335,7 +335,6 @@ class ASMToolsManager(
             "log_engagement_approach": self.log_engagement_approach,
             "add_engagement_credential": self.add_engagement_credential,
             "get_engagement_brain": self.get_engagement_brain,
-            "record_defense_profile": self.record_defense_profile,
             "get_methodology_progress": self.get_methodology_progress,
             "lookup_methodology_procedure": self.lookup_methodology_procedure,
             "ingest_urls_into_map": self.ingest_urls_into_map,
@@ -390,7 +389,6 @@ class ASMToolsManager(
             "run_poc_python": self.run_custom_probe,
             "sandbox_shell": self.sandbox_shell,
             "list_captured_requests": self.list_captured_requests,
-            "diff_stored_exchanges": self.diff_stored_exchanges,
             "plan_intruder_mutations": self.plan_intruder_mutations,
             "run_intruder_batch": self.run_intruder_batch,
             "mutate_captured_request": self.mutate_captured_request,
@@ -407,14 +405,6 @@ class ASMToolsManager(
             "compact_context": self.compact_context,
             "load_prior_hunt": self.load_prior_hunt,
             # Ported from Aegis Vanguard: probes and recon intel (leads only)
-            "probe_server_prototype_pollution": self.probe_server_prototype_pollution,
-            "probe_graphql": self.probe_graphql,
-            "probe_vcs_exposure": self.probe_vcs_exposure,
-            "probe_grpc_reflection": self.probe_grpc_reflection,
-            "probe_websocket_origin": self.probe_websocket_origin,
-            "fingerprint_gitlab": self.fingerprint_gitlab,
-            "query_mail_security": self.query_mail_security,
-            "detect_third_party_vendors": self.detect_third_party_vendors,
         }
         # Optional: web search (RedAmon-style) when Tavily API key is set
         if getattr(settings, "TAVILY_API_KEY", None):
@@ -424,6 +414,14 @@ class ASMToolsManager(
         tools["search_vulnx"] = self.search_vulnx       # single CVE deep-dive by ID
         tools["vulnx_query"] = self.vulnx_query         # search CVEs by technology/query
         tools.update({name: getattr(self, name) for name in CAPABILITY_TOOLS})
+        # Declarative tools (tool_specs.py). A spec may not shadow a legacy entry.
+        from app.services.agent.tool_specs import bind_specs
+
+        declared = bind_specs(self)
+        clash = sorted(set(declared) & set(tools))
+        if clash:
+            raise ValueError(f"tool specs shadow registered tools: {clash}")
+        tools.update(declared)
         return tools
 
     def get_tool(self, name: str) -> Optional[callable]:

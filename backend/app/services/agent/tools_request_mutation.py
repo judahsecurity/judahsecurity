@@ -613,3 +613,19 @@ class RequestMutationToolsMixin:
             blob = blob or (getattr(self, "_fallback_target", None) or "")
         result = generate_mutations(kind, blob, count=count)
         return json.dumps(result, indent=2)[:_tool_output_max_chars()]
+
+
+# Tool specs (see tool_specs.py): registry, phase map and prompt docs come from here.
+from app.services.agent.tool_specs import ALL_PHASES, read_tool  # noqa: E402
+
+TOOL_SPECS = (
+    read_tool(
+        'diff_stored_exchanges',
+        (
+            "Diff two recorded exchanges by evidence_id (or capture id) without re-sending: status, "
+            "length, body similarity, timing, response-header name deltas, class deltas. Args: "
+            "baseline_id, candidate_id. A difference is a lead, not proof. "
+        ),
+        phases=ALL_PHASES, section='Request Analysis',
+    ),
+)

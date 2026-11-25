@@ -270,3 +270,113 @@ async def _dns_resolve(name: str, rtype: str) -> list:
         else:
             out.append(record.to_text())
     return out
+
+
+# Tool specs (see tool_specs.py): registry, phase map and prompt docs come from here.
+from app.services.agent.tool_specs import ACTIVE_PHASES, ALL_PHASES, read_tool, write_tool  # noqa: E402
+
+PORTED_SECTION = 'Ported Probe & Recon Tools (leads only; never create findings)'
+TOOL_SECTION_NOTES = {
+    PORTED_SECTION: (
+        "Each returns verdict LEAD | NO_SIGNAL | INCONCLUSIVE with leads (signal, strength, "
+        "evidence_ids, next_step). Every request is scope-checked and recorded as evidence; POST "
+        "vectors need an operator-approved path under a scoped policy and are reported as skipped "
+        "otherwise. Confirm a lead, then submit_finding_candidate with its evidence_ids. "
+    ),
+}
+
+TOOL_SPECS = (
+    write_tool(
+        'probe_server_prototype_pollution',
+        (
+            "Server-side prototype pollution. Args: **url** (required), use_auth_session (default "
+            "true), identity, hypothesis_id, coverage_cell_id. Sends an inert nonce property via "
+            "`__proto__[k]` / `constructor[prototype][k]` query params and JSON bodies, each with a "
+            "plain-property control, then re-fetches the baseline. strong = marker persisted on a "
+            "fresh request; medium = reflected only for the pollution vector; weak = 200 to 5xx flip. "
+            "A vulnerable server keeps the inert property until restart. Client-side pollution stays "
+            "with scoped_client_probe_assigned. Example: "
+            "probe_server_prototype_pollution(url=\"https://api.target.com/v1/settings\") "
+        ),
+        phases=ACTIVE_PHASES, section=PORTED_SECTION,
+    ),
+    write_tool(
+        'probe_graphql',
+        (
+            "GraphQL introspection, field suggestions, batching (2 queries) and GET-query execution. "
+            "Args: **url** (required, the GraphQL endpoint), use_auth_session, identity, "
+            "hypothesis_id, coverage_cell_id. Falls back to GET introspection when POST is not "
+            "approved. Introspection or suggestions alone are informational; pair with an "
+            "authorization or mutation impact. Example: "
+            "probe_graphql(url=\"https://target.com/graphql\") "
+        ),
+        phases=ACTIVE_PHASES, section=PORTED_SECTION,
+    ),
+    write_tool(
+        'probe_vcs_exposure',
+        (
+            "Exposed .git / .svn check. Args: **url** (required; origin or sub-app path), "
+            "hypothesis_id. Anonymous GETs of .git HEAD, config, index, logs/HEAD, packed-refs and "
+            ".svn wc.db, entries, confirmed by file signature (soft-404 pages do not count). Extracts "
+            "remotes, branches and index size; credentials in .git/config (URL userinfo, "
+            "http.extraheader, password keys) are returned only as fingerprints. Never try recovered "
+            "credentials. Example: probe_vcs_exposure(url=\"https://target.com\") "
+        ),
+        phases=ALL_PHASES, section=PORTED_SECTION,
+    ),
+    write_tool(
+        'probe_grpc_reflection',
+        (
+            "Unauthenticated gRPC server reflection. Args: **url** (required, gRPC origin), "
+            "hypothesis_id. ListServices over HTTP/2 (grpc.reflection v1, v1alpha), then gRPC-Web "
+            "over HTTP/1.1. Lists service names only and never calls application methods; grpcurl is "
+            "not used. UNIMPLEMENTED means reflection is off; UNAUTHENTICATED means it is protected. "
+            "Example: probe_grpc_reflection(url=\"https://grpc.target.com\") "
+        ),
+        phases=ACTIVE_PHASES, section=PORTED_SECTION,
+    ),
+    write_tool(
+        'probe_websocket_origin',
+        (
+            "WebSocket Origin check (CSWSH). Args: **url** (required; ws, wss, http or https), "
+            "subprotocol, use_auth_session (default true, CSWSH needs ambient cookies), identity, "
+            "hypothesis_id, coverage_cell_id. Same-origin control handshake, then a nonce foreign "
+            "Origin, Origin null and no Origin; only a 101 with a valid Sec-WebSocket-Accept counts. "
+            "Handshakes only. A lead needs a cross-site read or write of user data over the socket. "
+            "Example: probe_websocket_origin(url=\"wss://app.target.com/socket\") "
+        ),
+        phases=ACTIVE_PHASES, section=PORTED_SECTION,
+    ),
+    read_tool(
+        'fingerprint_gitlab',
+        (
+            "GitLab version fingerprint by SHA-256 of /help stylesheets against a local hash DB "
+            "(GITLAB_HASH_DB_PATH), with the CVE-2021-22205 range. Args: **url** (required), "
+            "max_assets (default 20, max 50). Read-only GETs; cross-origin stylesheets are skipped. A "
+            "version in range is a lead; confirm the version from a second source. Example: "
+            "fingerprint_gitlab(url=\"https://gitlab.target.com\") "
+        ),
+        phases=ALL_PHASES, section=PORTED_SECTION,
+    ),
+    read_tool(
+        'query_mail_security',
+        (
+            "DNS-only mail posture for one in-scope domain: MX and provider, SPF (all qualifier, "
+            "duplicates, lookup count), DMARC policy, DKIM at common selectors, BIMI, MTA-STS, DANE "
+            "TLSA. Args: **domain** (required). No target HTTP traffic. Weak SPF/DMARC is a spoofing "
+            "lead, reportable only where the program counts mail posture. Example: "
+            "query_mail_security(domain=\"target.com\") "
+        ),
+        phases=ALL_PHASES, section=PORTED_SECTION,
+    ),
+    read_tool(
+        'detect_third_party_vendors',
+        (
+            "Third-party vendor inventory for one page from the body and CSP header, plus external "
+            "scripts without Subresource Integrity and unclassified script hosts. Args: **url** "
+            "(required). One read-only GET. Inventory for supply-chain review, not a finding. "
+            "Example: detect_third_party_vendors(url=\"https://target.com\") "
+        ),
+        phases=ALL_PHASES, section=PORTED_SECTION,
+    ),
+)

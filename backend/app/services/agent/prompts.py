@@ -405,7 +405,6 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **run_custom_probe** / **run_poc_python**: Sandboxed Python HTTP PoC (json/re/httpx only). In-scope hosts plus Interactsh/OAST. Never metadata/localhost. Args: **source** (Python that prints results), allowed_hosts (optional), timeout_sec (default 20). Not a shell.
 - **sandbox_shell**: Run a shell command in the isolated probe runner when enabled (bash, curl, jq, sqlmap, ffuf, python with requests/httpx/pyjwt). Args: command, allowed_hosts (optional), timeout_sec (default 60, max 120). Only in-scope hosts and OAST are reachable, over HTTP(S); every exchange is recorded as evidence. Pass ffuf -x "$PROBE_PROXY" and sqlmap --proxy="$PROBE_PROXY". For non-HTTP TCP prefix with proxychains4 (e.g. proxychains4 nmap -sT -Pn -sV -p 22,6379 host; connect scans only, logged under tcp). Destructive flags (--os-shell, --dump-all, --risk=3, brute/dos/exploit NSE scripts, brute-force tools) are refused.
 - **list_captured_requests**: Index XHR/API samples from the crawl map. Use its sample_ref with mutate_captured_request so later map changes cannot switch the request being tested. Each sample lists response classes seen on capture or replay (sql_error, template_error, debug_error, filter_blocked, input_reflected, access_denied, rate_limited, ...) with adaptive_hints; classification="sql_error" keeps only those samples.
-- **diff_stored_exchanges**: Diff two recorded exchanges by evidence_id (or capture id) without re-sending: status, length, body similarity, timing, response-header name deltas, class deltas. Args: baseline_id, candidate_id. A difference is a lead, not proof.
 - **plan_intruder_mutations**: Build a dry-run, bounded queue of one-field authorization, boundary, injection-canary, and URL-fetch mutations from captured requests. Read-only methods only by default. Review this before active execution.
 - **run_intruder_batch**: Execute up to 12 planned differential mutations at a bounded rate. Always confirmation-gated; state-changing methods remain excluded unless allow_state_change=true is explicitly approved. A difference is a lead, not a confirmed finding.
 - **mutate_captured_request**: Change ONE field on a captured request and send (baseline vs mutant). Args: sample_index, location (query|header|cookie|body_json|body_form|path|method), field, value, compare (default true). location=cookie changes one cookie by name and keeps the rest (session/CSRF cookies are refused); location=path with field=path[N] replaces the Nth path segment. Plant Interactsh URLs for SSRF — not 169.254.169.254.
@@ -622,18 +621,7 @@ These tools implement specialized offensive test workflows and require the explo
 - **lookup_methodology_procedure**: Load short Burp-style HOW-TO packs for a methodology_id (CSRF, IDOR, XSS, session tokens, …). Call when an open card needs concrete steps. Args: methodology_id or methodology_ids.
 - **ingest_urls_into_map**: Merge katana/gau/wayback/httpx URL lists into the capability map and refresh methodologies.
 - **add_engagement_credential** / **log_engagement_approach** / **get_engagement_brain**: Persist creds, tried approaches, inspect brain + checklist. log_engagement_approach(category=sqli|xss|…) marks a failed technique exhausted for that endpoint+category; result=success with payload=… saves an effective payload.
-- **record_defense_profile**: Record/read the WAF profile (vendor, blocked_patterns, bypass_confirmed, bypass_failed) plus exhausted techniques, effective payloads and prior-run memory for this origin (context only, never proof). HTTP responses update block signatures automatically.
 
-### Ported Probe & Recon Tools (leads only; never create findings)
-Each returns verdict LEAD | NO_SIGNAL | INCONCLUSIVE with leads (signal, strength, evidence_ids, next_step). Every request is scope-checked and recorded as evidence; POST vectors need an operator-approved path under a scoped policy and are reported as skipped otherwise. Confirm a lead, then submit_finding_candidate with its evidence_ids.
-- **probe_server_prototype_pollution**: Server-side prototype pollution. Args: **url** (required), use_auth_session (default true), identity, hypothesis_id, coverage_cell_id. Sends an inert nonce property via `__proto__[k]` / `constructor[prototype][k]` query params and JSON bodies, each with a plain-property control, then re-fetches the baseline. strong = marker persisted on a fresh request; medium = reflected only for the pollution vector; weak = 200 to 5xx flip. A vulnerable server keeps the inert property until restart. Client-side pollution stays with scoped_client_probe_assigned. Example: probe_server_prototype_pollution(url="https://api.target.com/v1/settings")
-- **probe_graphql**: GraphQL introspection, field suggestions, batching (2 queries) and GET-query execution. Args: **url** (required, the GraphQL endpoint), use_auth_session, identity, hypothesis_id, coverage_cell_id. Falls back to GET introspection when POST is not approved. Introspection or suggestions alone are informational; pair with an authorization or mutation impact. Example: probe_graphql(url="https://target.com/graphql")
-- **probe_vcs_exposure**: Exposed .git / .svn check. Args: **url** (required; origin or sub-app path), hypothesis_id. Anonymous GETs of .git HEAD, config, index, logs/HEAD, packed-refs and .svn wc.db, entries, confirmed by file signature (soft-404 pages do not count). Extracts remotes, branches and index size; credentials in .git/config (URL userinfo, http.extraheader, password keys) are returned only as fingerprints. Never try recovered credentials. Example: probe_vcs_exposure(url="https://target.com")
-- **probe_grpc_reflection**: Unauthenticated gRPC server reflection. Args: **url** (required, gRPC origin), hypothesis_id. ListServices over HTTP/2 (grpc.reflection v1, v1alpha), then gRPC-Web over HTTP/1.1. Lists service names only and never calls application methods; grpcurl is not used. UNIMPLEMENTED means reflection is off; UNAUTHENTICATED means it is protected. Example: probe_grpc_reflection(url="https://grpc.target.com")
-- **probe_websocket_origin**: WebSocket Origin check (CSWSH). Args: **url** (required; ws, wss, http or https), subprotocol, use_auth_session (default true, CSWSH needs ambient cookies), identity, hypothesis_id, coverage_cell_id. Same-origin control handshake, then a nonce foreign Origin, Origin null and no Origin; only a 101 with a valid Sec-WebSocket-Accept counts. Handshakes only. A lead needs a cross-site read or write of user data over the socket. Example: probe_websocket_origin(url="wss://app.target.com/socket")
-- **fingerprint_gitlab**: GitLab version fingerprint by SHA-256 of /help stylesheets against a local hash DB (GITLAB_HASH_DB_PATH), with the CVE-2021-22205 range. Args: **url** (required), max_assets (default 20, max 50). Read-only GETs; cross-origin stylesheets are skipped. A version in range is a lead; confirm the version from a second source. Example: fingerprint_gitlab(url="https://gitlab.target.com")
-- **query_mail_security**: DNS-only mail posture for one in-scope domain: MX and provider, SPF (all qualifier, duplicates, lookup count), DMARC policy, DKIM at common selectors, BIMI, MTA-STS, DANE TLSA. Args: **domain** (required). No target HTTP traffic. Weak SPF/DMARC is a spoofing lead, reportable only where the program counts mail posture. Example: query_mail_security(domain="target.com")
-- **detect_third_party_vendors**: Third-party vendor inventory for one page from the body and CSP header, plus external scripts without Subresource Integrity and unclassified script hosts. Args: **url** (required). One read-only GET. Inventory for supply-chain review, not a finding. Example: detect_third_party_vendors(url="https://target.com")
 """
 
     exploitation_tools = """
@@ -688,7 +676,10 @@ Do not put credentials or bearer tokens in tool arguments. Use the service's art
     
     if phase == "post_exploitation" and post_expl_enabled:
         tools += post_exploitation_tools
-    
+
+    # Declarative tools document themselves (tool_specs.py).
+    from app.services.agent.tool_specs import spec_docs
+    tools += spec_docs(phase)
     return tools
 
 
@@ -838,7 +829,6 @@ TOOL_PHASE_MAP = {
     "sandbox_shell": ["informational", "exploitation", "post_exploitation"],
     "run_poc_python": ["informational", "exploitation", "post_exploitation"],
     "list_captured_requests": ["informational", "exploitation", "post_exploitation"],
-    "diff_stored_exchanges": ["informational", "exploitation", "post_exploitation"],
     "plan_intruder_mutations": ["informational", "exploitation", "post_exploitation"],
     "run_intruder_batch": ["informational", "exploitation", "post_exploitation"],
     "mutate_captured_request": ["informational", "exploitation", "post_exploitation"],
@@ -920,14 +910,6 @@ TOOL_PHASE_MAP = {
     "test_saml_sso": ["exploitation", "post_exploitation"],
     "test_credential_spray": ["exploitation", "post_exploitation"],
     # Ported from Aegis Vanguard (leads only)
-    "probe_server_prototype_pollution": ["exploitation", "post_exploitation"],
-    "probe_graphql": ["exploitation", "post_exploitation"],
-    "probe_grpc_reflection": ["exploitation", "post_exploitation"],
-    "probe_websocket_origin": ["exploitation", "post_exploitation"],
-    "probe_vcs_exposure": ["informational", "exploitation", "post_exploitation"],
-    "fingerprint_gitlab": ["informational", "exploitation", "post_exploitation"],
-    "query_mail_security": ["informational", "exploitation", "post_exploitation"],
-    "detect_third_party_vendors": ["informational", "exploitation", "post_exploitation"],
 
     "map_application_traffic": ["informational", "exploitation", "post_exploitation"],
     "generate_authorization_matrix": ["informational", "exploitation", "post_exploitation"],
@@ -960,7 +942,6 @@ TOOL_PHASE_MAP = {
     "log_engagement_approach": ["informational", "exploitation", "post_exploitation"],
     "add_engagement_credential": ["informational", "exploitation", "post_exploitation"],
     "get_engagement_brain": ["informational", "exploitation", "post_exploitation"],
-    "record_defense_profile": ["informational", "exploitation", "post_exploitation"],
     "get_methodology_progress": ["informational", "exploitation", "post_exploitation"],
     "lookup_methodology_procedure": ["informational", "exploitation", "post_exploitation"],
     "ingest_urls_into_map": ["informational", "exploitation", "post_exploitation"],
@@ -973,6 +954,18 @@ TOOL_PHASE_MAP = {
     "run_port_scan": ["informational", "exploitation", "post_exploitation"],
     "check_http_status": ["informational", "exploitation", "post_exploitation"],
 }
+
+
+def _merge_spec_phases() -> None:
+    from app.services.agent.tool_specs import spec_phase_map
+
+    for name, phases in spec_phase_map().items():
+        if name in TOOL_PHASE_MAP:
+            raise ValueError(f"tool spec {name} is also in the hand-written TOOL_PHASE_MAP")
+        TOOL_PHASE_MAP[name] = phases
+
+
+_merge_spec_phases()
 
 
 def is_tool_allowed_in_phase(tool_name: str, phase: str) -> bool:
