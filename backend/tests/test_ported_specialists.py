@@ -262,7 +262,9 @@ def test_thin_lanes_extended_in_existing_packs():
 
 
 def test_ported_probe_tools_are_granted_to_their_lanes():
-    from app.services.agent.fireteam_service import _PORTED_TOOL_GRANTS, get_specialist
+    from app.services.agent.fireteam_service import (
+        DEFAULT_SPECIALISTS, _PORTED_TOOL_GRANTS, get_specialist,
+    )
     from app.services.agent.tools import ASMToolsManager
 
     registry = ASMToolsManager().tools
@@ -274,3 +276,6 @@ def test_ported_probe_tools_are_granted_to_their_lanes():
     injection = get_specialist("injection")
     assert "record_defense_profile" in injection.allowed_tools
     assert "record_defense_profile" in registry
+    comparers = [p for p in DEFAULT_SPECIALISTS if "compare_requests" in p.allowed_tools]
+    assert comparers and all("diff_stored_exchanges" in p.allowed_tools for p in comparers)
+    assert "diff_stored_exchanges" in registry
