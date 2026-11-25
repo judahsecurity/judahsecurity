@@ -70,6 +70,9 @@ COVERAGE_TO_PROOF = {
     "request_url_override": None, "client_template_injection": "client_template_injection",
     "client_prototype_pollution": "client_prototype_pollution",
     "js_dependency_review": "known_cve",
+    # Login/reset/session/JWT endpoint review. No proof kind confirms it
+    # (JWT forgery proves under "jwt"), so it can only produce leads.
+    "auth": None,
 }
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f​-‏ -‮⁦-⁩﻿]")

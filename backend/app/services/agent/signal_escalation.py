@@ -225,6 +225,7 @@ def queue_signal_escalation(
                 continue
             if cell.get("status") not in {"finding", "tested_clean", "skipped"}:
                 cell["status"] = "in_focus"
+                cell["status_detail"] = "candidate"
             cell["proof_escalation_id"] = eid
             cell["proof_strategy"] = strategy
             cell["proof_requirements"] = list(requirements)

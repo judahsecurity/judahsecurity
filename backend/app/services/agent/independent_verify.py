@@ -2308,13 +2308,20 @@ def apply_verdict(
             )
             if cand.proof_run_id:
                 cell["proof_run_id"] = cand.proof_run_id
+            if cell.get("status") == "finding":
+                # A published finding is sticky; a later duplicate candidate's
+                # verdict on the same cell cannot reopen or clear it.
+                continue
             if verdict == "refuted":
-                cell.update(status="tested_clean", reason=cand.verifier_summary or
+                cell.update(status="tested_clean", status_detail="rejected",
+                            reason=cand.verifier_summary or
                             cand.counterevidence.get("observation", "Independent control held"))
             elif verdict == "confirmed":
-                cell.update(status="in_focus", reason="Confirmed candidate awaits publication")
+                cell.update(status="in_focus", status_detail="validated",
+                            reason="Confirmed candidate awaits publication")
             else:
-                cell.update(status="inconclusive", reason=cand.proof_gap.get("reason") or
+                cell.update(status="inconclusive", status_detail="",
+                            reason=cand.proof_gap.get("reason") or
                             "Independent verification was inconclusive")
     if cand.proof_escalation_id:
         from app.services.agent.signal_escalation import apply_verifier_result
