@@ -168,19 +168,37 @@ never directs the probe.
 
 Prowl's leased scoped probes then build the request from the intent:
 
-| Class | Locations |
-|-------|-----------|
-| ssti, command_injection, path_traversal | query, header, cookie, body_form, body_json |
-| crlf, open_redirect | query, header, cookie, body_form, body_json |
-| nosql | query, body_form, body_json |
+| Class | Locations | Methods |
+|-------|-----------|---------|
+| ssti, command_injection, path_traversal | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
+| crlf, open_redirect | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
+| sqli (string Boolean OR/AND, error, time) | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
+| nosql | query, body_form, body_json | GET, POST, PUT, PATCH, DELETE |
+| xss (browser nonce execution) | query, fragment | GET |
 
-GET only, or POST for body locations on a `body_replay_paths` path (as for
-captured bodies). Host, Cookie, Authorization, framing, X-Forwarded-Host and
-credential-like headers, and credential-like or HttpOnly identity cookies, are
-never mutated. Anything else (path, fragment, body_xml, PUT/PATCH/DELETE, other
-classes such as xss/sqli) stays open/inconclusive with `unsupported_shape` and
-the intent is `blocked`; it is never `tested_clean`. A probe signal is still a
-lead until Prowl's independent verifier replays it. `intents --session S` shows
+Body locations need a non-GET method. `body_xml` takes an element name or a
+path (`xml:order.note` becomes `/order/note`); the value is XML-escaped into
+one text node, no DOCTYPE. `path` names one segment by 0-based index
+(`path:2`) or its exact literal (`path:alice`); only that segment changes.
+`fragment` is client-side only (the server never receives it), so only xss
+tests it (`fragment:q` makes `#q=<payload>`, `fragment:*` makes `#<payload>`).
+
+Method approval comes from the start `--policy-file`: GET is free; POST needs
+the path in `body_replay_paths`; PUT/PATCH/DELETE need an exact
+`write_method_paths: [{"method": "PUT", "path": "/api/profile"}]` entry, and a
+DELETE path must also be an approved cleanup path
+(`stored_xss_cleanup_paths`, `race_cleanup_paths` or `csrf_cleanup_paths`):
+DELETE only reaches an endpoint the operator designated for removing Prowl's
+own canaries. Without approval the probe returns `operator_approval_required`
+and the cell stays open. PUT/PATCH probes overwrite the one named field with
+inert and probe values; approve only resources you can reset. Host, Cookie,
+Authorization, framing, X-Forwarded-Host and credential-like headers, and
+credential-like or HttpOnly identity cookies, are never mutated. Anything else
+(xss on header/cookie/body/path, sqli/server classes on fragment, nosql on
+header/cookie/xml/path, a path segment the URL lacks) stays open/inconclusive
+with `unsupported_shape` and the intent is `blocked`; it is never
+`tested_clean`. A probe signal is still a lead until Prowl's independent
+verifier replays it with the same request builder. `intents --session S` shows
 status, result facts and the backing cell's status.
 
 ### Test identities (closed gap)

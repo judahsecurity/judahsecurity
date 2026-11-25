@@ -129,6 +129,7 @@ class ScopedAssessmentTools:
         csrf_action_paths = policy.get("csrf_action_paths") or []
         csrf_cleanup_paths = policy.get("csrf_cleanup_paths") or []
         expectations = policy.get("owner_only_resources") or []
+        write_rows = policy.get("write_method_paths") or []
         auth_login_path = policy.get("auth_login_path") or ""
         if (auth_login_path and (not isinstance(auth_login_path, str)
                 or not auth_login_path.startswith("/") or auth_login_path.startswith("//")
@@ -142,13 +143,25 @@ class ScopedAssessmentTools:
                 or not isinstance(race_cleanup_paths, list) or len(race_cleanup_paths) > 8
                 or not isinstance(csrf_action_paths, list) or len(csrf_action_paths) > 8
                 or not isinstance(csrf_cleanup_paths, list) or len(csrf_cleanup_paths) > 8
-                or not isinstance(expectations, list) or len(expectations) > 8):
+                or not isinstance(expectations, list) or len(expectations) > 8
+                or not isinstance(write_rows, list) or len(write_rows) > 8):
             raise ValueError("Invalid bounded assessment policy")
+        write_methods = set()
+        for row in write_rows:
+            if (not isinstance(row, dict) or set(row) != {"method", "path"}
+                    or row.get("method") not in {"PUT", "PATCH", "DELETE"}):
+                raise ValueError("Invalid write method approval")
+            write_methods.add((row["method"], row["path"]))
         for path in [*paths, *cleanup_paths, *race_action_paths, *race_cleanup_paths,
-                     *csrf_action_paths, *csrf_cleanup_paths]:
+                     *csrf_action_paths, *csrf_cleanup_paths,
+                     *(path for _method, path in write_methods)]:
             if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
                     or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Invalid approved write or cleanup path")
+        cleanup_union = set(cleanup_paths) | set(race_cleanup_paths) | set(csrf_cleanup_paths)
+        if any(method == "DELETE" and path not in cleanup_union for method, path in write_methods):
+            # DELETE only reaches an endpoint the operator designated for canary cleanup.
+            raise ValueError("A DELETE write approval must also be an approved cleanup path")
         approved = {}
         for row in expectations:
             if not isinstance(row, dict):
@@ -171,9 +184,10 @@ class ScopedAssessmentTools:
         self._scoped_csrf_action_paths = set(csrf_action_paths)
         self._scoped_csrf_cleanup_paths = set(csrf_cleanup_paths)
         self._scoped_owner_expectations = approved
+        self._scoped_write_method_paths = write_methods
         self._scoped_auth_login_path = auth_login_path
         if (paths or cleanup_paths or race_action_paths or race_cleanup_paths
-                or csrf_action_paths or csrf_cleanup_paths or approved):
+                or csrf_action_paths or csrf_cleanup_paths or approved or write_methods):
             self._scoped_assessment_started = True
 
     def _scoped_origin(self, url: str) -> str:

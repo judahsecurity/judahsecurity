@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -386,12 +387,58 @@ def test_probe_accepts_vanguard_mutation_specs(scope_file, monkeypatch, spec, lo
      "--method"),
     (["--target", "https://app.example.com/x", "--test-type", "ssti",
       "--parameter", "name", "--location", "body_json"], "POST"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "fragment:q"], "client-side"),
+    (["--target", "https://app.example.com/x", "--test-type", "xss",
+      "--parameter", "q", "--location", "query", "--method", "POST"], "GET navigation"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "xml:1bad", "--method", "POST"], "element name"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "path:a/b"], "segment"),
 ])
 def test_probe_refuses_before_any_request(scope_file, monkeypatch, extra, match):
     monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
     args = _probe(scope_file, *extra)
     with pytest.raises(client.ProwlError, match=match):
         args.fn(args)
+
+
+@pytest.mark.parametrize("spec,method,test_type,location,parameter", [
+    ("xml:order.note", "POST", "cmdi", "body_xml", "/order/note"),
+    ("xml:doc", "PUT", "ssti", "body_xml", "doc"),
+    ("path:2", "GET", "sqli", "path", "2"),
+    ("path:alice", "PATCH", "sql", "path", "alice"),
+    ("json:profile.bio", "PATCH", "ssti", "body_json", "/profile/bio"),
+    ("fragment:q", "GET", "xss", "fragment", "q"),
+    ("query:q", "DELETE", "redirect", "query", "q"),
+])
+def test_probe_new_locations_and_write_methods(scope_file, monkeypatch, spec, method,
+                                               test_type, location, parameter):
+    seen = []
+    monkeypatch.setattr(client, "request", lambda m, p, b=None, **k: seen.append(b) or {})
+    args = _probe(scope_file, "--target", "https://app.example.com/api/users/alice",
+                  "--test-type", test_type, "--parameter", spec, "--method", method)
+    args.fn(args)
+    assert (seen[0]["location"], seen[0]["parameter"], seen[0]["method"]) == (
+        location, parameter, method)
+
+
+def test_policy_file_write_methods_checked_locally(tmp_path):
+    ok = tmp_path / "ok.json"
+    ok.write_text(json.dumps({"write_method_paths": [
+        {"method": "PUT", "path": "/api/profile"},
+        {"method": "DELETE", "path": "/api/notes/cleanup"}],
+        "csrf_cleanup_paths": ["/api/notes/cleanup"]}))
+    args = SimpleNamespace(policy_file=str(ok), oob=False)
+    assert client.assessment_policy(args)["write_method_paths"][1]["method"] == "DELETE"
+    for bad, match in (
+            ({"write_method_paths": [{"method": "DELETE", "path": "/api/notes/9"}]}, "cleanup"),
+            ({"write_method_paths": [{"method": "POST", "path": "/api/x"}]}, "PUT|PATCH|DELETE"),
+            ({"write_method_paths": [{"method": "PUT", "path": "/api/x?id=1"}]}, "exact")):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps(bad))
+        with pytest.raises(client.ProwlError, match=match):
+            client.assessment_policy(SimpleNamespace(policy_file=str(path), oob=False))
 
 
 def test_intents_listing(monkeypatch):

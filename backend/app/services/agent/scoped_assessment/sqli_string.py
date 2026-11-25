@@ -32,6 +32,21 @@ ERROR_CHECK_ORDER = (
 )
 _SAFE_VALUE = re.compile(r"[A-Za-z][A-Za-z0-9 _-]{0,39}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+# Intent-built requests (``intent_request``) carry the same recipe on one
+# named input in any server-side location, with the operator-approved method.
+INTENT_SQLI_LOCATIONS = frozenset({"query", "header", "cookie", "body_form", "body_json",
+                                   "body_xml", "path"})
+INTENT_SQLI_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+
+
+def request_shape_valid(result: dict) -> bool:
+    """An observed GET query, or one intent-built input with a matching context."""
+    if result.get("intent_request") is True:
+        location = result.get("location")
+        return (location in INTENT_SQLI_LOCATIONS
+                and result.get("method") in INTENT_SQLI_METHODS
+                and result.get("request_context") == f"intent_{location}")
+    return result.get("method") == "GET" and result.get("location") == "query"
 
 
 def _observed_value(raw_value: str) -> tuple[str, str]:
@@ -179,7 +194,7 @@ def error_followup_eligible(result: dict) -> bool:
 def string_error_proof_valid(result: dict) -> bool:
     if (result.get("operation") != "sqli_error_string"
             or result.get("proof_recipe") != "string_error_v1"
-            or result.get("method") != "GET" or result.get("location") != "query"
+            or not request_shape_valid(result)
             or not result.get("target") or not result.get("parameter")
             or result.get("requests_sent") != len(ERROR_CHECK_ORDER)):
         return False
@@ -299,7 +314,7 @@ def string_sql_proof_valid(result: dict) -> bool:
         "string_or_boolean_v1", "string_and_boolean_v1", "string_or_json_rows_v1",
     }:
         return False
-    if (result.get("method") != "GET" or result.get("location") != "query"
+    if (not request_shape_valid(result)
             or not result.get("target") or not result.get("parameter")
             or result.get("input_encoding", "plain") not in {"plain", "base64"}
             or not re.fullmatch(r"[1-9][0-9]{4}", str(result.get("nonce", "")))):

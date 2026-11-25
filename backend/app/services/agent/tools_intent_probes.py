@@ -10,9 +10,20 @@ call these when a cell is
 * an observed header or cookie input on a GET (no capture is needed to set
   one header or cookie on the observed endpoint).
 
+Intent-backed ``xss`` and ``sqli`` cells go through
+``scoped_input_probe_assigned`` to ``_shaped_input_probe_assigned`` here: XSS
+as a browser nonce navigation (GET query or fragment), SQLi as the string
+Boolean/error/AND/time recipes on any server-side location.
+
 Requests are planned in ``scoped_assessment.intent_request``. When a probe
 works an intent-backed cell the intent is claimed and completed with a
 result fact citing the receipt (planning state, never proof).
+
+Method approval (``_shaped_approval``): GET is free; POST needs the path in
+``body_replay_paths``; PUT/PATCH/DELETE need the exact (method, path) in the
+operator's ``write_method_paths``, and DELETE also needs the path to be an
+approved cleanup path. Without it the probe returns
+``operator_approval_required`` and the cell stays leased/open.
 """
 
 from __future__ import annotations
@@ -78,12 +89,30 @@ class IntentProbeToolsMixin:
         return method, url, location, parameter, context
 
     def _shaped_approval(self, method: str, path: str) -> Optional[str]:
-        """Same POST approval as captured bodies: the path must be in body_replay_paths."""
+        """None when the operator approved this exact method and path, else why not.
+
+        POST: ``body_replay_paths`` (as for captured bodies). PUT/PATCH/DELETE:
+        ``write_method_paths``; DELETE also only on an approved cleanup path.
+        """
         if method == "GET":
             return None
-        if method == "POST" and path in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+        if method == "POST":
+            if path in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+                return None
+            return "POST path is not in body_replay_paths"
+        if method in {"PUT", "PATCH", "DELETE"}:
+            if (method, path) not in (getattr(self, "_scoped_write_method_paths", None) or set()):
+                return f"{method} path is not in write_method_paths"
+            if method == "DELETE" and path not in (
+                    (getattr(self, "_scoped_stored_xss_cleanup_paths", None) or set())
+                    | (getattr(self, "_scoped_race_cleanup_paths", None) or set())
+                    | (getattr(self, "_scoped_csrf_cleanup_paths", None) or set())):
+                return "DELETE path is not an approved cleanup path"
             return None
-        return "POST path is not in body_replay_paths" if method == "POST" else "method_unsupported"
+        return "method_unsupported"
+
+    def _shaped_write_approved(self, method: str, cell: Dict[str, Any]) -> bool:
+        return self._shaped_approval(method, str(cell.get("path") or "/")) is None
 
     def _shaped_shape_error(self, cell: Dict[str, Any], test_type: str) -> str:
         from app.services.agent.scoped_assessment.intent_request import shape_error
@@ -113,6 +142,7 @@ class IntentProbeToolsMixin:
             method=method, url=url, location=location, parameter=parameter,
             test_type=test_type, nonce=nonce, factors=factors, state=state,
             recipes=[recipe] if recipe and test_type != "nosql" else (),
+            write_approved=self._shaped_write_approved(method, cell),
         )
         for planned in requests.values():
             self._scoped_origin(planned.url)
@@ -147,6 +177,7 @@ class IntentProbeToolsMixin:
             method=method, url=url, location=location, parameter=parameter,
             values={"control": control_value, "probe": probe_value},
             state=self._scoped_state(identity, url), test_type=test_type,
+            write_approved=self._shaped_write_approved(method, cell),
         )
         for planned in requests.values():
             self._scoped_origin(planned.url)
@@ -254,3 +285,259 @@ class IntentProbeToolsMixin:
         except (graph.LineageError, ValueError):
             return None
         return {"id": intent_id, "status": done["status"], "result_fact": fact["id"]}
+
+    # ------------------------------------------------------------ xss / sqli
+
+    async def _run_shaped_sqli(self, cell: Dict[str, Any], identity: str, *,
+                               scoped_origin: str, recipe: str = "",
+                               family: str = "") -> dict:
+        """String SQLi recipes on one intent-backed input (hunter or verifier).
+
+        Hunter (no ``recipe``): OR Boolean, then the error or AND follow-up
+        and the time families exactly as the observed GET lane runs them.
+        Verifier: only the hunter's recipe (and SQL family), with fresh nonces.
+        """
+        from app.services.agent.scoped_assessment import intent_request, sqli_string, sqli_time
+
+        method, url, location, parameter, context = self._shaped_base(cell, scoped_origin)
+        path = str(cell.get("path") or "/")
+        if self._shaped_approval(method, path):
+            raise intent_request.ApprovalRequired()
+        state = self._scoped_state(identity, url)
+        target = scoped_origin + path
+        base = intent_request.sqli_baseline_value(url, location, parameter)
+        validators = {"sqli_boolean_string": sqli_string.string_sql_proof_valid,
+                      "sqli_error_string": sqli_string.string_error_proof_valid,
+                      "sqli_time_string": sqli_time.time_sql_proof_valid}
+
+        async def run(name: str, fam: str = "") -> dict:
+            nonce, false_nonce = intent_request.sqli_nonces()
+            values = intent_request.sqli_values(name, base, nonce, false_nonce, fam)
+            requests = intent_request.plan_requests(
+                method=method, url=url, location=location, parameter=parameter,
+                values=values, state=state, test_type="sqli",
+                write_approved=self._shaped_write_approved(method, cell),
+            )
+            for planned in requests.values():
+                self._scoped_origin(planned.url)
+            self._charge(method, len(requests))
+            checks = await asyncio.to_thread(
+                intent_request.probe_sqli_requests, requests, recipe=name,
+                allowed_origin=scoped_origin,
+            )
+            if name == "or":
+                result = sqli_string.build_string_boolean_result(
+                    target, nonce, parameter=parameter, checks=checks)
+            elif name == "and":
+                result = sqli_string.build_string_and_result(
+                    target, nonce, parameter=parameter, checks=checks)
+            elif name == "error":
+                result = sqli_string.build_string_error_result(
+                    target, parameter=parameter, checks=checks)
+            else:
+                result = sqli_time.build_string_time_result(
+                    target, nonce, parameter=parameter, family=fam, checks=checks)
+            result.update(method=method, location=location, request_context=context,
+                          intent_request=True, baseline_source="intent_request")
+            result["proof_confirmed"] = validators[result["operation"]](result)
+            result["finding"] = False
+            return result
+
+        if recipe:
+            name = {"string_or_boolean_v1": "or", "string_or_json_rows_v1": "or",
+                    "string_and_boolean_v1": "and", "string_error_v1": "error",
+                    "string_time_v1": "time"}.get(recipe)
+            if not name or (name == "time" and family not in sqli_time.FAMILIES):
+                raise intent_request.UnsupportedShape("recipe_unknown")
+            result = await run(name, family)
+            result["total_requests_sent"] = result["requests_sent"]
+            return result
+        or_result = await run("or")
+        result, prior = or_result, []
+
+        def done(row: dict) -> None:
+            prior.append({"proof_recipe": row.get("proof_recipe"),
+                          "sql_family": row.get("sql_family", ""),
+                          "proof_confirmed": row.get("proof_confirmed") is True,
+                          "requests_sent": row.get("requests_sent")})
+
+        if result["proof_confirmed"] is not True:
+            if sqli_string.error_followup_eligible(or_result):
+                done(result)
+                result = await run("error")
+            elif sqli_string.and_fallback_eligible(or_result):
+                done(result)
+                result = await run("and")
+        if result["proof_confirmed"] is not True and sqli_time.time_followup_eligible(or_result):
+            for fam in sqli_time.FAMILIES:
+                done(result)
+                result = await run("time", fam)
+                if result["proof_confirmed"] is True:
+                    break
+        result["prior_recipes"] = prior
+        result["total_requests_sent"] = (int(result.get("requests_sent") or 0)
+                                         + sum(int(row["requests_sent"] or 0) for row in prior))
+        return result
+
+    def _shaped_xss_template_matches(self, cell: Dict[str, Any], template: str,
+                                     scoped_origin: str) -> bool:
+        """Whether ``template`` is exactly what browser_template builds for this cell."""
+        from app.services.agent.scoped_assessment import intent_request
+
+        try:
+            _method, url, location, parameter, _context = self._shaped_base(cell, scoped_origin)
+            value = intent_request.browser_template_value(template, location, parameter)
+            return bool(value and "__PROWL_NONCE__" in value and template == (
+                intent_request.browser_template(url, location, parameter, value)))
+        except ValueError:
+            return False
+
+    async def _shaped_input_probe_assigned(
+        self, brain: Any, cell: Dict[str, Any], coverage_lease_id: str,
+        technique: str, variant: str,
+    ) -> Dict[str, Any]:
+        """``scoped_input_probe_assigned`` for intent-backed xss and sqli cells."""
+        import json
+        import time
+
+        from app.services.agent.coverage_cells import parameter_test_funnel, record_sqli_trace
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment import intent_request
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.xss_feedback import (
+            MAX_ATTEMPTS, payload_for, xss_trace,
+        )
+        from app.services.agent.tools_common import _lease_failure_reason
+
+        if (cell.get("status") != "leased" or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": _lease_failure_reason(cell, coverage_lease_id)}
+        test_type = cell["test_type"]
+
+        def unsupported(reason: str) -> Dict[str, Any]:
+            result = self._mark_unsupported_shape(brain, cell, coverage_lease_id, reason)
+            self._engagement_brain = brain.to_dict()
+            return result
+
+        reason = self._shaped_shape_error(cell, test_type)
+        if reason:
+            return unsupported(reason)
+        method = str(cell.get("method") or "GET").upper()
+        denied = self._shaped_approval(method, str(cell.get("path") or "/"))
+        if denied:
+            return {"success": False, "error": "operator_approval_required", "reason": denied}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        _method, url, location, parameter, context = self._shaped_base(cell, scoped_origin)
+        identity = self._cell_identity(cell)
+        try:
+            self._scoped_origin(url)
+            self._scoped_state(identity, url)
+        except (KeyError, ValueError):
+            return {"success": False, "error": "identity_unavailable"}
+        if test_type == "xss":
+            technique = {
+                "xss_browser": "html_body", "xss_browser_svg": "html_body_svg",
+                "xss_browser_attribute": "html_attribute",
+                "xss_browser_attribute_single": "html_attribute_single",
+                "xss_browser_js_single": "js_single", "xss_browser_js_double": "js_double",
+            }.get(technique, technique)
+            attempts = list(cell.get("xss_probe_attempts") or [])
+            if len(attempts) >= MAX_ATTEMPTS:
+                return {"success": False, "error": "xss_probe_budget_exhausted"}
+            if any(row.get("technique") == technique and row.get("variant", "base") == variant
+                   for row in attempts):
+                return {"success": False, "error": "technique_already_attempted"}
+            try:
+                payload = payload_for(technique, variant)
+            except ValueError as exc:
+                return {"success": False, "error": str(exc)}
+            try:
+                template = intent_request.browser_template(url, location, parameter, payload)
+                self._scoped_origin(template)
+            except intent_request.UnsupportedShape as exc:
+                return unsupported(str(exc))
+            proof = json.loads(await self.scoped_browser_assessment(
+                "check_xss", template, identity=identity))
+            operation = "scoped_browser_check_xss"
+            confirmed = proof.get("executed") is True
+        else:
+            if technique != "html_body" or variant != "base":
+                return {"success": False, "error": "unsupported_technique"}
+            try:
+                proof = await self._run_shaped_sqli(cell, identity, scoped_origin=scoped_origin)
+            except intent_request.UnsupportedShape as exc:
+                return unsupported(str(exc))
+            except intent_request.ApprovalRequired as exc:
+                return {"success": False, "error": "operator_approval_required",
+                        "reason": str(exc)}
+            except (ValueError, OSError) as exc:
+                return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+            proof["evidence_id"] = evidence_store(self).record(
+                "scoped_string_sqli", proof, target=proof["target"], identity=identity,
+                coverage_cell_id=cell["id"], test_type="sqli",
+                success=proof["proof_confirmed"],
+            )
+            operation = "scoped_string_sqli"
+            confirmed = proof.get("proof_confirmed") is True
+        artifact_id = str(proof.get("evidence_id") or "")
+        if not artifact_id:
+            return {"success": False,
+                    "error": str(proof.get("error") or "missing_probe_evidence")[:100]}
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == cell["id"]
+                        and row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed"}
+        current["probe_artifact_ids"] = list(dict.fromkeys([
+            *(current.get("probe_artifact_ids") or []), artifact_id]))[:20]
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), artifact_id]))[:30]
+        current["last_probe"] = operation
+        extra: Dict[str, Any] = {}
+        settle = True
+        if test_type == "sqli":
+            record_sqli_trace(current, proof)
+            probe_result = {key: proof[key] for key in (
+                "proof_confirmed", "proof_recipe", "requests_sent", "total_requests_sent",
+                "baseline_source", "sql_family") if key in proof}
+        else:
+            current["xss_probe_attempts"] = [
+                *(current.get("xss_probe_attempts") or []),
+                {"technique": technique, "variant": variant, "evidence_id": artifact_id,
+                 "executed": confirmed},
+            ][:MAX_ATTEMPTS]
+            trace = xss_trace(current, proof, technique=technique, variant=variant,
+                              attempts=current["xss_probe_attempts"])
+            current["xss_trace"] = trace
+            # Further techniques may follow; the intent settles on execution or
+            # when the bounded technique budget is spent.
+            settle = confirmed or len(current["xss_probe_attempts"]) >= MAX_ATTEMPTS
+            probe_result = {"executed": confirmed,
+                            "reflection_contexts": trace["rendered_contexts"],
+                            "reflection_observations": trace["render_observations"]}
+            extra = {"xss_trace": trace, "technique": technique, "variant": variant}
+        if confirmed:
+            current["status"] = "in_focus"
+            current["reason"] = "Execution-owned proof signal; independent verification required"
+        intent = None
+        if settle:
+            intent = self._settle_cell_intent(
+                live, current, worker=str(current.get("lease_owner") or ""), outcome="probed",
+                test_type=test_type, evidence_id=artifact_id, proof_confirmed=confirmed)
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "coverage_cell_id": cell["id"],
+                "coverage_lease_id": coverage_lease_id, "operation": operation,
+                "evidence_id": artifact_id, "proof_confirmed": confirmed,
+                "request_context": context, "intent": intent,
+                "probe_result": {**probe_result, "request_context": context},
+                "funnel": parameter_test_funnel(live), **extra}

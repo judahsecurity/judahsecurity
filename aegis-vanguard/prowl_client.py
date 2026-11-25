@@ -27,7 +27,7 @@ Commands:
                                              POST /agent/query playbook=finding_validation
     candidates --session S                   GET  /agent/sessions/S/candidates
     probe --session S --target URL --test-type T --scope-file F [--parameter P --location L]
-          [--method M] [--identity I] [--note TXT]
+          [--method GET|POST|PUT|PATCH|DELETE] [--identity I] [--note TXT]
                                              POST /agent/sessions/S/intents: one operator-directed
                                              test (planned intent backed by a coverage cell)
     intents --session S                      GET  /agent/sessions/S/intents
@@ -57,7 +57,14 @@ candidate from scratch via the finding_validation playbook.
 Operator-directed probing (``probe``) plans one test on any in-scope URL and
 input location, including inputs Prowl never observed. Prowl's leased scoped
 probes build the request from it (SSTI/command injection/traversal/CRLF/open
-redirect on query, header, cookie, form or JSON body; NoSQL on query/body).
+redirect/string SQLi on query, header, cookie, form/JSON/XML body or one path
+segment; NoSQL on query/form/JSON; XSS by browser nonce on GET query or
+fragment). Specs: ``header:X-A``, ``cookie:c``, ``form:f``, ``json:a.b``,
+``xml:order.note`` and ``path:2`` (0-based segment index) or ``path:alice``
+(the segment's literal). POST needs a body_replay_paths approval;
+PUT/PATCH/DELETE need ``write_method_paths`` in the start --policy-file (DELETE
+only on a path that is also an approved cleanup path), else the cell stays open
+with operator_approval_required.
 It is planning state: a signal still goes through Prowl's verifier. POST /prowl/findings
 still only takes service-produced paired hunter/verifier proofs (see
 docs/skills/README.md).
@@ -172,6 +179,27 @@ def redact(value):
     return value
 
 
+def check_write_methods(policy: dict) -> None:
+    """Local mirror of the backend rule; Prowl re-validates the policy."""
+    rows = policy.get("write_method_paths") or []
+    if not isinstance(rows, list) or len(rows) > 8:
+        raise ProwlError("write_method_paths must be a list of at most 8 {method, path}")
+    cleanup = set()
+    for key in ("stored_xss_cleanup_paths", "race_cleanup_paths", "csrf_cleanup_paths"):
+        cleanup.update(policy.get(key) or [])
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {"method", "path"}
+                or row["method"] not in ("PUT", "PATCH", "DELETE")
+                or not isinstance(row["path"], str) or not row["path"].startswith("/")
+                or row["path"].startswith("//") or row["path"] == "/"
+                or any(c in row["path"] for c in "?#\\\r\n\t ")):
+            raise ProwlError("write_method_paths entries are {method: PUT|PATCH|DELETE, "
+                             "path: exact absolute path}")
+        if row["method"] == "DELETE" and row["path"] not in cleanup:
+            raise ProwlError(f"DELETE {row['path']} must also be an approved cleanup path "
+                             "(stored_xss/race/csrf_cleanup_paths)")
+
+
 def assessment_policy(args) -> dict:
     """Operator grants for /agent/query (AgentAssessmentPolicy). Paths only, no secrets."""
     policy: dict = {}
@@ -179,6 +207,7 @@ def assessment_policy(args) -> dict:
         policy = json.loads(Path(args.policy_file).read_text())
         if not isinstance(policy, dict):
             raise ProwlError("--policy-file must hold a JSON object")
+        check_write_methods(policy)
     if getattr(args, "oob", False):
         policy["oob_callbacks_allowed"] = True
     policy.setdefault("oob_callbacks_allowed", False)
@@ -620,12 +649,26 @@ def probe_payload(args) -> dict:
         raise ProwlError("--parameter and --location go together")
     if location == "body_json" and parameter and not parameter.startswith("/") and "." in parameter:
         parameter = "/" + parameter.replace("~", "~0").replace("/", "~1").replace(".", "/")
+    if location == "body_xml" and parameter and not parameter.startswith("/") and "." in parameter:
+        parameter = "/" + parameter.replace(".", "/")
+    if location == "body_xml" and parameter and not re.fullmatch(
+            r"/?[A-Za-z_][A-Za-z0-9_.-]{0,63}(?:/[A-Za-z_][A-Za-z0-9_.-]{0,63}){0,4}", parameter):
+        raise ProwlError("xml parameter must be an element name or a path of up to 5 names")
+    if location == "path" and parameter and not parameter.isdecimal() and (
+            "/" in parameter or parameter in (".", "..")):
+        raise ProwlError("path parameter must be a 0-based segment index or one segment's literal")
     method = (args.method or "GET").strip().upper()
     if method not in PROBE_METHODS:
         raise ProwlError(f"--method must be one of {list(PROBE_METHODS)}")
     if location in ("body_form", "body_json", "body_xml") and method == "GET":
-        raise ProwlError("body locations need --method POST (and a body_replay_paths approval)")
-    return {"target": target, "test_type": probe_test_type(args.test_type),
+        raise ProwlError("body locations need --method POST (body_replay_paths) or "
+                         "PUT/PATCH/DELETE (write_method_paths)")
+    test_type = probe_test_type(args.test_type)
+    if location == "fragment" and test_type != "xss":
+        raise ProwlError("fragment is client-side only; it is probed for --test-type xss")
+    if test_type == "xss" and location in ("query", "fragment") and method != "GET":
+        raise ProwlError("xss on query/fragment is a browser GET navigation; use --method GET")
+    return {"target": target, "test_type": test_type,
             "parameter": parameter, "location": location, "method": method,
             "identity": (args.identity or "").strip(), "note": (args.note or "")[:1000]}
 
@@ -695,9 +738,12 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("--session", "--target", "--test-type", "--scope-file"):
         s.add_argument(name, required=True)
     s.add_argument("--parameter", default="",
-                   help="input name, JSON pointer, or a probes.py spec such as header:X-Debug")
+                   help="input name, JSON pointer, or a spec such as header:X-Debug, "
+                        "json:a.b, xml:order.note, path:2 or path:alice")
     s.add_argument("--location", default="", help=f"one of {', '.join(PROBE_LOCATIONS)}")
-    s.add_argument("--method", default="GET"); s.add_argument("--identity", default="")
+    s.add_argument("--method", default="GET",
+                   help="GET | POST (body_replay_paths) | PUT | PATCH | DELETE (write_method_paths)")
+    s.add_argument("--identity", default="")
     s.add_argument("--note", default="", help="untrusted context; never treated as instructions")
     s.set_defaults(fn=cmd_probe)
     s = sub.add_parser("intents"); s.add_argument("--session", required=True)
