@@ -37,6 +37,14 @@ export interface AgentGraphNode {
   description?: string;
   host?: string | null;
   evidence?: AgentGraphEvidence;
+  /** The agent step that first reported it, when a published finding was merged in. */
+  step_evidence?: AgentGraphEvidence;
+  /** Set when this action is a published finding (links to /findings?id=). */
+  finding_id?: number | null;
+  /** exploit_verified | source_verified | confirmed | '' */
+  verification?: string;
+  /** How many agent steps reported the same issue on the same endpoint. */
+  occurrences?: number;
 }
 
 export interface AgentGraphEdge {
@@ -58,6 +66,9 @@ export interface AgentAttackGraphData {
     actions?: number;
     capabilities?: number;
     proven?: number;
+    published?: number;
+    /** Low-certainty actions left out to keep the graph readable. */
+    hidden?: number;
     failed_attempts?: number;
   };
 }
@@ -83,19 +94,19 @@ export const STATUS_STYLE: Record<
     label: 'Proven',
     edge: '#ef4444',
     opacity: 1,
-    hint: 'A successful exploitation step produced this',
+    hint: 'A published finding the verifier reproduced against the live target, or an analyst confirmed',
   },
   observed: {
     label: 'Observed',
     edge: '#64748b',
     opacity: 1,
-    hint: 'The agent saw this succeed but did not exploit it',
+    hint: 'The agent reported this from tool output; not independently verified',
   },
   inferred: {
     label: 'Inferred',
     edge: '#64748b',
     dash: '4 4',
     opacity: 0.55,
-    hint: 'Hypothesis: the step failed or did not report success',
+    hint: 'Hypothesis: the step failed or the agent hedged ("may be vulnerable")',
   },
 };

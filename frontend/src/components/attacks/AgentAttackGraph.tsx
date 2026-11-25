@@ -3,7 +3,8 @@
 import { useMemo, useState } from 'react';
 import { Controls, ReactFlow, type Edge, type Node } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Maximize2, Route, X } from 'lucide-react';
+import Link from 'next/link';
+import { ExternalLink, Maximize2, Route, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
@@ -13,6 +14,7 @@ import {
   KIND_META,
   STATUS_STYLE,
   type AgentAttackGraphData,
+  type AgentGraphEvidence,
   type AgentGraphKind,
   type AgentGraphNode,
   type AgentGraphStatus,
@@ -104,18 +106,37 @@ function Inspector({ node, onClose }: { node: AgentGraphNode; onClose: () => voi
       </div>
       <div className="flex-1 space-y-2.5 overflow-y-auto px-3 py-2 text-[11px]">
         <p className="text-muted-foreground">{status.hint}.</p>
+        {node.finding_id ? (
+          <Link
+            href={`/findings?id=${node.finding_id}`}
+            className="flex items-center gap-1 text-primary hover:underline"
+          >
+            Open finding #{node.finding_id}
+            <ExternalLink className="h-3 w-3" />
+          </Link>
+        ) : null}
+        {node.verification ? <Field label="Verification" value={node.verification.replace(/_/g, ' ')} /> : null}
         {node.host ? <Field label="Host" value={node.host} mono /> : null}
         {node.severity ? <Field label="Severity" value={node.severity} /> : null}
-        {ev ? (
-          <>
-            <Field label="Step" value={`#${ev.iteration} · ${ev.phase || 'unknown phase'}`} />
-            {ev.tool ? <Field label="Tool" value={ev.tool} mono /> : null}
-            {ev.thought ? <Field label="Agent reasoning" value={ev.thought} /> : null}
-            {ev.args ? <Field label="Request" value={ev.args} mono block /> : null}
-            {ev.output ? <Field label="Result" value={ev.output} mono block /> : null}
-          </>
+        {node.occurrences && node.occurrences > 1 ? (
+          <Field label="Seen" value={`${node.occurrences} times by the agent`} />
         ) : null}
+        {ev ? <EvidenceFields ev={ev} title={node.finding_id ? 'Proof' : 'Step'} /> : null}
+        {node.step_evidence ? <EvidenceFields ev={node.step_evidence} title="First reported" /> : null}
       </div>
+    </div>
+  );
+}
+
+function EvidenceFields({ ev, title }: { ev: AgentGraphEvidence; title: string }) {
+  const where = ev.iteration ? `#${ev.iteration} · ${ev.phase || 'unknown phase'}` : ev.phase;
+  return (
+    <div className="space-y-2.5 border-t border-border pt-2.5">
+      <Field label={title} value={where || '—'} />
+      {ev.tool ? <Field label="Tool" value={ev.tool} mono /> : null}
+      {ev.thought ? <Field label={ev.iteration ? 'Agent reasoning' : 'Not demonstrated'} value={ev.thought} /> : null}
+      {ev.args ? <Field label="Request" value={ev.args} mono block /> : null}
+      {ev.output ? <Field label="Result" value={ev.output} mono block /> : null}
     </div>
   );
 }
@@ -210,6 +231,7 @@ export function AgentAttackGraph({
     `${meta.actions ?? 0} actions`,
     `${meta.capabilities ?? 0} captured`,
     `${meta.proven ?? 0} proven`,
+    ...(meta.hidden ? [`${meta.hidden} low-certainty hidden`] : []),
   ].join(' · ');
 
   return (

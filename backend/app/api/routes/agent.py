@@ -1331,10 +1331,12 @@ async def get_session_chain(
     If include_attack_paths=true, also fetches Neo4j attack paths for the
     organization and merges them into the response.
     """
-    chain = evograph.get_session_chain(session_id)
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    from app.services.agent.attack_graph import attach_verified_graph
+
+    chain = attach_verified_graph(evograph.get_session_chain(session_id), org_id, session_id, db)
 
     if include_attack_paths:
-        org_id = _resolve_agent_organization_id(current_user, db)
         if org_id:
             try:
                 from app.services.graph_service import get_graph_service
@@ -1356,8 +1358,10 @@ async def get_session_attack_graph(
 ):
     """Entity-centric attack path for a session: Internet → host → endpoint →
     action → capability, with per-node validation status and step evidence."""
-    _owned_conversation(db, session_id, current_user)
-    chain = evograph.get_session_chain(session_id)
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    from app.services.agent.attack_graph import attach_verified_graph
+
+    chain = attach_verified_graph(evograph.get_session_chain(session_id), org_id, session_id, db)
     return chain.get("attack_graph") or {"nodes": [], "edges": [], "meta": {}}
 
 

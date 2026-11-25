@@ -3000,6 +3000,11 @@ class AgentOrchestrator:
         # Emit attack scenario update so the frontend can render the chain in real-time
         chain_data = evograph.get_session_chain(session_id)
         if chain_data.get("nodes"):
+            from app.services.agent.attack_graph import attach_verified_graph
+
+            chain_data = await asyncio.to_thread(
+                attach_verified_graph, chain_data, state.get("organization_id"), session_id
+            )
             await self._emit_status({
                 "type": "attack_scenario_update",
                 "chain": chain_data,
