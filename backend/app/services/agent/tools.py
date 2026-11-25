@@ -39,6 +39,42 @@ def _tool_output_max_chars() -> int:
 logger = logging.getLogger(__name__)
 
 
+def _bounded_comparison_json(out: Dict[str, Any]) -> str:
+    """Serialize a request-comparison result within the tool-output limit.
+
+    Slicing serialized JSON cuts it mid-string and the caller can no longer parse
+    the proof result, so oversized results are compacted field by field instead.
+    """
+    serialized = json.dumps(out, indent=2)
+    if len(serialized) > _tool_output_max_chars():
+        for key in ("baseline", "mutant"):
+            exchange = out.get(key) or {}
+            request = exchange.get("request") or {}
+            response = exchange.get("response") or {}
+            out[key] = {
+                "evidence_id": exchange.get("evidence_id"),
+                "request": {field: request.get(field) for field in ("method", "url", "identity")},
+                "response": {field: response.get(field) for field in ("status", "length", "elapsed_s")},
+                "trace": exchange.get("trace") or {},
+            }
+        out["output_compacted"] = True
+        serialized = json.dumps(out, indent=2)
+    if len(serialized) > _tool_output_max_chars():
+        escalation = out.get("proof_escalation") or {}
+        serialized = json.dumps({
+            "verdict": out["verdict"],
+            "signals": [str(value)[:200] for value in out["signals"][:8]],
+            "baseline_evidence_id": out["baseline"].get("evidence_id"),
+            "mutant_evidence_id": out["mutant"].get("evidence_id"),
+            "proof_escalation": {
+                field: escalation.get(field) for field in ("id", "status", "strategy", "evidence_ids")
+            } if escalation else None,
+            "next_action": str(out.get("next_action") or "")[:300],
+            "output_compacted": True,
+        })
+    return serialized
+
+
 def _lease_failure_reason(cell: Optional[Dict[str, Any]], lease_id: str) -> str:
     """Name why a coverage-cell lease check failed, for the action ledger.
 
@@ -10166,8 +10202,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "a finding candidate."
                 )
                 self._engagement_brain = brain.to_dict()
-                result["engagement_brain"] = self._engagement_brain
-        return json.dumps(result, indent=2)[:_tool_output_max_chars()]
+        # The updated brain lives on this manager; embedding it here (as an
+        # earlier version did) pushed the result past the output limit.
+        return _bounded_comparison_json(result)
 
     def _resolve_request_cookies(self, headers, cookies, use_auth_session, url: str = ""):
         # Compatibility helper; the live transport uses the jar itself for redirects.
@@ -10746,34 +10783,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # The orchestrator reads the updated brain from this manager. Embedding
         # the entire brain in the comparison result can cut the JSON mid-object
         # at the tool-output limit, making the proof result unreadable.
-        serialized = json.dumps(out, indent=2)
-        if len(serialized) > _tool_output_max_chars():
-            for key in ("baseline", "mutant"):
-                exchange = out.get(key) or {}
-                request = exchange.get("request") or {}
-                response = exchange.get("response") or {}
-                out[key] = {
-                    "evidence_id": exchange.get("evidence_id"),
-                    "request": {field: request.get(field) for field in ("method", "url", "identity")},
-                    "response": {field: response.get(field) for field in ("status", "length", "elapsed_s")},
-                    "trace": exchange.get("trace") or {},
-                }
-            out["output_compacted"] = True
-            serialized = json.dumps(out, indent=2)
-        if len(serialized) > _tool_output_max_chars():
-            escalation = out.get("proof_escalation") or {}
-            serialized = json.dumps({
-                "verdict": out["verdict"],
-                "signals": [str(value)[:200] for value in out["signals"][:8]],
-                "baseline_evidence_id": out["baseline"].get("evidence_id"),
-                "mutant_evidence_id": out["mutant"].get("evidence_id"),
-                "proof_escalation": {
-                    field: escalation.get(field) for field in ("id", "status", "strategy", "evidence_ids")
-                } if escalation else None,
-                "next_action": str(out.get("next_action") or "")[:300],
-                "output_compacted": True,
-            })
-        return serialized
+        return _bounded_comparison_json(out)
 
     async def sync_engagement_brain(
         self,

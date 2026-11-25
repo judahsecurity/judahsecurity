@@ -210,7 +210,12 @@ async def test_browser_xss_dialog_links_probe_and_candidate_to_observed_input(ma
 
 
 @pytest.fixture
-def manager():
+def manager(tmp_path, monkeypatch):
+    # The fixed org/session below always maps to the same evidence namespace, and
+    # EvidenceStore rehydrates persisted records for its namespace. Without a
+    # per-test directory, artifacts from earlier tests or runs leak into this
+    # store (e.g. a prior oversized record pushes total_bytes past its bound).
+    monkeypatch.setenv("AEGIS_EVIDENCE_DIR", str(tmp_path / "evidence"))
     org = current_organization_id.set(98765)
     session = current_session_id.set("assessment-reliability-test")
     instance = ASMToolsManager()
