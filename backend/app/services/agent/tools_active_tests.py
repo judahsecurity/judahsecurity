@@ -955,6 +955,10 @@ class ActiveTestToolsMixin:
         summary_only: bool = False,
         sql_family: str = "",
         cmdi_shell: str = "",
+        cmdi_command: str = "",
+        jndi_variant: str = "",
+        intent_id: str = "",
+        coverage_cell_id: str = "",
     ) -> str:
         """Run a correlated custom OAST probe using a fresh Interactsh session.
 
@@ -971,17 +975,49 @@ class ActiveTestToolsMixin:
         When ``cmdi_shell`` is set (posix_subshell/posix_separator/
         windows_separator), the server builds a bounded ``nslookup`` payload for
         blind OS command injection on the observed ``field``. Only a DNS lookup
-        is sent.
+        is sent. ``cmdi_command`` curl or wget instead sends one HTTP GET to the
+        callback host (wget is POSIX only).
+
+        When ``jndi_variant`` is set (plain/dns/lower/upper/default_value/
+        env_fallback), a server-owned Log4Shell-style ``${jndi:...}`` lookup of
+        the callback host becomes the value of ``field`` (query, header,
+        body_json, or body_form). A callback proves an outbound lookup, not
+        code execution.
+
+        ``intent_id`` / ``coverage_cell_id`` also record the outcome as an
+        attack-graph fact. The callback collector is fixed by operator settings.
         """
         from app.services.agent.oob_callback_workflow import run_callback_workflow
 
-        if sql_family and cmdi_shell:
-            return json.dumps({"success": False, "error": "choose sql_family or cmdi_shell"})
-        if cmdi_shell:
-            from app.services.agent.scoped_assessment.cmdi_oob import plan_oob_cmdi
+        if sum(bool(v) for v in (sql_family, cmdi_shell, jndi_variant)) > 1:
+            return json.dumps({"success": False,
+                               "error": "choose one of sql_family, cmdi_shell, or jndi_variant"})
+        if cmdi_command and not cmdi_shell:
+            return json.dumps({"success": False, "error": "cmdi_command requires cmdi_shell"})
+        value_template = payload_label = ""
+        try:
+            if cmdi_shell and (cmdi_command or "nslookup").strip().lower() == "nslookup":
+                from app.services.agent.scoped_assessment.cmdi_oob import plan_oob_cmdi
 
-            field, body = plan_oob_cmdi(url, parameter=field, shell=cmdi_shell)
-            location, method = "query_template", "GET"
+                field, body = plan_oob_cmdi(url, parameter=field, shell=cmdi_shell)
+                location, method = "query_template", "GET"
+                payload_label = f"cmdi:{cmdi_shell}:nslookup"
+            elif cmdi_shell:
+                from app.services.agent.oob_payload_templates import plan_oob_cmdi_command
+
+                field, body = plan_oob_cmdi_command(url, parameter=field, shell=cmdi_shell,
+                                                    command=cmdi_command)
+                location, method = "query_template", "GET"
+                payload_label = f"cmdi:{cmdi_shell}:{cmdi_command.strip().lower()}"
+            if jndi_variant:
+                from app.services.agent.oob_payload_templates import JNDI_LOCATIONS, jndi_template
+
+                value_template = jndi_template(jndi_variant)
+                if (location or "query").strip().lower() not in JNDI_LOCATIONS:
+                    raise ValueError("jndi_variant injects into query, header, body_json, or body_form")
+                payload_label = f"jndi:{jndi_variant.strip().lower()}"
+        except ValueError as exc:
+            return json.dumps({"success": False, "error": str(exc)})
         if sql_family:
             from app.services.agent.scoped_assessment.sqli_oob import plan_oob_sqli
 
@@ -1004,10 +1040,14 @@ class ActiveTestToolsMixin:
             server=server,
             token=token,
             keep_session=keep_session,
+            value_template=value_template,
+            payload_label=payload_label,
+            intent_id=intent_id,
+            coverage_cell_id=coverage_cell_id,
         )
         if summary_only:
             result = {key: result.get(key) for key in (
                 "success", "error", "callback_observed", "poll_attempts",
-                "evidence_ids", "proof",
+                "evidence_ids", "proof", "provider", "graph_fact",
             ) if key in result}
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]

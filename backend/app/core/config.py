@@ -357,6 +357,22 @@ class Settings(BaseSettings):
     # scanner CIDR allowlist above.
     AEGIS_AGENT_EGRESS_IP: str = ""
 
+    # Out-of-band callback collector for run_oob_callback_workflow. Operator
+    # config only; the agent cannot choose or override the provider.
+    #   interactsh (default): interactsh-client sessions, as before.
+    #   http_poll: a self-hosted DNS/HTTP logger or webhook bin. Each probe
+    #     gets a fresh <token>.AEGIS_OOB_DOMAIN host and is polled with
+    #     GET AEGIS_OOB_POLL_URL?token=<token> (optional Bearer
+    #     AEGIS_OOB_POLL_KEY).
+    AEGIS_OOB_PROVIDER: str = "interactsh"
+    AEGIS_OOB_DOMAIN: str = ""
+    AEGIS_OOB_POLL_URL: str = ""
+    AEGIS_OOB_POLL_KEY: Optional[str] = None
+    # Operator default Interactsh server/token, used when a register call
+    # names none (otherwise the client falls back to the public oast.* pool).
+    AEGIS_INTERACTSH_SERVER: str = ""
+    AEGIS_INTERACTSH_TOKEN: Optional[str] = None
+
     # Dual Interceptor workers (Mac desktop + Ubuntu browser host)
     INTERCEPTOR_BIN: Optional[str] = None
     INTERCEPTOR_WORKER_TOKEN: Optional[str] = None

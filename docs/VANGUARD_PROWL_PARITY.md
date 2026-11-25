@@ -74,10 +74,14 @@ Identity gaps inside a Prowl run: `{{csrf}}` substitution/refresh;
 auto re-login on 401/403 (session expiry means re-running `identities`); non-GET and fuzzy-similarity authz diff with an
 anonymous leg.
 
-OOB gaps: generic webhook/self-hosted collector (`AEGIS_OOB_DOMAIN`,
-`AEGIS_OOB_POLL_URL`, `AEGIS_OOB_POLL_KEY`) and multi-schema parsing
-(Prowl is interactsh-only); operator default server/token; Log4Shell JNDI and
-curl-RCE payloads. Prowl is stronger at: persistent interactsh sessions,
+OOB: closed for `run_oob_callback_workflow`. Collector provider is operator
+config (`AEGIS_OOB_PROVIDER=interactsh|http_poll`, `backend/app/services/oob_collectors.py`);
+`http_poll` uses `AEGIS_OOB_DOMAIN` / `AEGIS_OOB_POLL_URL` / `AEGIS_OOB_POLL_KEY`
+with Vanguard's lenient multi-schema parsing and per-probe token correlation.
+Operator default Interactsh server/token: `AEGIS_INTERACTSH_SERVER` /
+`AEGIS_INTERACTSH_TOKEN`. JNDI (`jndi_variant`) and curl/wget (`cmdi_command`)
+templates: `agent/oob_payload_templates.py`. Still open: manual
+`execute_interactsh` register/poll stays Interactsh-only. Prowl is stronger at: persistent interactsh sessions,
 in-request callback placement, SQLi OOB across 4 DB families, SMTP sink, XXE.
 
 Also missing in pc: `--load` (prior session), `execute_interactsh` access.
