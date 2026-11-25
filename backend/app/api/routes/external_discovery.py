@@ -705,7 +705,10 @@ async def run_external_discovery(
                 if request.skip_existing:
                     assets_skipped += 1
                     continue
-                existing.discovery_chain = sources
+                # Keep provenance from other integrations; add ours alongside it
+                prior = [e for e in (existing.discovery_chain or [])
+                         if isinstance(e, dict) and e.get("signal") is None]
+                existing.discovery_chain = number_steps(prior + sources)
                 existing.association_reason = association_reason
                 existing.association_confidence = score.score
                 tags = [t for t in (existing.tags or []) if not str(t).startswith("ownership:")]
