@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 class ManifestTest(unittest.TestCase):
     def _config(self):
         return SimpleNamespace(
-            scanner_cmd=["python3", "run_pentest.py"],
+            scanner_cmd=["python", "-m", "local_harness.prowl_scanner"],
             scanner_extra_args=["--fast"],
-            scanner_cwd=Path("/repo/aegis-vanguard"),
+            scanner_cwd=Path("/repo/harness"),
             default_model="claude-sonnet-4-6",
         )
 

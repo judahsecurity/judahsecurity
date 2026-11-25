@@ -164,7 +164,7 @@ of the live ASM platform.
 ```
 target list / corpus     runner (subprocess)        artifact            judge + tally
 ─────────────────────  →  ───────────────────────  →  ───────────────  →  ─────────────
-REPO_LIST.txt             python3 run_pentest.py       findings.jsonl      recall / precision
+REPO_LIST.txt             prowl_scanner (Prowl agent)  findings.jsonl      recall / precision
 EXAMPLE.json              --target <url>               (via sink hook)     / F1 metrics
 ```
 
@@ -370,8 +370,8 @@ Everything is overridable via environment variables (see
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `AEGIS_HARNESS_SCANNER_CMD` | Command that launches one scan | `python3 run_pentest.py` |
-| `AEGIS_HARNESS_SCANNER_CWD` | Working dir for the scanner | `../aegis-vanguard` |
+| `AEGIS_HARNESS_SCANNER_CMD` | Command that launches one scan | `python -m local_harness.prowl_scanner` |
+| `AEGIS_HARNESS_SCANNER_CWD` | Working dir for the scanner | `harness` |
 | `AEGIS_HARNESS_SCANNER_ARGS` | Extra flags for every scan | `` (e.g. `--fast`) |
 | `AEGIS_HARNESS_SCAN_TIMEOUT` | Per-scan timeout (seconds) | `3600` |
 | `AEGIS_HARNESS_WORK_DIR` | Root for harness artifacts | `harness/runs` |
@@ -427,7 +427,7 @@ harness/
 ├── local_harness/
 │   ├── batch/           # multi-target scan + collect
 │   ├── benchmark/       # ground_truth/, judge, tally, xben_import
-│   ├── runner.py        # subprocess driver for run_pentest.py
+│   ├── runner.py        # subprocess driver for the scanner command
 │   └── findings.py      # JSONL sink parsing
 ├── tests/               # offline stub-scanner suite
 └── runs/                # local artifacts (not committed)
@@ -445,6 +445,5 @@ validates the full batch + benchmark flow offline.
 
 ## See also
 
-- [aegis-vanguard/README.md](../aegis-vanguard/README.md) — scanner under test  
 - [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](../docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) — in-product agent control plane  
 - Root [README.md](../README.md) — platform overview

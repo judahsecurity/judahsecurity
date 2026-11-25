@@ -1,10 +1,10 @@
 """
 Loading and normalization of scanner findings.
 
-The Aegis Vanguard scanner emits findings as JSON lines when
-``AEGIS_FINDINGS_SINK`` is set (see ``aegis-vanguard/asm_bridge.py``). This
-module reads that artifact and normalizes it into a shape the batch collector
-and the benchmark judge can reason about.
+The scanner emits findings as JSON lines when ``AEGIS_FINDINGS_SINK`` is set
+(the default scanner is the in-product Prowl agent, local_harness/prowl_scanner.py).
+This module reads that artifact and normalizes it into a shape the batch
+collector and the benchmark judge can reason about.
 """
 
 from __future__ import annotations
