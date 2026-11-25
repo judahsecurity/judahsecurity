@@ -113,3 +113,18 @@ def test_path_title_falls_back_to_from_to():
     a = _row(id=1, title="Open JS bundle", has_chain=True, session_id="s")
     b = _row(id=2, title="ICS integrity bypass", has_chain=True, session_id="s", severity="critical")
     assert path_title([a, b]) == "Open JS bundle to ICS integrity bypass"
+
+
+def test_verified_flag_requires_runtime_proof_or_confirmation():
+    chained = _row(id=1, has_chain=True, chain_steps=[{"tool": "curl"}])
+    assert campaigns_from_views([chained])[0]["verified"] is False
+    assert campaigns_from_views([chained])[0]["demonstrated"] is True
+
+    verified = _row(id=2, verification_level="exploit_verified")
+    assert campaigns_from_views([verified])[0]["verified"] is True
+
+    confirmed = _row(id=3, validation_verdict="confirmed")
+    assert campaigns_from_views([confirmed])[0]["verified"] is True
+
+    false_positive = _row(id=4, verification_level="exploit_verified", validation_verdict="false_positive")
+    assert campaigns_from_views([false_positive])[0]["verified"] is False

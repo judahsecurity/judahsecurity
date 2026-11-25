@@ -98,8 +98,10 @@ function AttacksPageInner() {
     try {
       const data = await api.getAttackWorkspace(parseInt(id, 10));
       setWorkspace(data);
+      const requested = searchParams.get('path');
       setPathId((current) => {
         if (current && data.paths?.some((p: AttackPath) => p.id === current)) return current;
+        if (requested && data.paths?.some((p: AttackPath) => p.id === requested)) return requested;
         return data.paths?.[0]?.id || '';
       });
     } catch (err) {
@@ -108,7 +110,7 @@ function AttacksPageInner() {
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [toast, searchParams]);
 
   useEffect(() => {
     if (orgId) loadWorkspace(orgId);

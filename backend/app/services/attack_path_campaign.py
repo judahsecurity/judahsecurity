@@ -98,6 +98,7 @@ class FindingView:
     oracle_scenario: str = ""
     attack_path_class: str = ""
     validation_verdict: Optional[str] = None
+    verification_level: Optional[str] = None
     detected_at: Optional[datetime] = None
     assigned_to: Optional[str] = None
 
@@ -598,6 +599,7 @@ def _finding_view(vuln: Vulnerability) -> FindingView:
             oracle.get("attack_path_class") or getattr(vuln, "oracle_attack_path", None) or ""
         ),
         validation_verdict=vuln.last_validation_verdict,
+        verification_level=getattr(vuln, "verification_level", None),
         detected_at=vuln.first_detected or vuln.created_at,
         assigned_to=vuln.assigned_to,
     )
@@ -630,6 +632,13 @@ def campaigns_from_views(rows: Sequence[FindingView]) -> List[Dict[str, Any]]:
             "timeframe": latest.isoformat() if latest else None,
             "severity": ranked[0].severity if ranked else "medium",
             "demonstrated": any(r.has_chain for r in group),
+            # Same bar as the agent attack graph's "proven": reproduced by the
+            # independent verifier, or confirmed by an analyst.
+            "verified": any(
+                r.verification_level == "exploit_verified" or r.validation_verdict == "confirmed"
+                for r in group
+                if r.validation_verdict != "false_positive"
+            ),
             "status_counts": counts,
             "finding_ids": [r.id for r in group],
             "session_id": sid,
