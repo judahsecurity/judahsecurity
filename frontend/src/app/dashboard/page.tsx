@@ -58,8 +58,8 @@ const WorldMap = dynamic(
   }
 );
 
-const ValueFunnelCard = dynamic(
-  () => import('@/components/dashboard/ValueFunnelCard').then((m) => m.ValueFunnelCard),
+const ValueFunnelSection = dynamic(
+  () => import('@/components/dashboard/ValueFunnelCard').then((m) => m.ValueFunnelSection),
   { ssr: false }
 );
 
@@ -499,34 +499,31 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* Value funnel beside the exposure map */}
-        <div className="grid gap-6 lg:grid-cols-3">
-          <ValueFunnelCard className="lg:col-span-2" />
-          <div className="min-w-0">
-            {mapLoading ? (
-              <div className="flex h-full min-h-[300px] items-center justify-center rounded-lg border border-border bg-card text-muted-foreground">
-                <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
-              </div>
-            ) : mapAssets.length > 0 ? (
-              <WorldMap
-                compact
-                assets={mapAssets}
-                onAssetClick={(asset) => {
-                  toast({
-                    title: asset.value,
-                    description: `${asset.geoLocation?.city || 'Unknown'}, ${asset.geoLocation?.country || 'Unknown'} · ${asset.findingsCount || 0} findings`,
-                  });
-                }}
-              />
-            ) : (
-              <div className="flex h-full min-h-[300px] flex-col items-center justify-center rounded-lg border border-border bg-card p-6 text-center text-muted-foreground">
-                <Globe className="mb-3 h-10 w-10 opacity-50" />
-                <p className="text-sm">No assets with geo-location data yet</p>
-                <p className="mt-1 text-xs">Run a DNS Resolution scan to resolve IPs and geo-locate assets</p>
-              </div>
-            )}
+        {/* Value story: alerts -> proof funnel beside the severity re-scoring */}
+        <ValueFunnelSection />
+
+        {/* Exposure map */}
+        {mapLoading ? (
+          <div className="flex min-h-[300px] items-center justify-center rounded-lg border border-border bg-card text-muted-foreground">
+            <RefreshCw className="h-6 w-6 animate-spin opacity-50" />
           </div>
-        </div>
+        ) : mapAssets.length > 0 ? (
+          <WorldMap
+            assets={mapAssets}
+            onAssetClick={(asset) => {
+              toast({
+                title: asset.value,
+                description: `${asset.geoLocation?.city || 'Unknown'}, ${asset.geoLocation?.country || 'Unknown'} · ${asset.findingsCount || 0} findings`,
+              });
+            }}
+          />
+        ) : (
+          <div className="flex min-h-[200px] flex-col items-center justify-center rounded-lg border border-border bg-card p-6 text-center text-muted-foreground">
+            <Globe className="mb-3 h-10 w-10 opacity-50" />
+            <p className="text-sm">No assets with geo-location data yet</p>
+            <p className="mt-1 text-xs">Run a DNS Resolution scan to resolve IPs and geo-locate assets</p>
+          </div>
+        )}
 
         {/* External Security Posture Grade */}
         {postureGrade && (
