@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlsplit
@@ -181,8 +182,18 @@ def intent_id_for(*, test_type: str, target: str, parameter: str = "", location:
 
 def add_intent(brain: Any, *, objective: str, test_type: str, target: str, parents: Iterable[str],
                parameter: str = "", location: str = "", method: str = "GET", identity: str = "",
-               created_by: str = "planner", link_coverage: bool = True) -> Dict[str, Any]:
-    """Add one planned test. Same test on the same input returns the existing intent."""
+               created_by: str = "planner", link_coverage: bool = True,
+               source_capture_id: str = "", source_evidence_id: str = "",
+               baseline_value: Optional[str] = None) -> Dict[str, Any]:
+    """Add one planned test. Same test on the same input returns the existing intent.
+
+    Provenance (optional, additive): ``source_capture_id`` names the private
+    browser capture the test comes from and ``source_evidence_id`` the evidence
+    record behind it, so the probe can take the input's baseline value and
+    request from that observation; ``baseline_value`` is the input's ordinary
+    value supplied with the intent (operator). Neither is proof. An existing
+    intent gains provenance it does not have yet; set values never change.
+    """
     test_type = normalize_test_type(test_type)
     if not test_type:
         raise ValueError("test_type is required")
@@ -196,24 +207,55 @@ def add_intent(brain: Any, *, objective: str, test_type: str, target: str, paren
     parents = _check_parents(brain, parents, allow_intents=False)
     parameter = _clean(parameter, 128)
     identity = _clean(identity, 40)
+    provenance = _provenance(source_capture_id=source_capture_id,
+                             source_evidence_id=source_evidence_id,
+                             baseline_value=baseline_value, location=location)
     iid = intent_id_for(test_type=test_type, target=target, parameter=parameter,
                         location=location, method=method, identity=identity)
     existing = get_intent(brain, iid)
     if existing:
         existing["parents"] = list(dict.fromkeys([*existing.get("parents", []), *parents]))
+        for key, value in provenance.items():
+            existing.setdefault(key, value)
         return existing
     row = {"id": iid, "objective": _clean(objective) or f"{test_type} on {parameter or target}",
            "test_type": test_type, "method": method, "target": _clean(target, 2048),
            "parameter": parameter, "location": location, "identity": identity,
            "parents": parents, "status": "open", "claimed_by": "", "result_facts": [],
            "created_by": _clean(created_by, 40) or "planner", "coverage_cell_id": "",
-           "created_at": time.time(), "updated_at": time.time()}
+           "created_at": time.time(), "updated_at": time.time(), **provenance}
     if link_coverage:
         row["coverage_cell_id"] = _link_coverage_cell(brain, row, parts)
     rows = _intents(brain)
     rows.append(row)
     _trim(rows, MAX_INTENTS, keep_open=True)
     return row
+
+
+_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}\Z")
+MAX_BASELINE_VALUE = 512
+
+
+def _provenance(*, source_capture_id: str, source_evidence_id: str,
+                baseline_value: Optional[str], location: str) -> Dict[str, Any]:
+    """Validated optional provenance fields for an intent row (only those given)."""
+    out: Dict[str, Any] = {}
+    for key, value in (("source_capture_id", source_capture_id),
+                       ("source_evidence_id", source_evidence_id)):
+        text = str(value or "").strip()
+        if text:
+            if not _REFERENCE.fullmatch(text):
+                raise ValueError(f"{key} must be an evidence/capture id")
+            out[key] = text
+    if baseline_value is not None:
+        if (not isinstance(baseline_value, str) or not baseline_value
+                or len(baseline_value) > MAX_BASELINE_VALUE
+                or re.search(r"[\x00-\x1f\x7f]", baseline_value)):
+            raise ValueError(f"baseline_value must be 1-{MAX_BASELINE_VALUE} printable characters")
+        if not location or location == "fragment":
+            raise ValueError("baseline_value needs a server-side input location")
+        out["baseline_value"] = baseline_value
+    return out
 
 
 def _link_coverage_cell(brain: Any, intent: Dict[str, Any], parts) -> str:

@@ -151,7 +151,8 @@ classes with their proof class and lane, `severity_caps` and
 ### Operator-directed probing (closed gap)
 
 `probe --session S --target URL --test-type T --scope-file F [--parameter P
---location L --method M --identity I --note TXT]` plans one test on any
+--location L --method M --identity I --note TXT --baseline-value V |
+--body-sample BODY]` plans one test on any
 in-scope URL and input, including inputs Prowl never observed. The client
 checks the scope file, the class (coverage class or alias: `cmdi`, `lfi`,
 `redirect`, `template_injection`, ...) and the location locally; it also
@@ -172,8 +173,8 @@ Prowl's leased scoped probes then build the request from the intent:
 |-------|-----------|---------|
 | ssti, command_injection, path_traversal | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
 | crlf, open_redirect | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
-| sqli (string Boolean OR/AND, error, time) | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
-| nosql | query, body_form, body_json | GET, POST, PUT, PATCH, DELETE |
+| sqli (string Boolean OR/AND, error, UNION, time; numeric Boolean) | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
+| nosql (operator differential) | query, body_form, body_json (operators), cookie (`j:` JSON), header (JSON baseline only), body_xml (operator elements), path (string `$where`/`$regex` recipes) | GET, POST, PUT, PATCH, DELETE (path: GET/POST) |
 | xss (browser nonce execution) | query, fragment | GET |
 
 Body locations need a non-GET method. `body_xml` takes an element name or a
@@ -182,6 +183,30 @@ one text node, no DOCTYPE. `path` names one segment by 0-based index
 (`path:2`) or its exact literal (`path:alice`); only that segment changes.
 `fragment` is client-side only (the server never receives it), so only xss
 tests it (`fragment:q` makes `#q=<payload>`, `fragment:*` makes `#<payload>`).
+
+**Baselines.** `--baseline-value` is the input's ordinary value (1-512
+printable characters; it must match the value the `--target` already carries
+for a query field or path literal). `--body-sample` takes a JSON or form body
+and sends only the named field's value as the baseline. Prowl's own
+`add_intent` can instead cite `source_capture_id`, the browser exchange the
+test comes from (same method, path and identity), and the probe takes the
+baseline value and request from that capture. Numeric Boolean SQLi runs only
+when the baseline is a positive integer; UNION (NULL-padded column discovery,
+hex-encoded marker reflected only by query execution) only when an ordinary
+string baseline's fresh response reflects result data; both first fetch a fresh
+baseline with that exact value. NoSQL on a header needs the header's JSON
+object/array value with exactly one string field (`{"user":"alice"}`); the
+intake refuses it otherwise. Cookies are probed as Express cookie-parser JSON
+cookies (`j:{"$ne":"<nonce>"}` and `j:{"$eq":...}` against the literal), XML as
+`<field><$ne>nonce</$ne></field>` against `<field>nonce</field>` (strict XML
+parsers reject `$`, so they never confirm), path segments only with string
+recipes (`' || 'a'=='a` / `' && 'a'=='b`, the double-quote pair, and
+`<lit>|.*` / `(?:<lit>)`). Every NoSQL location uses the same interleaved
+differential: stable always-true variant that differs from the literal
+control, same-meaning variant equal to the control. Missing baselines leave
+recipes skipped (`numeric_skipped`, `union_skipped`) or the cell open, never
+`tested_clean`. The independent verifier replays the hunter's recipe through
+the same builder and baseline source with fresh nonces.
 
 Method approval comes from the start `--policy-file`: GET is free; POST needs
 the path in `body_replay_paths`.

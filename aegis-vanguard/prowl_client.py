@@ -28,6 +28,7 @@ Commands:
     candidates --session S                   GET  /agent/sessions/S/candidates
     probe --session S --target URL --test-type T --scope-file F [--parameter P --location L]
           [--method GET|POST|PUT|PATCH|DELETE] [--identity I] [--note TXT]
+          [--baseline-value V | --body-sample JSON_OR_FORM]
                                              POST /agent/sessions/S/intents: one operator-directed
                                              test (planned intent backed by a coverage cell)
     intents --session S                      GET  /agent/sessions/S/intents
@@ -58,8 +59,16 @@ Operator-directed probing (``probe``) plans one test on any in-scope URL and
 input location, including inputs Prowl never observed. Prowl's leased scoped
 probes build the request from it (SSTI/command injection/traversal/CRLF/open
 redirect/string SQLi on query, header, cookie, form/JSON/XML body or one path
-segment; NoSQL on query/form/JSON; XSS by browser nonce on GET query or
-fragment). Specs: ``header:X-A``, ``cookie:c``, ``form:f``, ``json:a.b``,
+segment; numeric Boolean and UNION SQLi from the input's baseline value;
+NoSQL on query/form/JSON operators, cookie-parser ``j:`` JSON cookies, headers
+whose baseline is a JSON object/array, XML operator elements and string
+``$where``/``$regex`` recipes on a path segment; XSS by browser nonce on GET
+query or fragment). ``--baseline-value`` is the input's ordinary value (a
+positive integer enables numeric SQLi; UNION needs an ordinary string whose
+fresh response shows results; NoSQL on a header requires the header's JSON
+value). ``--body-sample`` takes a JSON or form body and sends the named
+field's value as the baseline. Without a usable baseline those recipes are
+skipped or the shape stays open, never clean. Specs: ``header:X-A``, ``cookie:c``, ``form:f``, ``json:a.b``,
 ``xml:order.note`` and ``path:2`` (0-based segment index) or ``path:alice``
 (the segment's literal). POST needs a body_replay_paths approval;
 PUT/PATCH/DELETE never touch an existing record: write probes only ever touch
@@ -722,9 +731,81 @@ def probe_payload(args) -> dict:
         raise ProwlError("fragment is client-side only; it is probed for --test-type xss")
     if test_type == "xss" and location in ("query", "fragment") and method != "GET":
         raise ProwlError("xss on query/fragment is a browser GET navigation; use --method GET")
-    return {"target": target, "test_type": test_type,
+    baseline = probe_baseline_value(args, target=target, test_type=test_type,
+                                    location=location, parameter=parameter)
+    body = {"target": target, "test_type": test_type,
             "parameter": parameter, "location": location, "method": method,
             "identity": (args.identity or "").strip(), "note": (args.note or "")[:1000]}
+    if baseline is not None:
+        body["baseline_value"] = baseline
+    return body
+
+
+MAX_BASELINE_VALUE = 512
+MAX_BODY_SAMPLE = 4096
+
+
+def _sample_field(sample: str, location: str, parameter: str) -> str:
+    """The named field's value in a JSON or form body sample (never sent itself)."""
+    if location == "body_json":
+        try:
+            document = json.loads(sample)
+        except ValueError:
+            raise ProwlError("--body-sample must be JSON for a json/body_json parameter") from None
+        tokens = ([t.replace("~1", "/").replace("~0", "~") for t in parameter.split("/")[1:]]
+                  if parameter.startswith("/") else [parameter])
+        for token in tokens:
+            if not isinstance(document, dict) or token not in document:
+                raise ProwlError(f"--body-sample has no field {parameter}")
+            document = document[token]
+        if isinstance(document, bool) or not isinstance(document, (str, int)):
+            raise ProwlError("--body-sample field must hold a string or integer")
+        return str(document)
+    if location == "body_form":
+        values = [v for k, v in urllib.parse.parse_qsl(sample, keep_blank_values=True)
+                  if k == parameter]
+        if len(values) != 1:
+            raise ProwlError(f"--body-sample must hold {parameter} exactly once")
+        return values[0]
+    raise ProwlError("--body-sample is for form/json body parameters")
+
+
+def probe_baseline_value(args, *, target: str, test_type: str, location: str,
+                         parameter: str) -> str | None:
+    """The optional baseline value, checked locally. The server re-validates."""
+    value = getattr(args, "baseline_value", None)
+    sample = getattr(args, "body_sample", None)
+    if value not in (None, "") and sample not in (None, ""):
+        raise ProwlError("give --baseline-value or --body-sample, not both")
+    if sample not in (None, ""):
+        if len(sample) > MAX_BODY_SAMPLE:
+            raise ProwlError(f"--body-sample is limited to {MAX_BODY_SAMPLE} characters")
+        value = _sample_field(sample, location, parameter)
+    if value in (None, ""):
+        if test_type == "nosql" and location == "header":
+            raise ProwlError("nosql on a header needs --baseline-value with the header's "
+                             "JSON object/array value")
+        return None
+    if len(value) > MAX_BASELINE_VALUE or re.search(r"[\x00-\x1f\x7f]", value):
+        raise ProwlError(f"--baseline-value must be 1-{MAX_BASELINE_VALUE} printable characters")
+    if not location or location == "fragment":
+        raise ProwlError("--baseline-value needs a server-side --location and --parameter")
+    if location == "query":
+        carried = [v for k, v in urllib.parse.parse_qsl(urllib.parse.urlsplit(target).query,
+                                                         keep_blank_values=True)
+                   if k == parameter]
+        if len(carried) == 1 and carried[0] != value:
+            raise ProwlError("--baseline-value differs from the value --target carries")
+    if location == "path" and not parameter.isdecimal() and value != parameter:
+        raise ProwlError("--baseline-value differs from the path segment literal")
+    if test_type == "nosql" and location == "header":
+        try:
+            document = json.loads(value)
+        except ValueError:
+            document = None
+        if not isinstance(document, (dict, list)):
+            raise ProwlError("nosql on a header needs a JSON object/array --baseline-value")
+    return value
 
 
 def cmd_probe(args) -> dict:
@@ -799,6 +880,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="GET | POST (body_replay_paths) | PUT | PATCH | DELETE (Prowl-owned test record, test_record_endpoints)")
     s.add_argument("--identity", default="")
     s.add_argument("--note", default="", help="untrusted context; never treated as instructions")
+    s.add_argument("--baseline-value", default=None,
+                   help="the input's ordinary value: positive integer for numeric SQLi, "
+                        "a string whose page shows results for UNION, the header's JSON "
+                        "value for nosql on a header (max 512 chars)")
+    s.add_argument("--body-sample", default=None,
+                   help="a JSON or form body; the --parameter field's value becomes the "
+                        "baseline value (the sample itself is not sent)")
     s.set_defaults(fn=cmd_probe)
     s = sub.add_parser("intents"); s.add_argument("--session", required=True)
     s.set_defaults(fn=cmd_intents)

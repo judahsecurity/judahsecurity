@@ -204,7 +204,11 @@ def _validate_hunter_verifier_pair(store, candidate, proof: dict,
             or first.get("test_type") != claim or second.get("test_type") != claim
             or first.get("parameter") != second.get("parameter")
             or first.get("request_context") != second.get("request_context")
-            or first.get("recipe") != second.get("recipe")):
+            or first.get("recipe") != second.get("recipe")
+            # NoSQL beyond query/form/JSON (cookie, header, XML, path): the
+            # same method and location as well as the same request context.
+            or (claim == "nosql" and any(first.get(key) != second.get(key)
+                                         for key in ("method", "location")))):
         return False, f"Independent matching {claim} proof on the same input and recipe is required"
     return True, ""
 
@@ -275,10 +279,11 @@ def validate_proof(
             or first.get("source_artifact_id") != second.get("source_artifact_id")
         ):
             return False, "Independent browser GET replay must use the same observed request"
-        if kind in {"string_boolean_sqli", "string_error_sqli", "string_time_sqli",
-                    "string_union_sqli"} and any(
+        if kind in {"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli",
+                    "string_time_sqli", "string_union_sqli"} and any(
             first.get(key) != second.get(key)
-            for key in ("method", "location", "intent_request", "request_context")
+            for key in ("method", "location", "intent_request", "request_context",
+                        "baseline_value_source")
         ):
             return False, "Independent SQLi replay must use the same request shape"
         if kind in {"scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed"}:

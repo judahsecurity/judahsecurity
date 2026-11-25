@@ -479,3 +479,43 @@ def test_intents_listing(monkeypatch):
     assert args.fn(args) == {"intents": []}
     assert seen == [("GET", "/agent/sessions/s%201/intents")]
 
+
+
+@pytest.mark.parametrize("extra,expected", [
+    (["--test-type", "sqli", "--parameter", "json:item.id", "--method", "POST",
+      "--baseline-value", "7"], "7"),
+    (["--test-type", "sqli", "--parameter", "json:item.id", "--method", "POST",
+      "--body-sample", '{"item":{"id":42,"x":"y"}}'], "42"),
+    (["--test-type", "sqli", "--parameter", "form:id", "--method", "POST",
+      "--body-sample", "id=9&q=a"], "9"),
+    (["--test-type", "nosql", "--parameter", "header:X-Filter",
+      "--baseline-value", '{"user":"alice"}'], '{"user":"alice"}'),
+    (["--test-type", "sqli", "--parameter", "query:lang", "--baseline-value", "en"], "en"),
+])
+def test_probe_sends_validated_baseline_value(scope_file, monkeypatch, extra, expected):
+    seen = []
+    monkeypatch.setattr(client, "request", lambda m, p, b=None, **k: seen.append(b) or {})
+    args = _probe(scope_file, "--target", "https://app.example.com/api/items?lang=en", *extra)
+    args.fn(args)
+    assert seen[0]["baseline_value"] == expected
+
+
+@pytest.mark.parametrize("extra,match", [
+    (["--test-type", "nosql", "--parameter", "header:X-Filter"], "JSON"),
+    (["--test-type", "nosql", "--parameter", "header:X-Filter", "--baseline-value", "alice"],
+     "JSON object"),
+    (["--test-type", "sqli", "--parameter", "query:lang", "--baseline-value", "de"], "differs"),
+    (["--test-type", "sqli", "--parameter", "query:q", "--baseline-value", "a\nb"], "printable"),
+    (["--test-type", "xss", "--parameter", "fragment:q", "--baseline-value", "x"],
+     "server-side"),
+    (["--test-type", "sqli", "--parameter", "json:id", "--method", "POST",
+      "--body-sample", '{"other":1}'], "no field"),
+    (["--test-type", "sqli", "--parameter", "json:id", "--method", "POST",
+      "--body-sample", '{"id":1}', "--baseline-value", "1"], "not both"),
+    (["--test-type", "sqli", "--parameter", "query:q", "--body-sample", "q=1"], "body param"),
+])
+def test_probe_refuses_bad_baseline_before_any_request(scope_file, monkeypatch, extra, match):
+    monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
+    args = _probe(scope_file, "--target", "https://app.example.com/api/items?lang=en", *extra)
+    with pytest.raises(client.ProwlError, match=match):
+        args.fn(args)

@@ -5,9 +5,16 @@ tests on inputs Prowl never observed) and observed header/cookie inputs name a
 method, URL, parameter and location, but carry no replayable capture. This
 module builds the inert control and the fixed probes for exactly one such
 input and sends them. The caller still chooses nothing: values come from the
-proof modules (``injection_probe``, the response canaries, the string SQLi
-recipes, the XSS browser payloads), and every request here differs from the
-control only in that one input.
+proof modules (``injection_probe``, the response canaries, the string,
+numeric and UNION SQLi recipes, the XSS browser payloads), and every request
+here differs from the control only in that one input.
+
+NoSQL (``nosql_requests``) goes beyond bracket/JSON operators only where the
+server plausibly turns the input into an object: cookie-parser ``j:`` JSON
+cookies, a header whose baseline value is a JSON object/array, XML operator
+elements, and string ``$where``/``$regex`` recipes on a path segment.
+Baselines for numeric/UNION SQLi and JSON headers (``url_value``,
+``captured_value``, operator ``baseline_value``) are chosen by the caller.
 
 Locations: ``query``, ``header``, ``cookie``, ``body_form``, ``body_json``,
 ``body_xml`` (a slash path of element names, the value XML-escaped in a text
@@ -64,8 +71,13 @@ SUPPORTED_LOCATIONS: Dict[str, frozenset] = {
     "path_traversal": INJECTION_LOCATIONS,
     "crlf": INJECTION_LOCATIONS,
     "open_redirect": INJECTION_LOCATIONS,
-    # Operator syntax only exists where a server parses field names or JSON.
-    "nosql": frozenset({"query", "body_form", "body_json"}),
+    # Operator syntax only where the server plausibly builds an object from the
+    # input: bracket field names (query/form), JSON bodies, cookie-parser JSON
+    # cookies (``j:``), JSON-valued headers (only with a JSON object/array
+    # baseline, checked at plan time), XML bodies converted to objects
+    # (operator element names), and string-only recipes on one path segment
+    # (``nosql_requests``).
+    "nosql": INJECTION_LOCATIONS,
     # String Boolean/error/time recipes: the value is a string in every location.
     "sqli": INJECTION_LOCATIONS,
     # Browser nonce execution navigates with GET: only URL parts the browser
@@ -243,6 +255,26 @@ def _xml_body(parameter: str, value: Any) -> bytes:
             + closed).encode()
 
 
+_XML_OPERATORS = frozenset({"$ne", "$eq"})
+
+
+def _xml_operator_body(parameter: str, operator: str, value: Any) -> bytes:
+    """``<a><b><$ne>value</$ne></b></a>``: an operator element under the field.
+
+    XML-to-object converters that keep element names as keys turn this into
+    ``{"a": {"b": {"$ne": "value"}}}``. ``$`` is not an XML name character,
+    so a strict parser rejects the body; the differential then shows nothing
+    and the probe is not confirmed (fails safe).
+    """
+    if operator not in _XML_OPERATORS or not isinstance(value, str):
+        raise UnsupportedShape("xml_value_unsupported")
+    tokens = _xml_tokens(parameter)
+    opened = "".join(f"<{t}>" for t in tokens)
+    closed = "".join(f"</{t}>" for t in reversed(tokens))
+    return ('<?xml version="1.0" encoding="UTF-8"?>' + opened + f"<{operator}>"
+            + _xml_escape(value) + f"</{operator}>" + closed).encode()
+
+
 def _set_query(url: str, parameter: str, value: str, *, name: str = "") -> str:
     parts = urlsplit(url)
     fields = [f for f in parts.query.split("&") if f] if parts.query else []
@@ -285,11 +317,14 @@ def _protected_identity_cookie(state: Optional[dict], name: str) -> bool:
 def plan_requests(*, method: str, url: str, location: str, parameter: str,
                   values: Dict[str, Any], state: Optional[dict], test_type: str,
                   field_names: Optional[Dict[str, str]] = None,
-                  write_approved: bool = False) -> Dict[str, PlannedRequest]:
+                  write_approved: bool = False,
+                  xml_operators: Optional[Dict[str, str]] = None) -> Dict[str, PlannedRequest]:
     """One request per entry of ``values`` (``control`` plus recipes or steps).
 
     ``values[name]`` replaces the single input; ``field_names[name]`` renames
-    it instead (query/form NoSQL operator steps). The URL keeps its own query
+    it instead (query/form NoSQL operator steps); ``xml_operators[name]``
+    wraps a body_xml value in one fixed operator element (NoSQL steps). The
+    URL keeps its own query
     fields; header/cookie/body locations leave the URL unchanged, and a path
     location changes only its one segment. Any method but GET needs
     ``write_approved`` (the caller's exact operator approval).
@@ -338,7 +373,9 @@ def plan_requests(*, method: str, url: str, location: str, parameter: str,
             body = _json_body(parameter, value)
             headers.append(("Content-Type", "application/json"))
         elif location == "body_xml":
-            body = _xml_body(parameter, value)
+            operator = (xml_operators or {}).get(name, "")
+            body = (_xml_operator_body(parameter, operator, value) if operator
+                    else _xml_body(parameter, value))
             headers.append(("Content-Type", "application/xml"))
         if cookies:
             headers.append(("Cookie", "; ".join(f"{k}={v}" for k, v in cookies)))
@@ -462,10 +499,21 @@ def response_values(test_type: str, location: str, nonce: str, scoped_origin: st
 def injection_requests(*, method: str, url: str, location: str, parameter: str,
                        test_type: str, nonce: str, factors: Tuple[int, int],
                        state: Optional[dict], recipes: Iterable[str] = (),
-                       write_approved: bool = False) -> Dict[str, PlannedRequest]:
-    """Control + fixed recipes (or the NoSQL differential steps) for one input."""
+                       write_approved: bool = False, baseline: str = "",
+                       nosql_recipe: str = "") -> Dict[str, PlannedRequest]:
+    """Control + fixed recipes (or the NoSQL differential steps) for one input.
+
+    ``baseline`` (header NoSQL only: the JSON value the header carries) and
+    ``nosql_recipe`` (path NoSQL: one of ``NOSQL_PATH_RECIPES``) feed
+    ``nosql_requests`` for the cookie/header/XML/path locations.
+    """
     from .injection_probe import NOSQL_SEQUENCE, control_value, probe_value, recipes_for
 
+    if test_type == "nosql" and location in NOSQL_OBJECT_LOCATIONS:
+        return nosql_requests(method=method, url=url, location=location, parameter=parameter,
+                              nonce=nonce, state=state, baseline=baseline,
+                              recipe=nosql_recipe or nosql_recipes_for(location)[0],
+                              write_approved=write_approved)
     if test_type == "nosql":
         literal = control_value(test_type, nonce)
         if location == "body_json":
@@ -561,8 +609,13 @@ def sqli_values(recipe: str, base: str, nonce: str, false_nonce: str,
     return {key: values[key] for key in order}
 
 
-def observe_planned(req: PlannedRequest, *, allowed_origin: str) -> dict:
-    """The bounded response metadata ``http_observe.observe_get`` records."""
+def observe_planned(req: PlannedRequest, *, allowed_origin: str,
+                    reflection_marker: str = "") -> dict:
+    """The bounded response metadata ``http_observe.observe_get`` records.
+
+    ``reflection_marker`` (UNION recipe and its baseline precondition) sets
+    ``reflection_detected``; the body itself never leaves this function.
+    """
     from .http_observe import MAX_BODY as OBSERVE_MAX, _sql_error_family
 
     started = time.perf_counter()
@@ -590,18 +643,265 @@ def observe_planned(req: PlannedRequest, *, allowed_origin: str) -> dict:
             "body_sha256": hashlib.sha256(data).hexdigest(), "redirected": bool(location),
             "elapsed_ms": elapsed_ms, "sql_error_family": _sql_error_family(data),
             "json_array_lengths": lengths,
+            "reflection_detected": bool(reflection_marker
+                                        and reflection_marker.encode() in data),
         }
 
 
 def probe_sqli_requests(requests: Dict[str, PlannedRequest], *, recipe: str,
-                        allowed_origin: str, observe=observe_planned) -> Dict[str, dict]:
+                        allowed_origin: str, observe=observe_planned,
+                        reflection_marker: str = "") -> Dict[str, dict]:
     """Send each check in order; keep the fields the recipe's validator reads."""
     keep = ("status", "content_type", "bytes_captured", "truncated", "body_sha256",
             "redirected")
     extra = {"or": ("sql_error_family", "json_array_lengths"), "and": (),
-             "error": ("sql_error_family",), "time": ("elapsed_ms",)}[recipe]
+             "error": ("sql_error_family",), "time": ("elapsed_ms",),
+             "numeric": (), "union": ("reflection_detected",)}[recipe]
+    marker = {"reflection_marker": reflection_marker} if reflection_marker else {}
     checks: Dict[str, dict] = {}
     for key, req in requests.items():
-        row = observe(req, allowed_origin=allowed_origin)
+        row = observe(req, allowed_origin=allowed_origin, **marker)
         checks[key] = {name: row.get(name) for name in (*keep, *extra)}
     return checks
+
+
+# ---------------------------------------------------------------- NoSQL locations
+
+# Locations ``nosql_requests`` builds (query/form/JSON keep the steps above).
+NOSQL_OBJECT_LOCATIONS = frozenset({"cookie", "header", "body_xml", "path"})
+NOSQL_OPERATOR_RECIPE = "operator_ne"
+# A path segment is always a string: only string-carried recipes. Each pairs an
+# always-true variant with a variant that means the same as the literal control.
+#   where_*: the segment is concatenated into a ``$where`` JavaScript string
+#     (``this.f == '<seg>'``): ``' || 'a'=='a`` is always true, ``' && 'a'=='b``
+#     always false, exactly like the control literal that matches nothing.
+#   regex_alternation: the segment becomes a ``$regex``: ``<lit>|.*`` matches
+#     everything, ``(?:<lit>)`` matches exactly what the control matches.
+# A server that compares or reflects the segment literally makes the false
+# variant differ from the control (reflection) or the true variant equal it
+# (no evaluation): never confirmed.
+NOSQL_PATH_RECIPES = ("where_single_quote", "where_double_quote", "regex_alternation")
+MAX_JSON_BASELINE = 512
+
+
+def nosql_recipes_for(location: str) -> Tuple[str, ...]:
+    return NOSQL_PATH_RECIPES if location == "path" else (NOSQL_OPERATOR_RECIPE,)
+
+
+def _nosql_path_values(recipe: str, literal: str) -> Tuple[str, str]:
+    if recipe == "where_single_quote":
+        return literal + "' || 'a'=='a", literal + "' && 'a'=='b"
+    if recipe == "where_double_quote":
+        return literal + '" || "a"=="a', literal + '" && "a"=="b'
+    if recipe == "regex_alternation":
+        return literal + "|.*", "(?:" + literal + ")"
+    raise UnsupportedShape("recipe_unknown")
+
+
+def _json_string_leaves(document: Any, path: Tuple[Any, ...] = (), depth: int = 0) -> list:
+    if depth > 5:
+        raise UnsupportedShape("json_baseline_too_deep")
+    if isinstance(document, dict):
+        return [leaf for key, child in list(document.items())[:40]
+                for leaf in _json_string_leaves(child, (*path, key), depth + 1)]
+    if isinstance(document, list):
+        return [leaf for index, child in enumerate(document[:40])
+                for leaf in _json_string_leaves(child, (*path, index), depth + 1)]
+    return [path] if isinstance(document, str) else []
+
+
+def _json_replace(document: Any, path: Tuple[Any, ...], value: Any) -> Any:
+    if not path:
+        return value
+    head, rest = path[0], path[1:]
+    if isinstance(document, dict):
+        return {k: (_json_replace(v, rest, value) if k == head else v)
+                for k, v in document.items()}
+    return [(_json_replace(v, rest, value) if i == head else v)
+            for i, v in enumerate(document)]
+
+
+def json_operator_values(baseline: str, literal: str) -> Dict[str, str]:
+    """Control/true/false header values from a JSON object/array baseline.
+
+    Exactly one string leaf must exist (the input the server filters on); it
+    becomes the literal, ``{"$ne": literal}`` and ``{"$eq": literal}``. Every
+    other part of the baseline is kept. Anything else is unsupported.
+    """
+    if not isinstance(baseline, str) or not baseline or len(baseline) > MAX_JSON_BASELINE:
+        raise UnsupportedShape("header_baseline_not_json")
+    try:
+        document = json.loads(baseline)
+    except ValueError:
+        raise UnsupportedShape("header_baseline_not_json") from None
+    if not isinstance(document, (dict, list)):
+        raise UnsupportedShape("header_baseline_not_json")
+    leaves = _json_string_leaves(document)
+    if len(leaves) != 1:
+        raise UnsupportedShape("header_json_needs_one_string_field" if not leaves
+                               else "header_json_string_field_ambiguous")
+
+    def dump(value: Any) -> str:
+        return json.dumps(_json_replace(document, leaves[0], value), separators=(",", ":"))
+
+    return {"control": dump(literal), "true": dump({"$ne": literal}),
+            "false": dump({"$eq": literal})}
+
+
+def nosql_requests(*, method: str, url: str, location: str, parameter: str, nonce: str,
+                   state: Optional[dict], baseline: str = "",
+                   recipe: str = NOSQL_OPERATOR_RECIPE,
+                   write_approved: bool = False) -> Dict[str, PlannedRequest]:
+    """The ``NOSQL_SEQUENCE`` steps for one cookie/header/XML/path input.
+
+    * cookie: ``j:{"$ne":"<lit>"}`` / ``j:{"$eq":"<lit>"}`` (Express
+      cookie-parser JSON cookies) against the plain literal;
+    * header: the JSON baseline with its one string field replaced
+      (``json_operator_values``); a non-JSON baseline is unsupported;
+    * body_xml: ``<field><$ne>lit</$ne></field>`` / ``<$eq>`` against
+      ``<field>lit</field>``;
+    * path: the string recipes in ``NOSQL_PATH_RECIPES``.
+    """
+    from .injection_probe import NOSQL_SEQUENCE, control_value
+
+    if location not in NOSQL_OBJECT_LOCATIONS:
+        raise UnsupportedShape("location_unsupported")
+    if recipe not in nosql_recipes_for(location):
+        raise UnsupportedShape("recipe_unknown")
+    literal = control_value("nosql", nonce)
+    kinds = {step: step.split("_", 1)[0] for step in NOSQL_SEQUENCE}
+    operators: Dict[str, str] = {}
+    if location == "cookie":
+        by_kind = {"control": literal,
+                   "true": "j:" + json.dumps({"$ne": literal}, separators=(",", ":")),
+                   "false": "j:" + json.dumps({"$eq": literal}, separators=(",", ":"))}
+    elif location == "header":
+        by_kind = json_operator_values(baseline, literal)
+    elif location == "body_xml":
+        by_kind = {"control": literal, "true": literal, "false": literal}
+        operators = {step: {"true": "$ne", "false": "$eq"}[kind]
+                     for step, kind in kinds.items() if kind != "control"}
+    else:
+        true, false = _nosql_path_values(recipe, literal)
+        by_kind = {"control": literal, "true": true, "false": false}
+    return plan_requests(method=method, url=url, location=location, parameter=parameter,
+                         values={step: by_kind[kind] for step, kind in kinds.items()},
+                         state=state, test_type="nosql", write_approved=write_approved,
+                         xml_operators=operators)
+
+
+# ---------------------------------------------------------------- baselines
+
+_POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,8}\Z")
+MAX_BASELINE_VALUE = 512
+
+
+def positive_integer(value: Any) -> bool:
+    return bool(isinstance(value, str) and _POSITIVE_INTEGER.fullmatch(value))
+
+
+def sqli_safe_value(value: Any) -> bool:
+    """An ordinary string value the string/UNION recipes may extend."""
+    return bool(isinstance(value, str) and _SQL_SAFE_VALUE.fullmatch(value))
+
+
+def valid_baseline_value(value: Any) -> bool:
+    """Operator-supplied ``baseline_value``: bounded printable text."""
+    return (isinstance(value, str) and 0 < len(value) <= MAX_BASELINE_VALUE
+            and not re.search(r"[\x00-\x1f\x7f]", value))
+
+
+def url_value(url: str, location: str, parameter: str) -> str:
+    """The value the URL already carries for a query field or path segment."""
+    try:
+        if location == "query":
+            fields = [f for f in urlsplit(url).query.split("&") if f]
+            found = [unquote_plus(f.partition("=")[2]) for f in fields
+                     if unquote_plus(f.partition("=")[0]) == parameter]
+            return found[0] if len(found) == 1 else ""
+        if location == "path":
+            segments = (urlsplit(url).path or "/").split("/")
+            return unquote(segments[path_segment_index(url, parameter)])
+    except ValueError:
+        return ""
+    return ""
+
+
+def captured_value(captured: Dict[str, Any], location: str, parameter: str) -> Optional[str]:
+    """The value one input had in a private browser capture, or None.
+
+    Captures hold the URL, the sanitized replay headers and the request body;
+    never cookies (credentials come from the named identity), so a cookie
+    baseline needs the operator's ``baseline_value``. XML bodies are not
+    parsed here either.
+    """
+    import base64
+    import binascii
+
+    url = str(captured.get("url") or "")
+    if location in {"query", "path"}:
+        return url_value(url, location, parameter) or None
+    if location == "header":
+        headers = captured.get("replay_headers") or {}
+        found = [str(v) for k, v in headers.items() if str(k).lower() == parameter.lower()]
+        return found[0] if len(found) == 1 and found[0] else None
+    try:
+        body = base64.b64decode(str(captured.get("request_body_base64") or ""), validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    mime = str(captured.get("request_content_type") or "").lower()
+    if location == "body_form" and mime == "application/x-www-form-urlencoded":
+        from urllib.parse import parse_qsl
+
+        try:
+            pairs = parse_qsl(body.decode("utf-8"), keep_blank_values=True, max_num_fields=100)
+        except (UnicodeDecodeError, ValueError):
+            return None
+        found = [v for k, v in pairs if k == parameter]
+        return found[0] if len(found) == 1 and found[0] else None
+    if location == "body_json" and (mime == "application/json" or mime.endswith("+json")):
+        try:
+            document: Any = json.loads(body)
+            for token in _json_tokens(parameter):
+                document = document[token] if isinstance(document, dict) else None
+        except (ValueError, KeyError, TypeError):
+            return None
+        if isinstance(document, bool) or not isinstance(document, (str, int)):
+            return None
+        return str(document) or None
+    return None
+
+
+def result_data_reflected(row: Dict[str, Any]) -> bool:
+    """A baseline response that renders query results (the UNION precondition).
+
+    JSON with a non-empty result array, or a body that shows the baseline
+    value itself (``reflection_detected`` with the value as marker).
+    """
+    if row.get("status") != 200 or row.get("truncated") is not False or row.get("redirected"):
+        return False
+    lengths = row.get("json_array_lengths") or {}
+    return bool(row.get("reflection_detected") is True
+                or any(isinstance(n, int) and n > 0 for n in lengths.values()))
+
+
+def numeric_values(base: str, nonce: str) -> Dict[str, str]:
+    """The observed numeric lane's checks (``sqli_boolean``) as raw values."""
+    from . import sqli_boolean
+
+    if not positive_integer(base):
+        raise UnsupportedShape("baseline_not_positive_integer")
+    true = f"{base} AND {nonce}={nonce}"
+    false = f"{base} AND {nonce}={int(nonce) + 1}"
+    values = {"baseline_first": base, "true_first": true, "false_first": false,
+              "true_second": true, "false_second": false, "baseline_last": base}
+    return {key: values[key] for key in sqli_boolean.CHECK_ORDER}
+
+
+def union_value(base: str, family: str, columns: int, position: int, marker: str) -> str:
+    """The observed UNION lane's payload (``sqli_union._union_suffix``) as a raw value."""
+    from . import sqli_union
+
+    if not sqli_safe_value(base):
+        raise UnsupportedShape("baseline_not_ordinary_string")
+    return base + unquote(sqli_union._union_suffix(family, columns, position, marker))

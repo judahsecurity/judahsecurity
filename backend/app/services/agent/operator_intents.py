@@ -14,6 +14,12 @@ Same intake rules as external candidates (``external_candidates``):
   ``attack_graph.INTENT_LOCATIONS``;
 * the note is untrusted text, wrapped like ``CLAIM_HEADER`` and never read as
   instructions;
+* ``baseline_value`` (optional) is the input's ordinary value: 1-512 printable
+  characters, needs a server-side location, must equal the value the target
+  already carries for a query field or path segment, and must be a JSON
+  object/array for NoSQL on a header. Numeric SQLi runs only when it is a
+  positive integer, UNION only when the fresh baseline response reflects
+  result data, JSON-header NoSQL only with it;
 * idle session: written to the run snapshot; running session: queued in the
   durable candidate inbox (``kind: operator_intent``) and merged at the think
   turn by ``drain_candidate_inbox_into_brain``.
@@ -85,9 +91,41 @@ def _check_shape(klass: str, location: str, parameter: str, method: str, target:
                                    f"/slash/path of up to 5 element names ({reason})")
 
 
+def _check_baseline_value(klass: str, location: str, parameter: str, target: str,
+                          value: Any) -> str:
+    """The validated ``baseline_value`` ('' when none was supplied)."""
+    from app.services.agent.external_candidates import IntakeError
+    from app.services.agent.scoped_assessment import intent_request as ir
+
+    if value is None or value == "":
+        if klass == "nosql" and location == "header":
+            raise IntakeError(422, "nosql on a header needs baseline_value: the header's "
+                                   "JSON object/array value (operators are only sent where "
+                                   "the server parses the header as JSON)")
+        return ""
+    if not ir.valid_baseline_value(value):
+        raise IntakeError(422, f"baseline_value must be 1-{ir.MAX_BASELINE_VALUE} printable "
+                               "characters")
+    if not location or location == "fragment":
+        raise IntakeError(422, "baseline_value needs a server-side location and parameter")
+    carried = ir.url_value(target, location, parameter) if location in {"query", "path"} else ""
+    if location == "path" and not parameter.isdecimal():
+        carried = parameter  # the segment is named by its literal
+    if carried and carried != value:
+        raise IntakeError(422, f"baseline_value differs from the value the target carries for "
+                               f"{location}:{parameter}")
+    if klass == "nosql" and location == "header":
+        try:
+            ir.json_operator_values(value, "x")
+        except ir.UnsupportedShape as exc:
+            raise IntakeError(422, "nosql on a header needs baseline_value holding a JSON "
+                                   f"object/array with exactly one string field ({exc})") from None
+    return value
+
+
 def validated_intent(seed: str, *, target: str, test_type: str, parameter: str = "",
                      location: str = "", method: str = "GET", identity: str = "",
-                     note: str = "") -> Dict[str, Any]:
+                     note: str = "", baseline_value: Any = None) -> Dict[str, Any]:
     """Scope/class/location checks + sanitization. Returns the inert payload."""
     from app.services.agent.attack_graph import INTENT_LOCATIONS, intent_id_for, normalize_test_type
     from app.services.agent.external_candidates import (
@@ -131,6 +169,8 @@ def validated_intent(seed: str, *, target: str, test_type: str, parameter: str =
     if clean_method not in INTENT_METHODS:
         raise IntakeError(422, f"method must be one of {list(INTENT_METHODS)}")
     _check_shape(klass, clean_location, clean_param, clean_method, clean_target)
+    clean_baseline = _check_baseline_value(klass, clean_location, clean_param, clean_target,
+                                           baseline_value)
     clean_identity = str(identity or "").strip()
     if clean_identity and not _IDENTITY.fullmatch(clean_identity):
         raise IntakeError(422, "identity must be a registered identity name")
@@ -150,6 +190,7 @@ def validated_intent(seed: str, *, target: str, test_type: str, parameter: str =
         "identity": clean_identity,
         # Stored under "description" so the inbox redacts it at rest.
         "description": wrapped_note(clean_note),
+        **({"baseline_value": clean_baseline} if clean_baseline else {}),
     }
 
 
@@ -213,6 +254,7 @@ def apply_intent_payload(brain: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
         test_type=payload["test_type"], target=payload["target"], parents=[fact["id"]],
         parameter=payload["parameter"], location=payload["location"],
         method=payload["method"], identity=payload["identity"], created_by="operator",
+        baseline_value=payload.get("baseline_value") or None,
     )
     if payload.get("description"):
         intent["operator_note"] = payload["description"]
@@ -240,6 +282,8 @@ def intent_summary(row: Dict[str, Any], brain: Any = None) -> Dict[str, Any]:
         "coverage_cell_status": (cell or {}).get("status", ""),
         "unsupported_shape": (cell or {}).get("unsupported_shape", ""),
         "note": row.get("operator_note") or "",
+        "baseline_value_supplied": bool(row.get("baseline_value")),
+        "source_capture_id": row.get("source_capture_id") or "",
     }
 
 
@@ -252,6 +296,8 @@ def queued_intent_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
         "claimed_by": "", "result_facts": [], "coverage_cell_id": "",
         "coverage_cell_status": "", "unsupported_shape": "",
         "note": payload.get("description") or "", "queued_at": payload.get("queued_at"),
+        "baseline_value_supplied": bool(payload.get("baseline_value")),
+        "source_capture_id": "",
     }
 
 
