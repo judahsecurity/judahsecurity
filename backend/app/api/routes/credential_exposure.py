@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -25,11 +25,15 @@ from app.models.identity import (
     IdentitySourceSync,
     StealerDomainSummary,
     StealerUrlExposure,
+    ExposureScope,
 )
 from app.models.servicenow_integration import ServiceNowIntegration
 from app.models.user import User
-from app.services import identity_sync_service
-from app.services.credential_exposure_service import rescore_organization
+from app.services import exposure_scope_service, identity_sync_service
+from app.services.credential_exposure_service import (
+    ingest_stealer_log_records,
+    rescore_organization,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -447,3 +451,162 @@ async def _bg_servicenow_sync(organization_id: int) -> None:
         logger.error("ServiceNow identity sync failed for org %s: %s", organization_id, exc)
     finally:
         db.close()
+
+
+# ── Engagement scope (authorized domains) ────────────────────────────────────
+
+class ScopeOut(BaseModel):
+    id: int
+    domain: str
+    include_subdomains: bool
+    audience_scope: str
+    is_active: bool
+    authorized_by: Optional[str] = None
+    authorization_note: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ScopeCreate(BaseModel):
+    domain: str
+    include_subdomains: bool = True
+    audience_scope: str = "both"  # employees | customers | both
+    note: Optional[str] = None
+
+
+@router.get("/scope", response_model=List[ScopeOut])
+def list_scope(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    rows = (
+        db.query(ExposureScope)
+        .filter(ExposureScope.organization_id == _org_id(current_user))
+        .order_by(ExposureScope.domain)
+        .all()
+    )
+    return [ScopeOut.model_validate(r) for r in rows]
+
+
+@router.post("/scope", response_model=ScopeOut, status_code=status.HTTP_201_CREATED)
+def add_scope(
+    payload: ScopeCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Record a signed-off domain. Only in-scope records are ever stored."""
+    who = getattr(current_user, "email", None) or getattr(current_user, "username", None)
+    try:
+        row = exposure_scope_service.add_scope(
+            db,
+            _org_id(current_user),
+            payload.domain,
+            authorized_by=who,
+            include_subdomains=payload.include_subdomains,
+            audience_scope=payload.audience_scope,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    db.commit()
+    db.refresh(row)
+    return ScopeOut.model_validate(row)
+
+
+@router.delete("/scope/{scope_id}", status_code=status.HTTP_204_NO_CONTENT)
+def deactivate_scope(
+    scope_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Deactivate a domain. Existing records stay; no new ones are ingested."""
+    row = (
+        db.query(ExposureScope)
+        .filter(
+            ExposureScope.id == scope_id,
+            ExposureScope.organization_id == _org_id(current_user),
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scope entry not found.")
+    row.is_active = False
+    db.commit()
+
+
+# ── Signed collector intake ──────────────────────────────────────────────────
+
+class IntakeRecord(BaseModel):
+    url: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    application: Optional[str] = None
+
+
+class IntakePayload(BaseModel):
+    organization_id: int
+    records: List[IntakeRecord] = Field(default_factory=list)
+    source_name: str = "Infostealer log"
+    leak_date: Optional[str] = None
+
+
+@router.post("/intake")
+async def collector_intake(request: Request, db: Session = Depends(get_db)):
+    """Accept normalized stealer-log records from the isolated collector.
+
+    Authentication is an HMAC signature over the raw body, not a user session.
+    The platform re-enforces the organization's authorized scope on every
+    record, so out-of-scope data is dropped even if the collector sent it.
+    """
+    from app.core.config import settings
+    from app.services.credential_exposure_service import parse_leak_date
+    from app.services.exposure_intake_service import (
+        SIGNATURE_HEADER,
+        TIMESTAMP_HEADER,
+        verify_signature,
+    )
+    from app.services.stealer_log_parser import CredentialRecord
+
+    body = await request.body()
+    ok, reason = verify_signature(
+        secret=settings.EXPOSURE_COLLECTOR_SECRET,
+        signature=request.headers.get(SIGNATURE_HEADER),
+        timestamp=request.headers.get(TIMESTAMP_HEADER),
+        body=body,
+        max_skew_seconds=settings.EXPOSURE_INTAKE_MAX_SKEW_SECONDS,
+    )
+    if not ok:
+        raise HTTPException(status_code=401, detail=reason)
+
+    try:
+        payload = IntakePayload.model_validate_json(body)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"Invalid intake payload: {exc}")
+
+    scope = exposure_scope_service.load_scope(db, payload.organization_id)
+    if scope.is_empty:
+        raise HTTPException(
+            status_code=403,
+            detail="No authorized domains for this organization; intake refused.",
+        )
+
+    records = [
+        CredentialRecord(
+            url=r.url, username=r.username, password=r.password, application=r.application
+        )
+        for r in payload.records
+    ]
+    stats = ingest_stealer_log_records(
+        db,
+        payload.organization_id,
+        records,
+        source_name=payload.source_name,
+        leak_date=parse_leak_date(payload.leak_date),
+    )
+    db.commit()
+    logger.info(
+        "Collector intake org=%s: %d in scope, %d out of scope, %d unusable",
+        payload.organization_id, stats["in_scope"], stats["out_of_scope"], stats["unusable"],
+    )
+    return {"received": len(records), **stats}

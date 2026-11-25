@@ -141,3 +141,22 @@ BEGIN
         ALTER TYPE assettype ADD VALUE 'EMAIL';
     END IF;
 END $$;
+
+-- Authorized domains for leaked-credential collection and ingest (the
+-- engagement boundary). Only in-scope records are ever stored.
+CREATE TABLE IF NOT EXISTS exposure_scopes (
+    id SERIAL PRIMARY KEY,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    domain VARCHAR(255) NOT NULL,
+    include_subdomains BOOLEAN NOT NULL DEFAULT TRUE,
+    audience_scope VARCHAR(20) NOT NULL DEFAULT 'both',
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    authorized_by VARCHAR(255),
+    authorization_note TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_exposure_scope_org_domain UNIQUE (organization_id, domain)
+);
+
+CREATE INDEX IF NOT EXISTS ix_exposure_scopes_organization_id ON exposure_scopes (organization_id);
+CREATE INDEX IF NOT EXISTS ix_exposure_scopes_domain ON exposure_scopes (domain);

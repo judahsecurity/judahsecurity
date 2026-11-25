@@ -615,3 +615,83 @@ async def run_credential_exposure_check(
         db.commit()
 
     return out
+
+
+# ── Stealer-log records (from the isolated collector) ────────────────────────
+
+PROVIDER_COLLECTOR = "collector"
+
+
+def _record_host(value: Optional[str]) -> Optional[str]:
+    from app.services.exposure_scope_service import host_of
+
+    return host_of(value or "") if value else None
+
+
+def ingest_stealer_log_records(
+    db: Session,
+    organization_id: int,
+    records: Iterable[Any],
+    *,
+    source_name: str = "Infostealer log",
+    leak_date: Optional[datetime] = None,
+    provider: str = PROVIDER_COLLECTOR,
+    now: Optional[datetime] = None,
+) -> Dict[str, int]:
+    """Store parsed stealer-log credentials, enforcing the engagement scope.
+
+    A record is in scope when its username is an address under an authorized
+    domain (an employee credential) or the saved URL's host is under one (a
+    credential for a client asset). Passwords are fingerprinted, never stored.
+    Records outside scope are dropped and counted, not persisted.
+    """
+    from app.services.exposure_scope_service import load_scope
+
+    now = now or datetime.utcnow()
+    scope = load_scope(db, organization_id)
+    index = build_identity_index(db, organization_id)
+    hosts = host_asset_index(db, organization_id)
+    stats = {"in_scope": 0, "out_of_scope": 0, "unusable": 0, "created": 0, "refreshed": 0}
+
+    for record in records:
+        username = normalize_identifier(getattr(record, "username", None) or "")
+        url = (getattr(record, "url", None) or "").strip()
+        password = getattr(record, "password", None)
+        if not (username or url) or not (password or username):
+            stats["unusable"] += 1
+            continue
+
+        username_in_scope = bool(username) and scope.allows(username, audience="employee")
+        url_in_scope = bool(url) and scope.allows(url)
+        if not (username_in_scope or url_in_scope):
+            stats["out_of_scope"] += 1
+            continue
+        stats["in_scope"] += 1
+
+        identifier = username or f"unknown@{_record_host(url) or 'unknown'}"
+        affected_host = _record_host(url)
+        exposure, created = upsert_exposure(
+            db,
+            organization_id,
+            index,
+            identifier=identifier,
+            provider=provider,
+            source_type=EXPOSURE_SOURCE_STEALER_LOG,
+            source_name=source_name,
+            credential_type=CREDENTIAL_PASSWORD_PLAINTEXT,
+            data_classes=["Saved password", "Browser-stored credential"],
+            leak_date=leak_date,
+            secret_value=password,
+            affected_url=url[:2000] or None,
+            affected_host=affected_host,
+            dedup_extra=(getattr(record, "application", None) or ""),
+        )
+        exposure_asset = hosts.get(affected_host or "")
+        if exposure_asset is not None:
+            exposure.asset_id = exposure_asset
+            apply_exposure_score(exposure, exposure.identity)
+            stats["asset_matched"] = stats.get("asset_matched", 0) + 1
+        stats["created" if created else "refreshed"] += 1
+
+    db.flush()
+    return stats

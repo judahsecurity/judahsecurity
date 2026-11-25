@@ -75,6 +75,7 @@ from app.models.identity import (
     CredentialExposure,
     StealerUrlExposure,
     StealerDomainSummary,
+    ExposureScope,
 )
 
 __all__ = [
@@ -83,6 +84,7 @@ __all__ = [
     "CredentialExposure",
     "StealerUrlExposure",
     "StealerDomainSummary",
+    "ExposureScope",
     "User",
     "UserRole",
     "Organization",

@@ -241,3 +241,37 @@ class StealerDomainSummary(Base):
     domain = Column(String(255), nullable=False)
     summary = Column(JSON, nullable=False, default=dict)
     fetched_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ExposureScope(Base):
+    """An authorized domain for leaked-credential collection and ingest.
+
+    This is the engagement boundary. Only records whose email or affected host
+    falls under an authorized domain for the organization may be stored. Every
+    row records who authorized it, so the sign-off is explicit and auditable
+    rather than inferred from the asset inventory.
+    """
+
+    __tablename__ = "exposure_scopes"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "domain", name="uq_exposure_scope_org_domain"),
+        Index("ix_exposure_scopes_domain", "domain"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(
+        Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    domain = Column(String(255), nullable=False)  # authorized apex, e.g. rockwellautomation.com
+    include_subdomains = Column(Boolean, nullable=False, default=True)
+    # employees | customers | both — who at this domain is in scope
+    audience_scope = Column(String(20), nullable=False, default="both")
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    authorized_by = Column(String(255), nullable=True)  # user who recorded the sign-off
+    authorization_note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<ExposureScope org={self.organization_id} {self.domain}>"

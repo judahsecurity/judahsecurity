@@ -300,6 +300,14 @@ class Settings(BaseSettings):
     # XposedOrNot's domain search needs a key for a verified domain.
     XPOSEDORNOT_API_KEY: Optional[str] = None
     HUDSONROCK_ENABLED: bool = True
+
+    # Shared secret for the isolated stealer-log collector's signed intake.
+    # The collector runs in a separate, disposable environment, parses logs
+    # there, and POSTs normalized records signed with this secret. Unset
+    # disables the intake endpoint.
+    EXPOSURE_COLLECTOR_SECRET: Optional[str] = None
+    # Reject signed payloads whose timestamp is older than this (replay guard).
+    EXPOSURE_INTAKE_MAX_SKEW_SECONDS: int = 300
     
     # MITRE ATT&CK Enrichment
     MITRE_ENRICHMENT_ENABLED: bool = True
