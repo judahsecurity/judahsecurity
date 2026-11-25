@@ -180,7 +180,9 @@ async def route_finding_validation(
     native   - native replay only
     prowl    - native; Prowl independent verifier when native is inconclusive
     auto     - native; then Prowl (if enabled); then the Vanguard LLM validator
-               only when Prowl cannot take the finding and a Vanguard backend exists
+               only when no native verifier handled the finding (its verdict has
+               no ``native_verifier``), Prowl cannot take it, and a Vanguard
+               backend exists
     subprocess / docker (or unknown) - Vanguard LLM validator only
 
     run_prowl returns None when Prowl cannot take the finding. Vanguard errors
@@ -200,6 +202,10 @@ async def route_finding_validation(
                 k: verdict.get(k) for k in ("verdict", "method", "reasoning")
             }
             return prowl_verdict
+    if isinstance(verdict, dict) and verdict.get("native_verifier"):
+        # A native verifier (network service, secret, manual replay, template
+        # replay) owns this finding: its inconclusive answer is the answer.
+        return verdict
     if mode == "auto" and vanguard_fallback:
         logger.info(f"VALIDATE_FINDING: native inconclusive; escalating to {vanguard_fallback}")
         try:
@@ -1051,7 +1057,9 @@ class ScannerWorker:
           - prowl — native first; when inconclusive, re-test with Prowl's
             independent verifier (HTTP(S) findings in a class Prowl can prove)
           - auto — native, then Prowl (unless AEGIS_VALIDATOR_PROWL=false), then
-            the Aegis Vanguard LLM validator only for findings Prowl cannot take
+            the Aegis Vanguard LLM validator only for findings that no native
+            verifier (network service, secret, manual replay, template replay)
+            handled and Prowl cannot take
           - docker / subprocess — Aegis Vanguard LLM validator
 
         Writes the structured verdict back to FindingValidation and denormalizes
@@ -1158,7 +1166,9 @@ class ScannerWorker:
                 source_kind = "manual"
             elif detected_by in ("port_scanner",):
                 source_kind = "network_service"
-            elif detected_by in ("trufflehog", "github_secret_scanner"):
+            elif detected_by in ("trufflehog", "github_secret_scanner", "js_secret_scan") or (
+                detected_by == "jsluice" and "secret" in (vuln.tags or [])
+            ):
                 source_kind = "secret"
             elif detected_by in (
                 "nuclei", "graphql_scanner", "takeover_scanner", "js_recon",
@@ -1218,6 +1228,8 @@ class ScannerWorker:
                 "cve_id": vuln.cve_id,
                 "cwe_id": vuln.cwe_id,
                 "detection_confidence": vuln.detection_confidence,
+                # Lets the verifiers tell "remediated" from "never real".
+                "last_validation_verdict": vuln.last_validation_verdict,
                 "references": vuln.references or [],
                 "tags": vuln.tags or [],
                 "evidence": vuln.evidence,
@@ -1398,6 +1410,15 @@ class ScannerWorker:
                 logger.warning(f"VALIDATE_FINDING: validation {validation.id} failed: {run_error}")
                 return
 
+            try:
+                from app.services.native_verifiers import finalize_verdict
+                verdict_data = finalize_verdict(verdict_data, finding_payload)
+            except Exception as e:
+                logger.debug(f"VALIDATE_FINDING: could not normalize verdict: {e}")
+            # Remediated = it was real and is gone; never count it as a
+            # detection false positive (feedback, patterns, auto-refine).
+            remediated = verdict_data.get("remediation_state") == "remediated"
+
             verdict_str = str(verdict_data.get("verdict", "needs_more_evidence")).lower()
             verdict_map = {
                 "confirmed": ValidationVerdict.CONFIRMED,
@@ -1468,7 +1489,8 @@ class ScannerWorker:
             db.commit()
 
             # Log a template-logic issue when the FP is attributed to the template.
-            if verdict_enum == ValidationVerdict.FALSE_POSITIVE and vuln.template_id and template_logic_issue:
+            if (verdict_enum == ValidationVerdict.FALSE_POSITIVE and not remediated
+                    and vuln.template_id and template_logic_issue):
                 try:
                     from app.services.detection_feedback_service import record_detection_feedback
                     record_detection_feedback(
@@ -1499,6 +1521,7 @@ class ScannerWorker:
             if (
                 auto_refine
                 and verdict_enum == ValidationVerdict.FALSE_POSITIVE
+                and not remediated
                 and vuln.template_id
                 and template_logic_issue
                 and template_yaml
@@ -1540,7 +1563,7 @@ class ScannerWorker:
             # Re-evaluate the false-positive pattern for this template. A pattern
             # spanning enough hosts raises a suppression recommendation (it never
             # auto-suppresses without analyst approval).
-            if verdict_enum == ValidationVerdict.FALSE_POSITIVE and vuln.template_id:
+            if verdict_enum == ValidationVerdict.FALSE_POSITIVE and not remediated and vuln.template_id:
                 try:
                     from app.services.detection_pattern_service import evaluate_template
                     evaluate_template(

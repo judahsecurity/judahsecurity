@@ -257,8 +257,11 @@ def _revalidate_port_exposure(finding: dict, endpoints: list[dict[str, Any]]) ->
     }
 
 
-async def revalidate_port_exposure(finding: dict) -> Optional[dict[str, Any]]:
-    """Check the one port claimed by a network exposure finding with Nmap."""
+async def revalidate_port_exposure(
+    finding: dict, *, service_probe=None,
+) -> Optional[dict[str, Any]]:
+    """Check the one port claimed by a network exposure finding with Nmap, then
+    whether the claimed service actually answers there (``verify_network_service``)."""
     detected_by = (finding.get("detected_by") or "").lower()
     source_kind = (finding.get("source_kind") or "").lower()
     endpoints = await asyncio.to_thread(_extract_endpoints, finding)
@@ -272,7 +275,11 @@ async def revalidate_port_exposure(finding: dict) -> Optional[dict[str, Any]]:
         verdict["verdict"] = "needs_more_evidence"
         verdict["confidence"] = "medium"
         verdict["reasoning"] += " The claimed service vulnerability still needs its own reproduction evidence."
-    return verdict
+    from app.services.native_verifiers import finalize_verdict, verify_network_service
+    verdict = await asyncio.to_thread(
+        verify_network_service, finding, verdict, service_probe=service_probe,
+    )
+    return finalize_verdict(verdict, finding)
 
 
 def _verdict_from_probes(
@@ -427,6 +434,7 @@ async def _revalidate_nuclei(finding: dict) -> Optional[dict[str, Any]]:
         }
 
     still = bool(recheck.get("still_fires"))
+    from app.services.native_verifiers import _was_real
     if still:
         return {
             "verdict": "confirmed",
@@ -443,6 +451,28 @@ async def _revalidate_nuclei(finding: dict) -> Optional[dict[str, Any]]:
             "template_logic_issue": None,
             "method": "nuclei_template_replay",
             "nuclei_recheck": recheck,
+            "native_verifier": "template",
+        }
+
+    if _was_real(finding):
+        return {
+            "verdict": "false_positive",
+            "confidence": "high",
+            "is_false_positive": False,
+            "still_open": False,
+            "logical_mismatch": False,
+            "recommended_severity": "info",
+            "remediation_state": "remediated",
+            "reasoning": (
+                f"Re-ran nuclei template {template_id or '(inline yaml)'} against "
+                f"{target}; it no longer matches. The finding was confirmed before, so "
+                "it has been remediated."
+            ),
+            "evidence": str(recheck),
+            "template_logic_issue": None,
+            "method": "nuclei_template_replay",
+            "nuclei_recheck": recheck,
+            "native_verifier": "template",
         }
 
     return {
@@ -460,6 +490,7 @@ async def _revalidate_nuclei(finding: dict) -> Optional[dict[str, Any]]:
         "template_logic_issue": None,
         "method": "nuclei_template_replay",
         "nuclei_recheck": recheck,
+        "native_verifier": "template",
     }
 
 
@@ -493,12 +524,35 @@ def _application_level(detected_by: str, source_kind: str) -> bool:
     return detected_by in _APPLICATION_DETECTORS
 
 
-async def revalidate_finding(finding: dict) -> dict[str, Any]:
+async def revalidate_finding(
+    finding: dict,
+    *,
+    http_call=None,
+    service_probe=None,
+    llm_call=None,
+) -> dict[str, Any]:
     """
     Revalidate one finding using scanner-native tools and stored reproduction data.
 
     ``finding`` is the same payload shape built by handle_validate_finding.
+    ``http_call``, ``service_probe`` and ``llm_call`` replace the network and
+    LLM access of the verifiers in ``native_verifiers`` (tests).
     """
+    from app.services import native_verifiers as nv
+
+    verdict = await _revalidate_finding(
+        finding, http_call=http_call, service_probe=service_probe,
+    )
+    # Template-logic diagnosis: only for template detections the re-test did
+    # not confirm. Any LLM problem leaves the verdict as it is.
+    diagnosis = await nv.diagnose_template_logic(finding, verdict, llm_call=llm_call)
+    verdict = nv.apply_diagnosis(verdict, diagnosis)
+    return nv.finalize_verdict(verdict, finding)
+
+
+async def _revalidate_finding(finding: dict, *, http_call=None, service_probe=None) -> dict[str, Any]:
+    from app.services import native_verifiers as nv
+
     detected_by = (finding.get("detected_by") or "").lower()
     source_kind = (finding.get("source_kind") or "").lower()
 
@@ -506,19 +560,39 @@ async def revalidate_finding(finding: dict) -> dict[str, Any]:
     #    positive no replay can redeem; it also names the template's flaw.
     sanity = _logical_sanity_verdict(finding)
     if sanity:
-        sanity.update(detected_by=detected_by, source_kind=source_kind)
+        sanity.update(detected_by=detected_by, source_kind=source_kind,
+                      native_verifier="logical_sanity")
         return sanity
 
-    # 1) Nuclei / template-based detectors — replay the exact template when possible.
+    # 1) Leaked secrets — re-observe by fingerprint; never use the secret.
+    #    Before template replay: secret detectors set synthetic template ids.
+    if source_kind == "secret":
+        verdict = await asyncio.to_thread(nv.verify_secret, finding, http_call=http_call)
+        verdict.update(detected_by=detected_by, source_kind=source_kind)
+        return verdict
+
+    # 2) Nuclei / template-based detectors — replay the exact template when possible.
     if finding.get("template_id") or finding.get("template_yaml"):
         nuclei_verdict = await _revalidate_nuclei(finding)
         if nuclei_verdict:
             return nuclei_verdict
 
-    # 2) Port / agent / manual / generic — probe reproduction endpoints from stored steps.
-    port_verdict = await revalidate_port_exposure(finding)
+    # 3) Network services — port state plus service detection.
+    if service_probe is not None:
+        port_verdict = await revalidate_port_exposure(finding, service_probe=service_probe)
+    else:
+        port_verdict = await revalidate_port_exposure(finding)
     if port_verdict:
         return port_verdict
+
+    # 4) Manual findings — replay the documented requests, compare the result.
+    if source_kind == "manual" or finding.get("is_manual"):
+        manual = await asyncio.to_thread(nv.verify_manual, finding, http_call=http_call)
+        if manual:
+            manual.update(detected_by=detected_by, source_kind=source_kind)
+            return manual
+
+    # 5) Agent / generic — probe reproduction endpoints from stored steps.
     endpoints = await asyncio.to_thread(_extract_endpoints, finding)
     method = {
         "network_service": "port_replay",

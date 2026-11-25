@@ -29,10 +29,23 @@ Gaps (Vanguard `validate_finding.py` / `finding_lifecycle.py` vs Prowl
    protocol-mismatch case, which now reaches detection feedback and
    `NUCLEI_AUTO_REFINE_ON_FP` without Vanguard.
 2. LLM `template_logic_issue` diagnosis for other template flaws (weak banner or
-   version matchers) — still only in `validate_finding.py`. In `auto` mode it
-   ran only when native replay was inconclusive.
-3. Verification of non-HTTP findings (host:port services, secrets, manual steps) and nuclei re-runs — **MISSING** (pc rejects non-HTTP targets).
-4. `still_open` (remediated vs never real), `confidence`, verifier `recommended_severity`/downgrade — **MISSING** (Prowl only caps severity).
+   version matchers) — **closed**: `native_verifiers.diagnose_template_logic`
+   (backend LLM via `custom_template_ai.call_llm`; only with template YAML and a
+   false_positive / needs_more_evidence verdict; LLM errors give no diagnosis).
+3. Verification of non-HTTP findings — **closed** in the native validator
+   (`backend/app/services/native_verifiers.py`): `verify_network_service` (nmap
+   `-sV`: the claimed protocol must answer, not just TCP open),
+   `verify_secret` (re-fetch the exposing URL, compare the secret fingerprint;
+   the secret is never used), `verify_manual` (replay documented curl / raw HTTP
+   requests, compare the documented result). Nuclei re-runs were already native.
+4. `still_open` (remediated vs never real), `confidence`, `recommended_severity`
+   — **closed**: every native verdict carries `remediation_state`
+   (`open|remediated|never_real|unknown`); remediated verdicts are not counted as
+   detection false positives. `auto` mode escalates to Vanguard only when no
+   native verifier owns the finding (`native_verifier` unset) and Prowl cannot
+   take it: today that is agent/LLM-red-team application findings outside
+   Prowl's provable classes, manual findings with no replayable request or no
+   stated result, and generic findings with mixed endpoint results.
 5. Read-only verification — **closed for worker re-tests**: `prowl_revalidation`
    runs in a throwaway session with `revalidation_only` set, and `create_finding`,
    `scoped_assessment_publish` and LLM red-team auto-filing refuse to publish while
