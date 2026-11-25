@@ -150,7 +150,8 @@ class HttpIdentityToolsMixin:
                              use_auth_session: bool = True, timeout: int = 25,
                              follow_redirects: bool = True, identity: Optional[str] = None,
                              hypothesis_id: str = "", coverage_cell_id: str = "",
-                             max_response_bytes: Optional[int] = None) -> Dict[str, Any]:
+                             max_response_bytes: Optional[int] = None,
+                             http2: bool = False, return_bytes: bool = False) -> Dict[str, Any]:
         import time as _time
         from app.services.agent.assessment_sessions import cookie_jar, identity_registry
         from app.services.agent.evidence_store import evidence_store, verification_run, origin
@@ -233,9 +234,15 @@ class HttpIdentityToolsMixin:
         # Follow redirects manually: retain RFC cookie scope and never forward an
         # explicit Cookie/Authorization header to a different origin.
         from app.services.agent.assessment_proxy import assessment_httpx_options
+        protocol = {}
+        if http2:
+            # gRPC needs HTTP/2: ALPN for https, prior knowledge (h2c) for http.
+            protocol = {"http2": True}
+            if httpx.URL(url).scheme == "http":
+                protocol["http1"] = False
         async with httpx.AsyncClient(
             cookies=jar, follow_redirects=False, timeout=timeout,
-            **assessment_httpx_options(),
+            **protocol, **assessment_httpx_options(),
         ) as client:
             req = client.build_request(method, url, headers=hdrs, content=raw_body)
             if not any(k.lower() == "cookie" for k in hdrs):
@@ -335,6 +342,7 @@ class HttpIdentityToolsMixin:
             "capture": capture,
             "trace": {**trace, "coverage_cell_id": coverage_cell_id},
             "_body_text": body_text,
+            **({"_body_bytes": resp.content} if return_bytes else {}),
         }
 
     async def replay_http_request(

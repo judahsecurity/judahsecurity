@@ -75,6 +75,7 @@ from app.services.agent.tools_http import HttpIdentityToolsMixin
 from app.services.agent.tools_brain import EngagementBrainToolsMixin
 from app.services.agent.tools_recon_fireteam import ReconFireteamToolsMixin
 from app.services.agent.tools_threat_intel import ThreatIntelToolsMixin
+from app.services.agent.tools_ported_probes import PortedProbeToolsMixin
 
 
 class ASMToolsManager(
@@ -93,6 +94,7 @@ class ASMToolsManager(
     EngagementBrainToolsMixin,
     ReconFireteamToolsMixin,
     ThreatIntelToolsMixin,
+    PortedProbeToolsMixin,
     ScopedAssessmentTools,
     AssessmentCapabilities,
 ):
@@ -403,6 +405,15 @@ class ASMToolsManager(
             "probe_registry_anonymous": self.probe_registry_anonymous,
             "compact_context": self.compact_context,
             "load_prior_hunt": self.load_prior_hunt,
+            # Ported from Aegis Vanguard: probes and recon intel (leads only)
+            "probe_server_prototype_pollution": self.probe_server_prototype_pollution,
+            "probe_graphql": self.probe_graphql,
+            "probe_vcs_exposure": self.probe_vcs_exposure,
+            "probe_grpc_reflection": self.probe_grpc_reflection,
+            "probe_websocket_origin": self.probe_websocket_origin,
+            "fingerprint_gitlab": self.fingerprint_gitlab,
+            "query_mail_security": self.query_mail_security,
+            "detect_third_party_vendors": self.detect_third_party_vendors,
         }
         # Optional: web search (RedAmon-style) when Tavily API key is set
         if getattr(settings, "TAVILY_API_KEY", None):
