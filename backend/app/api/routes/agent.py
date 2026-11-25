@@ -174,6 +174,9 @@ class AgentAssessmentPolicy(BaseModel):
     # objective to match the authorization regex.
     oob_callbacks_allowed: bool = False
     credential_testing_allowed: bool = False
+    # Timing-only account enumeration (dozens of paced POSTs to a reset form).
+    # Off unless the operator sets it here; objective wording cannot grant it.
+    timing_enumeration_allowed: bool = False
 
     @model_validator(mode="before")
     @classmethod

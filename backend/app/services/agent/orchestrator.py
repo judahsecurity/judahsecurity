@@ -3961,6 +3961,10 @@ class AgentOrchestrator:
             self.tool_manager._oob_callbacks_allowed = oob_callbacks_allowed(
                 question, assessment_policy,
             )
+            self.tool_manager._timing_enumeration_allowed = bool(
+                isinstance(assessment_policy, dict)
+                and assessment_policy.get("timing_enumeration_allowed") is True
+            )
 
             _max_iterations_var.set(max_iterations)
             self._start_turn_deadline()

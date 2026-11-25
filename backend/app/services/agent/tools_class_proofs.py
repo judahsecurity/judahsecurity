@@ -12,8 +12,9 @@ Approvals:
 - POST upload, JSON gadget (and its malformed-JSON error readback) and LLM
   requests: ``body_replay_paths``.
 - Login/reset enumeration POST: ``body_replay_paths`` or ``auth_login_path``.
-  Timing-only enumeration on a login (wrong-password attempts against the
-  test account) also needs the operator's ``credential_testing_allowed``.
+  Timing-only enumeration runs only on reset forms (never a login: it would
+  send repeated wrong passwords to the test account) and only with the
+  operator's ``timing_enumeration_allowed`` policy flag.
 - Upload and indirect-LLM cleanup DELETE: only a ``stored_xss_cleanup_paths`` entry.
 - Indirect LLM injection: one ``llm_indirect_fields`` entry approves the POST
   to its write_path (or, for a record_path with ``{id}``, PUT/PATCH on a
@@ -314,9 +315,12 @@ class ClassProofToolsMixin:
         user_field, password_field = enum_fields(fields, username_field)
         test_username = str(fields.get(user_field) or "")
         if mode == "timing":
-            if password_field and not getattr(self, "_credential_testing_allowed", False):
-                raise PermissionError("timing enumeration on a login sends wrong-password attempts "
-                                      "to the test account; it needs credential_testing_allowed")
+            if password_field:
+                raise ValueError("timing enumeration runs only on reset forms; a login would send "
+                                 "repeated wrong-password attempts to the test account")
+            if not getattr(self, "_timing_enumeration_allowed", False):
+                raise PermissionError("timing enumeration needs the operator's "
+                                      "timing_enumeration_allowed policy flag")
             self._class_claim_timing(TIMING_REQUESTS)
             proof = await asyncio.to_thread(
                 probe_account_enum_timing, url, kind=kind, fields=fields,
@@ -555,7 +559,7 @@ class ClassProofToolsMixin:
         gadget: str = "json_spaces", **_kwargs: Any,
     ) -> Dict[str, Any]:
         """JSON-spaces or status-code pollution gadget with control and reset (one marker
-        per endpoint and gadget per run)."""
+        per endpoint per run, whichever gadget)."""
         from app.services.agent.engagement_brain import engagement_brain_from_dict
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
@@ -564,7 +568,7 @@ class ClassProofToolsMixin:
         if done is None:
             done = self._class_pp_paths = set()
         known = next((row for row in brain.coverage_cells if row.get("id") == coverage_cell_id), None)
-        if known and (known.get("path"), gadget) in done:
+        if known and known.get("path") in done:
             return {"success": False, "error": "already_probed",
                     "reason": "One bounded pollution marker per endpoint per run"}
         cell, error = self._class_leased_cell(brain, coverage_cell_id, coverage_lease_id,
@@ -580,7 +584,7 @@ class ClassProofToolsMixin:
             return {"success": False, "error": "operator_approval_required", "reason": str(exc)}
         except (ValueError, OSError) as exc:
             return self._class_error(exc)
-        done.add((cell["path"], gadget))
+        done.add(cell["path"])
         artifact_id = self._class_record(proof, url=url, identity=identity,
                                          test_type="server_prototype_pollution",
                                          coverage_cell_id=coverage_cell_id,
@@ -993,9 +997,9 @@ TOOL_SPECS = (
             "values removed). timing: for identical responses; 40 paced POSTs (two runs of 10 "
             "test-account and 10 fresh random-account samples, interleaved ABBA); confirms only "
             "when each run passes the 10-sample 2-sigma rule with effect size >= 2.5 and a median "
-            "gap >= 25 ms, in the same direction both runs. A login timing run also needs the "
-            "operator's credential_testing_allowed (it sends wrong-password attempts to the test "
-            "account). Both modes stop on 429 or lockout text."
+            "gap >= 25 ms, in the same direction both runs. Timing mode runs only on a reset form "
+            "(never a login) and only with the operator's timing_enumeration_allowed policy flag. "
+            "Both modes stop on 429 or lockout text."
         ),
         phases=ACTIVE_PHASES, section=CLASS_PROOF_SECTION,
     ),
@@ -1049,7 +1053,7 @@ TOOL_SPECS = (
             "control, error, __proto__.status=c (541-589), error, reset __proto__.status=0, "
             "error; confirms only when the unrelated error status becomes exactly c after the "
             "gadget, not after the control, and returns to the control status after the reset. "
-            "One marker per endpoint per gadget per run; a vulnerable process keeps the property "
+            "One marker per endpoint per run, whichever gadget; a vulnerable process keeps the property "
             "until restart (the reset only restores behavior). "
             "vulnerability_class=server_prototype_pollution."
         ),

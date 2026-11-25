@@ -157,6 +157,7 @@ class ASMToolsManager(
     _fallback_target = SessionValue(lambda: "")
     _credential_testing_allowed = SessionValue(lambda: False)
     _oob_callbacks_allowed = SessionValue(lambda: False)
+    _timing_enumeration_allowed = SessionValue(lambda: False)
 
     def __init__(self):
         self.tools = self._register_tools()

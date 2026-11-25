@@ -146,6 +146,14 @@ def _serve(app):
                 app.files[name] = (content, ctype)
                 return self._send(201, json.dumps({"url": f"/files/{name}"}).encode(),
                                   [("Content-Type", "application/json")])
+            if parts.path == "/forgot-password":
+                fields = dict(parse_qsl(body.decode()))
+                if app.enum_mode == "timing" and fields.get("email") == "alice@example.test":
+                    time.sleep(app.timing_delay)
+                if app.enum_mode == "lockout":
+                    return self._send(429, b"Too many attempts, try again later")
+                return self._send(200, b"<p>If the account exists, we sent a reset link.</p>",
+                                  [("Content-Type", "text/html")])
             if parts.path == "/login":
                 fields = dict(parse_qsl(body.decode()))
                 user = fields.get("email", "")
@@ -235,7 +243,7 @@ def _manager(base, rows=()):
     manager._engagement_brain = brain.to_dict()
     register_scope(manager, urlsplit(base).hostname)
     manager.set_scoped_assessment_policy({
-        "body_replay_paths": ["/upload", "/api/profile", "/api/chat", "/login"],
+        "body_replay_paths": ["/upload", "/api/profile", "/api/chat", "/login", "/forgot-password"],
         "stored_xss_cleanup_paths": ["/files/delete"],
     })
     return manager
@@ -330,6 +338,17 @@ async def test_upload_needs_body_replay_approval(target):
 
 
 # ---------------------------------------------------------------- account enumeration
+
+def _operator_reset_capture(manager, base, identity="alice"):
+    identity_registry(manager).register(identity, base, cookies=[{"name": "sid", "value": "a"}])
+    return evidence_store(manager).record("http_exchange", {
+        "source": "operator_capture",
+        "request": {"method": "POST", "url": base + "/forgot-password",
+                    "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+                    "body": "email=alice%40example.test"},
+        "response": {"status": 200, "url": base + "/forgot-password"},
+    }, target=base + "/forgot-password", identity=identity)
+
 
 def _operator_login_capture(manager, base, identity="alice"):
     identity_registry(manager).register(identity, base, cookies=[{"name": "sid", "value": "a"}])
@@ -909,22 +928,40 @@ async def test_llm_indirect_oob_variant(target, collector):
 # ---------------------------------------------------------------- 3. timing enumeration
 
 @pytest.mark.asyncio
-async def test_account_enum_timing_needs_grant_and_verifier_replays(target):
+async def test_account_enum_timing_refuses_login_forms(target):
     app, base = target
     app.enum_mode = "timing"
     manager = _manager(base, [{"method": "POST", "path": "/login", "name": "email",
                                "location": "body_form", "source": "browser_traffic",
                                "identity": "anonymous"}])
     manager._class_timing_interval = 0
+    manager._timing_enumeration_allowed = True
+    manager._credential_testing_allowed = True
     _operator_login_capture(manager, base)
     lease = _lease(manager, "auth_logic", "auth")
+    sent_before = len(app.requests)
+    refused = await manager.scoped_account_enum_assigned(lease.coverage_cell_id, lease.id,
+                                                         identity="alice", mode="timing")
+    assert refused.get("proof_confirmed") is not True and "reset forms" in json.dumps(refused)
+    assert len(app.requests) == sent_before  # nothing sent to the login
+
+
+@pytest.mark.asyncio
+async def test_account_enum_timing_on_reset_needs_the_policy_flag(target):
+    app, base = target
+    app.enum_mode = "timing"
+    manager = _manager(base, [{"method": "POST", "path": "/forgot-password", "name": "email",
+                               "location": "body_form", "source": "browser_traffic",
+                               "identity": "anonymous"}])
+    manager._class_timing_interval = 0
+    _operator_reset_capture(manager, base)
+    lease = _lease(manager, "auth_logic", "auth")
+    manager._credential_testing_allowed = True  # not the timing grant
     denied = await manager.scoped_account_enum_assigned(lease.coverage_cell_id, lease.id,
                                                         identity="alice", mode="timing")
     assert denied["error"] == "operator_approval_required"
-    plain = await manager.scoped_account_enum_assigned(lease.coverage_cell_id, lease.id,
-                                                       identity="alice")
-    assert plain["proof_confirmed"] is False  # identical bodies: no differential
-    manager._credential_testing_allowed = True
+    assert "timing_enumeration_allowed" in denied["reason"]
+    manager._timing_enumeration_allowed = True
     result = await manager.scoped_account_enum_assigned(lease.coverage_cell_id, lease.id,
                                                         identity="alice", mode="timing")
     assert result["proof_confirmed"] is True, result
@@ -932,9 +969,16 @@ async def test_account_enum_timing_needs_grant_and_verifier_replays(target):
     payload = evidence_store(manager).records[result["evidence_id"]]["payload"]
     assert "alice@example.test" not in json.dumps(payload)
     assert payload["timing_direction"] == "test_slower"
-    report = await _verify(manager, base, "/login", result, "account_enumeration",
+    report = await _verify(manager, base, "/forgot-password", result, "account_enumeration",
                            identity="alice", cell_id=lease.coverage_cell_id)
     assert report["status"] == "confirmed", report["verifier_summary"]
+
+
+def test_timing_flag_only_comes_from_structured_policy():
+    from app.api.routes.agent import AgentAssessmentPolicy
+
+    assert AgentAssessmentPolicy().timing_enumeration_allowed is False
+    assert AgentAssessmentPolicy(timing_enumeration_allowed=True).timing_enumeration_allowed is True
 
 
 @pytest.mark.parametrize("mode,stopped", (("uniform", ""), ("lockout", "lockout_or_rate_limit")))
@@ -1000,6 +1044,9 @@ async def test_server_pp_status_gadget_control_reset_and_verifier(target):
     again = await manager.scoped_server_pp_assigned(
         lease.coverage_cell_id, lease.id, readback_url=base + "/api/other", gadget="status_code")
     assert again["error"] == "already_probed"
+    other_gadget = await manager.scoped_server_pp_assigned(
+        lease.coverage_cell_id, lease.id, readback_url=base + "/api/other", gadget="json_spaces")
+    assert other_gadget["error"] == "already_probed"  # one marker per endpoint, any gadget
     report = await _verify(manager, base, "/api/profile", result, "server_prototype_pollution",
                            cell_id=lease.coverage_cell_id)
     assert report["status"] == "confirmed", report["verifier_summary"]
