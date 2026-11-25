@@ -69,6 +69,16 @@ def _check_shape(klass: str, location: str, parameter: str, method: str, target:
         raise IntakeError(422, "body locations need method POST, PUT, PATCH or DELETE")
     if klass == "xss" and location in {"query", "fragment"} and method != "GET":
         raise IntakeError(422, "xss on query/fragment is a browser GET navigation; use GET")
+    if klass == "xss" and location in {"header", "cookie", "body_form", "body_json",
+                                       "body_xml", "path"}:
+        from app.services.agent.scoped_assessment.browser_intercept import intercept_shape_error
+
+        reason = intercept_shape_error(method, location, parameter or "x")
+        if reason in {"xss_write_method_unsupported", "path_xss_requires_get",
+                      "method_unsupported"}:
+            raise IntakeError(422, "xss on header/cookie/body/path is an intercepted browser "
+                                   "request: GET or POST (bodies POST on body_replay_paths, "
+                                   f"path GET); PUT/PATCH/DELETE are not supported ({reason})")
     if location == "path":
         reason = ir.shape_error("ssti", "GET", "path", parameter)
         try:

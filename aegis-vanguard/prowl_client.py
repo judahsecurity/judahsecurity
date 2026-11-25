@@ -59,7 +59,9 @@ input location, including inputs Prowl never observed. Prowl's leased scoped
 probes build the request from it (SSTI/command injection/traversal/CRLF/open
 redirect/string SQLi on query, header, cookie, form/JSON/XML body or one path
 segment; NoSQL on query/form/JSON; XSS by browser nonce on GET query or
-fragment). Specs: ``header:X-A``, ``cookie:c``, ``form:f``, ``json:a.b``,
+fragment, and on header, cookie, form/JSON/XML body (POST) or one path
+segment (GET) by intercepting the one browser request that carries the input
+and changing only that input; PUT/PATCH/DELETE XSS is refused). Specs: ``header:X-A``, ``cookie:c``, ``form:f``, ``json:a.b``,
 ``xml:order.note`` and ``path:2`` (0-based segment index) or ``path:alice``
 (the segment's literal). POST needs a body_replay_paths approval;
 PUT/PATCH/DELETE never touch an existing record: write probes only ever touch
@@ -664,6 +666,8 @@ PROBE_TEST_ALIASES = {
     "redirect": "open_redirect", "template_injection": "ssti", "header_injection": "crlf",
     "sql": "sqli", "sql_injection": "sqli", "nosqli": "nosql", "idor": "authz", "bola": "authz",
 }
+# XSS locations Prowl proves by intercepting one browser request (not a URL).
+_XSS_INTERCEPT_LOCATIONS = ("header", "cookie", "body_form", "body_json", "body_xml", "path")
 # Vanguard probes.py spec prefixes -> Prowl locations.
 _LOCATION_ALIASES = {"form": "body_form", "json": "body_json", "xml": "body_xml"}
 
@@ -722,6 +726,13 @@ def probe_payload(args) -> dict:
         raise ProwlError("fragment is client-side only; it is probed for --test-type xss")
     if test_type == "xss" and location in ("query", "fragment") and method != "GET":
         raise ProwlError("xss on query/fragment is a browser GET navigation; use --method GET")
+    if test_type == "xss" and location in _XSS_INTERCEPT_LOCATIONS:
+        # Prowl intercepts the one browser request that carries the input.
+        if method in ("PUT", "PATCH", "DELETE"):
+            raise ProwlError("xss on header/cookie/body/path is an intercepted browser request; "
+                             "PUT/PATCH/DELETE are not supported (use GET, or POST for bodies)")
+        if location == "path" and method != "GET":
+            raise ProwlError("xss on a path segment is an intercepted GET; use --method GET")
     return {"target": target, "test_type": test_type,
             "parameter": parameter, "location": location, "method": method,
             "identity": (args.identity or "").strip(), "note": (args.note or "")[:1000]}

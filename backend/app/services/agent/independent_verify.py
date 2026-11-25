@@ -807,6 +807,10 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_sql_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_browser_intercept_xss_candidate(
+                    tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 replayed = await _verify_scoped_browser_xss_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
@@ -1917,6 +1921,109 @@ async def _verify_scoped_post_sql_candidate(
             "Deterministic POST SQLi verifier could not replay candidate %s", cand.id,
         )
         failure = "Scoped POST SQLi replay failed before verification completed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+            "verifier_summary": failure, "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_browser_intercept_xss_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Replay an intercepted-request XSS receipt (header, cookie, body, path).
+
+    The verifier rebuilds the interception plan from the coverage cell with
+    the hunter's payload template and rendering page (``_intercept_xss_spec``,
+    the hunter's builder) and requires it to equal the hunter receipt on page,
+    request match, location, method, path template/segment and template. Then
+    it repeats the same interception with a fresh nonce; approval and the
+    protected header/cookie rules are re-checked by the builder.
+    """
+    import logging
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import inferred_vulnerability_class
+    from app.services.agent.scoped_assessment import browser_intercept
+
+    if (cand.vulnerability_class or inferred_vulnerability_class(cand)) != "xss":
+        return None
+    store = evidence_store(tools_manager)
+    hunters = [(eid, store.records[eid]) for eid in cand.evidence_ids
+               if eid in store.records
+               and store.records[eid].get("kind") == "scoped_browser_check_intercept_xss"
+               and store.records[eid].get("target") == cand.target]
+    if not hunters:
+        return None
+    failure = "Intercepted XSS receipt is not bound to its coverage cell"
+    brain = _brain(tools_manager)
+    cell_id = cand.coverage_cell_id or str(
+        (hunters[0][1].get("payload") or {}).get("coverage_cell_id") or "")
+    cell = next((row for row in brain.coverage_cells if row.get("id") == cell_id), None)
+    target = urlsplit(cand.target)
+    location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+    identity = str((cell or {}).get("identity") or "anonymous")
+    identity = "anonymous" if identity in {"", "unspecified"} else identity
+    shaped = getattr(tools_manager, "_shaped_cell", lambda _cell: False)
+    bound = bool(
+        cell and cell.get("test_type") == "xss" and shaped(cell)
+        and location in browser_intercept.INTERCEPT_LOCATIONS and separator and parameter
+        and target.scheme in {"http", "https"}
+        and _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
+        and (target.path or "/") == cell.get("path") and not target.query and not target.fragment
+        and (not cand.identity or cand.identity == identity)
+        and (not cand.parameter or cand.parameter == cell.get("parameter")))
+    if bound and not cand.coverage_cell_id:
+        cand.coverage_cell_id = str(cell["id"])
+        for raw in brain.candidates:
+            if isinstance(raw, dict) and raw.get("id") == cand.id:
+                raw["coverage_cell_id"] = cand.coverage_cell_id
+        cell["candidate_id"] = cand.id
+        tools_manager._engagement_brain = brain.to_dict()
+    scoped_origin = f"{target.scheme}://{target.netloc}"
+    try:
+        for hunter_id, receipt in (hunters[:3] if bound else []):
+            payload = receipt.get("payload") or {}
+            if (receipt.get("identity") != identity
+                    or payload.get("coverage_cell_id") != cell["id"]
+                    or not browser_intercept.receipt_valid(payload)):
+                continue
+            render_page = (urlsplit(payload["target_template"]).path or "/"
+                           if payload["intercept_mode"] == "fetch" else "")
+            try:
+                spec = tools_manager._intercept_xss_spec(
+                    cell, identity, scoped_origin=scoped_origin,
+                    payload_template=payload["payload_template"], render_page=render_page)
+            except ValueError as exc:
+                # Approval withdrawn, protected input, or a shape no longer built.
+                failure = f"Interception plan refused for replay: {str(exc)[:100]}"
+                continue
+            if any(spec.get(key) != payload.get(key) for key in browser_intercept.BINDING_FIELDS):
+                failure = "Hunter interception does not match the request built for this cell"
+                continue
+            replay = await tools_manager._run_intercept_xss(
+                cell, identity, scoped_origin=scoped_origin,
+                payload_template=payload["payload_template"], render_page=render_page)
+            if replay.get("executed") is not True:
+                failure = ("Fresh intercepted replay did not execute the XSS canary"
+                           + (f" ({replay['intercept_error']})" if replay.get("intercept_error")
+                              else ""))
+                continue
+            proof = {"kind": "scoped_browser_intercept_xss", "hunter_artifact_id": hunter_id,
+                     "artifact_id": replay["evidence_id"]}
+            confirmed, failure = _confirm_or_explain(
+                tools_manager, store, cand, run, proof, replay["evidence_id"],
+                "Fresh browser execution reproduced the XSS candidate on the same "
+                "intercepted request input.",
+            )
+            if confirmed:
+                return {"candidate_id": cand.id, "title": cand.title, "status": "confirmed",
+                        "verifier_summary": "Fresh intercepted browser XSS proof matched the "
+                                            "hunter receipt",
+                        "key_findings": [], "tool_calls": 1, "error": None}
+    except Exception:
+        logging.getLogger(__name__).exception("Intercepted XSS verifier replay failed")
+        failure = "Intercepted XSS replay failed before verification completed"
     apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
                   evidence=failure, summary=failure)
     return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",

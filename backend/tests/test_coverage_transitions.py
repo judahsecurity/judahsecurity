@@ -175,7 +175,7 @@ def test_auth_class_for_login_reset_session_and_jwt_endpoints():
 def test_crlf_planned_beyond_get_query():
     assert "crlf" in parameter_test_classes({"location": "header", "name": "X-Tenant"})
     assert "sqli" in parameter_test_classes({"location": "header", "name": "X-Tenant"})
-    assert parameter_test_classes({"location": "cookie", "name": "lang"}) == ("sqli",)
+    assert parameter_test_classes({"location": "cookie", "name": "lang"}) == ("sqli", "xss")
     post_redirect = parameter_test_classes(
         {"location": "body_form", "name": "returnUrl", "method": "POST", "path": "/settings"})
     assert {"crlf", "open_redirect"} <= set(post_redirect)
