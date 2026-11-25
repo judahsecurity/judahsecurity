@@ -84,7 +84,7 @@ async def test_port_probe_result_reaches_trace_and_status_as_text(monkeypatch):
     )
     orchestrator._emit_status = AsyncMock()
     monkeypatch.setattr(evograph, "record_step", lambda **_kwargs: None)
-    monkeypatch.setattr(evograph, "get_session_chain", lambda _session_id: {})
+    monkeypatch.setattr(evograph, "get_session_chain", lambda _session_id, _org_id: {})
 
     result = await orchestrator._execute_tool_node({
         "user_id": "1",
@@ -147,7 +147,7 @@ async def test_pilot_does_not_inject_page_cookies_into_later_browser_read(monkey
     )
     orchestrator._emit_status = AsyncMock()
     monkeypatch.setattr(evograph, "record_step", lambda **_kwargs: None)
-    monkeypatch.setattr(evograph, "get_session_chain", lambda _session_id: {})
+    monkeypatch.setattr(evograph, "get_session_chain", lambda _session_id, _org_id: {})
     args = {"args": json.dumps({"actions": [
         {"action": "navigate", "url": "https://ginandjuice.shop/catalog"},
         {"action": "get_source"},
