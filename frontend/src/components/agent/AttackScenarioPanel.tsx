@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils';
 import { TrustBoundaryMap, TRUST_COLORS } from './TrustBoundaryMap';
 import type { AgentRunLedger } from './RunLedgerPanel';
 import { AgentAttackGraph } from '@/components/attacks/AgentAttackGraph';
+import { ProofFunnel } from './ProofFunnel';
 import type { AgentAttackGraphData } from '@/components/attacks/agentGraph';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
@@ -314,6 +315,13 @@ export function AttackScenarioPanel({
       </CardHeader>
 
       <CardContent className="p-0 flex-1 overflow-hidden flex flex-col">
+        {!isEmpty && (
+          <ProofFunnel
+            run={runLedger}
+            verified={chainData?.attack_graph?.meta?.proven || 0}
+            className="border-b"
+          />
+        )}
         {!isEmpty && viewMode !== 'path' && (
           <div className="flex flex-wrap gap-x-3 gap-y-1 px-3 py-1.5 border-b text-[10px] text-muted-foreground font-mono">
             {viewMode === 'map' ? (
