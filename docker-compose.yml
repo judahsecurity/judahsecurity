@@ -212,6 +212,9 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
       - AEGIS_INTERACTSH_LOCAL=true
       - AEGIS_INTERACTSH_STATE_DIR=/app/data/interactsh
       - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
@@ -383,6 +386,9 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
       # AWS SQS Configuration (optional - falls back to database polling if not set)
       - SQS_QUEUE_URL=${SQS_QUEUE_URL:-}
       - AWS_REGION=${AWS_REGION:-us-east-1}
@@ -490,6 +496,9 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - REDIS_URL=redis://redis:6379/0
       - SCHEDULE_CHECK_INTERVAL=${SCHEDULE_CHECK_INTERVAL:-60}
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
     depends_on:
       db:
         condition: service_healthy
@@ -513,6 +522,9 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
       - AI_PROVIDER=${AI_PROVIDER:-anthropic}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
@@ -577,6 +589,9 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
       - VULNCHECK_API_TOKEN=${VULNCHECK_API_TOKEN:-}
       - DELPHI_CACHE_DIR=${DELPHI_CACHE_DIR:-/app/data/delphi_cache}
       - VULN_INTEL_REFRESH_INTERVAL_SECONDS=${VULN_INTEL_REFRESH_INTERVAL_SECONDS:-3600}
@@ -610,6 +625,9 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
       - VULNCHECK_API_TOKEN=${VULNCHECK_API_TOKEN:-}
       - DELPHI_CACHE_DIR=${DELPHI_CACHE_DIR:-/app/data/delphi_cache}
       - SEVERITY_EVAL_INTERVAL_SECONDS=${SEVERITY_EVAL_INTERVAL_SECONDS:-60}

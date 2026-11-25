@@ -1,5 +1,6 @@
 # Models module
 from app.models.user import User, UserRole
+from app.models.org_role import OrgRole
 from app.models.organization import Organization
 from app.models.netblock import Netblock  # Must be imported BEFORE Asset due to FK reference
 from app.models.business_application import BusinessApplication  # before Asset/Vulnerability (FK)

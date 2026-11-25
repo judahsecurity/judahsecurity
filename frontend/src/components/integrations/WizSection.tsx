@@ -293,6 +293,13 @@ export function WizSection() {
                   {item.last_sync_stats?.findings_truncated === true && item.last_sync_ok && (
                     <p className="text-xs text-amber-400 mt-1">VM assets use the full Wiz resource inventory. Finding import is limited to the first 50,000 Wiz findings.</p>
                   )}
+                  {item.last_sync_stats?.graph_projection && (
+                    <p className={`text-xs mt-1 ${item.last_sync_stats.graph_projection.ok ? 'text-green-400' : 'text-red-400'}`}>
+                      {item.last_sync_stats.graph_projection.ok
+                        ? `Graph: ${item.last_sync_stats.graph_projection.assets} assets, ${item.last_sync_stats.graph_projection.vulnerabilities} findings, ${item.last_sync_stats.graph_projection.endpoints} endpoints, ${item.last_sync_stats.graph_projection.direct_issue_links} direct issue links.`
+                        : `Graph sync failed: ${item.last_sync_stats.graph_projection.error || 'unknown error'}`}
+                    </p>
+                  )}
                   {item.last_sync_stats?.sync_in_progress === true && (
                     <p className="text-xs text-violet-400 mt-1 flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />Syncing Wiz endpoints and findings…</p>
                   )}

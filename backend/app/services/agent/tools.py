@@ -36,35 +36,6 @@ _FOLLOWUP_EXCLUDED_MODES = frozenset({"recon", "coverage_followup", "cms_followu
 def _tool_output_max_chars() -> int:
     return getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000)
 
-
-# Fields that are large and already available elsewhere (the engagement brain is
-# rendered into the prompt every turn), dropped first when output is too long.
-_BULKY_OUTPUT_KEYS = ("engagement_brain",)
-
-
-def _bounded_json(payload: Dict[str, Any], max_chars: Optional[int] = None) -> str:
-    """Serialize a tool result within the output budget as *valid* JSON.
-
-    Slicing a JSON string mid-document hands the model an unterminated string
-    and silently drops whatever came after the cut (verdicts, next actions).
-    Instead: try pretty, then drop bulky keys with a note, then compact. Only
-    if a single payload is still over budget fall back to a hard cut.
-    """
-    limit = max_chars if max_chars is not None else _tool_output_max_chars()
-    text = json.dumps(payload, indent=2, default=str)
-    if len(text) <= limit:
-        return text
-    trimmed = dict(payload)
-    for key in _BULKY_OUTPUT_KEYS:
-        if key in trimmed:
-            trimmed.pop(key)
-            trimmed[f"{key}_omitted"] = "too large for tool output; see the engagement brain in context"
-    for indent in (2, None):
-        text = json.dumps(trimmed, indent=indent, default=str)
-        if len(text) <= limit:
-            return text
-    return text[:limit]
-
 logger = logging.getLogger(__name__)
 
 
@@ -10194,11 +10165,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "Complete the structured authorization proof before submitting "
                     "a finding candidate."
                 )
-                # State lives on the manager (the orchestrator syncs it from
-                # there); the model sees the brain in its prompt. Don't echo
-                # the whole brain into this tool's output.
+                # The orchestrator syncs state from self._engagement_brain; the full
+                # brain must not ride along in the tool output, where it overflows the
+                # output cap.
                 self._engagement_brain = brain.to_dict()
-        return _bounded_json(result)
+        serialized = json.dumps(result, indent=2)
+        if len(serialized) > _tool_output_max_chars():
+            # Never slice serialized JSON: a cut string is unparseable. Keep the
+            # verdict and the proof routing, and point at the stored evidence.
+            escalation = result.get("proof_escalation") or {}
+            serialized = json.dumps({
+                "verdict": result["verdict"],
+                "signals": [str(value)[:200] for value in result["signals"][:8]],
+                "baseline_evidence_id": (result.get("baseline") or {}).get("evidence_id"),
+                "mutant_evidence_id": (result.get("mutant") or {}).get("evidence_id"),
+                "proof_escalation": {
+                    field: escalation.get(field)
+                    for field in ("id", "status", "strategy", "evidence_ids", "coverage_cell_id", "specialist")
+                } if escalation else None,
+                "guidance": result["guidance"],
+                "next_action": str(result.get("next_action") or "")[:300],
+                "output_compacted": True,
+            })
+        return serialized
 
     def _resolve_request_cookies(self, headers, cookies, use_auth_session, url: str = ""):
         # Compatibility helper; the live transport uses the jar itself for redirects.

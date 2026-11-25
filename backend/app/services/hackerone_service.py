@@ -717,7 +717,7 @@ def _import_report(
         existing = (
             db.query(Vulnerability)
             .filter(
-                Vulnerability.metadata_["hackerone_report_id"].astext == str(report_id),
+                Vulnerability.metadata_["hackerone_report_id"].as_string() == str(report_id),
             )
             .first()
         )
@@ -731,7 +731,7 @@ def _import_report(
             .join(Asset, Vulnerability.asset_id == Asset.id)
             .filter(
                 Asset.organization_id == org_id,
-                Vulnerability.metadata_["hackerone_report_id"].astext == str(report_id),
+                Vulnerability.metadata_["hackerone_report_id"].as_string() == str(report_id),
             )
             .first()
         )

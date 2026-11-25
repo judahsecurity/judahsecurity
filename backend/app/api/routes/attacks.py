@@ -69,5 +69,5 @@ def get_attack_session_graph(
     )
     if conv is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    chain = attach_verified_graph(evograph.get_session_chain(session_id), org_id, session_id, db)
+    chain = attach_verified_graph(evograph.get_session_chain(session_id, org_id), org_id, session_id, db)
     return chain.get("attack_graph") or {"nodes": [], "edges": [], "meta": {}}

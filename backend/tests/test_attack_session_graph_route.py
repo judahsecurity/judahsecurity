@@ -24,7 +24,7 @@ def db(monkeypatch):
     session.add(AgentConversation(session_id="s-org1", user_id=1, organization_id=1, messages=[]))
     session.add(AgentConversation(session_id="s-org2", user_id=2, organization_id=2, messages=[]))
     session.commit()
-    monkeypatch.setattr(evograph, "get_session_chain", lambda sid: {"nodes": [], "edges": [], "meta": {"session_id": sid}})
+    monkeypatch.setattr(evograph, "get_session_chain", lambda sid, org_id: {"nodes": [], "edges": [], "meta": {"session_id": sid, "org": org_id}})
     monkeypatch.setattr(attack_graph, "load_session_proofs", lambda *a, **k: [])
     yield session
     session.close()
