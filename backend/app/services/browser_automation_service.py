@@ -212,7 +212,15 @@ async def execute_browser_actions(
         if os.environ.get("AEGIS_BROWSER_DISABLE_SANDBOX", "").lower() in ("1", "true", "yes"):
             logger.warning("Chromium sandbox disabled by explicit assessment configuration")
             browser_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
-        browser = await pw.chromium.launch(headless=True, args=browser_args)
+        launch_kwargs: Dict[str, Any] = {"headless": True, "args": browser_args}
+        # Same browser selection as the scoped assessment browser
+        # (scoped_assessment/browser_runtime.launch_options), so one setting
+        # points every agent browser at an installed Chromium build.
+        executable = (os.environ.get("AEGIS_CHROMIUM_PATH") or os.environ.get("PROWL_CHROMIUM_PATH")
+                      or os.environ.get("CHROME_BIN"))
+        if executable:
+            launch_kwargs["executable_path"] = executable
+        browser = await pw.chromium.launch(**launch_kwargs)
         try:
             ctx_kwargs: Dict[str, Any] = {
                 "viewport": {"width": 1280, "height": 720},

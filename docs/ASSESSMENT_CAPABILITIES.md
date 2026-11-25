@@ -220,9 +220,21 @@ cookies, GraphQL discovery and cross-origin blocking:
 ```sh
 export PYTHONPATH=backend:harness:backend/packages/aegis_praetorium:backend/packages/asm_scanner_core
 pytest backend/tests/test_assessment_*.py
-RUN_ASSESSMENT_BROWSER_TESTS=1 pytest backend/tests/test_assessment_browser_capture.py
+RUN_ASSESSMENT_BROWSER_TESTS=1 pytest backend/tests/test_assessment_browser_capture.py backend/tests/test_csp_blocked_xss.py
 pytest harness/tests
 ```
+
+Playwright looks for the Chromium build that matches its own version. If the
+installed Python package is newer or older than the browsers on the machine
+(launch fails with "Executable doesn't exist at ..."), either run
+`python -m playwright install chromium` for that package version, or point every
+agent browser at an installed Chromium:
+
+```sh
+export AEGIS_CHROMIUM_PATH=/path/to/chrome   # also read: PROWL_CHROMIUM_PATH, CHROME_BIN
+```
+
+Both the scoped assessment browser and `browse_as_identity` honor it.
 
 Remaining work is explicit: AST-based and computed webpack-chunk discovery;
 GraphQL schema-aware parameter mutation; gRPC descriptors
