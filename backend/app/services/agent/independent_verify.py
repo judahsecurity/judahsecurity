@@ -1251,12 +1251,16 @@ async def _verify_scoped_injection_candidate(
                 replay, context = await tools_manager._run_injection_probe(
                     cell, cand.target, parameter, claim, nonce, factors, identity,
                     scoped_origin=scoped_origin,
-                    recipe="" if claim == "nosql" else recipe,
+                    # NoSQL: the hunter's recipe selects the same string recipe on
+                    # a path segment; operator recipes ignore it.
+                    recipe=recipe if claim == "nosql" and shaped(cell) else
+                    "" if claim == "nosql" else recipe,
                 )
                 if context != payload.get("request_context"):
                     raise ValueError("Observed injection baseline changed")
-                summary = {"test_type": claim, "parameter": parameter, "path": cell["path"],
-                           "request_context": context, "nonce": nonce, **replay}
+                summary = {"test_type": claim, "parameter": parameter, "location": location,
+                           "path": cell["path"], "request_context": context, "nonce": nonce,
+                           **replay}
                 artifact_id = store.record(
                     "scoped_injection_probe", summary, target=cand.target,
                     identity=identity, coverage_cell_id=cand.coverage_cell_id,
@@ -1815,11 +1819,13 @@ async def _verify_scoped_sql_candidate(
 async def _verify_scoped_intent_sql_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any, cell: dict,
 ) -> Optional[Dict[str, Any]]:
-    """Repeat the hunter's string SQLi recipe on an intent-built input.
+    """Repeat the hunter's SQLi recipe on an intent-built input.
 
     Same request builder as the hunter (``_run_shaped_sqli``): same method,
-    location and input, the hunter's recipe and SQL family, fresh nonces. The
-    operator's method approval is re-checked by the builder.
+    location and input, the same baseline source (operator value, linked
+    capture or intent target), the hunter's recipe (string Boolean/error/time,
+    numeric Boolean, UNION) and SQL family, fresh nonces. The operator's
+    method approval is re-checked by the builder.
     """
     import logging
     from urllib.parse import urlsplit
@@ -1839,7 +1845,8 @@ async def _verify_scoped_intent_sql_candidate(
     store = evidence_store(tools_manager)
     hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
                    if eid in store.records
-                   and store.records[eid].get("kind") == "scoped_string_sqli"
+                   and store.records[eid].get("kind") in {"scoped_string_sqli",
+                                                          "scoped_numeric_sqli"}
                    and store.records[eid].get("target") == cand.target
                    and store.records[eid].get("identity") == identity
                    and store.records[eid].get("payload", {}).get("parameter") == parameter
@@ -1850,18 +1857,24 @@ async def _verify_scoped_intent_sql_candidate(
     hunter_id, receipt = hunter
     payload = receipt["payload"]
     recipe = str(payload.get("proof_recipe") or "")
-    kind = ("string_error_sqli" if recipe == "string_error_v1" else
+    kind = ("numeric_boolean_sqli" if recipe == "numeric_and_boolean_v1" else
+            "string_union_sqli" if recipe == "string_union_v1" else
+            "string_error_sqli" if recipe == "string_error_v1" else
             "string_time_sqli" if recipe == "string_time_v1" else "string_boolean_sqli")
+    evidence_kind = receipt.get("kind")
+    if (kind == "numeric_boolean_sqli") != (evidence_kind == "scoped_numeric_sqli"):
+        return None
     failure = "Fresh SQLi replay did not reproduce the hunter proof"
     try:
         replay = await tools_manager._run_shaped_sqli(
             cell, identity, scoped_origin=f"{target.scheme}://{target.netloc}",
             recipe=recipe, family=str(payload.get("sql_family") or ""),
         )
-        if replay.get("request_context") != payload.get("request_context"):
+        if (replay.get("request_context") != payload.get("request_context")
+                or replay.get("baseline_value_source") != payload.get("baseline_value_source")):
             raise ValueError("Intent SQLi request shape changed")
         artifact_id = store.record(
-            "scoped_string_sqli", replay, target=cand.target, identity=identity,
+            evidence_kind, replay, target=cand.target, identity=identity,
             coverage_cell_id=cand.coverage_cell_id, test_type="sqli",
             success=replay["proof_confirmed"],
         )

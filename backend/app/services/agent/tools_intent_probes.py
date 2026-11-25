@@ -13,7 +13,20 @@ call these when a cell is
 Intent-backed ``xss`` and ``sqli`` cells go through
 ``scoped_input_probe_assigned`` to ``_shaped_input_probe_assigned`` here: XSS
 as a browser nonce navigation (GET query or fragment), SQLi as the string
-Boolean/error/AND/time recipes on any server-side location.
+Boolean/error/AND/UNION/time recipes on any server-side location, plus the
+numeric Boolean recipe when the input's baseline value is a positive integer.
+
+Baselines (``_shaped_baseline``): the operator's ``baseline_value`` on the
+intent, else the value the linked observation carried (the intent's
+``source_capture_id``, or an observed header cell's own capture), else the
+value already in the intent target (query field or path segment). Numeric and
+UNION SQLi and JSON-header NoSQL need such a value; without one the shape is
+unsupported (open, never clean).
+
+NoSQL (``_run_shaped_nosql``): query/form/JSON bracket or operator objects,
+cookie-parser ``j:`` JSON cookies, JSON-valued headers (JSON object/array
+baseline only), XML operator elements, and string ``$where``/``$regex``
+recipes on one path segment, all under the same interleaved differential.
 
 Requests are planned in ``scoped_assessment.intent_request``. When a probe
 works an intent-backed cell the intent is claimed and completed with a
@@ -201,6 +214,10 @@ class IntentProbeToolsMixin:
         """One SSTI/command/traversal/NoSQL proof on a shaped cell."""
         from app.services.agent.scoped_assessment import injection_probe, intent_request
 
+        if test_type == "nosql":
+            return await self._run_shaped_nosql(cell, nonce, identity,
+                                                scoped_origin=scoped_origin, recipe=recipe)
+
         method, url, location, parameter, context = self._shaped_base(cell, scoped_origin)
         denied = self._shaped_approval(method, str(cell.get("path") or "/"))
         if denied:
@@ -308,6 +325,141 @@ class IntentProbeToolsMixin:
         )
         return proof, control_source
 
+    # ------------------------------------------------------------ baselines
+
+    def _shaped_capture(self, capture_id: str, identity: str) -> Optional[Dict[str, Any]]:
+        """The private capture a shaped cell is bound to, or None.
+
+        The binding comes from planning state (the intent's
+        ``source_capture_id`` or the observed cell's ``capture_id``), never from
+        a candidate. The independent verifier may read the hunter's capture
+        for that binding only, as for observed GET SQLi replays.
+        """
+        import json
+
+        from app.services.agent.evidence_store import verification_run
+
+        try:
+            row = self._scoped_capture_row(capture_id)
+        except Exception:
+            return None
+        if not row or row.get("identity") != identity or not isinstance(row.get("private"), bytes):
+            return None
+        run = verification_run.get()
+        if row.get("verifier_run_id") not in (None, run.id if run else None):
+            return None
+        try:
+            captured = json.loads(row["private"])
+        except ValueError:
+            return None
+        return captured if isinstance(captured, dict) else None
+
+    def _shaped_baseline(self, cell: Dict[str, Any], identity: str,
+                         scoped_origin: str) -> Dict[str, str]:
+        """The input's baseline value and the request URL it came with.
+
+        Order: the intent's operator ``baseline_value``; the linked
+        observation (intent ``source_capture_id`` or the observed cell's
+        capture) when it is the same method, origin and path; the value the
+        intent target already carries (query field or path segment). ``value``
+        is '' when none exists. Values never enter receipts; ``source`` does.
+        """
+        from app.services.agent.attack_graph import get_intent
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment import intent_request
+
+        method, url, location, parameter, _context = self._shaped_base(cell, scoped_origin)
+        intent: Dict[str, Any] = {}
+        if cell.get("intent_id"):
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            intent = get_intent(brain, str(cell["intent_id"])) or {}
+        supplied = intent.get("baseline_value")
+        if intent_request.valid_baseline_value(supplied):
+            return {"value": supplied, "source": "operator_baseline_value"
+                    if intent.get("created_by") == "operator" else "intent_baseline_value",
+                    "url": url, "capture_id": ""}
+        capture_id = str(intent.get("source_capture_id") or cell.get("capture_id") or "")
+        captured = self._shaped_capture(capture_id, identity) if capture_id else None
+        if captured is not None:
+            from urllib.parse import urlsplit, urlunsplit
+
+            try:
+                parts = urlsplit(str(captured.get("url") or ""))
+                same = (_origin(str(captured.get("url") or "")) == scoped_origin
+                        and (parts.path or "/") == str(cell.get("path") or "/")
+                        and str(captured.get("method") or "").upper() == method)
+            except ValueError:
+                same = False
+            value = intent_request.captured_value(captured, location, parameter) if same else None
+            if value and intent_request.valid_baseline_value(value):
+                return {"value": value, "source": "captured_request",
+                        "url": urlunsplit(parts._replace(fragment="")), "capture_id": capture_id}
+        value = intent_request.url_value(url, location, parameter)
+        return {"value": value, "source": "intent_target" if value else "", "url": url,
+                "capture_id": ""}
+
+    async def _run_shaped_nosql(self, cell: Dict[str, Any], nonce: str, identity: str, *,
+                                scoped_origin: str, recipe: str = "") -> Tuple[dict, str]:
+        """The NoSQL operator differential on a shaped cell (hunter and verifier).
+
+        Every location shares ``probe_nosql``'s standard: stable control,
+        stable always-true variant that differs from it, and a same-meaning
+        variant equal to the control. Path segments try the string recipes in
+        order (the verifier replays only the hunter's). All requests are
+        planned before any is sent, so an unsupported shape sends nothing.
+        """
+        from app.services.agent.scoped_assessment import injection_probe, intent_request
+
+        method, url, location, parameter, context = self._shaped_base(cell, scoped_origin)
+        if self._shaped_approval(method, str(cell.get("path") or "/")):
+            raise ValueError("operator_approval_required")
+        recipes = intent_request.nosql_recipes_for(location)
+        if recipe and location in intent_request.NOSQL_OBJECT_LOCATIONS:
+            if recipe not in recipes:
+                raise intent_request.UnsupportedShape("recipe_unknown")
+            recipes = (recipe,)
+        baseline = {"value": "", "source": "", "capture_id": ""}
+        if location == "header":
+            baseline = self._shaped_baseline(cell, identity, scoped_origin)
+            if not baseline["value"]:
+                raise intent_request.UnsupportedShape("header_baseline_value_unavailable")
+        state = self._scoped_state(identity, url)
+        writer = self._own_record_writer(cell, method, identity, state, scoped_origin)
+        if writer is not None:
+            url = writer.plan_url(url)
+        plans = {name: intent_request.injection_requests(
+            method=method, url=url, location=location, parameter=parameter, test_type="nosql",
+            nonce=nonce, factors=(0, 0), state=state, baseline=baseline["value"],
+            nosql_recipe=name, write_approved=self._shaped_write_approved(method, cell))
+            for name in recipes}
+        for requests in plans.values():
+            for planned in requests.values():
+                self._scoped_origin(planned.url)
+        fetch = writer.wrap(intent_request.fetch_body) if writer else intent_request.fetch_body
+        tried = []
+        proof: Dict[str, Any] = {}
+        try:
+            for name, requests in plans.items():
+                self._charge(method, len(requests))
+                proof = await asyncio.to_thread(
+                    injection_probe.probe_nosql, requests, allowed_origin=scoped_origin,
+                    state=None, nonce=nonce, fetch=fetch, recipe=name,
+                )
+                tried.append(name)
+                if proof.get("proof_confirmed") is True:
+                    break
+        finally:
+            if writer is not None:
+                await asyncio.to_thread(writer.finish)
+        proof.update(method=method, location=location, recipes_tried=tried,
+                     total_requests_sent=sum(len(plans[name]) for name in tried))
+        if baseline["source"]:
+            proof["baseline_value_source"] = baseline["source"]
+        if writer is not None:
+            proof.update(writer.receipt())
+        return proof, context
+
     # ------------------------------------------------------------ intents
 
     def _mark_unsupported_shape(self, brain: Any, cell: Dict[str, Any], lease_id: str,
@@ -383,7 +535,9 @@ class IntentProbeToolsMixin:
                                family: str = "") -> dict:
         """String SQLi recipes on one intent-backed input (hunter or verifier).
 
-        Hunter (no ``recipe``): OR Boolean, then the error or AND follow-up
+        Hunter (no ``recipe``): numeric Boolean first when the baseline value is
+        a positive integer; then OR Boolean, the error or AND follow-up, UNION
+        (ordinary string baseline whose fresh response reflects result data)
         and the time families exactly as the observed GET lane runs them.
         Verifier: only the hunter's recipe (and SQL family), with fresh nonces.
         PUT/PATCH/DELETE go only to Prowl's own fresh record (one per call).
@@ -411,24 +565,34 @@ class IntentProbeToolsMixin:
     async def _shaped_sqli_recipes(self, cell: Dict[str, Any], identity: str, *,
                                    scoped_origin: str, recipe: str, family: str,
                                    writer: Any) -> dict:
-        from app.services.agent.scoped_assessment import intent_request, sqli_string, sqli_time
+        import secrets
+
+        from app.services.agent.scoped_assessment import (
+            intent_request, sqli_boolean, sqli_string, sqli_time, sqli_union,
+        )
 
         method, url, location, parameter, context = self._shaped_base(cell, scoped_origin)
         path = str(cell.get("path") or "/")
+        baseline = self._shaped_baseline(cell, identity, scoped_origin)
+        url = baseline["url"]
+        value = baseline["value"]
         state = self._scoped_state(identity, url)
         if writer is not None:
             url = writer.plan_url(url)
         observe = (writer.wrap(intent_request.observe_planned) if writer is not None
                    else intent_request.observe_planned)
         target = scoped_origin + path
-        base = intent_request.sqli_baseline_value(url, location, parameter)
+        # String recipes extend an ordinary value; anything else uses the
+        # intent target's value or a fresh harmless canary, as before.
+        base = (value if intent_request.sqli_safe_value(value)
+                else intent_request.sqli_baseline_value(url, location, parameter))
         validators = {"sqli_boolean_string": sqli_string.string_sql_proof_valid,
                       "sqli_error_string": sqli_string.string_error_proof_valid,
-                      "sqli_time_string": sqli_time.time_sql_proof_valid}
+                      "sqli_time_string": sqli_time.time_sql_proof_valid,
+                      "sqli_boolean_numeric": sqli_boolean.numeric_sql_proof_valid,
+                      "sqli_union_string": sqli_union.union_sql_proof_valid}
 
-        async def run(name: str, fam: str = "") -> dict:
-            nonce, false_nonce = intent_request.sqli_nonces()
-            values = intent_request.sqli_values(name, base, nonce, false_nonce, fam)
+        def plan(values: Dict[str, str]) -> Dict[str, Any]:
             requests = intent_request.plan_requests(
                 method=method, url=url, location=location, parameter=parameter,
                 values=values, state=state, test_type="sqli",
@@ -437,8 +601,33 @@ class IntentProbeToolsMixin:
             for planned in requests.values():
                 self._scoped_origin(planned.url)
             self._charge(method, len(requests))
+            return requests
+
+        def stamp(result: dict, value_source: str) -> dict:
+            result.update(method=method, location=location, request_context=context,
+                          intent_request=True, baseline_source="intent_request",
+                          baseline_value_source=value_source)
+            if value_source == "captured_request" and baseline.get("capture_id"):
+                result["source_capture_id"] = baseline["capture_id"]
+            result["proof_confirmed"] = validators[result["operation"]](result)
+            result["finding"] = False
+            return result
+
+        async def preflight(marker: str = "") -> dict:
+            """One fresh baseline request with the exact baseline value."""
+            requests = plan({"baseline": value})
+            row = await asyncio.to_thread(observe, requests["baseline"],
+                                          allowed_origin=scoped_origin,
+                                          reflection_marker=marker)
+            return {key: row.get(key) for key in (
+                "status", "content_type", "bytes_captured", "truncated", "body_sha256",
+                "redirected", "json_array_lengths", "reflection_detected")}
+
+        async def run(name: str, fam: str = "") -> dict:
+            nonce, false_nonce = intent_request.sqli_nonces()
+            values = intent_request.sqli_values(name, base, nonce, false_nonce, fam)
             checks = await asyncio.to_thread(
-                intent_request.probe_sqli_requests, requests, recipe=name,
+                intent_request.probe_sqli_requests, plan(values), recipe=name,
                 allowed_origin=scoped_origin, observe=observe,
             )
             if name == "or":
@@ -453,23 +642,112 @@ class IntentProbeToolsMixin:
             else:
                 result = sqli_time.build_string_time_result(
                     target, nonce, parameter=parameter, family=fam, checks=checks)
-            result.update(method=method, location=location, request_context=context,
-                          intent_request=True, baseline_source="intent_request")
-            result["proof_confirmed"] = validators[result["operation"]](result)
-            result["finding"] = False
-            return result
+            source = baseline["source"] if base == value and value else "intent_request"
+            return stamp(result, source)
+
+        async def run_numeric() -> Tuple[Optional[dict], str]:
+            """Numeric Boolean (``sqli_boolean``) on a positive-integer baseline."""
+            if not intent_request.positive_integer(value):
+                return None, "baseline_not_positive_integer"
+            pre = await preflight()
+            if (pre["status"] != 200 or pre["truncated"] is not False
+                    or pre["redirected"] is not False):
+                return None, "baseline_response_not_ok"
+            nonce = str(secrets.randbelow(90000) + 10000)
+            checks = await asyncio.to_thread(
+                intent_request.probe_sqli_requests, plan(intent_request.numeric_values(value, nonce)),
+                recipe="numeric", allowed_origin=scoped_origin, observe=observe,
+            )
+            result = sqli_boolean.build_numeric_boolean_result(
+                target, nonce, parameter=parameter, checks=checks)
+            result["baseline_preflight"] = {k: pre[k] for k in (
+                "status", "body_sha256", "redirected", "truncated")}
+            result["preflight_requests"] = 1
+            return stamp(result, baseline["source"]), ""
+
+        async def union_ready(or_result: Optional[dict]) -> str:
+            """'' when UNION may run: ordinary value whose response renders results."""
+            if not intent_request.sqli_safe_value(value) or not baseline["source"]:
+                return "baseline_not_ordinary_string"
+            if or_result is not None and not sqli_union.union_followup_eligible(or_result):
+                return "baseline_unstable"
+            pre = await preflight(marker=value if len(value) >= 4 else "")
+            return "" if intent_request.result_data_reflected(pre) else "baseline_result_not_reflected"
+
+        async def run_union(fam: str) -> Tuple[Optional[dict], int]:
+            """Column count by NULL padding, reflected cell, then the fixed confirm."""
+            nonce = str(secrets.randbelow(90000) + 10000)
+            marker = sqli_union.marker_for(nonce)
+            found, probes = None, 0
+            for columns in range(1, sqli_union.MAX_COLUMNS + 1):
+                for position in range(1, columns + 1):
+                    if probes >= sqli_union.MAX_DISCOVERY:
+                        break
+                    probes += 1
+                    requests = plan({"union": intent_request.union_value(
+                        value, fam, columns, position, marker)})
+                    row = await asyncio.to_thread(observe, requests["union"],
+                                                  allowed_origin=scoped_origin,
+                                                  reflection_marker=marker)
+                    if (row.get("status") == 200 and row.get("reflection_detected") is True
+                            and row.get("truncated") is False and not row.get("redirected")):
+                        found = (columns, position)
+                        break
+                if found or probes >= sqli_union.MAX_DISCOVERY:
+                    break
+            if not found:
+                return None, probes
+            columns, position = found
+            union = intent_request.union_value(value, fam, columns, position, marker)
+            checks = await asyncio.to_thread(
+                intent_request.probe_sqli_requests,
+                plan({"baseline_first": value, "union_first": union,
+                      "union_second": union, "baseline_last": value}),
+                recipe="union", allowed_origin=scoped_origin, observe=observe,
+                reflection_marker=marker,
+            )
+            result = sqli_union.build_string_union_result(
+                target, nonce, parameter=parameter, family=fam, column_count=columns,
+                reflected_position=position, checks=checks)
+            result["discovery_requests"] = probes
+            return stamp(result, baseline["source"]), probes
 
         if recipe:
             name = {"string_or_boolean_v1": "or", "string_or_json_rows_v1": "or",
                     "string_and_boolean_v1": "and", "string_error_v1": "error",
-                    "string_time_v1": "time"}.get(recipe)
-            if not name or (name == "time" and family not in sqli_time.FAMILIES):
+                    "string_time_v1": "time", "numeric_and_boolean_v1": "numeric",
+                    "string_union_v1": "union"}.get(recipe)
+            if (not name or (name == "time" and family not in sqli_time.FAMILIES)
+                    or (name == "union" and family not in sqli_union.FAMILIES)):
                 raise intent_request.UnsupportedShape("recipe_unknown")
+            if name == "numeric":
+                result, why = await run_numeric()
+                if result is None:
+                    raise intent_request.UnsupportedShape(why)
+                result["total_requests_sent"] = result["requests_sent"] + 1
+                return result
+            if name == "union":
+                why = await union_ready(None)
+                if why:
+                    raise intent_request.UnsupportedShape(why)
+                result, probes = await run_union(family)
+                if result is None:
+                    return {"operation": "sqli_union_string", "proof_recipe": recipe,
+                            "target": target, "parameter": parameter, "method": method,
+                            "location": location, "request_context": context,
+                            "intent_request": True, "sql_family": family,
+                            "requests_sent": probes, "total_requests_sent": probes + 1,
+                            "proof_confirmed": False, "finding": False,
+                            "union_skipped": "no_reflected_column_layout"}
+                result["total_requests_sent"] = result["requests_sent"] + probes + 1
+                return result
             result = await run(name, family)
             result["total_requests_sent"] = result["requests_sent"]
             return result
-        or_result = await run("or")
-        result, prior = or_result, []
+
+        prior: list = []
+        extra_requests = 0
+        skipped: Dict[str, str] = {}
 
         def done(row: dict) -> None:
             prior.append({"proof_recipe": row.get("proof_recipe"),
@@ -477,6 +755,22 @@ class IntentProbeToolsMixin:
                           "proof_confirmed": row.get("proof_confirmed") is True,
                           "requests_sent": row.get("requests_sent")})
 
+        result: Optional[dict] = None
+        if intent_request.positive_integer(value):
+            result, why = await run_numeric()
+            extra_requests += 1
+            if why:
+                skipped["numeric_skipped"] = why
+        elif value:
+            skipped["numeric_skipped"] = "baseline_not_positive_integer"
+        if result is not None and result["proof_confirmed"] is True:
+            result["prior_recipes"] = prior
+            result["total_requests_sent"] = result["requests_sent"] + extra_requests
+            return result
+        if result is not None:
+            done(result)
+        or_result = await run("or")
+        result = or_result
         if result["proof_confirmed"] is not True:
             if sqli_string.error_followup_eligible(or_result):
                 done(result)
@@ -484,6 +778,27 @@ class IntentProbeToolsMixin:
             elif sqli_string.and_fallback_eligible(or_result):
                 done(result)
                 result = await run("and")
+        if result["proof_confirmed"] is not True:
+            why = await union_ready(or_result)
+            if why:
+                skipped["union_skipped"] = why
+            else:
+                extra_requests += 1
+                union_result = None
+                for fam in sqli_union.FAMILIES:
+                    attempt, probes = await run_union(fam)
+                    extra_requests += probes
+                    if attempt is not None:
+                        if union_result is not None:
+                            extra_requests += int(union_result["requests_sent"] or 0)
+                        union_result = attempt
+                        if attempt["proof_confirmed"] is True:
+                            break
+                if union_result is None:
+                    skipped["union_skipped"] = "no_reflected_column_layout"
+                else:
+                    done(result)
+                    result = union_result
         if result["proof_confirmed"] is not True and sqli_time.time_followup_eligible(or_result):
             for fam in sqli_time.FAMILIES:
                 done(result)
@@ -491,7 +806,8 @@ class IntentProbeToolsMixin:
                 if result["proof_confirmed"] is True:
                     break
         result["prior_recipes"] = prior
-        result["total_requests_sent"] = (int(result.get("requests_sent") or 0)
+        result.update(skipped)
+        result["total_requests_sent"] = (int(result.get("requests_sent") or 0) + extra_requests
                                          + sum(int(row["requests_sent"] or 0) for row in prior))
         return result
 
@@ -600,12 +916,14 @@ class IntentProbeToolsMixin:
                 return self._test_record_aborted(cell, exc)
             except (ValueError, OSError) as exc:
                 return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+            # Numeric Boolean receipts are scoped_numeric_sqli, as on the observed lane.
+            operation = ("scoped_numeric_sqli" if proof.get("operation") == "sqli_boolean_numeric"
+                         else "scoped_string_sqli")
             proof["evidence_id"] = evidence_store(self).record(
-                "scoped_string_sqli", proof, target=proof["target"], identity=identity,
+                operation, proof, target=proof["target"], identity=identity,
                 coverage_cell_id=cell["id"], test_type="sqli",
                 success=proof["proof_confirmed"],
             )
-            operation = "scoped_string_sqli"
             confirmed = proof.get("proof_confirmed") is True
         artifact_id = str(proof.get("evidence_id") or "")
         if not artifact_id:
@@ -628,7 +946,9 @@ class IntentProbeToolsMixin:
             record_sqli_trace(current, proof)
             probe_result = {key: proof[key] for key in (
                 "proof_confirmed", "proof_recipe", "requests_sent", "total_requests_sent",
-                "baseline_source", "sql_family", "record_paths", "test_records") if key in proof}
+                "baseline_source", "baseline_value_source", "sql_family", "column_count",
+                "reflected_position", "prior_recipes", "numeric_skipped", "union_skipped",
+                "record_paths", "test_records") if key in proof}
         else:
             current["xss_probe_attempts"] = [
                 *(current.get("xss_probe_attempts") or []),

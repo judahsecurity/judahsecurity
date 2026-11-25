@@ -1159,6 +1159,9 @@ class OperatorIntentRequest(BaseModel):
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
     identity: str = Field(default="", max_length=40)
     note: str = Field(default="", max_length=1000)
+    # The input's ordinary value (numeric/UNION SQLi baseline, a header's JSON
+    # value for NoSQL). Validated in operator_intents; never a payload.
+    baseline_value: Optional[str] = Field(default=None, max_length=512)
 
 
 @router.post("/sessions/{session_id}/intents", status_code=201)
@@ -1188,6 +1191,7 @@ async def submit_session_intent(
             org_id, session_id, target=request.target, test_type=request.test_type,
             parameter=request.parameter, location=request.location, method=request.method,
             identity=request.identity, note=request.note,
+            baseline_value=request.baseline_value,
         )
     except IntakeError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail) from None

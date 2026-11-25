@@ -69,7 +69,10 @@ def plan_numeric_boolean_url(url: str, *, parameter: str,
 def numeric_sql_proof_valid(result: dict) -> bool:
     if result.get("operation") != "sqli_boolean_numeric" or result.get("proof_recipe") != "numeric_and_boolean_v1":
         return False
-    if (result.get("method") != "GET" or result.get("location") != "query"
+    from .sqli_string import request_shape_valid
+
+    # An observed GET query, or one intent-built input (``intent_request``).
+    if (not request_shape_valid(result)
             or not isinstance(result.get("target"), str) or not result["target"]
             or not isinstance(result.get("parameter"), str) or not result["parameter"]
             or not re.fullmatch(r"[1-9][0-9]{4}", str(result.get("nonce", "")))):

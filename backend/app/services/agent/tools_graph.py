@@ -68,20 +68,68 @@ class AttackGraphToolsMixin:
         self._graph_save(brain)
         return json.dumps({"fact": fact}, default=str)
 
+    def _intent_capture_reference(self, capture_id: str, target: str, method: str,
+                                  identity: str) -> str:
+        """Why ``capture_id`` cannot back this intent ('' when it can).
+
+        The capture must be one of this session's private browser exchanges,
+        for the same identity, method, origin and path as the intent target.
+        """
+        from urllib.parse import urlsplit
+
+        row = None
+        try:
+            row = self._scoped_capture_row(capture_id)
+        except Exception:
+            row = None
+        if not row or not isinstance(row.get("private"), bytes):
+            return "unknown source_capture_id"
+        if row.get("identity") != (identity or "anonymous"):
+            return "source_capture_id belongs to another identity"
+        try:
+            captured = json.loads(row["private"])
+            got, want = urlsplit(str(captured.get("url") or "")), urlsplit(target)
+        except ValueError:
+            return "source_capture_id is not a browser exchange"
+        if (str(captured.get("method") or "").upper() != (method or "GET").upper()
+                or (got.scheme, got.netloc.lower(), got.path or "/")
+                != (want.scheme, want.netloc.lower(), want.path or "/")):
+            return "source_capture_id is a different request (method, origin or path)"
+        return ""
+
     async def add_intent(self, test_type: str, target: str, parents: Any, objective: str = "",
                          parameter: str = "", location: str = "", method: str = "GET",
-                         identity: str = "", **_kwargs: Any) -> str:
+                         identity: str = "", source_capture_id: str = "",
+                         baseline_value: Any = None, **_kwargs: Any) -> str:
         """Plan one test; it must cite an existing fact or finding."""
-        from app.services.agent.attack_graph import LineageError, add_intent
+        from app.services.agent.attack_graph import LineageError, add_intent, record_fact
 
         denied = self._graph_scope(target)
         if denied:
             return json.dumps({"error": f"out of scope: {denied}"})
         brain = self._graph_brain()
+        parent_ids = _as_list(parents)
+        capture_id = str(source_capture_id or "").strip()
         try:
+            if capture_id:
+                why = self._intent_capture_reference(capture_id, target, method, identity)
+                if why:
+                    return json.dumps({"error": why})
+                # The observation the intent comes from, as an evidence fact
+                # parent citing the capture.
+                fact = record_fact(
+                    brain, kind="evidence", target=target, evidence_ids=[capture_id],
+                    summary=f"Observed {str(method or 'GET').upper()} request the intent replays",
+                    source="browser_capture", parents=parent_ids or (),
+                    key=f"capture:{capture_id}")
+                parent_ids = list(dict.fromkeys([*parent_ids, fact["id"]]))
             intent = add_intent(brain, objective=objective, test_type=test_type, target=target,
-                                parents=_as_list(parents), parameter=parameter, location=location,
-                                method=method, identity=identity, created_by="agent")
+                                parents=parent_ids, parameter=parameter, location=location,
+                                method=method, identity=identity, created_by="agent",
+                                source_capture_id=capture_id,
+                                source_evidence_id=capture_id,
+                                baseline_value=(None if baseline_value in (None, "")
+                                                else str(baseline_value)))
         except (LineageError, ValueError) as exc:
             return json.dumps({"error": str(exc)})
         self._graph_save(brain)
@@ -145,9 +193,12 @@ TOOL_SPECS = (
         "Plan one test. Args: **test_type** (coverage class, e.g. sqli, xss, authz, ssrf), "
         "**target** (absolute in-scope URL), **parents** (existing fact or finding ids; "
         "required), parameter, location (query | body_form | body_json | body_xml | header | "
-        "cookie | path | fragment), method, identity, objective. Backs the intent with a "
-        "coverage cell so scoped probes can lease it. The same test on the same input "
-        "returns the existing intent.",
+        "cookie | path | fragment), method, identity, objective, source_capture_id (the "
+        "browser exchange the test comes from: same method/path/identity; the probe takes "
+        "the input's baseline value and request from it), baseline_value (the input's "
+        "ordinary value, e.g. a positive integer id for numeric SQLi or a JSON header "
+        "value for NoSQL). Backs the intent with a coverage cell so scoped probes can "
+        "lease it. The same test on the same input returns the existing intent.",
         phases=ALL_PHASES, section=GRAPH_SECTION,
     ),
     write_tool(

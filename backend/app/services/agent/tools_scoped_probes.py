@@ -1249,6 +1249,8 @@ class ScopedProbeToolsMixin:
         operator-approved, browser-captured POST bodies (form or JSON), observed
         GET header/cookie inputs, and intent-backed cells (query, header,
         cookie, form/JSON/XML body or one path segment built from the intent;
+        NoSQL on cookies as ``j:`` JSON, on headers only with a JSON baseline,
+        as XML operator elements and as string recipes on a path segment;
         POST only on body_replay_paths, PUT/PATCH/DELETE only on Prowl's own
         test record, test_record_endpoints) are supported. Unsupported shapes stay open. The model chooses the leased cell; payloads, factors, and
         requests are fixed here.
