@@ -16,6 +16,8 @@ export interface PriorityPath {
   demonstrated: boolean;
   verified?: boolean;
   timeframe?: string | null;
+  /** Server-side explainable priority; when present it drives the ranking. */
+  priority?: { score: number; tier: string; reasons: string[] };
 }
 
 export interface FeedFinding {
@@ -39,10 +41,11 @@ export interface FeedEngagement {
 
 const SEV_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
 
-/** Verified first, then demonstrated, then severity, then recency. */
+/** Server priority score first; otherwise verified, demonstrated, severity, recency. */
 export function rankPaths(paths: PriorityPath[]): PriorityPath[] {
   return [...paths].sort((a, b) => {
     const key = (p: PriorityPath) => [
+      p.priority?.score ?? -1,
       p.verified ? 1 : 0,
       p.demonstrated ? 1 : 0,
       SEV_RANK[normalizeSeverity(p.severity)],
@@ -174,7 +177,7 @@ export function WhatMattersNow({
         <div>
           <h2 className="text-base font-semibold">What matters now</h2>
           <p className="text-xs text-muted-foreground">
-            Ranked by proof first: verified exploits, then demonstrated chains, then severity.
+            Ranked by proof, what each path reaches, exposure and known exploitation.
           </p>
         </div>
         <div className="w-full max-w-md">
@@ -200,7 +203,9 @@ export function WhatMattersNow({
                 <li key={p.id}>
                   <Link href={`/attacks?path=${encodeURIComponent(p.id)}`} className="group flex items-center gap-3 py-2">
                     <SeverityChip severity={p.severity} />
-                    <span className="min-w-0 flex-1 truncate text-sm group-hover:text-primary">{p.title}</span>
+                    <span className="min-w-0 flex-1 truncate text-sm group-hover:text-primary" title={p.priority?.reasons.join(' · ')}>
+                      {p.title}
+                    </span>
                     <ProofTag path={p} />
                     <Chip icon={Server}>
                       {p.hosts.length} host{p.hosts.length === 1 ? '' : 's'}

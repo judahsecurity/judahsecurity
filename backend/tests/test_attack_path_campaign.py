@@ -128,3 +128,46 @@ def test_verified_flag_requires_runtime_proof_or_confirmation():
 
     false_positive = _row(id=4, verification_level="exploit_verified", validation_verdict="false_positive")
     assert campaigns_from_views([false_positive])[0]["verified"] is False
+
+
+def test_priority_puts_proof_and_impact_first():
+    from app.services.attack_path_campaign import path_priority
+
+    verified_rce = path_priority([_row(id=1, title="Command injection in ping", severity="critical",
+                                       verification_level="exploit_verified", exposed=True)])
+    assert verified_rce["tier"] == "fix_now"
+    assert verified_rce["reasons"][:2] == ["Exploit verified", "Reaches code execution"]
+    assert "Internet-exposed" in verified_rce["reasons"]
+
+    kev_unvalidated = path_priority([_row(id=2, title="Remote code execution in VPN portal", severity="critical",
+                                          exposed=True, known_exploited=True)])
+    assert kev_unvalidated["tier"] == "fix_now"
+    assert "Known exploited in the wild" in kev_unvalidated["reasons"]
+
+    scary_guess = path_priority([_row(id=3, title="Outdated jQuery version", severity="medium")])
+    assert scary_guess["tier"] == "monitor"
+    assert verified_rce["score"] > kev_unvalidated["score"] > scary_guess["score"]
+
+
+def test_resolved_paths_drop_to_monitor():
+    from app.services.attack_path_campaign import path_priority
+
+    p = path_priority([_row(id=4, title="Command injection", severity="critical", status="resolved",
+                            verification_level="exploit_verified", exposed=True)])
+    assert p["tier"] == "monitor" and p["reasons"][0] == "All findings resolved"
+
+
+def test_false_positive_verdict_is_not_verified():
+    from app.services.attack_path_campaign import path_priority
+
+    p = path_priority([_row(id=5, title="SQL injection", verification_level="exploit_verified",
+                            validation_verdict="false_positive")])
+    assert "Exploit verified" not in p["reasons"]
+
+
+def test_exposed_leaked_secret_is_high_not_monitor():
+    from app.services.attack_path_campaign import path_priority
+
+    p = path_priority([_row(id=6, title="Public S3 bucket exposes JS bundle with secrets", severity="high", exposed=True)])
+    assert p["tier"] == "high"
+    assert p["reasons"] == ["Captures credentials", "Internet-exposed"]

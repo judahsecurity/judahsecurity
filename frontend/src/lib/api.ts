@@ -2693,6 +2693,14 @@ class ApiClient {
     return response.data;
   }
 
+  /** Org-scoped entity attack graph for an agent session (any member of the org). */
+  async getAttackSessionGraph(sessionId: string, organizationId?: number) {
+    const response = await this.client.get(`/attacks/sessions/${encodeURIComponent(sessionId)}/graph`, {
+      params: organizationId ? { organization_id: organizationId } : undefined,
+    });
+    return response.data;
+  }
+
   async getAttackWorkspace(organizationId?: number) {
     const response = await this.client.get('/attacks/workspace', {
       params: organizationId ? { organization_id: organizationId } : undefined,

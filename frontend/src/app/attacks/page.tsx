@@ -35,6 +35,9 @@ import { cn, formatDate } from '@/lib/utils';
 import { AttackPathCanvas, exportAttackPathPng } from '@/components/attacks/AttackPathCanvas';
 import { AttackPathNarrative } from '@/components/attacks/AttackPathNarrative';
 import type { AttackPath, AttackWorkspace } from '@/components/attacks/types';
+import { AgentAttackGraph } from '@/components/attacks/AgentAttackGraph';
+import type { AgentAttackGraphData } from '@/components/attacks/agentGraph';
+import { PriorityPathList, TierBadge } from '@/components/attacks/PriorityPathList';
 
 type Org = { id: number; name: string };
 
@@ -62,7 +65,10 @@ function AttacksPageInner() {
   const [workspace, setWorkspace] = useState<AttackWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
   const [pathId, setPathId] = useState<string>('');
-  const [view, setView] = useState<'graph' | 'narrative'>('graph');
+  // 'agent' = entity graph from the agent session; default when the path has one.
+  const [view, setView] = useState<'agent' | 'graph' | 'narrative'>('agent');
+  const [agentGraph, setAgentGraph] = useState<AgentAttackGraphData | null>(null);
+  const [agentGraphLoading, setAgentGraphLoading] = useState(false);
   const [tab, setTab] = useState('paths');
   const [exporting, setExporting] = useState(false);
 
@@ -121,6 +127,24 @@ function AttacksPageInner() {
     () => workspace?.paths.find((p) => p.id === pathId) || workspace?.paths[0] || null,
     [workspace, pathId]
   );
+
+  const effectiveView = view === 'agent' && !path?.session_id ? 'graph' : view;
+  const sessionId = path?.session_id || '';
+
+  useEffect(() => {
+    if (!sessionId || effectiveView !== 'agent') return;
+    let live = true;
+    setAgentGraphLoading(true);
+    setAgentGraph(null);
+    api
+      .getAttackSessionGraph(sessionId, orgId ? parseInt(orgId, 10) : undefined)
+      .then((g) => live && setAgentGraph(g))
+      .catch(() => live && setAgentGraph(null))
+      .finally(() => live && setAgentGraphLoading(false));
+    return () => {
+      live = false;
+    };
+  }, [sessionId, effectiveView, orgId]);
 
   const handleExport = async () => {
     if (!path) return;
@@ -192,90 +216,114 @@ function AttacksPageInner() {
             </TabsList>
           </div>
 
-          <TabsContent value="paths" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden px-6 py-4">
+          <TabsContent value="paths" className="mt-0 flex min-h-0 flex-1 overflow-hidden">
             {loading && !workspace ? (
               <div className="flex flex-1 items-center justify-center text-muted-foreground">
                 <Loader2 className="h-6 w-6 animate-spin" />
               </div>
             ) : !path ? (
-              <EmptyState
-                title="No attack paths yet"
-                body="Demonstrated-compromise findings from the agent will compose into named campaigns here — attacker, MITRE technique, host, and vulnerability."
-              />
+              <div className="flex-1 px-6 py-4">
+                <EmptyState
+                  title="No attack paths yet"
+                  body="Demonstrated-compromise findings from the agent will compose into named campaigns here — attacker, MITRE technique, host, and vulnerability."
+                />
+              </div>
             ) : (
               <>
-                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    {workspace && workspace.paths.length > 1 && (
-                      <Select value={path.id} onValueChange={setPathId}>
-                        <SelectTrigger className="mb-2 h-8 w-full max-w-xl text-left">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {workspace.paths.map((p) => (
-                            <SelectItem key={p.id} value={p.id}>
-                              {p.title}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    )}
-                    <h2 className="text-lg font-semibold leading-snug">{path.title}</h2>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="outline" size="sm" disabled={exporting || view !== 'graph'}>
-                          {exporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
-                          Export PNG
-                          <ChevronDown className="ml-1 h-3.5 w-3.5 opacity-60" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={handleExport}>Download PNG</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <div className="flex overflow-hidden rounded-md border border-border">
-                      {(['graph', 'narrative'] as const).map((mode) => (
-                        <Button
-                          key={mode}
-                          variant={view === mode ? 'secondary' : 'ghost'}
-                          size="sm"
-                          className="rounded-none"
-                          onClick={() => setView(mode)}
-                        >
-                          {mode === 'graph' ? 'Graph View' : 'Narrative View'}
-                        </Button>
-                      ))}
+                <aside className="flex w-[340px] shrink-0 flex-col border-r border-border px-4 py-4">
+                  <p className="mb-2 text-xs text-muted-foreground">
+                    Ranked by proof, impact reached, exposure and known exploitation.
+                  </p>
+                  <PriorityPathList paths={workspace?.paths || []} selectedId={path.id} onSelect={setPathId} />
+                </aside>
+
+                <div className="flex min-w-0 flex-1 flex-col px-6 py-4">
+                  <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <TierBadge path={path} />
+                        {path.verified ? (
+                          <Badge variant="outline" className="border-red-500/40 text-red-300">Exploit verified</Badge>
+                        ) : path.demonstrated ? (
+                          <Badge variant="outline" className="border-amber-500/40 text-amber-300">Demonstrated</Badge>
+                        ) : (
+                          <Badge variant="outline">Inferred</Badge>
+                        )}
+                      </div>
+                      <h2 className="text-lg font-semibold leading-snug">{path.title}</h2>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="outline" size="sm" disabled={exporting || view !== 'graph'}>
+                            {exporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                            Export PNG
+                            <ChevronDown className="ml-1 h-3.5 w-3.5 opacity-60" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={handleExport}>Download PNG</DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                      <div className="flex overflow-hidden rounded-md border border-border">
+                        {(path.session_id ? (['agent', 'graph', 'narrative'] as const) : (['graph', 'narrative'] as const)).map((mode) => (
+                          <Button
+                            key={mode}
+                            variant={effectiveView === mode ? 'secondary' : 'ghost'}
+                            size="sm"
+                            className="rounded-none"
+                            onClick={() => setView(mode)}
+                          >
+                            {mode === 'agent' ? 'Agent Path' : mode === 'graph' ? 'MITRE View' : 'Narrative'}
+                          </Button>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div className="mb-3 rounded-md border border-border/70 bg-muted/30 px-4 py-3">
-                  <p className="text-sm leading-relaxed text-muted-foreground">{path.summary}</p>
-                  <div className="mt-3 flex flex-wrap gap-x-8 gap-y-1 text-xs text-muted-foreground">
-                    <span>
-                      <span className="mr-2 font-semibold uppercase tracking-wide text-slate-400">Target</span>
-                      <span className="font-mono text-foreground">{path.target || '—'}</span>
-                    </span>
-                    <span>
-                      <span className="mr-2 font-semibold uppercase tracking-wide text-slate-400">Timeframe</span>
-                      <span className="text-foreground">{path.timeframe ? formatDate(path.timeframe) : '—'}</span>
-                    </span>
-                    {path.demonstrated ? (
-                      <Badge variant="outline" className="border-red-500/40 text-red-300">Demonstrated</Badge>
+                  <div className="mb-3 rounded-md border border-border/70 bg-muted/30 px-4 py-3">
+                    {path.priority?.reasons?.length ? (
+                      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                        <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Why it ranks here</span>
+                        {path.priority.reasons.map((r) => (
+                          <span key={r} className="rounded-full border border-border bg-background/60 px-2 py-0.5 text-xs text-foreground">
+                            {r}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    <p className="text-sm leading-relaxed text-muted-foreground">{path.summary}</p>
+                    <div className="mt-3 flex flex-wrap gap-x-8 gap-y-1 text-xs text-muted-foreground">
+                      <span>
+                        <span className="mr-2 font-semibold uppercase tracking-wide text-slate-400">Target</span>
+                        <span className="font-mono text-foreground">{path.target || '—'}</span>
+                      </span>
+                      <span>
+                        <span className="mr-2 font-semibold uppercase tracking-wide text-slate-400">Timeframe</span>
+                        <span className="text-foreground">{path.timeframe ? formatDate(path.timeframe) : '—'}</span>
+                      </span>
+                      <span>
+                        <span className="mr-2 font-semibold uppercase tracking-wide text-slate-400">Findings</span>
+                        <span className="text-foreground">{path.finding_ids.length}</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-border/60">
+                    {effectiveView === 'agent' ? (
+                      agentGraphLoading ? (
+                        <div className="flex flex-1 items-center justify-center text-muted-foreground">
+                          <Loader2 className="h-5 w-5 animate-spin" />
+                        </div>
+                      ) : (
+                        <AgentAttackGraph graph={agentGraph} />
+                      )
+                    ) : effectiveView === 'graph' ? (
+                      <AttackPathCanvas path={path} />
                     ) : (
-                      <Badge variant="outline">Inferred</Badge>
+                      <AttackPathNarrative steps={path.narrative} notDemonstrated={path.not_demonstrated} />
                     )}
                   </div>
-                </div>
-
-                <div className="relative min-h-0 flex-1">
-                  {view === 'graph' ? (
-                    <AttackPathCanvas path={path} />
-                  ) : (
-                    <AttackPathNarrative steps={path.narrative} notDemonstrated={path.not_demonstrated} />
-                  )}
                 </div>
               </>
             )}
