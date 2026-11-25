@@ -30,6 +30,8 @@ INTENT_LOCATIONS = frozenset({
     "", "query", "body_form", "body_json", "body_xml", "header", "cookie", "path", "fragment",
 })
 _TERMINAL = frozenset({"done", "blocked", "cancelled"})
+# Source of a coverage cell created for an intent (no observed capture behind it).
+INTENT_CELL_SOURCE = "attack_graph_intent"
 MAX_FACTS = 2000
 MAX_INTENTS = 1000
 _TEXT = 400
@@ -166,11 +168,22 @@ def _bounded_data(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 # ---------------------------------------------------------------- intents
 
+def normalize_test_type(test_type: Any) -> str:
+    return _clean(test_type, 64).lower().replace(" ", "_").replace("-", "_")
+
+
+def intent_id_for(*, test_type: str, target: str, parameter: str = "", location: str = "",
+                  method: str = "GET", identity: str = "") -> str:
+    """The id add_intent gives this test, so intake can dedup before the brain is loaded."""
+    return _id("intent", normalize_test_type(test_type), (_clean(method, 10) or "GET").upper(),
+               target, _clean(parameter, 128), _clean(location, 20).lower(), _clean(identity, 40))
+
+
 def add_intent(brain: Any, *, objective: str, test_type: str, target: str, parents: Iterable[str],
                parameter: str = "", location: str = "", method: str = "GET", identity: str = "",
                created_by: str = "planner", link_coverage: bool = True) -> Dict[str, Any]:
     """Add one planned test. Same test on the same input returns the existing intent."""
-    test_type = _clean(test_type, 64).lower().replace(" ", "_").replace("-", "_")
+    test_type = normalize_test_type(test_type)
     if not test_type:
         raise ValueError("test_type is required")
     location = _clean(location, 20).lower()
@@ -183,7 +196,8 @@ def add_intent(brain: Any, *, objective: str, test_type: str, target: str, paren
     parents = _check_parents(brain, parents, allow_intents=False)
     parameter = _clean(parameter, 128)
     identity = _clean(identity, 40)
-    iid = _id("intent", test_type, method, target, parameter, location, identity)
+    iid = intent_id_for(test_type=test_type, target=target, parameter=parameter,
+                        location=location, method=method, identity=identity)
     existing = get_intent(brain, iid)
     if existing:
         existing["parents"] = list(dict.fromkeys([*existing.get("parents", []), *parents]))
@@ -203,7 +217,13 @@ def add_intent(brain: Any, *, objective: str, test_type: str, target: str, paren
 
 
 def _link_coverage_cell(brain: Any, intent: Dict[str, Any], parts) -> str:
-    """Back the intent with an exact coverage cell so lease-based probes can work it."""
+    """Back the intent with an exact coverage cell so lease-based probes can work it.
+
+    A new cell is marked ``source=INTENT_CELL_SOURCE`` with the intent id, so
+    the scoped probes build its request from the intent (there is no capture).
+    When the cell already exists (Prowl observed the same input), it keeps its
+    own source and capture and only gains the intent id.
+    """
     try:
         from app.services.agent.coverage_cells import record_coverage_cell
     except Exception:  # pragma: no cover - import guard
@@ -212,15 +232,32 @@ def _link_coverage_cell(brain: Any, intent: Dict[str, Any], parts) -> str:
     if parameter and intent["location"] and ":" not in parameter:
         parameter = f"{intent['location']}:{parameter}"
     try:
+        from app.services.agent.coverage_cells import coverage_cell_id
+
+        cid = coverage_cell_id(
+            method=intent["method"], path=parts.path or "/", host=parts.netloc, operation_id="",
+            identity=intent["identity"] or "anonymous", tenant="",
+            parameter=parameter or "endpoint", test_type=intent["test_type"])
+        existing = next((c for c in getattr(brain, "coverage_cells", None) or []
+                         if c.get("id") == cid), None)
+        if existing is not None:
+            # Never reset an observed cell's status, lease or verdict.
+            existing["intent_id"] = existing.get("intent_id") or intent["id"]
+            return cid
         cell = record_coverage_cell(
             brain, method=intent["method"], path=parts.path or "/", host=parts.netloc,
-            status="untested", identity=intent["identity"], parameter=parameter,
+            status="untested", identity=intent["identity"] or "anonymous", parameter=parameter,
             test_type=intent["test_type"], reason=f"intent {intent['id']} ({intent['created_by']})",
-            intent_id=intent["id"],
         )
     except Exception:
         return ""
-    return str((cell or {}).get("id") or (cell or {}).get("coverage_cell_id") or "")
+    cell_id = str((cell or {}).get("id") or "")
+    live = next((c for c in brain.coverage_cells if c.get("id") == cell_id), None)
+    if live is not None:
+        live["intent_id"] = intent["id"]
+        live["source"] = INTENT_CELL_SOURCE
+        live["observation_source"] = f"{intent['created_by']}_intent"[:40]
+    return cell_id
 
 
 def claim_intent(brain: Any, intent_id: str, worker: str) -> Dict[str, Any]:

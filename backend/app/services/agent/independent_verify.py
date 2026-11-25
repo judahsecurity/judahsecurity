@@ -940,23 +940,24 @@ async def _verify_scoped_response_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any,
 ) -> Optional[Dict[str, Any]]:
     """Repeat the fixed response-header or Location canary on the same input."""
-    import asyncio
     import secrets
     from urllib.parse import urlsplit
 
+    from app.services.agent.attack_graph import INTENT_CELL_SOURCE
     from app.services.agent.evidence_store import evidence_store
     from app.services.agent.proof_policy import validate_proof
-    from app.services.agent.scoped_assessment.response_probe import probe_response
 
     claim = cand.vulnerability_class
     if claim not in {"crlf", "open_redirect"}:
         return None
     store = evidence_store(tools_manager)
+    shaped = getattr(tools_manager, "_shaped_cell", lambda _cell: False)
     cell = next((row for row in _brain(tools_manager).coverage_cells
                  if row.get("id") == cand.coverage_cell_id
                  and row.get("test_type") == claim
-                 and row.get("source") == "parameter_inventory"
-                 and row.get("method") == "GET"
+                 and (row.get("source") == "parameter_inventory"
+                      or (row.get("source") == INTENT_CELL_SOURCE and shaped(row)))
+                 and row.get("method") in ({"GET", "POST"} if shaped(row) else {"GET"})
                  and row.get("path") == (urlsplit(cand.target).path or "/")), None)
     identity = str(cand.identity or "anonymous")
     hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
@@ -970,37 +971,19 @@ async def _verify_scoped_response_candidate(
     if cell and hunter:
         hunter_id, receipt = hunter
         location, separator, parameter = str(cell.get("parameter") or "").partition(":")
-        if location == "query" and separator and parameter:
+        if (location == "query" or shaped(cell)) and separator and parameter:
             nonce = secrets.token_hex(8)
             target = urlsplit(cand.target)
             scoped_origin = f"{target.scheme}://{target.netloc}"
-            if claim == "crlf":
-                control_value = "%0D%0AX-Prowl-Probe: " + nonce
-                probe_value = "\r\nX-Prowl-Probe: " + nonce
-            else:
-                control_value = scoped_origin + "/__prowl_control_" + nonce
-                probe_value = "https://prowl.invalid/" + nonce
             try:
-                control_url, context = tools_manager._observed_get_query_template(
-                    cand.target, parameter, control_value, identity,
-                    capture_id=cell.get("capture_id") or "",
+                # Same request builder as the hunter: observed GET query
+                # baseline, or the intent/header/cookie shape of the cell.
+                replay, context = await tools_manager._run_response_probe(
+                    cell, cand.target, parameter, claim, nonce, identity,
+                    scoped_origin=scoped_origin,
                 )
-                probe_url, probe_context = tools_manager._observed_get_query_template(
-                    cand.target, parameter, probe_value, identity,
-                    capture_id=cell.get("capture_id") or "",
-                )
-                if (context == "single_parameter" or probe_context != context
-                        or context != receipt["payload"].get("request_context")):
+                if context != receipt["payload"].get("request_context"):
                     raise ValueError("Observed response baseline changed")
-                tools_manager._scoped_origin(control_url)
-                tools_manager._scoped_origin(probe_url)
-                tools_manager._scoped_claim_gets(2)
-                replay = await asyncio.to_thread(
-                    probe_response, control_url, probe_url, test_type=claim,
-                    allowed_origin=scoped_origin,
-                    state=tools_manager._scoped_state(identity, cand.target),
-                    nonce=nonce,
-                )
                 summary = {"test_type": claim, "parameter": parameter,
                            "path": cell["path"], "request_context": context,
                            "nonce": nonce, **replay}
@@ -1171,10 +1154,14 @@ async def _verify_scoped_injection_candidate(
     if claim not in _INJECTION_PROOF_KINDS:
         return None
     store = evidence_store(tools_manager)
+    from app.services.agent.attack_graph import INTENT_CELL_SOURCE
+
+    shaped = getattr(tools_manager, "_shaped_cell", lambda _cell: False)
     cell = next((row for row in _brain(tools_manager).coverage_cells
                  if row.get("id") == cand.coverage_cell_id
                  and row.get("test_type") == claim
-                 and row.get("source") == "parameter_inventory"
+                 and (row.get("source") == "parameter_inventory"
+                      or (row.get("source") == INTENT_CELL_SOURCE and shaped(row)))
                  and row.get("method") in {"GET", "POST"}
                  and row.get("path") == (urlsplit(cand.target).path or "/")), None)
     identity = str(cand.identity or "anonymous")
@@ -1191,8 +1178,8 @@ async def _verify_scoped_injection_candidate(
         payload = receipt.get("payload", {})
         location, separator, parameter = str(cell.get("parameter") or "").partition(":")
         recipe = str(payload.get("recipe") or "")
-        if (location in {"query", "body_form", "body_json"} and separator and parameter
-                and (recipe or claim == "nosql")):
+        if ((location in {"query", "body_form", "body_json"} or shaped(cell))
+                and separator and parameter and (recipe or claim == "nosql")):
             target = urlsplit(cand.target)
             scoped_origin = f"{target.scheme}://{target.netloc}"
             nonce = secrets.token_hex(8)

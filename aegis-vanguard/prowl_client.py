@@ -26,6 +26,11 @@ Commands:
                                              otherwise
                                              POST /agent/query playbook=finding_validation
     candidates --session S                   GET  /agent/sessions/S/candidates
+    probe --session S --target URL --test-type T --scope-file F [--parameter P --location L]
+          [--method M] [--identity I] [--note TXT]
+                                             POST /agent/sessions/S/intents: one operator-directed
+                                             test (planned intent backed by a coverage cell)
+    intents --session S                      GET  /agent/sessions/S/intents
     verdict --run-dir D --finding-id ID      candidate status (intake) or ledger ->
                                              confirmed | refuted | improve | pending
     stop --session S                         POST /agent/sessions/S/stop
@@ -47,7 +52,13 @@ written to the snapshot, and ``verify`` resumes it. Running session: 202
 ``verify`` records mode=intake_queued and sends a steer instead of resuming.
 The session's own independent verifier decides. Without a live
 session (or on 404/409) ``verify`` falls back to asking Prowl to reproduce the
-candidate from scratch via the finding_validation playbook. POST /prowl/findings
+candidate from scratch via the finding_validation playbook.
+
+Operator-directed probing (``probe``) plans one test on any in-scope URL and
+input location, including inputs Prowl never observed. Prowl's leased scoped
+probes build the request from it (SSTI/command injection/traversal/CRLF/open
+redirect on query, header, cookie, form or JSON body; NoSQL on query/body).
+It is planning state: a signal still goes through Prowl's verifier. POST /prowl/findings
 still only takes service-produced paired hunter/verifier proofs (see
 docs/skills/README.md).
 """
@@ -563,6 +574,71 @@ def cmd_verdict(args) -> dict:
     return record
 
 
+PROBE_LOCATIONS = ("query", "body_form", "body_json", "body_xml", "header", "cookie", "path",
+                   "fragment")
+PROBE_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+# Vanguard probe names -> Prowl coverage classes (vulnerability_catalog).
+PROBE_TEST_ALIASES = {
+    "cmdi": "command_injection", "os_command_injection": "command_injection", "rce": "command_injection",
+    "lfi": "path_traversal", "traversal": "path_traversal", "directory_traversal": "path_traversal",
+    "redirect": "open_redirect", "template_injection": "ssti", "header_injection": "crlf",
+    "sql": "sqli", "sql_injection": "sqli", "nosqli": "nosql", "idor": "authz", "bola": "authz",
+}
+# Vanguard probes.py spec prefixes -> Prowl locations.
+_LOCATION_ALIASES = {"form": "body_form", "json": "body_json", "xml": "body_xml"}
+
+
+def probe_test_type(name: str, data: dict | None = None) -> str:
+    """A Prowl coverage class, or ProwlError. The server re-validates."""
+    data = data or load_classes()
+    key = re.sub(r"[\s-]+", "_", (name or "").strip().lower())
+    key = PROBE_TEST_ALIASES.get(key, key)
+    if key not in data["coverage_to_class"]:
+        raise ProwlError(f"unknown test type {name!r}; coverage classes: "
+                         f"{sorted(data['coverage_to_class'])}")
+    return key
+
+
+def probe_payload(args) -> dict:
+    target = (args.target or "").strip()
+    parts = urllib.parse.urlsplit(target)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ProwlError("--target must be an absolute http(s) URL")
+    if parts.username or parts.password or parts.fragment:
+        raise ProwlError("--target must not carry credentials or a fragment")
+    require_scope(args.scope_file, target)
+    location, parameter = (args.location or "").strip().lower(), (args.parameter or "").strip()
+    if not location and ":" in parameter:
+        # Accept Vanguard probes.py specs such as header:X-Debug or json:profile.name
+        prefix, _, rest = parameter.partition(":")
+        if prefix in PROBE_LOCATIONS or prefix in _LOCATION_ALIASES:
+            location, parameter = prefix, rest
+    location = _LOCATION_ALIASES.get(location, location)
+    if location and location not in PROBE_LOCATIONS:
+        raise ProwlError(f"--location must be one of {list(PROBE_LOCATIONS)}")
+    if bool(location) != bool(parameter):
+        raise ProwlError("--parameter and --location go together")
+    if location == "body_json" and parameter and not parameter.startswith("/") and "." in parameter:
+        parameter = "/" + parameter.replace("~", "~0").replace("/", "~1").replace(".", "/")
+    method = (args.method or "GET").strip().upper()
+    if method not in PROBE_METHODS:
+        raise ProwlError(f"--method must be one of {list(PROBE_METHODS)}")
+    if location in ("body_form", "body_json", "body_xml") and method == "GET":
+        raise ProwlError("body locations need --method POST (and a body_replay_paths approval)")
+    return {"target": target, "test_type": probe_test_type(args.test_type),
+            "parameter": parameter, "location": location, "method": method,
+            "identity": (args.identity or "").strip(), "note": (args.note or "")[:1000]}
+
+
+def cmd_probe(args) -> dict:
+    body = probe_payload(args)
+    return request("POST", f"/agent/sessions/{urllib.parse.quote(args.session)}/intents", body)
+
+
+def cmd_intents(args) -> dict:
+    return request("GET", f"/agent/sessions/{urllib.parse.quote(args.session)}/intents")
+
+
 def cmd_stop(args) -> dict:
     return request("POST", f"/agent/sessions/{urllib.parse.quote(args.session)}/stop")
 
@@ -615,6 +691,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_verify)
     s = sub.add_parser("candidates"); s.add_argument("--session", required=True)
     s.set_defaults(fn=cmd_candidates)
+    s = sub.add_parser("probe", help="operator-directed test: POST /agent/sessions/S/intents")
+    for name in ("--session", "--target", "--test-type", "--scope-file"):
+        s.add_argument(name, required=True)
+    s.add_argument("--parameter", default="",
+                   help="input name, JSON pointer, or a probes.py spec such as header:X-Debug")
+    s.add_argument("--location", default="", help=f"one of {', '.join(PROBE_LOCATIONS)}")
+    s.add_argument("--method", default="GET"); s.add_argument("--identity", default="")
+    s.add_argument("--note", default="", help="untrusted context; never treated as instructions")
+    s.set_defaults(fn=cmd_probe)
+    s = sub.add_parser("intents"); s.add_argument("--session", required=True)
+    s.set_defaults(fn=cmd_intents)
     s = sub.add_parser("verdict")
     s.add_argument("--run-dir", required=True); s.add_argument("--finding-id", required=True)
     s.set_defaults(fn=cmd_verdict)

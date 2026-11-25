@@ -1084,6 +1084,75 @@ async def list_session_candidates(
     return {**list_candidates(org_id, session_id), "run_in_progress": has_running_task(session_id)}
 
 
+# =============================================================================
+# OPERATOR-DIRECTED PROBING (planned tests -> leased scoped probes)
+# =============================================================================
+
+class OperatorIntentRequest(BaseModel):
+    """One test the operator wants Prowl to run. The note is untrusted text."""
+
+    target: str = Field(min_length=8, max_length=2048)
+    test_type: str = Field(min_length=2, max_length=64)
+    parameter: str = Field(default="", max_length=128)
+    location: str = Field(default="", max_length=20)
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
+    identity: str = Field(default="", max_length=40)
+    note: str = Field(default="", max_length=1000)
+
+
+@router.post("/sessions/{session_id}/intents", status_code=201)
+async def submit_session_intent(
+    session_id: str,
+    request: OperatorIntentRequest,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Plan one operator-directed test as an ``operator`` fact + intent.
+
+    The intent is backed by a coverage cell, so the session's leased scoped
+    probes build its request from these fields even when Prowl never observed
+    the input. Idle session: written to the snapshot (201). Running session:
+    queued for the next think turn (202, ``queued: true``). Never a finding.
+    """
+    conv, org_id = _owned_conversation(db, session_id, current_user)
+    if conv.mode != "agent":
+        raise HTTPException(status_code=409, detail="Operator intents require an agent-mode session")
+    from app.services.agent.external_candidates import IntakeError
+    from app.services.agent.operator_intents import submit_operator_intent
+
+    try:
+        # Synchronous: running-task check and snapshot write share one event-loop slice.
+        result = submit_operator_intent(
+            org_id, session_id, target=request.target, test_type=request.test_type,
+            parameter=request.parameter, location=request.location, method=request.method,
+            identity=request.identity, note=request.note,
+        )
+    except IntakeError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from None
+    if result.get("queued"):
+        response.status_code = 202
+    elif not result.get("accepted"):
+        response.status_code = 200
+    logger.info("Operator intent intake user=%s session=%s accepted=%s queued=%s",
+                current_user.id, session_id, result.get("accepted"), bool(result.get("queued")))
+    return {"session_id": session_id, **result}
+
+
+@router.get("/sessions/{session_id}/intents")
+async def list_session_intents(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Planned tests (all creators) from the snapshot plus undrained operator intents."""
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    from app.services.agent.operator_intents import list_intents
+    from app.services.agent.run_control import has_running_task
+
+    return {**list_intents(org_id, session_id), "run_in_progress": has_running_task(session_id)}
+
+
 @router.get("/playbooks")
 async def get_agent_playbooks():
     """List preset playbook objectives for the agent."""

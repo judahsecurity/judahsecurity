@@ -77,6 +77,7 @@ from app.services.agent.tools_recon_fireteam import ReconFireteamToolsMixin
 from app.services.agent.tools_threat_intel import ThreatIntelToolsMixin
 from app.services.agent.tools_ported_probes import PortedProbeToolsMixin
 from app.services.agent.tools_graph import AttackGraphToolsMixin
+from app.services.agent.tools_intent_probes import IntentProbeToolsMixin
 
 
 class ASMToolsManager(
@@ -97,6 +98,7 @@ class ASMToolsManager(
     ThreatIntelToolsMixin,
     PortedProbeToolsMixin,
     AttackGraphToolsMixin,
+    IntentProbeToolsMixin,
     ScopedAssessmentTools,
     AssessmentCapabilities,
 ):

@@ -1415,6 +1415,9 @@ def claim_coverage_cell_leases(
             for cell in brain.coverage_cells
             if cell.get("status") in CELL_OPEN
             and not cell.get("lease_id")
+            # A probe found this exact request shape unbuildable; it stays
+            # open (inconclusive) for a human or a future probe, not re-leased.
+            and not cell.get("unsupported_shape")
             and (not allowed_sources or cell.get("source") in allowed_sources)
             and (not excluded_test_types or cell.get("test_type") not in excluded_test_types)
             and (allowed_cell_ids is None or cell.get("id") in allowed_cell_ids)
