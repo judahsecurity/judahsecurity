@@ -76,6 +76,7 @@ COVERAGE_TO_PROOF = {
     "client_template_injection": "client_template_injection",
     "client_prototype_pollution": "client_prototype_pollution",
     "js_dependency_review": "known_cve",
+    "auth": None,
 }
 
 # Names Vanguard hunters, findings.json and asm_bridge already use.

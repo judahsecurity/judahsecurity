@@ -3994,8 +3994,11 @@ def record_surface_coverage(
             and (row.get("method") or "GET").upper() == method.upper()
             and row_host == rec_host
         ):
-            row["status"] = status
-            row["reason"] = reason[:500]
+            # A surface with a finding stays a finding surface; the exact cell
+            # guard below decides what happens to the cited cell.
+            if row.get("status") != "finding" or status == "finding":
+                row["status"] = status
+                row["reason"] = reason[:500]
             row["hypothesis_id"] = hypothesis_id or row.get("hypothesis_id") or ""
             row["finding_title"] = finding_title or row.get("finding_title") or ""
             row["updated_at"] = now

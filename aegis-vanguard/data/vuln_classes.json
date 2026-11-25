@@ -229,6 +229,7 @@
     }
   },
   "coverage_to_class": {
+    "auth": null,
     "authz": "authorization",
     "business_logic": null,
     "client_prototype_pollution": "client_prototype_pollution",
