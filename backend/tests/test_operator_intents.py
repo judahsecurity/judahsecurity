@@ -501,9 +501,11 @@ async def test_crlf_header_and_redirect_json_intents(monkeypatch):
     ("scoped_response_probe_assigned", "crlf", "header", "Host", "GET"),
     ("scoped_response_probe_assigned", "open_redirect", "fragment", "*", "GET"),
     ("scoped_injection_probe_assigned", "nosql", "path", "missing", "GET"),
-    ("scoped_input_probe_assigned", "xss", "header", "X-Name", "GET"),
-    ("scoped_input_probe_assigned", "xss", "path", "0", "GET"),
-    ("scoped_input_probe_assigned", "xss", "body_json", "name", "POST"),
+    # XSS on header/cookie/body/path runs as an intercepted browser request
+    # (test_intercept_xss.py); protected inputs and write methods stay open.
+    ("scoped_input_probe_assigned", "xss", "header", "Authorization", "GET"),
+    ("scoped_input_probe_assigned", "xss", "path", "missing", "GET"),
+    ("scoped_input_probe_assigned", "xss", "body_json", "name", "PUT"),
     ("scoped_input_probe_assigned", "sqli", "fragment", "q", "GET"),
     ("scoped_input_probe_assigned", "sqli", "path", "missing", "GET"),
 ])

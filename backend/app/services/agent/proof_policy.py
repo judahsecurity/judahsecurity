@@ -24,7 +24,8 @@ Keep observations, candidates, confirmed findings, refutations, and inconclusive
 PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
     "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "oob_callback"}),
-    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
+    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss",
+                          "scoped_browser_intercept_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
     "xxe": frozenset({"oob_callback"}),
@@ -281,6 +282,36 @@ def _validate_class_probe_pair(store, candidate, proof: dict,
     return (True, "") if disciplined else (False, why)
 
 
+def _validate_intercept_xss_pair(store, candidate, proof: dict,
+                                 evidence_ids: list[str]) -> tuple[bool, str]:
+    """Hunter and fresh verifier each changed one input of the same intercepted
+    browser request (header, cookie, body field or path segment) and the
+    nonce dialog fired after that mutated response rendered."""
+    from app.services.agent.scoped_assessment.browser_intercept import pair_valid
+
+    hunter_id, verifier_id = proof.get("hunter_artifact_id"), proof.get("artifact_id")
+    hunter = (store.records.get(hunter_id)
+              if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
+    verifier = store.records.get(verifier_id) if verifier_id in evidence_ids else None
+    expected = "scoped_browser_check_intercept_xss"
+    if (not hunter or not verifier or hunter["id"] == verifier["id"]
+            or hunter["kind"] != expected or verifier["kind"] != expected
+            or hunter["created_at"] >= verifier["created_at"]):
+        return False, "Distinct ordered hunter and verifier execution evidence is required"
+    if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
+        return False, "Both actors must prove the same candidate target"
+    if hunter["identity"] != verifier["identity"]:
+        return False, "Hunter and verifier must use the same test identity"
+    first, second = hunter["payload"], verifier["payload"]
+    if (not pair_valid(first, second)
+            or first["request_match"].get("path") != urlsplit(candidate.target).path
+            or (candidate.parameter and candidate.parameter
+                != f"{first['input_location']}:{first['input_parameter']}")):
+        return False, ("Two fresh nonce executions of the same intercepted request "
+                       "(page, request match, location, method and template) are required")
+    return True, ""
+
+
 def validate_proof(
     store, candidate, proof: dict, evidence_ids: list[str]
 ) -> tuple[bool, str]:
@@ -297,6 +328,8 @@ def validate_proof(
         return False, reason
     if kind in CLASS_PROBE_KINDS:
         return _validate_class_probe_pair(store, candidate, proof, evidence_ids, kind)
+    if kind == "scoped_browser_intercept_xss":
+        return _validate_intercept_xss_pair(store, candidate, proof, evidence_ids)
     if kind in _SERVER_INJECTION_KINDS or kind in {"scoped_csrf_state_change", "scoped_jwt_forgery",
                                                     "scoped_jwt_key_url_fetch"}:
         ok, why = _validate_hunter_verifier_pair(store, candidate, proof, evidence_ids, kind)

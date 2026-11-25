@@ -256,6 +256,7 @@
       "proof_kinds": [
         "browser_xss",
         "scoped_browser_form_xss",
+        "scoped_browser_intercept_xss",
         "scoped_browser_stored_xss",
         "scoped_browser_xhr_xss",
         "scoped_browser_xss",

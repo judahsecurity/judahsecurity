@@ -490,7 +490,7 @@ class EvidenceStore:
                 "scoped_body_sqli_boolean", "scoped_owner_only",
                 "scoped_http_get", "scoped_browser_check_xss",
                 "scoped_browser_check_form_xss", "scoped_browser_check_xhr_xss",
-                "scoped_browser_check_stored_xss",
+                "scoped_browser_check_stored_xss", "scoped_browser_check_intercept_xss",
                 "scoped_browser_check_client", "scoped_response_probe",
                 "scoped_race_probe", "scoped_injection_probe", "scoped_csrf_probe",
                 "scoped_jwt_probe", "scoped_class_probe",
@@ -518,6 +518,11 @@ class EvidenceStore:
                                  and isinstance(payload.get("readback_status"), int)
                                  and 200 <= payload["readback_status"] < 300
                                  and payload.get("cleanup_success") is True)))
+                elif row["kind"] == "scoped_browser_check_intercept_xss":
+                    proven = (payload.get("executed") is True
+                              and payload.get("intercept_mutated") is True
+                              and payload.get("mutated_response_seen") is True
+                              and payload.get("mutated_redirect_refused") is False)
                 elif row["kind"] == "scoped_browser_check_client":
                     proven = (payload.get("behavior_observed") is True
                               and (payload.get("observations") or {}).get(

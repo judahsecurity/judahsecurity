@@ -176,6 +176,8 @@ Prowl's leased scoped probes then build the request from the intent:
 | sqli (string Boolean OR/AND, error, UNION, time; numeric Boolean) | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
 | nosql (operator differential) | query, body_form, body_json (operators), cookie (`j:` JSON), header (JSON baseline only), body_xml (operator elements), path (string `$where`/`$regex` recipes) | GET, POST, PUT, PATCH, DELETE (path: GET/POST) |
 | xss (browser nonce execution) | query, fragment | GET |
+| xss (intercepted browser request) | header, cookie, path | GET (header/cookie also POST) |
+| xss (intercepted browser request) | body_form, body_json, body_xml | POST |
 
 Body locations need a non-GET method. `body_xml` takes an element name or a
 path (`xml:order.note` becomes `/order/note`); the value is XML-escaped into
@@ -207,6 +209,19 @@ control, same-meaning variant equal to the control. Missing baselines leave
 recipes skipped (`numeric_skipped`, `union_skipped`) or the cell open, never
 `tested_clean`. The independent verifier replays the hunter's recipe through
 the same builder and baseline source with fresh nonces.
+
+XSS on header, cookie, body and path inputs loads the rendering page in
+Prowl's browser and intercepts one request: the navigation to the target URL
+(body locations are then sent as a one-field POST), or, when the specialist
+names a `render_page`, that page's fetch/XHR to the target path. Only the one
+input changes (header value, one cookie pair, the body field, the exact path
+segment); redirects are refused, not followed. Proof is the fresh nonce
+dialog after that mutated response renders; reflection alone, an unrelated
+dialog or a request that was never sent stay inconclusive. The receipt binds
+a path probe to the cell by its path template and segment index, and the
+verifier replays the same page, request match and location with a fresh
+nonce (proof kind `scoped_browser_intercept_xss`). PUT/PATCH/DELETE XSS is
+not supported (refused by `probe` and at intake).
 
 Method approval comes from the start `--policy-file`: GET is free; POST needs
 the path in `body_replay_paths`.
@@ -256,7 +271,7 @@ no matching endpoint; without one at run time the probe returns
 provably Prowl's returns `test_record_aborted` and nothing is probed. Host, Cookie,
 Authorization, framing, X-Forwarded-Host and credential-like headers, and
 credential-like or HttpOnly identity cookies, are never mutated. Anything else
-(xss on header/cookie/body/path, sqli/server classes on fragment, nosql on
+(xss on a protected header/cookie, sqli/server classes on fragment, nosql on
 header/cookie/xml/path, a path segment the URL lacks) stays open/inconclusive
 with `unsupported_shape` and the intent is `blocked`; it is never
 `tested_clean`. A probe signal is still a lead until Prowl's independent

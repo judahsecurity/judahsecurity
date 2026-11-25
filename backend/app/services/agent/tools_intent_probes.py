@@ -12,9 +12,14 @@ call these when a cell is
 
 Intent-backed ``xss`` and ``sqli`` cells go through
 ``scoped_input_probe_assigned`` to ``_shaped_input_probe_assigned`` here: XSS
-as a browser nonce navigation (GET query or fragment), SQLi as the string
-Boolean/error/AND/UNION/time recipes on any server-side location, plus the
-numeric Boolean recipe when the input's baseline value is a positive integer.
+as a browser nonce navigation (GET query or fragment) or, for header, cookie,
+body_form/body_json/body_xml (POST) and path (GET) inputs, as an intercepted
+browser request (``scoped_assessment.browser_intercept``: the rendering page
+loads and only that one input of the matching document or fetch/XHR request
+changes); observed header/cookie xss cells use the same interception. SQLi as
+the string Boolean/error/AND/UNION/time recipes on any server-side location,
+plus the numeric Boolean recipe when the input's baseline value is a positive
+integer.
 
 Baselines (``_shaped_baseline``): the operator's ``baseline_value`` on the
 intent, else the value the linked observation carried (the intent's
@@ -142,6 +147,13 @@ class IntentProbeToolsMixin:
 
         location, _sep, parameter = str(cell.get("parameter") or "").partition(":")
         method = str(cell.get("method") or "GET").upper()
+        if test_type == "xss":
+            from app.services.agent.scoped_assessment.browser_intercept import (
+                INTERCEPT_LOCATIONS, intercept_shape_error,
+            )
+
+            if location in INTERCEPT_LOCATIONS:
+                return intercept_shape_error(method, location, parameter)
         if method in WRITE_METHODS and location == "path":
             # A path probe would change the record URL itself, i.e. write to a
             # record that is not Prowl's own.
@@ -826,7 +838,7 @@ class IntentProbeToolsMixin:
 
     async def _shaped_input_probe_assigned(
         self, brain: Any, cell: Dict[str, Any], coverage_lease_id: str,
-        technique: str, variant: str,
+        technique: str, variant: str, render_page: str = "",
     ) -> Dict[str, Any]:
         """``scoped_input_probe_assigned`` for intent-backed xss and sqli cells."""
         import json
@@ -893,14 +905,36 @@ class IntentProbeToolsMixin:
                 payload = payload_for(technique, variant)
             except ValueError as exc:
                 return {"success": False, "error": str(exc)}
-            try:
-                template = intent_request.browser_template(url, location, parameter, payload)
-                self._scoped_origin(template)
-            except intent_request.UnsupportedShape as exc:
-                return unsupported(str(exc))
-            proof = json.loads(await self.scoped_browser_assessment(
-                "check_xss", template, identity=identity))
-            operation = "scoped_browser_check_xss"
+            from app.services.agent.scoped_assessment.browser_intercept import (
+                INTERCEPT_LOCATIONS,
+            )
+
+            if location in INTERCEPT_LOCATIONS:
+                try:
+                    proof = await self._run_intercept_xss(
+                        cell, identity, scoped_origin=scoped_origin,
+                        payload_template=payload, render_page=render_page)
+                except intent_request.UnsupportedShape as exc:
+                    return unsupported(str(exc))
+                except intent_request.ApprovalRequired as exc:
+                    return {"success": False, "error": "operator_approval_required",
+                            "reason": str(exc)}
+                except (ValueError, OSError) as exc:
+                    return {"success": False, "error": type(exc).__name__,
+                            "reason": str(exc)[:200]}
+                operation = "scoped_browser_check_intercept_xss"
+            else:
+                if render_page:
+                    return {"success": False, "error": "render_page_unsupported",
+                            "reason": "query/fragment XSS navigates the cell URL itself"}
+                try:
+                    template = intent_request.browser_template(url, location, parameter, payload)
+                    self._scoped_origin(template)
+                except intent_request.UnsupportedShape as exc:
+                    return unsupported(str(exc))
+                proof = json.loads(await self.scoped_browser_assessment(
+                    "check_xss", template, identity=identity))
+                operation = "scoped_browser_check_xss"
             confirmed = proof.get("executed") is True
         else:
             if technique != "html_body" or variant != "base":
@@ -964,6 +998,11 @@ class IntentProbeToolsMixin:
             probe_result = {"executed": confirmed,
                             "reflection_contexts": trace["rendered_contexts"],
                             "reflection_observations": trace["render_observations"]}
+            if operation == "scoped_browser_check_intercept_xss":
+                probe_result.update({key: proof.get(key) for key in (
+                    "intercept_mode", "request_match", "sent_method", "intercept_mutated",
+                    "mutated_response_seen", "mutated_status", "mutated_redirect_refused",
+                    "intercept_error", "path_template", "path_segment_index")})
             extra = {"xss_trace": trace, "technique": technique, "variant": variant}
         if confirmed:
             current["status"] = "in_focus"
@@ -980,6 +1019,69 @@ class IntentProbeToolsMixin:
                 "request_context": context, "intent": intent,
                 "probe_result": {**probe_result, "request_context": context},
                 "funnel": parameter_test_funnel(live), **extra}
+
+    # ------------------------------------------------------------ intercepted XSS
+
+    def _intercept_xss_spec(self, cell: Dict[str, Any], identity: str, *, scoped_origin: str,
+                            payload_template: str, render_page: str = "") -> Dict[str, Any]:
+        """The interception plan for a cell (hunter and verifier build it the same way).
+
+        ``render_page`` is an exact same-origin path of a page whose fetch/XHR
+        carries the input; empty means the cell URL itself is the rendering
+        page (document mode).
+        """
+        from app.services.agent.scoped_assessment import browser_intercept, intent_request
+
+        method, url, location, parameter, _context = self._shaped_base(cell, scoped_origin)
+        reason = browser_intercept.intercept_shape_error(method, location, parameter)
+        if reason:
+            raise intent_request.UnsupportedShape(reason)
+        if self._shaped_approval(method, str(cell.get("path") or "/")):
+            raise intent_request.ApprovalRequired()
+        page_url = ""
+        if render_page:
+            if (not isinstance(render_page, str) or not render_page.startswith("/")
+                    or render_page.startswith("//") or len(render_page) > 512):
+                raise intent_request.UnsupportedShape("render_page_unsupported")
+            page_url = scoped_origin + render_page
+        return browser_intercept.plan_intercept(
+            method=method, url=url, location=location, parameter=parameter,
+            payload_template=payload_template, page_url=page_url,
+            state=self._scoped_state(identity, url))
+
+    async def _run_intercept_xss(self, cell: Dict[str, Any], identity: str, *,
+                                 scoped_origin: str, payload_template: str,
+                                 render_page: str = "") -> Dict[str, Any]:
+        """One intercepted-request XSS execution check, recorded as evidence."""
+        import hashlib
+
+        from app.services.agent.assessment_proxy_bootstrap import ensure_assessment_proxy_ready
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.scoped_assessment import browser_intercept
+
+        _method, _url, _location, _parameter, context = self._shaped_base(cell, scoped_origin)
+        spec = self._intercept_xss_spec(cell, identity, scoped_origin=scoped_origin,
+                                        payload_template=payload_template,
+                                        render_page=render_page)
+        self._scoped_origin(spec["target_template"])
+        self._scoped_origin(spec["request_url"])
+        state = self._scoped_state(identity, spec["request_url"])
+        self._charge(spec["sent_method"], 1)
+        await ensure_assessment_proxy_ready(spec["target_template"])
+        result, screenshot = await browser_intercept.check_intercept_xss(
+            spec, allowed_origins=[scoped_origin], storage_state=state)
+        result.update(identity=identity, request_context=context,
+                      coverage_cell_id=str(cell.get("id") or ""),
+                      screenshot_sha256=hashlib.sha256(screenshot).hexdigest()
+                      if screenshot else None)
+        self._scoped_assessment_started = True
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_browser_check_intercept_xss", result,
+            target=scoped_origin + (urlsplit(spec["request_url"]).path or "/"),
+            identity=identity, coverage_cell_id=str(cell.get("id") or ""), test_type="xss",
+            success=result.get("executed") is True,
+        )
+        return result
 
 
 TOOL_SPECS = (

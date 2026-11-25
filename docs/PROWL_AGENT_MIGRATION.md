@@ -108,6 +108,34 @@ different browser event is inconclusive. Pages with query values are not
 automatically used as rendering pages, so private URL values do not enter the
 receipt.
 
+Inputs a GET navigation cannot carry (header, cookie, `body_form`/`body_json`/
+`body_xml`, one path segment) are proven by request interception
+(`scoped_assessment/browser_intercept.py`). For an intent-backed xss cell, or
+an observed header/cookie xss cell, `scoped_input_probe_assigned` loads the
+rendering page and intercepts one request: the top-level navigation to the
+cell URL (document mode; body locations are re-sent as a one-field POST), or,
+with `render_page`, the page's first fetch/XHR whose method, exact path and
+body content type match the cell (fetch mode). Only the one input changes
+(header value, one cookie pair, the form/JSON/XML field located by its byte
+span, or the exact path segment); the browser's own headers, cookies, URL and
+body are otherwise re-sent unchanged through `route.fetch` with
+`max_redirects=0`, and the server's response is fulfilled back to the page. A
+3xx is refused, not followed. Proof requires the nonce dialog after that
+mutated response arrived; reflection, a dialog without the nonce, or a
+matching request that was never sent are inconclusive. Body XSS needs POST on
+an approved `body_replay_paths` path; path XSS is GET only;
+PUT/PATCH/DELETE XSS is unsupported (the cell stays open, the intent is
+blocked). Header/cookie protections are those of intent probing (no Host,
+Cookie, Authorization, framing, Origin, X-Forwarded-Host, Forwarded or
+credential-like headers; no credential-like or HttpOnly identity cookies, and
+no HttpOnly cookie of the live browser jar). The receipt
+(`scoped_browser_check_intercept_xss`) records the mode, rendering page,
+request match, sent method, location, parameter, payload template and, for a
+path, the cell's path template and mutated segment index. The verifier
+rebuilds the plan from the cell with the hunter's template and page, requires
+it to equal the hunter receipt, and repeats the same interception with a
+fresh nonce (`scoped_browser_intercept_xss`, class `xss`).
+
 JavaScript analysis keeps the page that loaded an external script. An XSS
 specialist can use `scoped_dom_xss_assigned` on a leased DOM cell when the
 script has a fragment source lead, an executable sink lead, and an observed

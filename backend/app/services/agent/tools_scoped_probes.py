@@ -161,7 +161,7 @@ class ScopedProbeToolsMixin:
 
     async def scoped_input_probe_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
-        technique: str = "html_body", variant: str = "base",
+        technique: str = "html_body", variant: str = "base", render_page: str = "",
     ) -> Dict[str, Any]:
         """Probe one leased, observed GET input or approved POST form.
 
@@ -188,11 +188,15 @@ class ScopedProbeToolsMixin:
                      if row.get("id") == coverage_cell_id), None)
         from app.services.agent.attack_graph import INTENT_CELL_SOURCE
 
-        if (cell and cell.get("source") == INTENT_CELL_SOURCE and self._shaped_cell(cell)
-                and cell.get("test_type") in {"xss", "sqli"}):
-            # Intent-backed input Prowl never observed: built from the intent.
+        if (cell and self._shaped_cell(cell)
+                and (cell.get("source") == INTENT_CELL_SOURCE
+                     and cell.get("test_type") in {"xss", "sqli"}
+                     or cell.get("test_type") == "xss")):
+            # Intent-backed input Prowl never observed (built from the intent),
+            # or an observed header/cookie XSS input (intercepted request).
             return await self._shaped_input_probe_assigned(
-                brain, cell, coverage_lease_id, technique, variant)
+                brain, cell, coverage_lease_id, technique, variant,
+                render_page=render_page)
         location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
         method = str((cell or {}).get("method") or "").upper()
         form_xss = bool(cell and cell.get("test_type") == "xss"
