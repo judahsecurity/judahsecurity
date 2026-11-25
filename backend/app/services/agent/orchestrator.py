@@ -2998,7 +2998,7 @@ class AgentOrchestrator:
             )
 
         # Emit attack scenario update so the frontend can render the chain in real-time
-        chain_data = evograph.get_session_chain(session_id)
+        chain_data = evograph.get_session_chain(session_id, org_id)
         if chain_data.get("nodes"):
             await self._emit_status({
                 "type": "attack_scenario_update",
