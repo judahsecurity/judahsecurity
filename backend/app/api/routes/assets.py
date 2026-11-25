@@ -960,6 +960,27 @@ def get_asset_agent_coverage(
         for v in exploitable
     ]
     summary["exploitable_untested"] = bool(exploitable) and summary["tested"] == 0
+
+    from app.models.agent_exploration import AgentExplorationAnchor, AgentExplorationGraph
+    anchors = (
+        db.query(AgentExplorationAnchor, AgentExplorationGraph.updated_at)
+        .join(AgentExplorationGraph, AgentExplorationGraph.session_id == AgentExplorationAnchor.session_id)
+        .filter(AgentExplorationAnchor.organization_id == asset.organization_id,
+                AgentExplorationAnchor.asset_id == asset.id)
+        .order_by(AgentExplorationGraph.updated_at.desc())
+        .limit(400)
+        .all()
+    )
+    sessions: dict = {}
+    for anchor, updated_at in anchors:
+        entry = sessions.setdefault(anchor.session_id, {
+            "session_id": anchor.session_id, "updated_at": updated_at,
+            "intents": 0, "facts": 0, "findings": 0, "examples": [],
+        })
+        entry[{"intent": "intents", "fact": "facts", "finding": "findings"}[anchor.kind]] += 1
+        if anchor.kind in ("intent", "finding") and len(entry["examples"]) < 5:
+            entry["examples"].append({"kind": anchor.kind, "label": anchor.label, "status": anchor.status})
+    summary["sessions"] = list(sessions.values())[:25]
     return summary
 
 

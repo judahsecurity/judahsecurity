@@ -1319,6 +1319,29 @@ async def delete_conversation(
 # ATTACK SCENARIO / EVOGRAPH CHAIN
 # =============================================================================
 
+@router.get("/sessions/{session_id}/exploration")
+async def get_session_exploration(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Typed exploration lineage for a session: goal -> intents -> facts ->
+    findings with spawns / derived_from / yields / proves edges, each node
+    anchored to its asset when known (app.services.agent.exploration_graph)."""
+    from app.models.agent_exploration import AgentExplorationGraph
+
+    org_id = _resolve_agent_organization_id(current_user, db)
+    row = db.get(AgentExplorationGraph, session_id[:128])
+    if row is None or org_id is None or row.organization_id != org_id:
+        raise HTTPException(status_code=404, detail="No exploration graph for this session")
+    return {
+        "session_id": row.session_id,
+        "updated_at": row.updated_at,
+        "node_counts": row.node_counts or {},
+        **(row.graph or {"nodes": [], "edges": []}),
+    }
+
+
 @router.get("/sessions/{session_id}/chain")
 async def get_session_chain(
     session_id: str,

@@ -78,6 +78,10 @@ const NODE_COLORS: Record<string, string> = {
   finding_high: TRUST_COLORS.orange,
   finding_critical: TRUST_COLORS.red,
   failure: TRUST_COLORS.red,
+  // Extracted from analysis text and not yet verified.
+  finding_unverified: TRUST_COLORS.gray,
+  // Fireteam specialist work delegated from a step.
+  specialist: TRUST_COLORS.pink,
 };
 
 /** Phase → HF-inspired trust colors */

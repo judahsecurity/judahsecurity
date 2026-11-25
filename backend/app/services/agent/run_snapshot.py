@@ -183,6 +183,14 @@ def save_run_snapshot(
             persist_coverage(organization_id, session_id, brain)
         except Exception:
             logger.exception("durable test coverage save failed; the next save retries")
+    if isinstance(brain, dict):
+        try:
+            from app.services.agent.exploration_graph import persist as persist_lineage
+
+            persist_lineage(organization_id, session_id, brain,
+                            objective=str(state.get("original_objective") or "")[:300])
+        except Exception:
+            logger.exception("exploration lineage save failed; the next save retries")
     encoded = json.dumps(payload, default=str, separators=(",", ":")).encode()
     if len(encoded) > _MAX_SNAPSHOT_BYTES:
         logger.warning("run snapshot exceeds %d bytes; prior snapshot retained", _MAX_SNAPSHOT_BYTES)

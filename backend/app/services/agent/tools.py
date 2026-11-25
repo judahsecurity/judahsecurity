@@ -568,6 +568,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.followup_runtime import FollowupRuntime
 
         self._followup_runtime = FollowupRuntime()
+        # Tool calls currently inside _execute_recorded; finished follow-up
+        # planning is applied only when this is 0 (see _apply_finished_followups).
+        self._tools_in_flight = 0
         from app.services.agent.tool_singleflight import ToolSingleFlight
 
         self._tool_singleflight = ToolSingleFlight()
@@ -3226,8 +3229,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         )
         append_action(run_id, action_id, "started", tool_name, target=target,
                       fingerprint=fingerprint)
+        self._tools_in_flight = getattr(self, "_tools_in_flight", 0) + 1
         try:
-            result = await self._execute_impl(tool_name, tool_args)
+            try:
+                result = await self._execute_impl(tool_name, tool_args)
+            finally:
+                self._tools_in_flight = getattr(self, "_tools_in_flight", 1) - 1
+            self._apply_finished_followups()
             from app.services.agent.evidence_store import evidence_store
             if tool_name not in ("read_evidence", "search_evidence"):
                 artifact_id = evidence_store(self).record("tool_output", result, success=result.get("success", False))
@@ -11464,14 +11472,40 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if not followups_enabled():
             return None
         try:
-            event, _created = commit_observation(
+            event, created = commit_observation(
                 brain, run_id=current_run_id(), kind=kind, identity=identity,
                 evidence_ids=[str(v) for v in evidence_ids if v], facts=facts,
             )
+            if created and event.get("status") == "committed":
+                # A new fact wakes the planner now instead of at the next
+                # sync/map/dispatch call. Non-blocking; caller persists brain.
+                self._refresh_followups(brain)
             return event
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not record %s observation: %s", kind, type(exc).__name__)
             return None
+
+    def _apply_finished_followups(self) -> None:
+        """Apply follow-up planning that finished in the background.
+
+        Runs after a tool call completes and only when no other tool call is
+        in flight: tools load the brain, await, and save it back, so applying
+        while another tool holds a copy would be overwritten by its save.
+        """
+        runtime = getattr(self, "_followup_runtime", None)
+        if getattr(self, "_tools_in_flight", 0) or runtime is None or not getattr(self, "_engagement_brain", None):
+            return
+        try:
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+            brain = engagement_brain_from_dict(self._engagement_brain)
+            if not runtime.has_finished(self._followup_key(brain)):
+                return
+            out = self._refresh_followups(brain)
+            if out.get("status") not in ("error", "disabled"):
+                self._engagement_brain = brain.to_dict()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("finished follow-up apply skipped: %s", exc)
 
     def _refresh_followups(self, brain, inventory=None, *, reset=False):
         """Record capture events, apply finished planning, queue new planning.
@@ -12903,6 +12937,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         _checkpoint_task_graph()
 
         self._require_independent_verify = True
+        try:
+            from app.services.agent import evograph
+
+            evograph.record_specialist_steps(current_session_id.get() or "", list(result.reports or []))
+        except Exception:
+            logger.debug("EvoGraph specialist steps skipped", exc_info=True)
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         lifted = [*lifted_early, *ingest_report_findings(
             brain, [report for report in result.reports if id(report) not in ingested_reports]

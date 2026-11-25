@@ -246,6 +246,14 @@ def sync_graph_from_brain(brain: Any) -> PenetrationTaskGraph:
     recover_interrupted_leases(existing)
     _apply_default_dependencies(existing, hyps)
     _recompute_readiness(existing)
+    # Retired chain cards close their hypothesis too, so completion gates and
+    # the scheduler stop counting them as open work.
+    for h in hyps:
+        node = existing.nodes.get(h.id)
+        if (node is not None and node.status == NODE_KILLED and h.status in _OPEN_HYP
+                and node.last_failure.startswith(REFUTED_PREREQUISITE)):
+            h.status = "killed"
+            h.evidence = (node.last_failure + (f" | {h.evidence}" if h.evidence else ""))[:2000]
     brain.task_graph = existing.to_dict()
     return existing
 
@@ -277,15 +285,19 @@ def _apply_default_dependencies(graph: PenetrationTaskGraph, hyps: Sequence[Any]
         node.depends_on = deps
 
 
+REFUTED_PREREQUISITE = "Prerequisite refuted: "
+
+
 def _deps_satisfied(graph: PenetrationTaskGraph, node: TaskNode) -> bool:
     for dep_id in node.depends_on:
         dep = graph.nodes.get(dep_id)
         if dep is None:
             continue
-        # Chain cards need a terminal parent. Other explicit parent edges may
-        # proceed after the parent has started, without waiting for a verdict.
+        # A chain step fires on a fact: its parent must be proven. A killed
+        # parent is handled by _retire_refuted_chain. Other explicit parent
+        # edges may proceed once the parent has started.
         if node.source == "chain":
-            if dep.status not in _TERMINAL:
+            if dep.status != NODE_PROVEN:
                 return False
         else:
             if dep.status not in _TERMINAL | {NODE_RUNNING, NODE_RETRY}:
@@ -293,8 +305,23 @@ def _deps_satisfied(graph: PenetrationTaskGraph, node: TaskNode) -> bool:
     return True
 
 
+def _retire_refuted_chain(graph: PenetrationTaskGraph, node: TaskNode) -> bool:
+    """Kill a chain card whose prerequisite was refuted. Returns True if killed."""
+    if node.source != "chain" or node.status in _TERMINAL | {NODE_RUNNING}:
+        return False
+    for dep_id in node.depends_on:
+        dep = graph.nodes.get(dep_id)
+        if dep is not None and dep.status == NODE_KILLED:
+            node.status = NODE_KILLED
+            node.last_failure = f"{REFUTED_PREREQUISITE}{dep.title}"[:300]
+            return True
+    return False
+
+
 def _recompute_readiness(graph: PenetrationTaskGraph) -> None:
     for node in graph.nodes.values():
+        if _retire_refuted_chain(graph, node):
+            continue
         if node.recovery_required:
             node.status = NODE_BLOCKED
             node.blocked_reason = node.blocked_reason or (

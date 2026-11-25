@@ -2926,6 +2926,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getAgentSessionExploration(sessionId: string) {
+    const response = await this.client.get(`/agent/sessions/${sessionId}/exploration`);
+    return response.data;
+  }
+
   async getAgentSessionChain(sessionId: string, includeAttackPaths = false) {
     const response = await this.client.get(`/agent/sessions/${sessionId}/chain`, {
       params: includeAttackPaths ? { include_attack_paths: true } : undefined,

@@ -224,6 +224,89 @@ def record_failure(
         logger.debug(f"EvoGraph record_failure error: {e}")
 
 
+_LESSONS = (
+    (("403", "forbidden", "waf", "blocked by", "cloudflare", "akamai", "incapsula"),
+     "blocked by a WAF or access control; vary encoding/transport or test another input instead of repeating"),
+    (("401", "unauthorized", "login required", "authentication required"),
+     "needs an authenticated identity; establish one before retrying"),
+    (("429", "rate limit", "too many requests"),
+     "rate limited; slow down or spread requests before retrying"),
+    (("timeout", "timed out", "deadline"),
+     "timed out; narrow the scope or raise the timeout once, then move on"),
+    (("404", "not found", "no such"),
+     "the target path/resource does not exist; re-map before retrying"),
+    (("connection refused", "unreachable", "name or service not known", "dns", "reset by peer"),
+     "target unreachable from the agent; verify host, port and scope"),
+    (("unexpected keyword", "missing required", "invalid argument", "invalid_arguments", "validation error"),
+     "the tool call was malformed; fix the arguments to match the tool signature"),
+    (("out of scope", "not in scope", "scope"),
+     "outside the registered scope; do not retry"),
+)
+
+
+def lesson_for_failure(tool_name: str, error: str, tool_args: Any = None) -> str:
+    """Turn a tool failure into a reusable instruction for later sessions."""
+    text = f"{error or ''}".lower()
+    target = ""
+    if isinstance(tool_args, dict):
+        target = str(tool_args.get("url") or tool_args.get("target") or tool_args.get("host") or "")[:120]
+    for markers, advice in _LESSONS:
+        if any(m in text for m in markers):
+            return f"{tool_name}{' on ' + target if target else ''}: {advice}."[:500]
+    first = (error or "unknown error").strip().splitlines()[0][:160]
+    return f"{tool_name}{' on ' + target if target else ''} failed ({first}); change approach before retrying."[:500]
+
+
+def record_specialist_steps(session_id: str, reports: List[Any]) -> int:
+    """Record fireteam specialist work under the step that dispatched it.
+
+    (ChainStep)-[:DELEGATED]->(SpecialistStep {specialist, verdict, tools, ...})
+    A separate label keeps (session_id, iteration) unique for ChainStep.
+    """
+    driver = _get_driver()
+    if not driver or not reports:
+        return 0
+    rows = []
+    for report in reports:
+        calls = list(getattr(report, "tool_calls", None) or [])
+        rows.append({
+            "specialist": str(getattr(report, "specialist", "") or "")[:64],
+            "mission": str(getattr(report, "mission", "") or "")[:300],
+            "verdict": str(getattr(report, "verdict", "") or "")[:24],
+            "summary": str(getattr(report, "summary", "") or "")[:600],
+            "error": str(getattr(report, "error", "") or "")[:300],
+            "stop_reason": str(getattr(report, "stop_reason", "") or "")[:24],
+            "tool_count": len(calls),
+            "tools": list(dict.fromkeys(str(getattr(c, "tool", "")) for c in calls))[:20],
+            "failed_tools": sum(1 for c in calls if not getattr(c, "success", True)),
+            "hypothesis_ids": [str(h) for h in (getattr(report, "hypothesis_ids", None) or [])][:10],
+            "evidence_ids": [e for c in calls for e in (getattr(c, "evidence_ids", None) or [])][:20],
+        })
+    try:
+        with driver.session() as s:
+            s.run(
+                """
+                MATCH (c:AgentChain {session_id: $sid})-[:HAS_STEP]->(main:ChainStep)
+                WITH main ORDER BY main.iteration DESC LIMIT 1
+                UNWIND $rows AS row
+                CREATE (sub:SpecialistStep {
+                    session_id: $sid, iteration: main.iteration,
+                    specialist: row.specialist, mission: row.mission, verdict: row.verdict,
+                    summary: row.summary, error: row.error, stop_reason: row.stop_reason,
+                    tool_count: row.tool_count, tools: row.tools, failed_tools: row.failed_tools,
+                    hypothesis_ids: row.hypothesis_ids, evidence_ids: row.evidence_ids,
+                    created_at: $ts
+                })
+                MERGE (main)-[:DELEGATED]->(sub)
+                """,
+                sid=session_id, rows=rows, ts=_now_iso(),
+            )
+        return len(rows)
+    except Exception as e:
+        logger.debug(f"EvoGraph record_specialist_steps error: {e}")
+        return 0
+
+
 def record_chain_end(
     session_id: str,
     status: str = "completed",
@@ -385,13 +468,17 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
                 MATCH (c:AgentChain {session_id: $sid})-[:HAS_STEP]->(step:ChainStep)
                 OPTIONAL MATCH (step)-[:PRODUCED]->(f:ChainFinding)
                 OPTIONAL MATCH (step)-[:FAILED_WITH]->(fail:ChainFailure)
+                OPTIONAL MATCH (step)-[:DELEGATED]->(sub:SpecialistStep)
                 RETURN step.iteration AS iteration, step.phase AS phase,
                        step.tool_name AS tool_name, step.tool_args AS tool_args,
                        step.output_summary AS output_summary,
                        step.success AS success, step.thought AS thought,
                        step.created_at AS created_at,
                        collect(DISTINCT {type: f.finding_type, severity: f.severity, description: f.description}) AS findings,
-                       collect(DISTINCT {tool: fail.tool_name, error: fail.error, lesson: fail.lesson}) AS failures
+                       collect(DISTINCT {tool: fail.tool_name, error: fail.error, lesson: fail.lesson}) AS failures,
+                       collect(DISTINCT {specialist: sub.specialist, verdict: sub.verdict,
+                                         summary: sub.summary, tool_count: sub.tool_count,
+                                         tools: sub.tools, error: sub.error}) AS specialists
                 ORDER BY step.iteration
                 """,
                 sid=session_id,
@@ -459,6 +546,18 @@ def get_session_chain(session_id: str) -> Dict[str, Any]:
                         "properties": finding,
                     })
                     edges.append({"source": step_id, "target": fid, "type": "PRODUCED"})
+
+                specialists = [x for x in (step.get("specialists") or []) if x.get("specialist")]
+                nodes[-1]["properties"]["specialists"] = specialists
+                for i, sub in enumerate(specialists):
+                    sid_ = f"specialist-{step['iteration']}-{i}"
+                    nodes.append({
+                        "id": sid_,
+                        "label": f"{sub['specialist']}: {sub.get('verdict') or 'done'} ({sub.get('tool_count') or 0} tools)",
+                        "type": "failure" if sub.get("error") else "specialist",
+                        "properties": sub,
+                    })
+                    edges.append({"source": step_id, "target": sid_, "type": "DELEGATED"})
 
                 prev_step_id = step_id
 

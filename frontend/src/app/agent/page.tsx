@@ -30,6 +30,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useRouter } from 'next/navigation';
 import { AttackScenarioPanel, ChainData } from '@/components/agent/AttackScenarioPanel';
+import { ExplorationLineagePanel } from '@/components/agent/ExplorationLineagePanel';
 import { EngagementReplay, ReplayStep, TokenUsage } from '@/components/agent/EngagementReplay';
 import { RunLedgerPanel, AgentRunLedger } from '@/components/agent/RunLedgerPanel';
 import { ReviewQueuePanel } from '@/components/agent/ReviewQueuePanel';
@@ -2364,6 +2365,9 @@ function AgentPageContent() {
                     onToggleCollapse={() => setScenarioCollapsed(!scenarioCollapsed)}
                   />
                 )}
+
+                {/* Typed lineage: goal -> intents -> facts -> findings */}
+                {sessionId && <ExplorationLineagePanel sessionId={sessionId} refreshKey={chainData} />}
               </div>
             </TabsContent>
 

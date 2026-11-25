@@ -137,8 +137,16 @@ class FollowupRuntime:
 
     def __init__(self) -> None:
         self._jobs: dict[RuntimeKey, _Job] = {}
+        # Keys whose planning finished and whose results wait to be applied.
+        # The tool manager applies them after the next tool call completes,
+        # so new follow-ups appear without waiting for a sync/map/dispatch.
+        self._finished: set[RuntimeKey] = set()
+
+    def has_finished(self, key: RuntimeKey) -> bool:
+        return key in self._finished
 
     def cancel(self, key: RuntimeKey) -> None:
+        self._finished.discard(key)
         job = self._jobs.pop(key, None)
         if job and not job.task.done():
             job.task.cancel()
@@ -158,6 +166,7 @@ class FollowupRuntime:
         if not followups_enabled():
             return {"status": "disabled"}
         out: dict[str, Any] = {"status": "idle"}
+        self._finished.discard(key)
         job = self._jobs.get(key)
         if job is not None and job.task.done():
             del self._jobs[key]
@@ -187,6 +196,7 @@ class FollowupRuntime:
                     jobs, llm_factory, target=str(getattr(brain, "target", "") or ""),
                 ))
                 self._jobs[key] = _Job(task, [j["event_id"] for j in jobs], time.monotonic())
+                task.add_done_callback(lambda _t, k=key: self._finished.add(k))
                 out["status"] = "planning"
                 out["planning_events"] = len(jobs)
         events = _ledger(brain, "observation_events")

@@ -25,7 +25,8 @@ def db():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     md = MetaData()
     # Bare copies (names, types, keys) so only these tables are needed.
-    for name in ("assets", "agent_test_coverage", "vulnerabilities"):
+    for name in ("assets", "agent_test_coverage", "vulnerabilities",
+                 "agent_exploration_graphs", "agent_exploration_anchors"):
         src = Base.metadata.tables[name]
         Table(name, md, *[Column(c.name, c.type, primary_key=c.primary_key) for c in src.columns])
     md.create_all(engine)

@@ -1667,14 +1667,19 @@ class AgentOrchestrator:
         if not knowledge_context:
             knowledge_context = "None. Use search_memory after you store results."
 
-        # Cross-session graph summaries only when the palace is still empty.
+        # Cross-session graph summaries. When the palace already has drawers
+        # the summary is shortened rather than dropped: the palace keeps
+        # truncated notes, while EvoGraph holds what earlier sessions tried and
+        # which approaches failed.
         prior_chain_context = ""
         palace_has_drawers = "Palace has" in knowledge_context
-        if org_id and session_id and not palace_has_drawers:
+        if org_id and session_id:
             prior_chain_context = evograph.get_prior_chain_context(
                 organization_id=org_id,
                 current_session_id=session_id,
             )
+            if palace_has_drawers and len(prior_chain_context) > 1500:
+                prior_chain_context = prior_chain_context[:1500].rsplit("\n", 1)[0] + "\n..."
 
         # Build prompt
         merged_trace = list(compacted_trace) + drain_trace_extra
@@ -3019,7 +3024,7 @@ class AgentOrchestrator:
                 iteration=iteration,
                 tool_name=tool_name,
                 error=step_data["error_message"][:300],
-                lesson=f"{tool_name} failed with args {str(safe_args)[:200]}",
+                lesson=evograph.lesson_for_failure(tool_name, step_data["error_message"], safe_args),
             )
 
         # Emit attack scenario update so the frontend can render the chain in real-time
@@ -3151,7 +3156,9 @@ class AgentOrchestrator:
                 session_id=session_id,
                 iteration=iteration,
                 finding_type="actionable",
-                severity="medium",
+                # Extracted from the model's analysis text, not verified:
+                # never present a guessed severity as a finding's severity.
+                severity="unverified",
                 description=finding_text,
                 organization_id=state.get("organization_id"),
                 target=merged_target.primary_target,
@@ -3161,7 +3168,7 @@ class AgentOrchestrator:
                 session_id=session_id,
                 iteration=iteration,
                 finding_type="vulnerability",
-                severity="high",
+                severity="unverified",
                 description=vuln,
                 organization_id=state.get("organization_id"),
                 target=merged_target.primary_target,
