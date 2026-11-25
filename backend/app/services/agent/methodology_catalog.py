@@ -2239,6 +2239,13 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             why="Web surface behind HTTP infrastructure",
         ))
 
+    # Stack and perimeter fingerprints (Spring, Laravel, Next.js, VPN appliances,
+    # IdPs, ...) each get a card for their own specialist.
+    from app.services.agent.surface_hunters import surface_hunter_methodologies
+
+    for m in surface_hunter_methodologies(cmap):
+        add(m)
+
     return _rank(out)
 
 
