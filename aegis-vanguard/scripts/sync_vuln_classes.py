@@ -79,7 +79,7 @@ COVERAGE_TO_PROOF = {
     "auth": None,
 }
 
-# Names Vanguard hunters, findings.json and asm_bridge already use.
+# Names Vanguard skills and findings.json files already use.
 VANGUARD_ALIASES = {
     "sqli": "sql_injection", "sql": "sql_injection", "blind_sqli": "sql_injection",
     "xss": "xss", "reflected_xss": "xss", "stored_xss": "xss", "dom_xss": "xss", "dom-xss": "xss",

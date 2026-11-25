@@ -1,19 +1,5 @@
+"""Operator-side helpers for Aegis Vanguard's Claude Code skills.
+
+Only test-identity loading and login remain here (used by prowl_client.py);
+live testing runs in Prowl, the platform agent.
 """
-Aegis Vanguard Agent Framework
-
-CAI-inspired ReACT agent architecture for autonomous pentesting.
-Provides tool-calling, multi-agent handoffs, guardrails, and tracing.
-"""
-
-from agent.tools import security_tool, ToolRegistry
-from agent.core import Agent, AgentRunner, RunResult
-from agent.guardrails import GuardrailEngine
-from agent.tracing import Tracer
-from agent.distiller import Distiller, get_distiller
-
-__all__ = [
-    "security_tool", "ToolRegistry",
-    "Agent", "AgentRunner", "RunResult",
-    "GuardrailEngine", "Tracer",
-    "Distiller", "get_distiller",
-]

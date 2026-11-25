@@ -29,7 +29,7 @@ export AEGIS_API_TOKEN=<user JWT access token>  # from POST /api/v1/auth/login
 `prowl_client.py`: Prowl owns the scoped browser, OOB callbacks, deterministic
 proof probes, the independent verifier and the publication gate. curl in the
 session is for leads only. `--local` hunts without Prowl (medium+ stays
-`improve`). `--cli` runs `python3 run_pentest.py --target …` instead.
+`improve`).
 
 ## Cycle
 
@@ -336,7 +336,7 @@ Repeat runs resume the latest dir unless `--fresh`.
 
 `SKILL.md` stays under 150 lines. Methodology lives in sibling files
 (`schema.md`, `researchers.md`, `gate.md`), `_lib/*.py`, or Python
-(`run_pentest.py`, `prowl_client.py`).
+(`prowl_client.py`).
 Do not grow skills by pasting platform playbooks.
 
 ## Platform agent (optional)

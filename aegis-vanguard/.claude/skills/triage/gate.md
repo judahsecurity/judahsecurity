@@ -4,8 +4,8 @@ Score what is in the run directory, or what Prowl's verifier returned for it.
 Status 200 is never enough.
 
 Validation discipline adapted from elementalsouls/Claude-BugHunter (CC BY 4.0).
-Same gate as the CLI validator (`agent/agents.py` `create_validator_agent`) and
-the never-submit / chain tables in `agent/hunt_patterns.py`.
+Prowl applies the same discipline server-side (`validate_finding`, the proof
+kinds in `proof_policy.py` and its independent verifier).
 
 ## 0. Logical sanity (first)
 

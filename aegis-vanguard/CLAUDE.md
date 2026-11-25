@@ -2,7 +2,7 @@
 
 This directory is the offensive playbook. In Claude Code you are the
 **operator** (same shape as Glasswing): skills aim, find, and verify.
-Python (`run_pentest.py`) is optional for a fully autonomous live fireteam.
+All live testing runs in Prowl, the platform agent.
 
 ```
 /recon         (live, scope file enforced)
@@ -17,13 +17,6 @@ Live work goes through Prowl (the platform agent) with `prowl_client.py`
 `data/vuln_classes.json`, synced from Prowl's `proof_policy.PROOFS_BY_CLASS`.
 
 Start with `/aegis`. There is no bundled canary. Pass the checkout or URL.
-
-## Two ways in
-
-| Mode | When | Who hunts |
-|------|------|-----------|
-| Interactive skills | Default. You have a repo path or an authorized URL | This Claude Code session |
-| Autonomous CLI | Operator asks for the fireteam | `python3 run_pentest.py --target <url>` |
 
 ## Rules
 
@@ -48,4 +41,4 @@ Start with `/aegis`. There is no bundled canary. Pass the checkout or URL.
 - Skills: `.claude/skills/`
 - How to run (and Prowl API gaps): `docs/skills/README.md`
 - Prowl client: `prowl_client.py --help`
-- ReAct CLI system card (not this session): `docs/vanguard-system-card.md`
+- Test identities: `prowl_client.py identities` logs them in here and hands Prowl only the session (`agent/identity_sessions.py`)
