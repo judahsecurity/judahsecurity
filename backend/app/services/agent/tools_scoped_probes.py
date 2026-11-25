@@ -984,8 +984,8 @@ class ScopedProbeToolsMixin:
         Observed GET query inputs use their observed baseline. Intent-backed
         cells (no capture) and observed header/cookie inputs are built from the
         intent or cell (query, header, cookie, form/JSON/XML body, one path
-        segment; POST only on body_replay_paths, PUT/PATCH/DELETE only on
-        write_method_paths). Unsupported shapes stay open, never tested_clean.
+        segment; POST only on body_replay_paths, PUT/PATCH/DELETE only on Prowl's own
+        test record (test_record_endpoints). Unsupported shapes stay open, never tested_clean.
         """
         import secrets
         import time
@@ -1043,6 +1043,11 @@ class ScopedProbeToolsMixin:
         except ValueError as exc:
             if str(exc) == "observed_query_baseline_missing":
                 return {"success": False, "error": "observed_query_baseline_missing"}
+            if shaped and type(exc).__name__ == "TestRecordAborted":
+                return self._test_record_aborted(cell, exc)
+            if shaped and type(exc).__name__ == "ApprovalRequired":
+                return {"success": False, "error": "operator_approval_required",
+                        "reason": str(exc)}
             if shaped and type(exc).__name__ == "UnsupportedShape":
                 result = self._mark_unsupported_shape(brain, cell, coverage_lease_id, str(exc))
                 self._engagement_brain = brain.to_dict()
@@ -1244,8 +1249,8 @@ class ScopedProbeToolsMixin:
         operator-approved, browser-captured POST bodies (form or JSON), observed
         GET header/cookie inputs, and intent-backed cells (query, header,
         cookie, form/JSON/XML body or one path segment built from the intent;
-        POST only on body_replay_paths, PUT/PATCH/DELETE only on
-        write_method_paths) are supported. Unsupported shapes stay open. The model chooses the leased cell; payloads, factors, and
+        POST only on body_replay_paths, PUT/PATCH/DELETE only on Prowl's own
+        test record, test_record_endpoints) are supported. Unsupported shapes stay open. The model chooses the leased cell; payloads, factors, and
         requests are fixed here.
         """
         import secrets
@@ -1314,6 +1319,11 @@ class ScopedProbeToolsMixin:
                 scoped_origin=scoped_origin, recipe="",
             )
         except (ValueError, OSError) as exc:
+            if shaped and type(exc).__name__ == "TestRecordAborted":
+                return self._test_record_aborted(cell, exc)
+            if shaped and type(exc).__name__ == "ApprovalRequired":
+                return {"success": False, "error": "operator_approval_required",
+                        "reason": str(exc)}
             if shaped and type(exc).__name__ == "UnsupportedShape":
                 result = self._mark_unsupported_shape(brain, cell, coverage_lease_id, str(exc))
                 self._engagement_brain = brain.to_dict()
@@ -1345,7 +1355,8 @@ class ScopedProbeToolsMixin:
                 "proof_confirmed": proof["proof_confirmed"],
                 "request_context": context, "intent": intent,
                 "probe_result": {k: proof.get(k) for k in
-                                 ("test_type", "recipe", "control", "probes", "requests_sent")},
+                                 ("test_type", "recipe", "control", "probes", "requests_sent",
+                                  "record_paths", "test_records")},
                 "funnel": parameter_test_funnel(brain)}
 
     async def _run_injection_probe(

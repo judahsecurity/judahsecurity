@@ -151,6 +151,21 @@ export coverage cells, or call non-recon tools.
 Prowl is stronger at: leased coverage cells, deterministic scoped probes,
 JWT lanes, smuggling, isolated custom-probe runner, content shield.
 
+Write-method probes (operator intents via pc `probe --method PUT|PATCH|DELETE`):
+**write probes only ever touch records Prowl created and verified as its own.**
+They never modify a company's existing data. The run policy's
+`test_record_endpoints` (max 4: `create_path`, `create_body` with
+`__PROWL_NONCE__`, `content_type`, `record_path` with one `{id}`, `id_source`,
+`write_methods`, `cleanup` + `cleanup_delete_approved`) tells Prowl how to
+create a dummy record; Prowl POSTs it, reads the nonce back, probes only that
+record URL (a concrete id in the intent is replaced), then DELETEs and
+re-reads it when cleanup is approved. The verifier creates its own fresh
+record. Anything not confirmed removed is `cleanup_pending` in
+`list_test_records`, the run summary and pc `intents`. The old
+`write_method_paths` (writes to an operator-named existing path) is removed.
+Vanguard's CLI hunters have no equivalent guard; do not port write probes to
+them without it.
+
 ## Scanner wrappers (step 2)
 
 The two sides do different jobs: Vanguard `run_*` build fixed argv, parse and

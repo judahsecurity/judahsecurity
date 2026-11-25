@@ -153,6 +153,39 @@ def validated_intent(seed: str, *, target: str, test_type: str, parameter: str =
     }
 
 
+def check_write_intent(payload: Dict[str, Any], organization_id: int, session_id: str) -> None:
+    """PUT/PATCH/DELETE intents need a matching test_record_endpoints entry.
+
+    Write probes only ever touch a record Prowl creates and verifies as its
+    own; the intent target names the record template (``{id}`` or any id,
+    which is replaced by Prowl's own record), never a record to modify.
+    """
+    from app.services.agent.external_candidates import IntakeError
+    from app.services.agent.run_snapshot import load_session_sidecar
+    from app.services.agent.scoped_assessment.test_records import (
+        match_endpoint, validate_endpoints,
+    )
+
+    method = payload["method"]
+    if method not in ("PUT", "PATCH", "DELETE"):
+        return
+    if payload["location"] == "path":
+        raise IntakeError(422, f"{method} intents cannot probe a path segment: the request "
+                               "must go to Prowl's own test record URL unchanged")
+    try:
+        endpoints = validate_endpoints(
+            load_session_sidecar(organization_id, session_id).get("test_record_endpoints") or [])
+    except ValueError:
+        endpoints = []
+    path = urlsplit(payload["target"]).path or "/"
+    if match_endpoint(endpoints, method, path) is None:
+        raise IntakeError(422, (
+            f"{method} intents need a test_record_endpoints entry in this session's assessment "
+            f"policy whose record_path matches {path} and whose write_methods include {method}. "
+            "Write probes only touch a dummy record Prowl creates and verifies as its own; "
+            "start or resume the session with that policy first."))
+
+
 def is_intent_payload(payload: Any) -> bool:
     return isinstance(payload, dict) and payload.get("kind") == INTENT_PAYLOAD_KIND
 
@@ -248,6 +281,7 @@ def submit_operator_intent(organization_id: int, session_id: str, **fields: Any)
     if not seed:
         raise IntakeError(409, "Session has no recoverable assessment target; cannot bind scope.")
     payload = validated_intent(seed, **fields)
+    check_write_intent(payload, organization_id, session_id)
 
     raw_brain = dict(snapshot.get("engagement_brain") or {})
     brain = engagement_brain_from_dict(raw_brain)
@@ -307,8 +341,20 @@ def list_intents(organization_id: int, session_id: str) -> Dict[str, Any]:
     stored = {r["id"] for r in rows}
     rows += [queued_intent_summary(p) for p in peek_candidate_inbox(session_id, organization_id)
              if is_intent_payload(p) and p.get("intent_id") not in stored]
+    from app.services.agent.run_snapshot import load_session_sidecar
+    from app.services.agent.scoped_assessment.test_records import cleanup_notice, summarize
+
+    sidecar = load_session_sidecar(organization_id, session_id)
+    records = [r for r in sidecar.get("test_records") or [] if isinstance(r, dict)]
     return {"session_id": session_id, "snapshot_saved_at": snapshot.get("saved_at"),
-            "intents": rows}
+            "intents": rows,
+            # Dummy records Prowl created for write probes; cleanup_pending
+            # ones were not confirmed removed and need the operator.
+            "test_records": summarize(records),
+            "test_records_notice": cleanup_notice(records),
+            "test_record_endpoints": [
+                {k: e.get(k) for k in ("create_path", "record_path", "write_methods", "cleanup")}
+                for e in sidecar.get("test_record_endpoints") or [] if isinstance(e, dict)]}
 
 
 def drain_intent_payloads(brain: Any, payloads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

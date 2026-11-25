@@ -184,14 +184,51 @@ one text node, no DOCTYPE. `path` names one segment by 0-based index
 tests it (`fragment:q` makes `#q=<payload>`, `fragment:*` makes `#<payload>`).
 
 Method approval comes from the start `--policy-file`: GET is free; POST needs
-the path in `body_replay_paths`; PUT/PATCH/DELETE need an exact
-`write_method_paths: [{"method": "PUT", "path": "/api/profile"}]` entry, and a
-DELETE path must also be an approved cleanup path
-(`stored_xss_cleanup_paths`, `race_cleanup_paths` or `csrf_cleanup_paths`):
-DELETE only reaches an endpoint the operator designated for removing Prowl's
-own canaries. Without approval the probe returns `operator_approval_required`
-and the cell stays open. PUT/PATCH probes overwrite the one named field with
-inert and probe values; approve only resources you can reset. Host, Cookie,
+the path in `body_replay_paths`.
+
+**Write probes only ever touch records Prowl created and verified as its
+own.** PUT/PATCH/DELETE never modify a company's existing data, even when the
+intent names a real record. The policy names, at most four times, how Prowl
+may make a dummy record:
+
+```json
+{"test_record_endpoints": [{
+  "create_path": "/api/notes",
+  "create_body": {"title": "__PROWL_NONCE__"},
+  "content_type": "json",
+  "record_path": "/api/notes/{id}",
+  "id_source": "location",
+  "write_methods": ["PUT", "PATCH", "DELETE"],
+  "cleanup": "delete",
+  "cleanup_delete_approved": true
+}]}
+```
+
+Paths are exact (no query, fragment, `%` or dot segments); `record_path` has
+exactly one `{id}` and nowhere else; `create_body` (JSON object, or a form
+string for `content_type: form`) must contain `__PROWL_NONCE__`; `id_source`
+is `location` (the create response's same-origin Location matching
+`record_path`) or `json:<dotted.field>`; ids must be 1-64 of `[A-Za-z0-9_-]`.
+`cleanup: delete` needs `cleanup_delete_approved: true`: that cleanup DELETE is
+the only DELETE Prowl sends besides a DELETE probe on its own record.
+
+For each PUT/PATCH/DELETE probe Prowl: matches the intent path to a
+`record_path` with the method in `write_methods` (a concrete id such as
+`/api/notes/42` is never used; the request is retargeted); POSTs `create_path`
+with a fresh nonce (same identity, exact origin, no redirects); GETs the new
+record and requires the nonce; sends the probe only to that record URL
+(header/cookie/query/body inputs; `path` inputs are refused for writes); then,
+for `cleanup: delete` or a DELETE probe, DELETEs it and GETs again to confirm
+404/410/nonce gone (`cleaned`). A create without a usable id, a record whose
+nonce cannot be read back (never deleted: it may not be Prowl's), a failed
+cleanup or `cleanup: none` leaves the record `cleanup_pending`. A DELETE probe
+uses a fresh record per request. The independent verifier creates its own
+fresh record. Creates and cleanups spend the POST budget. `prowl_client.py
+intents` and the run summary list `test_records`; every `cleanup_pending`
+record is reported for you to remove. Intake refuses (422) a write intent with
+no matching endpoint; without one at run time the probe returns
+`operator_approval_required` and the cell stays open; a record that is not
+provably Prowl's returns `test_record_aborted` and nothing is probed. Host, Cookie,
 Authorization, framing, X-Forwarded-Host and credential-like headers, and
 credential-like or HttpOnly identity cookies, are never mutated. Anything else
 (xss on header/cookie/body/path, sqli/server classes on fragment, nosql on

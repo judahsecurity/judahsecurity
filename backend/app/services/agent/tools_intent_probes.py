@@ -20,9 +20,12 @@ works an intent-backed cell the intent is claimed and completed with a
 result fact citing the receipt (planning state, never proof).
 
 Method approval (``_shaped_approval``): GET is free; POST needs the path in
-``body_replay_paths``; PUT/PATCH/DELETE need the exact (method, path) in the
-operator's ``write_method_paths``, and DELETE also needs the path to be an
-approved cleanup path. Without it the probe returns
+``body_replay_paths``. PUT/PATCH/DELETE never touch an existing record: the
+cell path must match a ``test_record_endpoints`` ``record_path`` template with
+the method in its ``write_methods``, and the probe is sent only to a dummy
+record Prowl creates, verifies as its own (nonce read back) and cleans up
+(``scoped_assessment.test_records.OwnRecordWriter``). A concrete id in the
+intent is never used. Without a matching endpoint the probe returns
 ``operator_approval_required`` and the cell stays leased/open.
 """
 
@@ -31,6 +34,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlsplit
+
+from app.services.agent.tool_specs import ALL_PHASES, read_tool
 
 SHAPED_OBSERVED_LOCATIONS = frozenset({"header", "cookie"})
 
@@ -88,11 +93,19 @@ class IntentProbeToolsMixin:
                 pass
         return method, url, location, parameter, context
 
+    def _test_record_endpoint(self, method: str, path: str) -> Optional[Dict[str, Any]]:
+        from app.services.agent.scoped_assessment.test_records import match_endpoint
+
+        return match_endpoint(getattr(self, "_scoped_test_record_endpoints", None) or [],
+                              method, path)
+
     def _shaped_approval(self, method: str, path: str) -> Optional[str]:
-        """None when the operator approved this exact method and path, else why not.
+        """None when the operator approved this method for this path, else why not.
 
         POST: ``body_replay_paths`` (as for captured bodies). PUT/PATCH/DELETE:
-        ``write_method_paths``; DELETE also only on an approved cleanup path.
+        a ``test_record_endpoints`` entry whose ``record_path`` template
+        matches the path and whose ``write_methods`` hold the method; the
+        request then goes only to Prowl's own dummy record.
         """
         if method == "GET":
             return None
@@ -101,13 +114,10 @@ class IntentProbeToolsMixin:
                 return None
             return "POST path is not in body_replay_paths"
         if method in {"PUT", "PATCH", "DELETE"}:
-            if (method, path) not in (getattr(self, "_scoped_write_method_paths", None) or set()):
-                return f"{method} path is not in write_method_paths"
-            if method == "DELETE" and path not in (
-                    (getattr(self, "_scoped_stored_xss_cleanup_paths", None) or set())
-                    | (getattr(self, "_scoped_race_cleanup_paths", None) or set())
-                    | (getattr(self, "_scoped_csrf_cleanup_paths", None) or set())):
-                return "DELETE path is not an approved cleanup path"
+            if self._test_record_endpoint(method, path) is None:
+                return (f"{method} {path} matches no test_record_endpoints record_path with "
+                        f"{method} in write_methods; write probes only touch a record Prowl "
+                        "creates and verifies as its own")
             return None
         return "method_unsupported"
 
@@ -115,10 +125,68 @@ class IntentProbeToolsMixin:
         return self._shaped_approval(method, str(cell.get("path") or "/")) is None
 
     def _shaped_shape_error(self, cell: Dict[str, Any], test_type: str) -> str:
-        from app.services.agent.scoped_assessment.intent_request import shape_error
+        from app.services.agent.scoped_assessment.intent_request import WRITE_METHODS, shape_error
 
         location, _sep, parameter = str(cell.get("parameter") or "").partition(":")
-        return shape_error(test_type, str(cell.get("method") or "GET").upper(), location, parameter)
+        method = str(cell.get("method") or "GET").upper()
+        if method in WRITE_METHODS and location == "path":
+            # A path probe would change the record URL itself, i.e. write to a
+            # record that is not Prowl's own.
+            return "path_location_unsupported_for_record_writes"
+        return shape_error(test_type, method, location, parameter)
+
+    def _own_record_writer(self, cell: Dict[str, Any], method: str, identity: str,
+                           state: Optional[dict], scoped_origin: str):
+        """``OwnRecordWriter`` for a PUT/PATCH/DELETE cell, None for GET/POST."""
+        from app.services.agent.scoped_assessment import intent_request
+        from app.services.agent.scoped_assessment.test_records import OwnRecordWriter
+
+        if method not in intent_request.WRITE_METHODS:
+            return None
+        endpoint = self._test_record_endpoint(method, str(cell.get("path") or "/"))
+        if endpoint is None:
+            raise intent_request.ApprovalRequired()
+        return OwnRecordWriter(self, endpoint, method=method, identity=identity, state=state,
+                               scoped_origin=scoped_origin,
+                               coverage_cell_id=str(cell.get("id") or ""))
+
+    def _test_record_aborted(self, cell: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+        """The probe did not run: its dummy record was not provably Prowl's own.
+
+        The cell stays leased/open (never tested_clean); the record's state is
+        in list_test_records.
+        """
+        from app.services.agent.scoped_assessment.test_records import public_record
+
+        rows = [public_record(row) for row in getattr(self, "_scoped_test_records", None) or []
+                if row.get("coverage_cell_id") == cell.get("id")][-3:]
+        return {"success": False, "error": "test_record_aborted", "reason": str(exc)[:200],
+                "coverage_cell_id": cell.get("id"), "coverage_cell_status": cell.get("status"),
+                "test_records": rows}
+
+    def _persist_test_records(self) -> None:
+        """Mirror the session's test-record registry next to its run snapshot."""
+        from app.services.agent.run_snapshot import save_session_sidecar
+        from app.services.agent.scoped_assessment.test_records import public_record
+        from app.services.agent.tools import current_organization_id, current_session_id
+
+        org_id, session_id = current_organization_id.get(), current_session_id.get()
+        if org_id and session_id:
+            save_session_sidecar(org_id, session_id, test_records=[
+                public_record(row) for row in getattr(self, "_scoped_test_records", None) or []])
+
+    async def list_test_records(self, **_kwargs: Any) -> str:
+        """Dummy records Prowl created for write probes, and their cleanup state."""
+        import json
+
+        from app.services.agent.scoped_assessment.test_records import summarize
+
+        rows = list(getattr(self, "_scoped_test_records", None) or [])
+        endpoints = getattr(self, "_scoped_test_record_endpoints", None) or []
+        return json.dumps({**summarize(rows), "endpoints": [
+            {"create_path": e["create_path"], "record_path": e["record_path"],
+             "write_methods": e["write_methods"], "cleanup": e["cleanup"]} for e in endpoints]},
+            default=str)
 
     def _charge(self, method: str, count: int) -> None:
         if method == "GET":
@@ -138,6 +206,9 @@ class IntentProbeToolsMixin:
         if denied:
             raise ValueError("operator_approval_required")
         state = self._scoped_state(identity, url)
+        writer = self._own_record_writer(cell, method, identity, state, scoped_origin)
+        if writer is not None:
+            url = writer.plan_url(url)
         requests = intent_request.injection_requests(
             method=method, url=url, location=location, parameter=parameter,
             test_type=test_type, nonce=nonce, factors=factors, state=state,
@@ -147,17 +218,24 @@ class IntentProbeToolsMixin:
         for planned in requests.values():
             self._scoped_origin(planned.url)
         self._charge(method, len(requests))
-        if test_type == "nosql":
-            proof = await asyncio.to_thread(
-                injection_probe.probe_nosql, requests, allowed_origin=scoped_origin,
-                state=None, nonce=nonce, fetch=intent_request.fetch_body,
-            )
-        else:
-            proof = await asyncio.to_thread(
-                injection_probe.probe_injection, requests, test_type=test_type,
-                allowed_origin=scoped_origin, state=None, nonce=nonce, factors=factors,
-                fetch=intent_request.fetch_body,
-            )
+        fetch = writer.wrap(intent_request.fetch_body) if writer else intent_request.fetch_body
+        try:
+            if test_type == "nosql":
+                proof = await asyncio.to_thread(
+                    injection_probe.probe_nosql, requests, allowed_origin=scoped_origin,
+                    state=None, nonce=nonce, fetch=fetch,
+                )
+            else:
+                proof = await asyncio.to_thread(
+                    injection_probe.probe_injection, requests, test_type=test_type,
+                    allowed_origin=scoped_origin, state=None, nonce=nonce, factors=factors,
+                    fetch=fetch,
+                )
+        finally:
+            if writer is not None:
+                await asyncio.to_thread(writer.finish)
+        if writer is not None:
+            proof.update(writer.receipt())
         return proof, context
 
     async def _run_shaped_response(
@@ -173,19 +251,31 @@ class IntentProbeToolsMixin:
             raise ValueError("operator_approval_required")
         control_value, probe_value = intent_request.response_values(
             test_type, location, nonce, scoped_origin)
+        state = self._scoped_state(identity, url)
+        writer = self._own_record_writer(cell, method, identity, state, scoped_origin)
+        if writer is not None:
+            url = writer.plan_url(url)
         requests = intent_request.plan_requests(
             method=method, url=url, location=location, parameter=parameter,
             values={"control": control_value, "probe": probe_value},
-            state=self._scoped_state(identity, url), test_type=test_type,
+            state=state, test_type=test_type,
             write_approved=self._shaped_write_approved(method, cell),
         )
         for planned in requests.values():
             self._scoped_origin(planned.url)
         self._charge(method, 2)
-        proof = await asyncio.to_thread(
-            intent_request.probe_response_requests, requests["control"], requests["probe"],
-            test_type=test_type, allowed_origin=scoped_origin, nonce=nonce,
-        )
+        observe = (writer.wrap(intent_request.observe_headers) if writer
+                   else intent_request.observe_headers)
+        try:
+            proof = await asyncio.to_thread(
+                intent_request.probe_response_requests, requests["control"], requests["probe"],
+                test_type=test_type, allowed_origin=scoped_origin, nonce=nonce, observe=observe,
+            )
+        finally:
+            if writer is not None:
+                await asyncio.to_thread(writer.finish)
+        if writer is not None:
+            proof.update(writer.receipt())
         return proof, context
 
     async def _run_response_probe(
@@ -296,14 +386,40 @@ class IntentProbeToolsMixin:
         Hunter (no ``recipe``): OR Boolean, then the error or AND follow-up
         and the time families exactly as the observed GET lane runs them.
         Verifier: only the hunter's recipe (and SQL family), with fresh nonces.
+        PUT/PATCH/DELETE go only to Prowl's own fresh record (one per call).
         """
+        import asyncio
+
+        from app.services.agent.scoped_assessment import intent_request
+
+        method, url, _location, _parameter, _context = self._shaped_base(cell, scoped_origin)
+        if self._shaped_approval(method, str(cell.get("path") or "/")):
+            raise intent_request.ApprovalRequired()
+        writer = self._own_record_writer(cell, method, identity,
+                                         self._scoped_state(identity, url), scoped_origin)
+        try:
+            result = await self._shaped_sqli_recipes(
+                cell, identity, scoped_origin=scoped_origin, recipe=recipe, family=family,
+                writer=writer)
+        finally:
+            if writer is not None:
+                await asyncio.to_thread(writer.finish)
+        if writer is not None:
+            result.update(writer.receipt())
+        return result
+
+    async def _shaped_sqli_recipes(self, cell: Dict[str, Any], identity: str, *,
+                                   scoped_origin: str, recipe: str, family: str,
+                                   writer: Any) -> dict:
         from app.services.agent.scoped_assessment import intent_request, sqli_string, sqli_time
 
         method, url, location, parameter, context = self._shaped_base(cell, scoped_origin)
         path = str(cell.get("path") or "/")
-        if self._shaped_approval(method, path):
-            raise intent_request.ApprovalRequired()
         state = self._scoped_state(identity, url)
+        if writer is not None:
+            url = writer.plan_url(url)
+        observe = (writer.wrap(intent_request.observe_planned) if writer is not None
+                   else intent_request.observe_planned)
         target = scoped_origin + path
         base = intent_request.sqli_baseline_value(url, location, parameter)
         validators = {"sqli_boolean_string": sqli_string.string_sql_proof_valid,
@@ -323,7 +439,7 @@ class IntentProbeToolsMixin:
             self._charge(method, len(requests))
             checks = await asyncio.to_thread(
                 intent_request.probe_sqli_requests, requests, recipe=name,
-                allowed_origin=scoped_origin,
+                allowed_origin=scoped_origin, observe=observe,
             )
             if name == "or":
                 result = sqli_string.build_string_boolean_result(
@@ -409,6 +525,7 @@ class IntentProbeToolsMixin:
         from app.services.agent.scoped_assessment.xss_feedback import (
             MAX_ATTEMPTS, payload_for, xss_trace,
         )
+        from app.services.agent.scoped_assessment.test_records import TestRecordAborted
         from app.services.agent.tools_common import _lease_failure_reason
 
         if (cell.get("status") != "leased" or cell.get("lease_id") != coverage_lease_id
@@ -479,6 +596,8 @@ class IntentProbeToolsMixin:
             except intent_request.ApprovalRequired as exc:
                 return {"success": False, "error": "operator_approval_required",
                         "reason": str(exc)}
+            except TestRecordAborted as exc:
+                return self._test_record_aborted(cell, exc)
             except (ValueError, OSError) as exc:
                 return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
             proof["evidence_id"] = evidence_store(self).record(
@@ -509,7 +628,7 @@ class IntentProbeToolsMixin:
             record_sqli_trace(current, proof)
             probe_result = {key: proof[key] for key in (
                 "proof_confirmed", "proof_recipe", "requests_sent", "total_requests_sent",
-                "baseline_source", "sql_family") if key in proof}
+                "baseline_source", "sql_family", "record_paths", "test_records") if key in proof}
         else:
             current["xss_probe_attempts"] = [
                 *(current.get("xss_probe_attempts") or []),
@@ -541,3 +660,16 @@ class IntentProbeToolsMixin:
                 "request_context": context, "intent": intent,
                 "probe_result": {**probe_result, "request_context": context},
                 "funnel": parameter_test_funnel(live), **extra}
+
+
+TOOL_SPECS = (
+    read_tool(
+        "list_test_records",
+        "Dummy records Prowl created for PUT/PATCH/DELETE probes (write probes only ever "
+        "touch records Prowl created and verified as its own). No args. Returns each "
+        "record's path, endpoint, state (active | cleaned | cleanup_pending | "
+        "create_failed), created_at and role, plus the approved test_record_endpoints. "
+        "Report every cleanup_pending record to the operator.",
+        phases=ALL_PHASES, section="Scoped Assessment", concurrent=False,
+    ),
+)

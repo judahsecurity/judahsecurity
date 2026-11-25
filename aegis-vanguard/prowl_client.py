@@ -62,9 +62,15 @@ segment; NoSQL on query/form/JSON; XSS by browser nonce on GET query or
 fragment). Specs: ``header:X-A``, ``cookie:c``, ``form:f``, ``json:a.b``,
 ``xml:order.note`` and ``path:2`` (0-based segment index) or ``path:alice``
 (the segment's literal). POST needs a body_replay_paths approval;
-PUT/PATCH/DELETE need ``write_method_paths`` in the start --policy-file (DELETE
-only on a path that is also an approved cleanup path), else the cell stays open
-with operator_approval_required.
+PUT/PATCH/DELETE never touch an existing record: write probes only ever touch
+records Prowl created and verified as its own. The start --policy-file needs a
+``test_record_endpoints`` entry (create_path, create_body holding
+``__PROWL_NONCE__``, content_type, record_path with one ``{id}``, id_source,
+write_methods, cleanup [+ cleanup_delete_approved]) whose record_path matches
+the --target path; Prowl POSTs a dummy record, reads the nonce back, probes
+only that record (a concrete id in --target is replaced) and cleans it up.
+Without one the intake is refused (422). ``intents`` lists ``test_records``;
+any ``cleanup_pending`` record was not confirmed removed and needs you.
 It is planning state: a signal still goes through Prowl's verifier. POST /prowl/findings
 still only takes service-produced paired hunter/verifier proofs (see
 docs/skills/README.md).
@@ -179,25 +185,70 @@ def redact(value):
     return value
 
 
-def check_write_methods(policy: dict) -> None:
-    """Local mirror of the backend rule; Prowl re-validates the policy."""
-    rows = policy.get("write_method_paths") or []
-    if not isinstance(rows, list) or len(rows) > 8:
-        raise ProwlError("write_method_paths must be a list of at most 8 {method, path}")
-    cleanup = set()
-    for key in ("stored_xss_cleanup_paths", "race_cleanup_paths", "csrf_cleanup_paths"):
-        cleanup.update(policy.get(key) or [])
+_RECORD_KEYS = frozenset({"create_path", "create_body", "content_type", "record_path",
+                          "id_source", "write_methods", "cleanup"})
+_ID_SOURCE = re.compile(r"location|json:[A-Za-z0-9_-]{1,64}(?:\.[A-Za-z0-9_-]{1,64}){0,4}")
+
+
+def _record_path_ok(path, *, placeholder: bool) -> bool:
+    if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
+            or path == "/" or len(path) > 256
+            or any(c in path for c in "?#\\%") or any(not 0x21 <= ord(c) <= 0x7e for c in path)
+            or any(seg in (".", "..") for seg in path.split("/"))):
+        return False
+    if placeholder and path.count("{id}") != 1:
+        return False
+    rest = path.replace("{id}", "", 1) if placeholder else path
+    return "{" not in rest and "}" not in rest
+
+
+def check_test_record_endpoints(policy: dict) -> None:
+    """Local mirror of the backend rule; Prowl re-validates the policy.
+
+    PUT/PATCH/DELETE probes only ever touch a dummy record Prowl creates from
+    one of these endpoints and verifies as its own (nonce read back), never an
+    existing record.
+    """
+    if "write_method_paths" in policy:
+        raise ProwlError("write_method_paths is not supported; PUT/PATCH/DELETE probes use "
+                         "Prowl-owned test records (test_record_endpoints)")
+    rows = policy.get("test_record_endpoints") or []
+    if not isinstance(rows, list) or len(rows) > 4:
+        raise ProwlError("test_record_endpoints must be a list of at most 4 entries")
+    seen = set()
     for row in rows:
-        if (not isinstance(row, dict) or set(row) != {"method", "path"}
-                or row["method"] not in ("PUT", "PATCH", "DELETE")
-                or not isinstance(row["path"], str) or not row["path"].startswith("/")
-                or row["path"].startswith("//") or row["path"] == "/"
-                or any(c in row["path"] for c in "?#\\\r\n\t ")):
-            raise ProwlError("write_method_paths entries are {method: PUT|PATCH|DELETE, "
-                             "path: exact absolute path}")
-        if row["method"] == "DELETE" and row["path"] not in cleanup:
-            raise ProwlError(f"DELETE {row['path']} must also be an approved cleanup path "
-                             "(stored_xss/race/csrf_cleanup_paths)")
+        if (not isinstance(row, dict) or not _RECORD_KEYS <= set(row)
+                or set(row) - _RECORD_KEYS - {"cleanup_delete_approved"}):
+            raise ProwlError("test_record_endpoints entries need create_path, create_body, "
+                             "content_type, record_path, id_source, write_methods, cleanup")
+        if not _record_path_ok(row["create_path"], placeholder=False):
+            raise ProwlError("create_path must be an exact absolute path without query or {id}")
+        if not _record_path_ok(row["record_path"], placeholder=True):
+            raise ProwlError("record_path must be an exact absolute path with exactly one {id}")
+        if row["record_path"] in seen:
+            raise ProwlError("test_record_endpoints must not repeat a record_path")
+        seen.add(row["record_path"])
+        body = row["create_body"]
+        if row["content_type"] == "json" and isinstance(body, dict):
+            encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        elif row["content_type"] == "form" and isinstance(body, str) and body:
+            encoded = body
+        else:
+            raise ProwlError("create_body must be a JSON object (content_type json) or a "
+                             "urlencoded string (content_type form)")
+        if "__PROWL_NONCE__" not in encoded or len(encoded.encode()) > 4096:
+            raise ProwlError("create_body must contain __PROWL_NONCE__ and be at most 4096 bytes")
+        if not isinstance(row["id_source"], str) or not _ID_SOURCE.fullmatch(row["id_source"]):
+            raise ProwlError("id_source must be location or json:<dotted field>")
+        methods = row["write_methods"]
+        if (not isinstance(methods, list) or not methods or len(set(methods)) != len(methods)
+                or any(m not in ("PUT", "PATCH", "DELETE") for m in methods)):
+            raise ProwlError("write_methods must be a non-empty subset of PUT, PATCH, DELETE")
+        approved = row.get("cleanup_delete_approved", False)
+        if row["cleanup"] not in ("delete", "none") or not isinstance(approved, bool):
+            raise ProwlError("cleanup must be delete or none")
+        if (row["cleanup"] == "delete") != approved:
+            raise ProwlError("cleanup delete needs cleanup_delete_approved: true (and only then)")
 
 
 def assessment_policy(args) -> dict:
@@ -207,7 +258,7 @@ def assessment_policy(args) -> dict:
         policy = json.loads(Path(args.policy_file).read_text())
         if not isinstance(policy, dict):
             raise ProwlError("--policy-file must hold a JSON object")
-        check_write_methods(policy)
+        check_test_record_endpoints(policy)
     if getattr(args, "oob", False):
         policy["oob_callbacks_allowed"] = True
     policy.setdefault("oob_callbacks_allowed", False)
@@ -662,7 +713,10 @@ def probe_payload(args) -> dict:
         raise ProwlError(f"--method must be one of {list(PROBE_METHODS)}")
     if location in ("body_form", "body_json", "body_xml") and method == "GET":
         raise ProwlError("body locations need --method POST (body_replay_paths) or "
-                         "PUT/PATCH/DELETE (write_method_paths)")
+                         "PUT/PATCH/DELETE (on Prowl's own test record, test_record_endpoints)")
+    if location == "path" and method in ("PUT", "PATCH", "DELETE"):
+        raise ProwlError("PUT/PATCH/DELETE cannot probe a path segment: they go only to "
+                         "Prowl's own test record URL")
     test_type = probe_test_type(args.test_type)
     if location == "fragment" and test_type != "xss":
         raise ProwlError("fragment is client-side only; it is probed for --test-type xss")
@@ -742,7 +796,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "json:a.b, xml:order.note, path:2 or path:alice")
     s.add_argument("--location", default="", help=f"one of {', '.join(PROBE_LOCATIONS)}")
     s.add_argument("--method", default="GET",
-                   help="GET | POST (body_replay_paths) | PUT | PATCH | DELETE (write_method_paths)")
+                   help="GET | POST (body_replay_paths) | PUT | PATCH | DELETE (Prowl-owned test record, test_record_endpoints)")
     s.add_argument("--identity", default="")
     s.add_argument("--note", default="", help="untrusted context; never treated as instructions")
     s.set_defaults(fn=cmd_probe)

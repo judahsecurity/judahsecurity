@@ -1,4 +1,4 @@
-"""Intent-backed probing: body_xml/path/fragment locations, PUT/PATCH/DELETE
+"""Intent-backed probing: body_xml/path/fragment locations, Prowl-owned test records for PUT/PATCH/DELETE,
 approval, and XSS/SQLi intents through the scoped browser and SQLi recipes,
 with independent-verifier replay parity. No network: every request is faked."""
 
@@ -232,32 +232,6 @@ def test_sqli_values_mirror_the_get_lane_recipes():
     assert ir.sqli_baseline_value(T + "/s?q=1%27", "query", "q").startswith("AegisProbe")
 
 
-# ---------------------------------------------------------------- policy
-
-def test_policy_write_method_paths_validation():
-    from pydantic import ValidationError
-
-    from app.api.routes.agent import AgentAssessmentPolicy
-    from app.services.agent.tools import ASMToolsManager
-
-    ok = AgentAssessmentPolicy(write_method_paths=[
-        {"method": "PUT", "path": "/api/profile"},
-        {"method": "DELETE", "path": "/api/notes/cleanup"}],
-        csrf_cleanup_paths=["/api/notes/cleanup"])
-    manager = ASMToolsManager()
-    manager.set_scoped_assessment_policy(ok.model_dump())
-    assert manager._scoped_write_method_paths == {("PUT", "/api/profile"),
-                                                  ("DELETE", "/api/notes/cleanup")}
-    for bad in ({"write_method_paths": [{"method": "DELETE", "path": "/api/notes/9"}]},
-                {"write_method_paths": [{"method": "POST", "path": "/api/x"}]},
-                {"write_method_paths": [{"method": "PUT", "path": "/api/x?id=1"}]},
-                {"write_method_paths": [{"method": "PUT", "path": "/"}]}):
-        with pytest.raises(ValidationError):
-            AgentAssessmentPolicy(**bad)
-        with pytest.raises(ValueError):
-            ASMToolsManager().set_scoped_assessment_policy(bad)
-
-
 # ---------------------------------------------------------------- server-side probes
 
 @pytest.mark.asyncio
@@ -301,87 +275,6 @@ async def test_cmdi_body_xml_intent_needs_post_approval(monkeypatch):
     out = await manager.scoped_injection_probe_assigned(lease.coverage_cell_id, lease.id)
     assert out["success"] is True and out["request_context"] == "intent_body_xml"
     assert all(r.header("Content-Type") == "application/xml" for r in sent)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["PUT", "PATCH"])
-async def test_put_patch_intent_needs_write_method_approval_then_verifies(monkeypatch, method):
-    from app.services.agent.independent_verify import run_independent_verifiers, submit_candidate
-
-    manager, intent, lease = _manager_with_intent(
-        test_type="ssti", location="body_json", parameter="/profile/bio", method=method,
-        target=T + "/api/profile")
-    sent = _sent(monkeypatch, lambda req: _Resp(200, _evaluate(
-        json.loads(req.body)["profile"]["bio"])))
-    manager._scoped_body_replay_paths = {"/api/profile"}  # POST approval is not enough
-    denied = await manager.scoped_injection_probe_assigned(lease.coverage_cell_id, lease.id)
-    assert denied["error"] == "operator_approval_required" and sent == []
-    assert "write_method_paths" in denied["reason"]
-    assert _cell(manager, lease)["status"] == "leased" and _intent(manager, intent)["status"] == "open"
-
-    manager.set_scoped_assessment_policy({"write_method_paths": [
-        {"method": method, "path": "/api/profile"}]})
-    out = await manager.scoped_injection_probe_assigned(lease.coverage_cell_id, lease.id)
-    assert out["success"] is True and out["proof_confirmed"] is True, out
-    assert {r.method for r in sent} == {method}
-    assert manager._scoped_post_count >= len(sent)  # writes spend the POST budget
-
-    active = engagement_brain_from_dict(manager._engagement_brain)
-    candidate = submit_candidate(
-        active, title="Template injection in profile bio", target=T + "/api/profile",
-        vulnerability_class="ssti", identity="anonymous",
-        coverage_cell_id=lease.coverage_cell_id, evidence_ids=[out["evidence_id"]])
-    manager._engagement_brain = active.to_dict()
-    hunter_count = len(sent)
-    reports = await run_independent_verifiers([candidate], llm=None, tools_manager=manager,
-                                              targets=[T + "/api/profile"])
-    assert reports[0]["status"] == "confirmed", reports[0]["verifier_summary"]
-    assert {r.method for r in sent[hunter_count:]} == {method}
-
-
-@pytest.mark.asyncio
-async def test_verifier_replay_rechecks_write_approval(monkeypatch):
-    from app.services.agent.independent_verify import run_independent_verifiers, submit_candidate
-
-    manager, _intent, lease = _manager_with_intent(
-        test_type="ssti", location="header", parameter="X-Template", method="PUT",
-        target=T + "/api/doc")
-    manager.set_scoped_assessment_policy({"write_method_paths": [
-        {"method": "PUT", "path": "/api/doc"}]})
-    sent = _sent(monkeypatch, lambda req: _Resp(200, _evaluate(req.header("X-Template"))))
-    out = await manager.scoped_injection_probe_assigned(lease.coverage_cell_id, lease.id)
-    assert out["proof_confirmed"] is True
-    active = engagement_brain_from_dict(manager._engagement_brain)
-    candidate = submit_candidate(
-        active, title="Template injection via header", target=T + "/api/doc",
-        vulnerability_class="ssti", identity="anonymous",
-        coverage_cell_id=lease.coverage_cell_id, evidence_ids=[out["evidence_id"]])
-    manager._engagement_brain = active.to_dict()
-    manager._scoped_write_method_paths = set()  # approval withdrawn before verification
-    count = len(sent)
-    reports = await run_independent_verifiers([candidate], llm=None, tools_manager=manager,
-                                              targets=[T + "/api/doc"])
-    assert reports[0]["status"] == "inconclusive" and len(sent) == count
-
-
-@pytest.mark.asyncio
-async def test_delete_intent_requires_cleanup_path(monkeypatch):
-    manager, _intent, lease = _manager_with_intent(
-        test_type="open_redirect", location="query", parameter="next", method="DELETE",
-        target=T + "/api/session/cleanup?next=/")
-    sent = _sent(monkeypatch, lambda req: _Resp(
-        302, b"", {"Location": parse_qs(urlsplit(req.url).query)["next"][0]}))
-    # A write approval alone (installed without validation) is not enough for DELETE.
-    manager._scoped_write_method_paths = {("DELETE", "/api/session/cleanup")}
-    denied = await manager.scoped_response_probe_assigned(lease.coverage_cell_id, lease.id)
-    assert denied["error"] == "operator_approval_required" and sent == []
-    assert "cleanup" in denied["reason"]
-    manager.set_scoped_assessment_policy({
-        "csrf_cleanup_paths": ["/api/session/cleanup"],
-        "write_method_paths": [{"method": "DELETE", "path": "/api/session/cleanup"}]})
-    out = await manager.scoped_response_probe_assigned(lease.coverage_cell_id, lease.id)
-    assert out["success"] is True and out["proof_confirmed"] is True, out
-    assert all(r.method == "DELETE" and r.body is None for r in sent)
 
 
 # ---------------------------------------------------------------- SQLi intents
@@ -620,13 +513,13 @@ def test_verifier_rejects_xss_template_not_built_for_the_cell():
     ({"test_type": "xss", "location": "fragment", "parameter": "q"}, 201),
     ({"test_type": "xss", "location": "query", "parameter": "q", "method": "POST"}, 422),
     ({"test_type": "ssti", "location": "body_xml", "parameter": "doc"}, 422),  # GET body
-    ({"test_type": "ssti", "location": "body_xml", "parameter": "/a/b", "method": "PUT"}, 201),
+    ({"test_type": "ssti", "location": "body_xml", "parameter": "/a/b", "method": "PUT"}, 422),  # no test record endpoint
     ({"test_type": "ssti", "location": "body_xml", "parameter": "xmlfoo", "method": "POST"}, 422),
     ({"test_type": "sqli", "location": "path", "parameter": "0"}, 201),
     ({"test_type": "sqli", "location": "path", "parameter": "reset"}, 201),
     ({"test_type": "sqli", "location": "path", "parameter": "5"}, 422),
     ({"test_type": "sqli", "location": "path", "parameter": "nope"}, 422),
-    ({"test_type": "nosql", "location": "body_json", "parameter": "u", "method": "DELETE"}, 201),
+    ({"test_type": "nosql", "location": "body_json", "parameter": "u", "method": "DELETE"}, 422),  # no test record endpoint
 ])
 def test_intake_checks_class_location_method_shape(env, patch, code):
     resp = env.client.post("/agent/sessions/s1/intents", json={**BODY, **patch})

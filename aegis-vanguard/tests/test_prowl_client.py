@@ -407,7 +407,7 @@ def test_probe_refuses_before_any_request(scope_file, monkeypatch, extra, match)
     ("xml:order.note", "POST", "cmdi", "body_xml", "/order/note"),
     ("xml:doc", "PUT", "ssti", "body_xml", "doc"),
     ("path:2", "GET", "sqli", "path", "2"),
-    ("path:alice", "PATCH", "sql", "path", "alice"),
+    ("path:alice", "GET", "sql", "path", "alice"),
     ("json:profile.bio", "PATCH", "ssti", "body_json", "/profile/bio"),
     ("fragment:q", "GET", "xss", "fragment", "q"),
     ("query:q", "DELETE", "redirect", "query", "q"),
@@ -423,22 +423,52 @@ def test_probe_new_locations_and_write_methods(scope_file, monkeypatch, spec, me
         location, parameter, method)
 
 
-def test_policy_file_write_methods_checked_locally(tmp_path):
+NOTES_ENDPOINT = {
+    "create_path": "/api/notes", "create_body": {"title": "__PROWL_NONCE__"},
+    "content_type": "json", "record_path": "/api/notes/{id}", "id_source": "location",
+    "write_methods": ["PUT", "DELETE"], "cleanup": "delete", "cleanup_delete_approved": True,
+}
+
+
+def test_policy_file_test_record_endpoints_checked_locally(tmp_path):
+    form = {"create_path": "/api/items", "create_body": "name=__PROWL_NONCE__",
+            "content_type": "form", "record_path": "/api/items/{id}",
+            "id_source": "json:item.id", "write_methods": ["PATCH"], "cleanup": "none"}
     ok = tmp_path / "ok.json"
-    ok.write_text(json.dumps({"write_method_paths": [
-        {"method": "PUT", "path": "/api/profile"},
-        {"method": "DELETE", "path": "/api/notes/cleanup"}],
-        "csrf_cleanup_paths": ["/api/notes/cleanup"]}))
+    ok.write_text(json.dumps({"test_record_endpoints": [NOTES_ENDPOINT, form]}))
     args = SimpleNamespace(policy_file=str(ok), oob=False)
-    assert client.assessment_policy(args)["write_method_paths"][1]["method"] == "DELETE"
+    assert client.assessment_policy(args)["test_record_endpoints"][1]["cleanup"] == "none"
     for bad, match in (
-            ({"write_method_paths": [{"method": "DELETE", "path": "/api/notes/9"}]}, "cleanup"),
-            ({"write_method_paths": [{"method": "POST", "path": "/api/x"}]}, "PUT|PATCH|DELETE"),
-            ({"write_method_paths": [{"method": "PUT", "path": "/api/x?id=1"}]}, "exact")):
+            ({"write_method_paths": [{"method": "PUT", "path": "/api/profile"}]}, "not supported"),
+            ({"test_record_endpoints": [NOTES_ENDPOINT] * 5}, "at most 4"),
+            ({"test_record_endpoints": [NOTES_ENDPOINT, NOTES_ENDPOINT]}, "repeat"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "record_path": "/api/notes/42"}]},
+             "one \\{id\\}"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "record_path": "/a/{id}/{id}"}]},
+             "one \\{id\\}"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "create_path": "/api/notes?x=1"}]},
+             "create_path"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "create_body": {"t": "x"}}]},
+             "__PROWL_NONCE__"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "id_source": "header"}]}, "id_source"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "write_methods": ["POST"]}]},
+             "write_methods"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "cleanup_delete_approved": False}]},
+             "cleanup_delete_approved"),
+            ({"test_record_endpoints": [{**form, "cleanup_delete_approved": True}]},
+             "cleanup_delete_approved")):
         path = tmp_path / "bad.json"
         path.write_text(json.dumps(bad))
         with pytest.raises(client.ProwlError, match=match):
             client.assessment_policy(SimpleNamespace(policy_file=str(path), oob=False))
+
+
+def test_probe_write_method_refuses_path_location(scope_file, monkeypatch):
+    monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
+    args = _probe(scope_file, "--target", "https://app.example.com/api/notes/42",
+                  "--test-type", "ssti", "--parameter", "path:2", "--method", "PUT")
+    with pytest.raises(client.ProwlError, match="own test record"):
+        args.fn(args)
 
 
 def test_intents_listing(monkeypatch):

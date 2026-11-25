@@ -23,9 +23,11 @@ Safety rules enforced here:
 
 * exact origin (``assert_in_scope``) on every request, no redirects followed;
 * GET is free; any other method needs ``write_approved=True`` from the caller
-  (POST: ``body_replay_paths``; PUT/PATCH/DELETE: ``write_method_paths``, and
-  DELETE only on a path the operator also approved as a cleanup path), else
-  ``ApprovalRequired`` is raised before anything is planned;
+  (POST: ``body_replay_paths``; PUT/PATCH/DELETE: a matching
+  ``test_record_endpoints`` entry, and the caller retargets every such request
+  to a dummy record Prowl created and verified as its own, see
+  ``test_records``), else ``ApprovalRequired`` is raised before anything is
+  planned;
 * header mutation never names Host, Cookie, Authorization, framing headers or
   anything credential-like (``parameter_inventory._CREDENTIAL_HEADER``);
 * cookie mutation never names a credential-like cookie and never replaces an

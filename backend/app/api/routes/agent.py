@@ -12,10 +12,10 @@ import os
 import time
 import uuid
 from datetime import datetime
-from typing import Optional, Literal, List
+from typing import Any, Optional, Literal, List, Union
 from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect, Query, Response
-from pydantic import BaseModel, field_validator, model_validator, Field
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator, Field
 
 from sqlalchemy.orm import Session
 
@@ -103,28 +103,41 @@ class OwnerOnlyResource(BaseModel):
         return self
 
 
-class WriteMethodPath(BaseModel):
-    """One operator-approved PUT/PATCH/DELETE target for intent-backed probes."""
+class TestRecordEndpoint(BaseModel):
+    """How Prowl may create its own dummy record for PUT/PATCH/DELETE probes.
 
-    method: Literal["PUT", "PATCH", "DELETE"]
-    path: str = Field(min_length=2, max_length=256)
+    Write probes only ever touch records Prowl created and verified as its
+    own (``scoped_assessment.test_records``); an existing record is never a
+    write target. Validated again by the policy applier.
+    """
 
-    @field_validator("path")
-    @classmethod
-    def validate_path(cls, path: str) -> str:
-        if (not path.startswith("/") or path.startswith("//") or path == "/"
-                or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
-            raise ValueError("Approved write and cleanup paths must be exact absolute paths without query values")
-        return path
+    __test__ = False  # not a pytest class
+    model_config = ConfigDict(extra="forbid")
+
+    create_path: str = Field(min_length=2, max_length=256)
+    create_body: Union[dict[str, Any], str]
+    content_type: Literal["json", "form"]
+    record_path: str = Field(min_length=5, max_length=256)
+    id_source: str = Field(min_length=6, max_length=330)
+    write_methods: list[Literal["PUT", "PATCH", "DELETE"]] = Field(min_length=1, max_length=3)
+    cleanup: Literal["delete", "none"]
+    # cleanup "delete" is the only DELETE Prowl sends besides a DELETE probe on
+    # its own record, so the operator approves it by name.
+    cleanup_delete_approved: bool = False
+
+    @model_validator(mode="after")
+    def validate_endpoint(self):
+        from app.services.agent.scoped_assessment.test_records import normalize_endpoint
+
+        normalize_endpoint(self.model_dump())
+        return self
 
 
 class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
-    # Exact (method, path) approvals for intent-backed probes that send PUT,
-    # PATCH or DELETE. A DELETE path must also be an approved cleanup path
-    # (stored_xss/race/csrf_cleanup_paths): DELETE is only ever sent to an
-    # endpoint the operator designated for removing Prowl's own canaries.
-    write_method_paths: list[WriteMethodPath] = Field(default_factory=list, max_length=8)
+    # PUT/PATCH/DELETE probes run only against a dummy record Prowl creates
+    # from one of these endpoints, verifies as its own and cleans up.
+    test_record_endpoints: list[TestRecordEndpoint] = Field(default_factory=list, max_length=4)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
     # Operator-approved state-changing actions for the race and CSRF proofs.
     # Each needs a matching cleanup path that accepts the __PROWL_NONCE__ canary.
@@ -141,6 +154,15 @@ class AgentAssessmentPolicy(BaseModel):
     # objective to match the authorization regex.
     oob_callbacks_allowed: bool = False
     credential_testing_allowed: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_write_method_paths(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "write_method_paths" in data:
+            # Writes to an operator-named existing path could change real data.
+            raise ValueError("write_method_paths is not supported; PUT/PATCH/DELETE probes "
+                             "use Prowl-owned test records (test_record_endpoints)")
+        return data
 
     @field_validator("auth_login_path")
     @classmethod
@@ -165,14 +187,22 @@ class AgentAssessmentPolicy(BaseModel):
         return paths
 
     @model_validator(mode="after")
-    def validate_write_methods(self):
-        cleanup = (set(self.stored_xss_cleanup_paths) | set(self.race_cleanup_paths)
-                   | set(self.csrf_cleanup_paths))
-        for row in self.write_method_paths:
-            if row.method == "DELETE" and row.path not in cleanup:
-                raise ValueError("A DELETE write_method_paths entry must also be an approved "
-                                 "cleanup path (stored_xss/race/csrf_cleanup_paths)")
+    def validate_test_record_endpoints(self):
+        from app.services.agent.scoped_assessment.test_records import validate_endpoints
+
+        validate_endpoints([row.model_dump() for row in self.test_record_endpoints])
         return self
+
+
+def _record_test_record_endpoints(org_id: int, session_id: str, mode: str,
+                                  policy: Optional[dict]) -> None:
+    """Remember the endpoints this run will apply, so intent intake can check them."""
+    if mode != "agent" and policy is None:
+        return
+    from app.services.agent.run_snapshot import save_session_sidecar
+
+    save_session_sidecar(org_id, session_id,
+                         test_record_endpoints=list((policy or {}).get("test_record_endpoints") or []))
 
 
 class AgentQueryRequest(BaseModel):
@@ -617,6 +647,7 @@ async def query_agent(
     if pilot_config is not None:
         question = _pilot_question(question, pilot_config, request.playbook_id, request.load_session_id)
     assessment_policy = request.assessment_policy.model_dump() if request.assessment_policy else None
+    _record_test_record_endpoints(org_id, session_id, mode, assessment_policy)
     if mode == "agent":
         try:
             question = _agent_question_with_target(question, request.target)
@@ -1829,6 +1860,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 if pilot_config is not None and not saved:
                     await websocket.send_json({"type": "error", "message": "Pilot session could not be persisted"})
                     continue
+                _record_test_record_endpoints(org_id, session_id, mode, assessment_policy)
 
                 async def _run_query(
                     q=question,

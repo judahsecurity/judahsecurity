@@ -1133,7 +1133,9 @@ def _confirm_or_explain(tools_manager: Any, store: Any, cand: FindingCandidate, 
 
 
 # Methods an intent-backed (shaped) cell may carry; the replay re-checks the
-# operator's exact approval (body_replay_paths / write_method_paths).
+# operator's approval (body_replay_paths / test_record_endpoints). PUT/PATCH/DELETE
+# replays create the verifier's own fresh test record (never the hunter's), probe
+# it and clean it up, through the same runners the hunter used.
 _SHAPED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 
 _INJECTION_PROOF_KINDS = {

@@ -4052,6 +4052,15 @@ class AgentOrchestrator:
                             + "Review the threat model and scoped_assessment_summary before closing."
                         )
                     response.answer = (response.answer or "") + suffix
+            if mode == "agent":
+                from app.services.agent.scoped_assessment.test_records import cleanup_notice
+
+                notice = cleanup_notice(list(
+                    getattr(self.tool_manager, "_scoped_test_records", None) or []))
+                if notice and notice not in (response.answer or ""):
+                    # Dummy records Prowl could not confirm removed are always
+                    # reported, whatever else the run concluded.
+                    response.answer = (response.answer or "") + "\n\n" + notice
 
             # EvoGraph: record chain end
             evograph.record_chain_end(
