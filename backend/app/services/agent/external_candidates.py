@@ -216,6 +216,11 @@ def assert_in_session_scope(seed: str, url: str) -> str:
 
 # ---------------------------------------------------------------- intake
 
+def _is_intent(payload: Any) -> bool:
+    """Inbox items that are operator intents (operator_intents.py), not candidates."""
+    return isinstance(payload, dict) and payload.get("kind") == "operator_intent"
+
+
 def _state_for_save(snapshot: Dict[str, Any], brain: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "engagement_brain": brain,
@@ -282,7 +287,7 @@ def list_candidates(organization_id: int, session_id: str) -> Dict[str, Any]:
     rows = [candidate_summary(r) for r in (brain.get("candidates") or []) if isinstance(r, dict)]
     stored = {r["id"] for r in rows}
     rows += [queued_summary(p) for p in peek_candidate_inbox(session_id, organization_id)
-             if p.get("candidate_id") not in stored]
+             if p.get("candidate_id") not in stored and not _is_intent(p)]
     return {"session_id": session_id, "snapshot_saved_at": snapshot.get("saved_at"),
             "candidates": rows}
 
@@ -431,7 +436,9 @@ def submit_external_candidate(
     raw_brain = dict(snapshot.get("engagement_brain") or {})
     brain = engagement_brain_from_dict(raw_brain)
     existing = [r for r in (brain.candidates or []) if isinstance(r, dict)]
-    queued = peek_candidate_inbox(session_id, organization_id)
+    # The inbox also carries operator intents (operator_intents.py); they are
+    # not candidates and do not count toward the candidate limit.
+    queued = [p for p in peek_candidate_inbox(session_id, organization_id) if not _is_intent(p)]
     external = sum(1 for r in existing if r.get("specialist") == EXTERNAL_SPECIALIST) + len(queued)
     if external >= MAX_EXTERNAL_CANDIDATES_PER_SESSION:
         raise IntakeError(429, f"Session already holds {external} external candidates "
@@ -516,6 +523,17 @@ def drain_candidate_inbox_into_brain(
     brain = engagement_brain_from_dict(raw_brain)
     outcomes: List[Dict[str, Any]] = []
     added = False
+    intent_payloads = [p for p in payloads if _is_intent(p)]
+    payloads = [p for p in payloads if not _is_intent(p)]
+    intents_added = False
+    if intent_payloads:
+        from app.services.agent.operator_intents import drain_intent_payloads
+
+        if not brain.target:
+            brain.target = str(raw_brain.get("target") or "")
+        intent_outcomes = drain_intent_payloads(brain, intent_payloads)
+        outcomes.extend(intent_outcomes)
+        intents_added = any(o.get("accepted") for o in intent_outcomes)
     for payload in payloads:
         if not isinstance(payload, dict) or not payload.get("title"):
             continue
@@ -533,9 +551,14 @@ def drain_candidate_inbox_into_brain(
         added = True
         outcomes.append({**base, "accepted": True, "candidate_id": cand.id,
                          "vulnerability_class": payload.get("vulnerability_class")})
-    if not added:
+    if not added and not intents_added:
         return None, outcomes
-    raw_brain["candidates"] = list(brain.candidates)
+    if added:
+        raw_brain["candidates"] = list(brain.candidates)
+    if intents_added:
+        updated = brain.to_dict()
+        for key in ("facts", "intents", "coverage_cells"):
+            raw_brain[key] = updated.get(key, [])
     return raw_brain, outcomes
 
 
@@ -561,9 +584,12 @@ def settle_candidate_inbox(organization_id: Optional[int], session_id: Optional[
     rows = [r for r in (stored.get("candidates") or []) if isinstance(r, dict)]
     full = sum(1 for r in rows if r.get("specialist") == EXTERNAL_SPECIALIST) >= \
         MAX_EXTERNAL_CANDIDATES_PER_SESSION
+    from app.services.agent.operator_intents import settled_intent_keys
+
     done = [p.get("candidate_id") for p in pending
-            if full or _matching_row(rows, p.get("candidate_id") or "",
-                                     p.get("root_cause") or "") is not None]
+            if not _is_intent(p) and (full or _matching_row(
+                rows, p.get("candidate_id") or "", p.get("root_cause") or "") is not None)]
+    done += settled_intent_keys(stored, pending)
     return ack_candidate_inbox(session_id, done, organization_id)
 
 
@@ -572,6 +598,15 @@ def inbox_outcome_note(outcomes: List[Dict[str, Any]]) -> str:
     lines = []
     for item in outcomes:
         title = str(item.get("title") or "")[:120]
+        if _is_intent(item):
+            if item.get("accepted"):
+                lines.append(f"queued operator intent {item.get('intent_id')} added as open: {title}")
+            elif item.get("duplicate_of"):
+                lines.append(f"queued operator intent skipped, duplicate_of={item['duplicate_of']}: "
+                             f"{title}")
+            else:
+                lines.append(f"queued operator intent skipped ({item.get('reason')}): {title}")
+            continue
         if item.get("accepted"):
             lines.append(f"queued external candidate {item.get('candidate_id')} added as pending: {title}")
         elif item.get("duplicate_of"):

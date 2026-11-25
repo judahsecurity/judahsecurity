@@ -71,6 +71,8 @@ above only with a proof kind for the class; classes without proof kinds and
 | `verify` (live session) | `POST /agent/sessions/{sid}/candidates`, then `POST /agent/query` (resume `sid`) when idle (201), or `POST /agent/sessions/{sid}/steer` when the run is active (202 `queued`; `mode=intake_queued`) | JWT |
 | `verify` (fallback) | `POST /agent/query` with `playbook_id=finding_validation` + redacted packet | JWT |
 | `candidates` | `GET /agent/sessions/{sid}/candidates` | JWT |
+| `probe` | `POST /agent/sessions/{sid}/intents` (one operator-directed test; scope-checked locally first) | JWT |
+| `intents` | `GET /agent/sessions/{sid}/intents` | JWT |
 | `verdict` | candidate status from `candidates` when intake was used; else ledger receipts | JWT |
 | `stop` | `POST /agent/sessions/{sid}/stop` | JWT |
 | `identities` / `start --identity-file` | logs each identity in locally (`agent/identity_sessions.py`), then `POST /agent/sessions/{sid}/identities` with cookies + auth headers only | JWT |
@@ -145,6 +147,41 @@ status `queued`, plus `run_in_progress`. `verdict` maps `queued` to `pending`.
 `GET /agent/proof-classes` returns `PROOFS_BY_CLASS` (sorted kinds), coverage
 classes with their proof class and lane, `severity_caps` and
 `non_confirmable`. `data/vuln_classes.json` stays as the offline copy.
+
+### Operator-directed probing (closed gap)
+
+`probe --session S --target URL --test-type T --scope-file F [--parameter P
+--location L --method M --identity I --note TXT]` plans one test on any
+in-scope URL and input, including inputs Prowl never observed. The client
+checks the scope file, the class (coverage class or alias: `cmdi`, `lfi`,
+`redirect`, `template_injection`, ...) and the location locally; it also
+accepts `probes.py` specs (`header:X-Debug`, `cookie:theme`, `json:a.b`,
+`form:file`). The backend re-validates: exact URL on the session's seed origin
+(no credentials, fragment or credential-bearing query), coverage class,
+location in `query | body_form | body_json | body_xml | header | cookie | path
+| fragment`, method `GET | POST | PUT | PATCH | DELETE`. It stores an `operator`
+fact plus an intent (`created_by=operator`) backed by a coverage cell. Idle
+session: 201, written to the snapshot. Running session: 202 `queued`, merged at
+the next think turn. Same intent twice: 200 with `duplicate_of`. At most 50
+operator intents per session (429). The note is wrapped as untrusted text and
+never directs the probe.
+
+Prowl's leased scoped probes then build the request from the intent:
+
+| Class | Locations |
+|-------|-----------|
+| ssti, command_injection, path_traversal | query, header, cookie, body_form, body_json |
+| crlf, open_redirect | query, header, cookie, body_form, body_json |
+| nosql | query, body_form, body_json |
+
+GET only, or POST for body locations on a `body_replay_paths` path (as for
+captured bodies). Host, Cookie, Authorization, framing, X-Forwarded-Host and
+credential-like headers, and credential-like or HttpOnly identity cookies, are
+never mutated. Anything else (path, fragment, body_xml, PUT/PATCH/DELETE, other
+classes such as xss/sqli) stays open/inconclusive with `unsupported_shape` and
+the intent is `blocked`; it is never `tested_clean`. A probe signal is still a
+lead until Prowl's independent verifier replays it. `intents --session S` shows
+status, result facts and the backing cell's status.
 
 ### Test identities (closed gap)
 

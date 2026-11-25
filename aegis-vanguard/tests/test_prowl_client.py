@@ -331,3 +331,74 @@ def test_start_logs_in_before_starting_and_hands_over(scope_file, monkeypatch, t
                       "--identity-file", path])
     assert rc == 0 and calls == ["/agent/query", "/agent/sessions/s9/identities"]
 
+
+# ---------------------------------------------------------------- probe (operator intents)
+
+def _probe(scope_file, *extra):
+    return client.build_parser().parse_args([
+        "probe", "--session", "sess-1", "--scope-file", str(scope_file), *extra])
+
+
+def test_probe_posts_intent_for_unobserved_header(scope_file, monkeypatch):
+    seen = []
+    monkeypatch.setattr(client, "request",
+                        lambda m, p, b=None, **k: seen.append((m, p, b)) or {"accepted": True})
+    args = _probe(scope_file, "--target", "https://app.example.com/render?lang=en",
+                  "--test-type", "template-injection", "--parameter", "X-Template",
+                  "--location", "header", "--note", "seen in a JS bundle")
+    assert args.fn(args) == {"accepted": True}
+    method, path, body = seen[0]
+    assert (method, path) == ("POST", "/agent/sessions/sess-1/intents")
+    assert body == {"target": "https://app.example.com/render?lang=en", "test_type": "ssti",
+                    "parameter": "X-Template", "location": "header", "method": "GET",
+                    "identity": "", "note": "seen in a JS bundle"}
+
+
+@pytest.mark.parametrize("spec,location,parameter", [
+    ("header:X-Diagnostic", "header", "X-Diagnostic"),
+    ("cookie:diagnostic", "cookie", "diagnostic"),
+    ("json:profile.name", "body_json", "/profile/name"),
+    ("form:file", "body_form", "file"),
+])
+def test_probe_accepts_vanguard_mutation_specs(scope_file, monkeypatch, spec, location, parameter):
+    seen = []
+    monkeypatch.setattr(client, "request", lambda m, p, b=None, **k: seen.append(b) or {})
+    method = "POST" if location.startswith("body") else "GET"
+    args = _probe(scope_file, "--target", "https://app.example.com/x", "--test-type", "cmdi",
+                  "--parameter", spec, "--method", method)
+    args.fn(args)
+    assert seen[0]["location"] == location and seen[0]["parameter"] == parameter
+    assert seen[0]["test_type"] == "command_injection"
+
+
+@pytest.mark.parametrize("extra,match", [
+    (["--target", "https://evil.com/x", "--test-type", "ssti"], "out of scope"),
+    (["--target", "https://admin.api.example.com/x", "--test-type", "ssti"], "out of scope"),
+    (["--target", "https://u:p@app.example.com/x", "--test-type", "ssti"], "credentials"),
+    (["--target", "https://app.example.com/x#f", "--test-type", "ssti"], "fragment"),
+    (["--target", "/relative", "--test-type", "ssti"], "absolute"),
+    (["--target", "https://app.example.com/x", "--test-type", "idor-ish"], "unknown test type"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "q", "--location", "smoke"], "--location"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti", "--parameter", "q"],
+     "go together"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti", "--method", "TRACE"],
+     "--method"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "name", "--location", "body_json"], "POST"),
+])
+def test_probe_refuses_before_any_request(scope_file, monkeypatch, extra, match):
+    monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
+    args = _probe(scope_file, *extra)
+    with pytest.raises(client.ProwlError, match=match):
+        args.fn(args)
+
+
+def test_intents_listing(monkeypatch):
+    seen = []
+    monkeypatch.setattr(client, "request",
+                        lambda m, p, b=None, **k: seen.append((m, p)) or {"intents": []})
+    args = client.build_parser().parse_args(["intents", "--session", "s 1"])
+    assert args.fn(args) == {"intents": []}
+    assert seen == [("GET", "/agent/sessions/s%201/intents")]
+

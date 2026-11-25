@@ -970,8 +970,13 @@ class ScopedProbeToolsMixin:
     async def scoped_response_probe_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
     ) -> Dict[str, Any]:
-        """Test one observed GET input for response-header or redirect control."""
-        import asyncio
+        """Test one leased input for response-header or redirect control.
+
+        Observed GET query inputs use their observed baseline. Intent-backed
+        cells (no capture) and observed header/cookie inputs are built from the
+        intent or cell (query, header, cookie, form or JSON body; POST only on
+        body_replay_paths). Unsupported shapes stay open, never tested_clean.
+        """
         import secrets
         import time
         from urllib.parse import urlsplit
@@ -981,24 +986,37 @@ class ScopedProbeToolsMixin:
         from app.services.agent.evidence_store import evidence_store
         from app.services.agent.parameter_inventory import _origin
         from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
-        from app.services.agent.scoped_assessment.response_probe import probe_response
         from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cell = next((row for row in brain.coverage_cells
                      if row.get("id") == coverage_cell_id), None)
         location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        shaped = self._shaped_cell(cell)
+        observed_query = bool(
+            cell and cell.get("source") == "parameter_inventory"
+            and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
+            and cell.get("method") == "GET" and location == "query"
+            and separator and parameter)
         if (not cell or cell.get("status") != "leased"
                 or cell.get("lease_id") != coverage_lease_id
                 or float(cell.get("lease_deadline") or 0) <= time.time()
-                or cell.get("source") != "parameter_inventory"
-                or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
                 or cell.get("test_type") not in {"crlf", "open_redirect"}
-                or cell.get("method") != "GET" or location != "query"
-                or not separator or not parameter
+                or not (shaped or observed_query)
                 or not allowed_discovery_path(str(cell.get("path") or "/"))):
             return {"success": False, "error": "invalid_coverage_lease",
                     "reason": _lease_failure_reason(cell, coverage_lease_id)}
+        test_type = cell["test_type"]
+        if shaped:
+            unsupported = self._shaped_shape_error(cell, test_type)
+            if unsupported:
+                result = self._mark_unsupported_shape(brain, cell, coverage_lease_id, unsupported)
+                self._engagement_brain = brain.to_dict()
+                return result
+            denied = self._shaped_approval(str(cell.get("method") or "GET").upper(),
+                                           str(cell.get("path") or "/"))
+            if denied:
+                return {"success": False, "error": "operator_approval_required", "reason": denied}
         cmap = getattr(self, "_capability_map", None) or {}
         scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
         parts = urlsplit(scoped_origin)
@@ -1006,35 +1024,23 @@ class ScopedProbeToolsMixin:
                 != scoped_origin):
             return {"success": False, "error": "scope_mismatch"}
         url = scoped_origin + cell["path"]
-        identity = str(cell.get("identity") or "anonymous")
+        identity = self._cell_identity(cell)
         nonce = secrets.token_hex(8)
-        test_type = cell["test_type"]
-        if test_type == "crlf":
-            control_value = "%0D%0AX-Prowl-Probe: " + nonce
-            probe_value = "\r\nX-Prowl-Probe: " + nonce
-        else:
-            control_value = scoped_origin + "/__prowl_control_" + nonce
-            probe_value = "https://prowl.invalid/" + nonce
-        control_url, control_source = self._observed_get_query_template(
-            url, parameter, control_value, identity, capture_id=cell.get("capture_id") or "",
-        )
-        probe_url, probe_source = self._observed_get_query_template(
-            url, parameter, probe_value, identity, capture_id=cell.get("capture_id") or "",
-        )
-        if control_source == "single_parameter" or probe_source != control_source:
-            return {"success": False, "error": "observed_query_baseline_missing"}
         try:
-            self._scoped_origin(control_url)
-            self._scoped_origin(probe_url)
-            self._scoped_claim_gets(2)
-            proof = await asyncio.to_thread(
-                probe_response, control_url, probe_url, test_type=test_type,
-                allowed_origin=scoped_origin, state=self._scoped_state(identity, url),
-                nonce=nonce,
+            proof, control_source = await self._run_response_probe(
+                cell, url, parameter, test_type, nonce, identity, scoped_origin=scoped_origin,
             )
-        except (ValueError, OSError) as exc:
+        except ValueError as exc:
+            if str(exc) == "observed_query_baseline_missing":
+                return {"success": False, "error": "observed_query_baseline_missing"}
+            if shaped and type(exc).__name__ == "UnsupportedShape":
+                result = self._mark_unsupported_shape(brain, cell, coverage_lease_id, str(exc))
+                self._engagement_brain = brain.to_dict()
+                return result
             return {"success": False, "error": type(exc).__name__}
-        summary = {"test_type": test_type, "parameter": parameter,
+        except OSError as exc:
+            return {"success": False, "error": type(exc).__name__}
+        summary = {"test_type": test_type, "parameter": parameter, "location": location,
                    "path": cell["path"], "request_context": control_source,
                    "nonce": nonce,
                    **proof}
@@ -1051,10 +1057,15 @@ class ScopedProbeToolsMixin:
         if proof["proof_confirmed"]:
             cell["status"] = "in_focus"
             cell["reason"] = "Response-header signal requires independent verification"
+        intent = self._settle_cell_intent(
+            brain, cell, worker=str(cell.get("lease_owner") or ""), outcome="probed",
+            test_type=test_type, evidence_id=artifact_id,
+            proof_confirmed=bool(proof["proof_confirmed"]))
         self._engagement_brain = brain.to_dict()
         return {"success": True, "coverage_cell_id": coverage_cell_id,
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
                 "proof_confirmed": proof["proof_confirmed"],
+                "request_context": control_source, "intent": intent,
                 "probe_result": proof, "funnel": parameter_test_funnel(brain)}
 
     async def scoped_cors_probe_assigned(
@@ -1216,12 +1227,14 @@ class ScopedProbeToolsMixin:
     async def scoped_injection_probe_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
     ) -> Dict[str, Any]:
-        """Test one observed input for SSTI, command injection, traversal, or NoSQL.
+        """Test one leased input for SSTI, command injection, traversal, or NoSQL.
 
         Computed-output (SSTI/command injection), known-file (traversal), or
-        operator-differential (NoSQL) proofs only. Observed GET query inputs and
-        operator-approved, browser-captured POST bodies (form or JSON) are
-        supported. The model chooses the leased cell; payloads, factors, and
+        operator-differential (NoSQL) proofs only. Observed GET query inputs,
+        operator-approved, browser-captured POST bodies (form or JSON), observed
+        GET header/cookie inputs, and intent-backed cells (query, header,
+        cookie, form or JSON body built from the intent; POST only on
+        body_replay_paths) are supported. Unsupported shapes stay open. The model chooses the leased cell; payloads, factors, and
         requests are fixed here.
         """
         import secrets
@@ -1242,22 +1255,32 @@ class ScopedProbeToolsMixin:
                      if row.get("id") == coverage_cell_id), None)
         location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
         method = str((cell or {}).get("method") or "").upper()
-        get_input = method == "GET" and location == "query"
-        post_input = (method == "POST" and location in {"body_form", "body_json"}
+        shaped = self._shaped_cell(cell)
+        observed = bool(cell and cell.get("source") == "parameter_inventory"
+                        and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
+                        and separator and parameter)
+        get_input = observed and method == "GET" and location == "query"
+        post_input = (observed and method == "POST" and location in {"body_form", "body_json"}
                       and bool((cell or {}).get("capture_id"))
                       and (cell or {}).get("observation_source") == "browser_traffic"
                       and location in {"body_form", "body_json"})
         if (not cell or cell.get("status") != "leased"
                 or cell.get("lease_id") != coverage_lease_id
                 or float(cell.get("lease_deadline") or 0) <= time.time()
-                or cell.get("source") != "parameter_inventory"
-                or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
                 or cell.get("test_type") not in TEST_TYPES
-                or not (get_input or post_input)
-                or not separator or not parameter
+                or not (get_input or post_input or shaped)
                 or not allowed_discovery_path(str(cell.get("path") or "/"))):
             return {"success": False, "error": "invalid_coverage_lease",
                     "reason": _lease_failure_reason(cell, coverage_lease_id)}
+        if shaped:
+            unsupported = self._shaped_shape_error(cell, cell["test_type"])
+            if unsupported:
+                result = self._mark_unsupported_shape(brain, cell, coverage_lease_id, unsupported)
+                self._engagement_brain = brain.to_dict()
+                return result
+            denied = self._shaped_approval(method, str(cell.get("path") or "/"))
+            if denied:
+                return {"success": False, "error": "operator_approval_required", "reason": denied}
         if post_input and str(cell.get("path") or "/") not in (
                 getattr(self, "_scoped_body_replay_paths", None) or set()):
             return {"success": False, "error": "operator_approval_required",
@@ -1270,7 +1293,7 @@ class ScopedProbeToolsMixin:
                 != scoped_origin):
             return {"success": False, "error": "scope_mismatch"}
         url = scoped_origin + cell["path"]
-        identity = str(cell.get("identity") or "anonymous")
+        identity = self._cell_identity(cell)
         test_type = cell["test_type"]
         nonce = secrets.token_hex(8)
         factors = new_factors() if test_type != "path_traversal" else (0, 0)
@@ -1280,6 +1303,10 @@ class ScopedProbeToolsMixin:
                 scoped_origin=scoped_origin, recipe="",
             )
         except (ValueError, OSError) as exc:
+            if shaped and type(exc).__name__ == "UnsupportedShape":
+                result = self._mark_unsupported_shape(brain, cell, coverage_lease_id, str(exc))
+                self._engagement_brain = brain.to_dict()
+                return result
             return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
         summary = {"test_type": test_type, "parameter": parameter, "location": location,
                    "path": cell["path"], "request_context": context, "nonce": nonce,
@@ -1297,10 +1324,15 @@ class ScopedProbeToolsMixin:
         if proof["proof_confirmed"]:
             cell["status"] = "in_focus"
             cell["reason"] = "Server-side injection signal requires independent verification"
+        intent = self._settle_cell_intent(
+            brain, cell, worker=str(cell.get("lease_owner") or ""), outcome="probed",
+            test_type=test_type, evidence_id=artifact_id,
+            proof_confirmed=bool(proof["proof_confirmed"]))
         self._engagement_brain = brain.to_dict()
         return {"success": True, "coverage_cell_id": coverage_cell_id,
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
                 "proof_confirmed": proof["proof_confirmed"],
+                "request_context": context, "intent": intent,
                 "probe_result": {k: proof.get(k) for k in
                                  ("test_type", "recipe", "control", "probes", "requests_sent")},
                 "funnel": parameter_test_funnel(brain)}
@@ -1313,11 +1345,17 @@ class ScopedProbeToolsMixin:
         """Build and send one injection proof for a GET query or captured POST body.
 
         ``recipe`` restricts a verifier replay to the hunter's recipe.
+        Intent-backed and header/cookie cells are planned from the cell instead.
         """
         import asyncio
 
         from app.services.agent.scoped_assessment import injection_probe
 
+        if self._shaped_cell(cell):
+            return await self._run_shaped_injection(
+                cell, test_type, nonce, factors, identity,
+                scoped_origin=scoped_origin, recipe=recipe,
+            )
         location = str(cell.get("parameter") or "").partition(":")[0]
         state = self._scoped_state(identity, url)
         if location in {"body_form", "body_json"}:
