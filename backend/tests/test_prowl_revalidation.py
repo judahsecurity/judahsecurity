@@ -113,7 +113,9 @@ def test_refuted_retest_is_a_false_positive(monkeypatch):
 
 
 @pytest.mark.parametrize("finding, user_id", [
-    ({**IDOR, "title": "Outdated jQuery", "description": ""}, 9),     # no provable class
+    # No provable class and not an application claim (template exposure):
+    # application claims without a class get a retest instead (test_validation_gaps).
+    ({**IDOR, "title": "Outdated jQuery", "description": "", "detected_by": "nuclei"}, 9),
     (IDOR, None),                                                      # no requesting user
     ({**IDOR, "target": "ldap://dc.example.com"}, 9),                 # not HTTP
 ])
