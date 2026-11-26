@@ -346,6 +346,47 @@ async def test_spotlight_pages_survive_later_api_failure(db, monkeypatch):
     assert integration.last_sync_stats["sync_in_progress"] is False
 
 
+@pytest.mark.asyncio
+async def test_sync_skips_unchanged_findings_but_imports_new_and_updated(db, monkeypatch):
+    integration = _integration(db, "tenant")
+    integration.import_external_assets = False
+    integration.import_hosts = False
+    integration.import_spotlight = True
+    integration.last_sync_ok = True
+    integration.last_sync_at = datetime(2026, 11, 26, 14)
+    source = {
+        "id": "finding-1", "aid": "aid-1", "cid": "cid-1", "status": "open",
+        "updated_timestamp": "2026-11-26T12:00:00Z",
+        "host_info": {"hostname": "server-1", "internet_exposure": "Yes"},
+        "cve": {"id": "CVE-2026-1234", "severity": "HIGH"},
+    }
+    feeds = [[source], [source], [{**source, "updated_timestamp": "2026-11-26T13:00:00Z"}]]
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def hosts(self):
+            if False:
+                yield []
+
+        async def spotlight(self):
+            yield feeds.pop(0)
+
+    monkeypatch.setattr("app.services.crowdstrike_service._client_for", lambda _: Client())
+    first = await sync_integration(db, integration)
+    second = await sync_integration(db, integration)
+    third = await sync_integration(db, integration)
+    assert first["vulns_created"] == 1
+    assert second["findings_seen"] == second["findings_unchanged"] == 1
+    assert second["vulns_updated"] == 0
+    assert third["vulns_updated"] == 1
+    assert db.query(Vulnerability).count() == 1
+
+
 def test_crowdstrike_sync_claim_prevents_overlap(db):
     integration = _integration(db, "tenant")
     assert claim_sync(db, integration.id) is True
