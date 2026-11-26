@@ -1201,6 +1201,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         await record_surface(depth + 1)
                     except Exception as e:
                         result.errors.append(f"harvest {url[:80]}: {str(e)[:120]}")
+                    # Let the streaming first pass test what this page revealed.
+                    from app.services.agent.streaming_first_pass import report_crawl_progress
+                    report_crawl_progress(result)
 
                 # A small follow-up to the observed GET surface. These alphanumeric
                 # canaries only establish reflection, never XSS or script execution.

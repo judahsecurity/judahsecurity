@@ -3645,7 +3645,22 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     )
                 else:
                     mcp = self._get_mcp_server()
-                    result = await mcp.call_tool(tool_name, tool_args)
+                    if tool_name == "execute_deep_crawl":
+                        # Test inputs while the crawl maps (streaming_first_pass.py).
+                        from app.services.agent.streaming_first_pass import (
+                            run_with_streaming_first_pass,
+                        )
+                        try:
+                            crawl_spec = json.loads(str(tool_args.get("args") or "{}"))
+                        except (TypeError, ValueError):
+                            crawl_spec = {}
+                        crawl_target = str((crawl_spec.get("allowed_origin") or crawl_spec.get("url")
+                                            or crawl_spec.get("target") or "")
+                                           if isinstance(crawl_spec, dict) else "")
+                        result = await run_with_streaming_first_pass(
+                            self, crawl_target, lambda: mcp.call_tool(tool_name, tool_args))
+                    else:
+                        result = await mcp.call_tool(tool_name, tool_args)
                 from app.services.mcp.cli_results import normalize_cli_result
                 result = normalize_cli_result(tool_name, result)
 

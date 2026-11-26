@@ -40,6 +40,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_SELF_CHALLENGE": "false",
         "AGENT_RECHECK_WEAK_NEGATIVES": "false",
         "AGENT_SETTLEMENT_BACKFILL": "false",
+        "AGENT_STREAMING_FIRST_PASS": "false",
         "AGENT_CUSTOM_PROBE_MODE": "off",
         "AGENT_SANDBOX_SHELL": "false",
     },
@@ -51,6 +52,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_SELF_CHALLENGE": "true",
         "AGENT_RECHECK_WEAK_NEGATIVES": "true",
         "AGENT_SETTLEMENT_BACKFILL": "false",
+        "AGENT_STREAMING_FIRST_PASS": "false",
         "AGENT_CUSTOM_PROBE_MODE": "off",
         "AGENT_SANDBOX_SHELL": "false",
     },
@@ -63,6 +65,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_SELF_CHALLENGE": "true",
         "AGENT_RECHECK_WEAK_NEGATIVES": "true",
         "AGENT_SETTLEMENT_BACKFILL": "false",
+        "AGENT_STREAMING_FIRST_PASS": "false",
         "AGENT_CUSTOM_PROBE_MODE": "isolated",
         "AGENT_SANDBOX_SHELL": "true",
     },
@@ -75,6 +78,8 @@ PRESETS: Dict[str, Dict[str, str]] = {
 # model_led plus budget settlement: isolates whether saving unsubmitted
 # leads at budget end raises recall without adding false positives.
 PRESETS["model_led_settle"] = {**PRESETS["model_led"], "AGENT_SETTLEMENT_BACKFILL": "true"}
+# model_led plus first-pass testing while the crawl maps.
+PRESETS["model_led_stream"] = {**PRESETS["model_led"], "AGENT_STREAMING_FIRST_PASS": "true"}
 
 PRESETS["deep"] = dict(PRESETS["model_led"])
 PRESETS["deep_sandbox"] = dict(PRESETS["model_led_sandbox"])

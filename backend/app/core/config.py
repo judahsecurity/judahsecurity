@@ -240,6 +240,9 @@ class Settings(BaseSettings):
     # the rest is reserved for input testing and verification.
     AGENT_MAX_TARGET_REQUESTS: int = 0
     AGENT_TESTING_RESERVE_FRACTION: float = 0.6
+    # Run the bounded SQLi/XSS first pass on inputs while execute_deep_crawl is
+    # still mapping, instead of only after it returns (streaming_first_pass.py).
+    AGENT_STREAMING_FIRST_PASS: bool = False
     # Where run_custom_probe / run_poc_python execute model-written Python.
     # "off": tool disabled. "isolated": sent to the probe-runner container
     # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).
