@@ -97,7 +97,30 @@ async def _emit_crawl_progress(thought: str) -> None:
 
 # Common launch flags — safe under both root (scanner, user 0:0) and non-root
 # (backend appuser) containers.
+from app.services.agent.scoped_assessment.browser_runtime import QUIET_CHROMIUM_ARGS
+
+# Images, fonts and media hold no links, forms or inputs. Fetching them made a
+# 12-page crawl of ginandjuice.shop cost ~713 target requests, spending the
+# operator's request ceiling before any input check ran. Asset URLs with a
+# query string still load: they can carry an input (a tracking pixel that
+# echoes the search term, for instance).
+SKIPPED_CRAWL_RESOURCES = frozenset({"image", "media", "font"})
+
+
+def skip_static_asset(resource_type: str, url: str) -> bool:
+    return resource_type in SKIPPED_CRAWL_RESOURCES and not urlparse(url).query
+
+
+async def _skip_static_assets(route):
+    if skip_static_asset(route.request.resource_type, route.request.url):
+        await route.abort()
+    else:
+        # Hand the request to the scope route (or the network) unchanged.
+        await route.fallback()
+
+
 _LAUNCH_ARGS = [
+    *QUIET_CHROMIUM_ARGS,
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
@@ -826,6 +849,10 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         approved_post_paths=opts.get("approved_post_paths"),
                         approved_delete_paths=opts.get("approved_delete_paths"),
                     )
+                # Registered after the scope route so it runs first (Playwright
+                # runs matching routes in reverse registration order); skipped
+                # assets never reach the scope check or the pilot budget.
+                await context.route("**/*", _skip_static_assets)
 
                 # Seed authenticated cookies, if provided.
                 cookies = opts.get("cookies")

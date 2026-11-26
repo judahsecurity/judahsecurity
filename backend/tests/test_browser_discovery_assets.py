@@ -75,3 +75,52 @@ async def test_crawl_skips_images_fonts_and_media(monkeypatch):
     # Links are still discovered and followed.
     assert "/catalog" in hits
     assert result["pages_visited"] == 2
+
+
+def test_deep_crawl_rule_matches_the_scoped_crawler():
+    from app.services.deep_crawl_service import _LAUNCH_ARGS, skip_static_asset
+
+    assert skip_static_asset("image", "https://shop.test/p.png")
+    assert skip_static_asset("font", "https://shop.test/f.woff2")
+    assert not skip_static_asset("image", "https://shop.test/tracker.gif?searchTerms=x")
+    assert not skip_static_asset("script", "https://shop.test/app.js")
+    assert not skip_static_asset("stylesheet", "https://shop.test/s.css")
+    assert set(QUIET_CHROMIUM_ARGS) <= set(_LAUNCH_ARGS)
+
+
+@pytest.mark.skipif(os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
+                    reason="Opt-in local Chromium fixture")
+@pytest.mark.asyncio
+async def test_deep_crawl_skips_images_fonts_and_media(monkeypatch):
+    pytest.importorskip("playwright")
+    from app.services.deep_crawl_service import run_deep_crawl
+
+    monkeypatch.setattr("app.services.agent.assessment_proxy.assessment_proxy_url", lambda: None)
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            hits.append(path)
+            body = b"body{}" if path in TYPES else PAGE
+            self.send_response(200)
+            self.send_header("Content-Type", TYPES.get(path, "text/html"))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        await run_deep_crawl({"url": base + "/", "max_pages": 2, "depth": 1,
+                              "interact": False, "allowed_origin": base})
+    finally:
+        server.shutdown()
+
+    assert "/" in hits and "/app.js" in hits
+    assert "/tracker.gif" in hits
+    assert not {"/product1.png", "/product2.png", "/font.woff2", "/clip.mp4"} & set(hits)
