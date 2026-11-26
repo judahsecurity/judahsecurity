@@ -123,6 +123,7 @@ services:
       - AGENT_RECHECK_WEAK_NEGATIVES=${AGENT_RECHECK_WEAK_NEGATIVES:-true}
       - AGENT_SETTLEMENT_BACKFILL=${AGENT_SETTLEMENT_BACKFILL:-true}
       - AGENT_STREAMING_FIRST_PASS=${AGENT_STREAMING_FIRST_PASS:-true}
+      - AGENT_HUNT_ENGINE=${AGENT_HUNT_ENGINE:-false}
       # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
       - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
@@ -554,6 +555,7 @@ services:
       - AGENT_RECHECK_WEAK_NEGATIVES=${AGENT_RECHECK_WEAK_NEGATIVES:-true}
       - AGENT_SETTLEMENT_BACKFILL=${AGENT_SETTLEMENT_BACKFILL:-true}
       - AGENT_STREAMING_FIRST_PASS=${AGENT_STREAMING_FIRST_PASS:-true}
+      - AGENT_HUNT_ENGINE=${AGENT_HUNT_ENGINE:-false}
       # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
       - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}

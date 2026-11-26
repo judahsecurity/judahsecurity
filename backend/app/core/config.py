@@ -243,6 +243,14 @@ class Settings(BaseSettings):
     # Run the bounded SQLi/XSS first pass on inputs while execute_deep_crawl is
     # still mapping, instead of only after it returns (streaming_first_pass.py).
     AGENT_STREAMING_FIRST_PASS: bool = False
+    # Event-driven LLM planner + parallel specialist workers over first-pass
+    # signals (hunt_engine.py). Off by default; the model calls run_hunt_engine.
+    AGENT_HUNT_ENGINE: bool = False
+    AGENT_HUNT_WORKERS: int = 3
+    AGENT_HUNT_MAX_ROUNDS: int = 8
+    AGENT_HUNT_MAX_INTENTS: int = 24
+    AGENT_HUNT_SPECIALISTS: str = ("sqli,xss,ssrf,injection,server_injection,"
+                                   "auth_logic,business_logic,api_authz,explorer")
     # Where run_custom_probe / run_poc_python execute model-written Python.
     # "off": tool disabled. "isolated": sent to the probe-runner container
     # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).

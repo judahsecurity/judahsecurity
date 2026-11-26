@@ -721,6 +721,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "cmseek_help": self.execute_mcp_tool,
             # Fireteam: scatter-gather specialists in parallel
             "fireteam_dispatch": self.fireteam_dispatch,
+            "run_hunt_engine": self.run_hunt_engine,
             # Copilot-style parallel recon streams (non-blocking)
             "spawn_recon_workers": self.spawn_recon_workers,
             "wait_recon_workers": self.wait_recon_workers,
@@ -11560,6 +11561,102 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             )
         finally:
             db.close()
+
+    async def run_hunt_engine(
+        self, target: str = "", max_seconds: float = 900.0,
+        workers: int = 0, max_rounds: int = 0, max_intents: int = 0,
+    ) -> Dict[str, Any]:
+        """Event-driven planner + parallel specialist workers over first-pass signals.
+
+        The deterministic first pass has already tested every observed input; this
+        turns its signals and open candidates into focused specialist tasks. Workers
+        run through the normal tool path (scope, method policy, request ceiling,
+        publication gate). Gated by AGENT_HUNT_ENGINE; bounded pilot is excluded.
+        """
+        from app.core.config import settings
+        from app.services.agent.hunt_engine import (
+            DEFAULT_MAX_INTENTS, DEFAULT_MAX_ROUNDS, DEFAULT_WORKERS,
+            HuntEngine, Intent, brain_overview, format_summary,
+        )
+        from app.services.agent.pilot_policy import current_pilot
+
+        if not getattr(settings, "AGENT_HUNT_ENGINE", False) or current_pilot() is not None:
+            return {"success": False, "error": "hunt_engine_disabled",
+                    "output": "The event-driven hunt engine is not enabled for this run."}
+        cmap = getattr(self, "_capability_map", None) or {}
+        active_target = str(target or getattr(self, "_fallback_target", "")
+                            or (cmap.get("target") if isinstance(cmap, dict) else "") or "")
+        if not active_target:
+            return {"success": False, "error": "no_target",
+                    "output": "No in-scope assessment target to hunt."}
+
+        specialists = [s for s in getattr(settings, "AGENT_HUNT_SPECIALISTS",
+                       "sqli,xss,ssrf,injection,server_injection,auth_logic,business_logic,"
+                       "api_authz,explorer").split(",") if s.strip()]
+        from app.services.agent.custom_probe import custom_probe_mode
+        if not (custom_probe_mode() == "isolated"
+                and getattr(settings, "AGENT_SANDBOX_SHELL", False)):
+            specialists = [s for s in specialists if s != "explorer"]
+
+        def _in_scope(url: str) -> bool:
+            from app.services.agent.assessment_scope import assert_url_in_scope
+            try:
+                assert_url_in_scope(self, url)
+                return True
+            except ValueError:
+                return False
+
+        async def _plan(prompt: str) -> str:
+            from langchain_core.messages import HumanMessage
+            response = await self._cheap_llm().ainvoke([HumanMessage(content=prompt)])
+            from app.services.agent.orchestrator import llm_text
+            return llm_text(response.content)
+
+        def _overview(intents: List[Intent]) -> str:
+            from app.services.agent.request_budget import active as active_budget
+            budget = active_budget()
+            return brain_overview(getattr(self, "_engagement_brain", None) or {}, intents,
+                                  budget.snapshot() if budget else None)
+
+        async def _run_worker(intent: Intent) -> Dict[str, Any]:
+            from app.services.agent.fireteam_service import _run_specialist, get_specialist
+
+            profile = get_specialist(intent.specialist)
+            if profile is None:
+                return {"verdict": "blocked", "summary": "unknown specialist"}
+            mission = (
+                f"Focused follow-up task {intent.id}: {intent.title}\n"
+                f"Target: {intent.target}\nParameter: {intent.parameter or '(none)'}\n"
+                f"Objective: {intent.objective}\n"
+                "Test only this lead. Submit a finding candidate with evidence if you prove it; "
+                "the independent verifier will confirm or refute it. Do not widen scope."
+            )
+            report = await _run_specialist(
+                profile, mission, [intent.target], self._cheap_llm(), self,
+            )
+            return {"verdict": getattr(report, "verdict", ""),
+                    "summary": getattr(report, "summary", ""),
+                    "key_findings": list(getattr(report, "key_findings", []) or [])}
+
+        from app.services.agent.run_control import is_stop_requested
+        from app.services.agent.tools import current_session_id
+        session_id = current_session_id.get()
+
+        engine = HuntEngine(
+            plan=_plan, run_worker=_run_worker, overview=_overview, in_scope=_in_scope,
+            specialists=specialists, scope_label=active_target,
+            objective=str(getattr(self, "_original_objective", "") or active_target),
+            workers=workers or getattr(settings, "AGENT_HUNT_WORKERS", DEFAULT_WORKERS),
+            max_rounds=max_rounds or getattr(settings, "AGENT_HUNT_MAX_ROUNDS", DEFAULT_MAX_ROUNDS),
+            max_intents=max_intents or getattr(settings, "AGENT_HUNT_MAX_INTENTS", DEFAULT_MAX_INTENTS),
+            max_seconds=max_seconds,
+            should_stop=lambda: is_stop_requested(session_id),
+        )
+        summary = await engine.run()
+        # Workers submitted candidates into the live brain; hand it back so the
+        # orchestrator persists it and the verifier verdicts reach the UI panel.
+        return {"success": True, "output": format_summary(summary), "hunt": summary,
+                "engagement_brain": getattr(self, "_engagement_brain", None) or {}}
 
     def _cheap_llm(self):
         """Resolve a specialist/verifier LLM the same provider-aware way the main

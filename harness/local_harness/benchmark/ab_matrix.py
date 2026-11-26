@@ -41,6 +41,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_RECHECK_WEAK_NEGATIVES": "false",
         "AGENT_SETTLEMENT_BACKFILL": "false",
         "AGENT_STREAMING_FIRST_PASS": "false",
+        "AGENT_HUNT_ENGINE": "false",
         "AGENT_CUSTOM_PROBE_MODE": "off",
         "AGENT_SANDBOX_SHELL": "false",
     },
@@ -53,6 +54,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_RECHECK_WEAK_NEGATIVES": "true",
         "AGENT_SETTLEMENT_BACKFILL": "false",
         "AGENT_STREAMING_FIRST_PASS": "false",
+        "AGENT_HUNT_ENGINE": "false",
         "AGENT_CUSTOM_PROBE_MODE": "off",
         "AGENT_SANDBOX_SHELL": "false",
     },
@@ -66,6 +68,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
         "AGENT_RECHECK_WEAK_NEGATIVES": "true",
         "AGENT_SETTLEMENT_BACKFILL": "false",
         "AGENT_STREAMING_FIRST_PASS": "false",
+        "AGENT_HUNT_ENGINE": "false",
         "AGENT_CUSTOM_PROBE_MODE": "isolated",
         "AGENT_SANDBOX_SHELL": "true",
     },
@@ -80,6 +83,10 @@ PRESETS: Dict[str, Dict[str, str]] = {
 PRESETS["model_led_settle"] = {**PRESETS["model_led"], "AGENT_SETTLEMENT_BACKFILL": "true"}
 # model_led plus first-pass testing while the crawl maps.
 PRESETS["model_led_stream"] = {**PRESETS["model_led"], "AGENT_STREAMING_FIRST_PASS": "true"}
+# model_led plus streaming first pass and the event-driven hunt engine. The
+# engine's explorer workers need the probe sandbox, so pair it with sandbox.
+PRESETS["model_led_hunt"] = {**PRESETS["model_led_sandbox"],
+                             "AGENT_STREAMING_FIRST_PASS": "true", "AGENT_HUNT_ENGINE": "true"}
 
 PRESETS["deep"] = dict(PRESETS["model_led"])
 PRESETS["deep_sandbox"] = dict(PRESETS["model_led_sandbox"])
