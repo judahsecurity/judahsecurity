@@ -1120,6 +1120,10 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                             )
                     result.discovered_links = list(link_rows.values())
 
+                from app.services.agent.crawl_novelty import (
+                    make_tracker, novelty_stop_enabled,
+                )
+                novelty = make_tracker() if novelty_stop_enabled() else None
                 while queue and len(result.pages_visited) < max_pages:
                     if time.monotonic() >= navigation_deadline:
                         result.errors.append(
@@ -1204,6 +1208,12 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     # Let the streaming first pass test what this page revealed.
                     from app.services.agent.streaming_first_pass import report_crawl_progress
                     report_crawl_progress(result)
+
+                    if novelty is not None and novelty.record(result):
+                        result.errors.append(f"novelty_stop: {novelty.reason()}")
+                        await _emit_crawl_progress(
+                            f"deep_crawl: stopping early — {novelty.reason()}")
+                        break
 
                 # A small follow-up to the observed GET surface. These alphanumeric
                 # canaries only establish reflection, never XSS or script execution.

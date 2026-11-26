@@ -171,3 +171,51 @@ async def test_deep_crawl_downloads_shared_assets_once(monkeypatch):
     assert result["asset_cache_hits"] >= 4
     # The reported total counts only requests that reached the server.
     assert result["network_requests_total"] <= len(hits)
+
+
+@pytest.mark.skipif(os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
+                    reason="Opt-in local Chromium fixture")
+@pytest.mark.asyncio
+async def test_deep_crawl_stops_when_no_new_functionality(monkeypatch):
+    """A catalog linking many same-shaped product pages stops early."""
+    pytest.importorskip("playwright")
+    from app.core.config import settings
+    from app.services.deep_crawl_service import run_deep_crawl
+
+    monkeypatch.setattr("app.services.agent.assessment_proxy.assessment_proxy_url", lambda: None)
+    monkeypatch.setattr(settings, "AGENT_CRAWL_NOVELTY_STOP", True)
+    monkeypatch.setattr(settings, "AGENT_CRAWL_NOVELTY_PATIENCE", 2)
+    monkeypatch.setattr(settings, "AGENT_CRAWL_NOVELTY_MIN_PAGES", 2)
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            hits.append(path)
+            if path == "/":
+                links = "".join(f'<a href="/product/{i}">P{i}</a>' for i in range(1, 16))
+                body = f"<!doctype html><title>Shop</title>{links}".encode()
+            else:  # every product page is the same shape, different id
+                body = b"<!doctype html><title>Product</title><p>A product.</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = await run_deep_crawl({"url": base + "/", "max_pages": 20, "depth": 2,
+                                       "interact": False, "allowed_origin": base})
+    finally:
+        server.shutdown()
+
+    # Stopped well before the 20-page budget once products stopped adding shape.
+    pages = len((result.get("capability_map") or {}).get("pages_visited") or [])
+    assert pages < 8, pages
+    assert "novelty_stop" in (result.get("error") or "")
