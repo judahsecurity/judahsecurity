@@ -107,6 +107,8 @@ ALWAYS_FORCED_TOOLS = frozenset({
     "sync_engagement_brain",
     # Capped (32 checks, 180 s) SQLi/XSS first passes on observed inputs.
     "probe_observed_input_batch",
+    # Bounded hunt over first-pass signals (AGENT_HUNT_ENGINE only).
+    "run_hunt_engine",
     "independent_verify",
     "submit_finding_candidate",
     "create_finding",

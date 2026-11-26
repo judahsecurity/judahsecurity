@@ -91,7 +91,9 @@ def test_rejects_out_of_scope_and_unknown_specialist():
 def test_duplicate_tasks_are_dropped_across_rounds():
     dup = {"title": "SQLi", "specialist": "sqli", "target": f"{SCOPE}/a?id=1",
            "parameter": "id", "objective": "o"}
-    plan = _plan_sequence({"intents": [dup]}, {"intents": [dict(dup, title="again")]})
+    # Round 2 cites T1's fact but names nothing new, so it is a plain repeat.
+    plan = _plan_sequence({"intents": [dup]},
+                          {"intents": [dict(dup, title="again", parent_ids=["F1"])]})
     ran = []
     summary = asyncio.run(_engine(plan, _worker(ran)).run())
     assert ran == ["T1"]
@@ -104,7 +106,7 @@ def test_signal_can_spawn_a_follow_up_round():
         {"intents": [{"title": "probe", "specialist": "sqli", "target": f"{SCOPE}/a?id=1",
                       "parameter": "id", "objective": "o"}]},
         {"intents": [{"title": "exploit", "specialist": "explorer", "target": f"{SCOPE}/a?id=1",
-                      "parameter": "id", "objective": "dump"}]},
+                      "parameter": "id", "objective": "dump", "parent_ids": ["F1"]}]},
     )
     ran = []
     summary = asyncio.run(_engine(plan, _worker(ran)).run())
@@ -153,7 +155,8 @@ def test_max_intents_caps_total_work():
     def wave(start):
         return {"intents": [{"title": f"t{i}", "specialist": "sqli",
                              "target": f"{SCOPE}/a?id={i}", "parameter": f"id{i}",
-                             "objective": "o"} for i in range(start, start + 4)]}
+                             "objective": "o", "parent_ids": ["F1"] if start else []}
+                            for i in range(start, start + 4)]}
     # Distinct inputs each round, so only the cap (not dedup) can reject them.
     plan = _plan_sequence(wave(0), wave(4), wave(8))
     ran = []
@@ -203,3 +206,158 @@ def test_format_summary_names_the_verifier():
                "rejected": [], "stop_reason": "idle"}
     text = format_summary(summary)
     assert "independent verifier" in text and "T1" in text
+
+
+# -- facts, lineage, retries, todo --------------------------------------------
+
+from app.services.agent.hunt_engine import facts_from_brain, worker_mission  # noqa: E402
+
+SIGNAL_BRAIN = {"coverage_cells": [{
+    "id": "cell-cat", "path": "/catalog", "method": "GET", "parameter": "query:category",
+    "test_type": "sqli", "first_pass_outcome": "proof_signal",
+    "first_pass_reason": "true/false product counts differ",
+    "first_pass_evidence_id": "ev-pair", "url": f"{SCOPE}/catalog?category=Gin",
+}]}
+
+
+def _sqli_task(**extra):
+    row = {"title": "SQLi on category", "specialist": "sqli",
+           "target": f"{SCOPE}/catalog?category=Gin", "parameter": "category",
+           "objective": "confirm boolean SQLi", "parent_ids": ["F1"]}
+    row.update(extra)
+    return row
+
+
+def test_facts_from_brain_seed_signals_and_candidates():
+    brain = dict(SIGNAL_BRAIN, candidates=[{"id": "c1", "vulnerability_class": "sql_injection",
+                                            "title": "SQLi", "status": "rejected",
+                                            "verifier_summary": "did not reproduce"}])
+    rows = facts_from_brain(brain)
+    assert rows[0]["confidence"] == "observed" and rows[0]["evidence_ids"] == ["ev-pair"]
+    assert "category" in rows[0]["summary"]
+    assert rows[1]["negative"] is True and "did not reproduce" in rows[1]["summary"]
+
+
+def test_seeded_facts_reach_the_planner_and_tasks_must_cite_them():
+    plan = _plan_sequence({"intents": [
+        _sqli_task(),
+        dict(_sqli_task(parameter="other", target=f"{SCOPE}/x?other=1"), parent_ids=[]),
+        dict(_sqli_task(parameter="ghost", target=f"{SCOPE}/y?ghost=1"), parent_ids=["F99"]),
+    ]})
+    ran = []
+    engine = _engine(plan, _worker(ran), seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN))
+    summary = asyncio.run(engine.run())
+    assert "F1" in plan.calls["prompts"][0] and "proof signal" in plan.calls["prompts"][0]
+    assert ran == ["T1"]
+    reasons = {r["reason"] for r in summary["rejected"]}
+    assert "task cites no existing fact" in reasons
+    assert "parent_ids name facts that do not exist" in reasons
+    assert summary["tasks"][0]["parents"] == ["F1"]
+
+
+def test_seeding_twice_adds_no_duplicate_facts():
+    engine = _engine(_plan_sequence(), _worker([]), seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN))
+    engine._sync_facts()
+    engine._sync_facts()
+    assert [f.id for f in engine.facts] == ["F1"]
+
+
+def test_worker_facts_leads_and_lineage_are_recorded():
+    async def worker(intent):
+        return {"verdict": "proven", "summary": "boolean SQLi confirmed",
+                "facts": [{"summary": "category is injectable (boolean)", "confidence": "observed",
+                           "evidence_ids": ["ev-real", "ev-made-up"]}],
+                "leads": [{"method": "GET", "url": f"{SCOPE}/admin", "why": "linked in error",
+                           "evidence_ids": ["ev-real"]}]}
+
+    plan = _plan_sequence({"intents": [_sqli_task()]})
+    engine = _engine(plan, worker, seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN),
+                     known_evidence=lambda i: i == "ev-real")
+    summary = asyncio.run(engine.run())
+    facts = {f["id"]: f for f in summary["facts"]}
+    assert facts["F2"]["from_task"] == "T1" and facts["F2"]["evidence_ids"] == ["ev-real"]
+    assert facts["F3"]["summary"].startswith("Lead: GET")
+    assert summary["tasks"][0]["yields"] == ["F2", "F3"]
+    # The second planning round sees the new facts and where they came from.
+    assert '"from_task": "T1"' in plan.calls["prompts"][1]
+
+
+def test_unlabelled_worker_result_becomes_an_inferred_fact():
+    plan = _plan_sequence({"intents": [_sqli_task()]})
+    engine = _engine(plan, _worker([], verdict="killed"),
+                     seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN))
+    summary = asyncio.run(engine.run())
+    fact = summary["facts"][-1]
+    assert fact["negative"] is True and fact["confidence"] == "inferred"
+
+
+def _retry_engine(worker_result, second_round):
+    async def worker(intent):
+        return worker_result(intent)
+
+    plan = _plan_sequence({"intents": [_sqli_task()]}, {"intents": second_round})
+    return _engine(plan, worker, seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN))
+
+
+def test_retry_needs_a_new_fact_and_a_stated_difference():
+    def result(intent):
+        return {"verdict": "inconclusive", "summary": "x",
+                "facts": [{"summary": f"{intent.id} saw a WAF block", "confidence": "observed"}]}
+
+    # No differs_by: plain duplicate. differs_by but only the old fact: refused.
+    engine = _retry_engine(result, [_sqli_task(title="again"),
+                                    _sqli_task(title="again 2", differs_by="double URL encoding")])
+    summary = asyncio.run(engine.run())
+    reasons = [r["reason"] for r in summary["rejected"]]
+    assert "duplicate of an existing task" in reasons
+    assert "retry names no fact recorded after the earlier attempt" in reasons
+
+    # Citing the fact T1 produced (recorded after it started) makes it a real retry.
+    engine = _retry_engine(result, [_sqli_task(title="bypass WAF", parent_ids=["F2"],
+                                               differs_by="double URL encoding past the WAF")])
+    summary = asyncio.run(engine.run())
+    retry = summary["tasks"][1]
+    assert retry["retry_of"] == "T1" and retry["status"] == "done"
+
+
+def test_inferred_negative_earns_one_recheck_only():
+    def result(intent):
+        return {"verdict": "killed", "summary": "x",
+                "facts": [{"summary": "not injectable (one payload)", "negative": True,
+                           "confidence": "inferred"}]}
+
+    async def worker(intent):
+        return result(intent)
+
+    recheck = _sqli_task(title="re-check", differs_by="time-based variant")
+    plan = _plan_sequence({"intents": [_sqli_task()]}, {"intents": [recheck]},
+                          {"intents": [dict(recheck, title="third", parent_ids=["F3"])]})
+    engine = _engine(plan, worker, seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN))
+    summary = asyncio.run(engine.run())
+    assert [t["id"] for t in summary["tasks"]] == ["T1", "T2"]
+    assert any(r["reason"] == "route already retried once" for r in summary["rejected"])
+
+
+def test_planner_todo_survives_between_rounds():
+    plan = _plan_sequence(
+        {"todo": [{"step": "1 confirm SQLi on category", "done": False},
+                  {"step": "2 enumerate columns", "done": False}],
+         "intents": [_sqli_task()]},
+        {"todo": [{"step": "1 confirm SQLi on category", "done": True},
+                  {"step": "2 enumerate columns", "done": False}], "intents": []},
+    )
+    engine = _engine(plan, _worker([]), seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN))
+    summary = asyncio.run(engine.run())
+    assert "[ ] 2 enumerate columns" in plan.calls["prompts"][1]
+    assert summary["todo"][0]["done"] is True
+
+
+def test_worker_mission_carries_parent_facts_and_rules():
+    engine = _engine(_plan_sequence(), _worker([]), seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN))
+    engine._sync_facts()
+    intent = Intent("T1", "SQLi on category", "sqli", f"{SCOPE}/catalog?category=Gin",
+                    "category", "confirm", 1, parents=["F1"])
+    text = worker_mission(intent, engine.facts)
+    assert "F1 [observed]" in text and "evidence=ev-pair" in text
+    assert "Do only this task" in text and '"facts"' in text
+    assert "inferred" in text

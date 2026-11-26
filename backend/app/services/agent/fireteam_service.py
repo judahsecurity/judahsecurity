@@ -1217,6 +1217,9 @@ class SpecialistReport:
     progress: str = ""
     # Out-of-lane endpoints a specialist saw but did not test (raw, unvalidated).
     leads: list[dict] = field(default_factory=list)
+    # Hunt-engine facts: one summarized conclusion each, positive or negative,
+    # with the worker's confidence (observed | inferred). Raw, unvalidated.
+    facts: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1266,6 +1269,9 @@ def _fill_summary_contract(report: SpecialistReport, payload: dict) -> None:
             for row in leads[:_MAX_LEADS]
             if isinstance(row, dict) and row.get("url")
         ]
+    facts = payload.get("facts") or []
+    if isinstance(facts, list):
+        report.facts = [row for row in facts[:8] if isinstance(row, dict) and row.get("summary")]
 
 
 _MAX_LEADS = 5

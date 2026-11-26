@@ -11565,6 +11565,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     async def run_hunt_engine(
         self, target: str = "", max_seconds: float = 900.0,
         workers: int = 0, max_rounds: int = 0, max_intents: int = 0,
+        signal_signature: str = "", signal_count: int = 0,
     ) -> Dict[str, Any]:
         """Event-driven planner + parallel specialist workers over first-pass signals.
 
@@ -11576,7 +11577,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.core.config import settings
         from app.services.agent.hunt_engine import (
             DEFAULT_MAX_INTENTS, DEFAULT_MAX_ROUNDS, DEFAULT_WORKERS,
-            HuntEngine, Intent, brain_overview, format_summary,
+            HuntEngine, Intent, brain_overview, facts_from_brain, format_summary,
+            worker_mission,
         )
         from app.services.agent.pilot_policy import current_pilot
 
@@ -11624,19 +11626,27 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             profile = get_specialist(intent.specialist)
             if profile is None:
                 return {"verdict": "blocked", "summary": "unknown specialist"}
-            mission = (
-                f"Focused follow-up task {intent.id}: {intent.title}\n"
-                f"Target: {intent.target}\nParameter: {intent.parameter or '(none)'}\n"
-                f"Objective: {intent.objective}\n"
-                "Test only this lead. Submit a finding candidate with evidence if you prove it; "
-                "the independent verifier will confirm or refute it. Do not widen scope."
-            )
+            mission = worker_mission(intent, engine.facts)
             report = await _run_specialist(
                 profile, mission, [intent.target], self._cheap_llm(), self,
             )
             return {"verdict": getattr(report, "verdict", ""),
                     "summary": getattr(report, "summary", ""),
-                    "key_findings": list(getattr(report, "key_findings", []) or [])}
+                    "key_findings": list(getattr(report, "key_findings", []) or []),
+                    "facts": list(getattr(report, "facts", []) or []),
+                    "hypothesis_results": list(getattr(report, "hypothesis_results", []) or []),
+                    "leads": list(getattr(report, "leads", []) or [])}
+
+        def _seed_facts() -> List[Dict[str, Any]]:
+            return facts_from_brain(getattr(self, "_engagement_brain", None) or {})
+
+        def _known_evidence(evidence_id: str) -> bool:
+            # Facts may cite only evidence this run actually recorded.
+            from app.services.agent.evidence_store import evidence_store
+            try:
+                return evidence_id in evidence_store(self).records
+            except Exception:
+                return False
 
         from app.services.agent.run_control import is_stop_requested
         from app.services.agent.tools import current_session_id
@@ -11651,6 +11661,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             max_intents=max_intents or getattr(settings, "AGENT_HUNT_MAX_INTENTS", DEFAULT_MAX_INTENTS),
             max_seconds=max_seconds,
             should_stop=lambda: is_stop_requested(session_id),
+            seed_facts=_seed_facts, known_evidence=_known_evidence,
         )
         summary = await engine.run()
         # Workers submitted candidates into the live brain; hand it back so the

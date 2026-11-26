@@ -1288,6 +1288,52 @@ def _ready_hypothesis_wave(
     }
 
 
+# The hunt engine starts by itself once the first pass has signals. It used to
+# run only when the model chose to call it, so a run could end with first-pass
+# signals nobody followed up. Bounded per run; a new signal set may start another.
+HUNT_AUTO_MAX_RUNS = 2
+HUNT_AUTO_SECONDS = 600
+
+
+def _first_pass_signal_ids(state: Dict[str, Any]) -> List[str]:
+    ids = []
+    for cell in ((state.get("engagement_brain") or {}).get("coverage_cells") or []):
+        if isinstance(cell, dict) and cell.get("first_pass_outcome") in ("proof_signal", "inconclusive"):
+            ids.append(str(cell.get("id") or "|".join(
+                str(cell.get(k) or "") for k in ("method", "path", "parameter", "test_type"))))
+    return sorted(set(ids))
+
+
+def _hunt_engine_step(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
+) -> Optional[Dict[str, Any]]:
+    from app.core.config import settings
+
+    if not getattr(settings, "AGENT_HUNT_ENGINE", False) or state.get("mode") == "pilot":
+        return None
+    signals = _first_pass_signal_ids(state)
+    if not signals:
+        return None
+    from app.services.agent.request_budget import active as active_request_budget
+
+    budget = active_request_budget()
+    if budget is not None and budget.exhausted:
+        return None
+    runs = [step for step in trace if step.get("tool_name") == "run_hunt_engine"]
+    if len(runs) >= HUNT_AUTO_MAX_RUNS:
+        return None
+    signature = hashlib.sha256("\n".join(signals).encode()).hexdigest()[:16]
+    if any((step.get("tool_args") or {}).get("signal_signature") == signature for step in runs):
+        return None
+    return {
+        "tool_name": "run_hunt_engine",
+        "tool_args": {"target": target, "max_seconds": HUNT_AUTO_SECONDS,
+                      "signal_signature": signature, "signal_count": len(signals)},
+        "thought": (f"The first pass raised {len(signals)} signal(s); hand them to the hunt "
+                    "planner and parallel specialists before more discovery."),
+    }
+
+
 def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
     Deterministic next tool for a web assessment.
@@ -1506,6 +1552,12 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         batch = _observed_input_batch_step(state, trace, input_signature)
         if batch:
             return batch
+
+    # First-pass signals go straight to the hunt engine (when it is enabled),
+    # ahead of enrichment and the broad specialist wave.
+    hunt = _hunt_engine_step(state, trace, target)
+    if hunt:
+        return hunt
 
     # Launch enrichment in the background once the first pass has run.
     if not dir_started:
