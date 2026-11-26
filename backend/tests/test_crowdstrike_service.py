@@ -68,8 +68,36 @@ async def test_cursor_pagination_uses_next_and_rejects_repeats():
     client = CrowdStrikeClient("us-1", "client", "secret")
     client._request = AsyncMock(return_value={"resources": [], "meta": {"pagination": {"after": "same"}}})
     with pytest.raises(CrowdStrikeError, match="repeated page cursor"):
-        async for _ in client.spotlight():
+        async for _ in client._pages("/spotlight/combined/vulnerabilities/v1", params={"limit": 1}, cursor_key="after"):
             pass
+    await client.http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_spotlight_splits_large_result_into_timestamp_windows(monkeypatch):
+    monkeypatch.setattr("app.services.crowdstrike_service.SPOTLIGHT_WINDOW_LIMIT", 2)
+    client = CrowdStrikeClient("us-1", "client", "secret")
+    page_filters = []
+
+    async def request(_method, _path, *, params):
+        filter_value = params["filter"]
+        if params.get("sort") == "updated_timestamp.asc" and filter_value == SPOTLIGHT_EXPOSED_FILTER:
+            return {"resources": [{"updated_timestamp": "2026-01-01T12:00:00Z"}]}
+        if params.get("sort") == "updated_timestamp.desc" and filter_value == SPOTLIGHT_EXPOSED_FILTER:
+            return {"resources": [{"updated_timestamp": "2026-01-04T12:00:00Z"}]}
+        if params["limit"] == 1:
+            count = 4 if "2026-01-01T00:00:00Z" in filter_value and "2026-01-05T00:00:00Z" in filter_value else 2
+            return {"resources": [{}], "meta": {"pagination": {"total": count}}}
+        page_filters.append(filter_value)
+        ids = ["one", "two"] if "2026-01-01T00:00:00Z" in filter_value else ["three", "four"]
+        return {"resources": [{"id": item} for item in ids], "meta": {"pagination": {}}}
+
+    client._request = AsyncMock(side_effect=request)
+    pages = [batch async for batch in client.spotlight()]
+    assert [item["id"] for batch in pages for item in batch] == ["one", "two", "three", "four"]
+    assert len(page_filters) == 2
+    assert "updated_timestamp:<'2026-01-03T00:00:00Z'" in page_filters[0]
+    assert "updated_timestamp:>='2026-01-03T00:00:00Z'" in page_filters[1]
     await client.http.aclose()
 
 
@@ -117,8 +145,9 @@ async def test_spotlight_uses_required_exposed_filter(monkeypatch):
     request.reset_mock()
     client = CrowdStrikeClient("us-1", "client", "secret")
     try:
-        assert [batch async for batch in client.spotlight()] == [[]]
+        assert [batch async for batch in client.spotlight()] == []
         assert request.await_args.kwargs["params"]["filter"] == SPOTLIGHT_EXPOSED_FILTER
+        assert request.await_args.kwargs["params"]["sort"] == "updated_timestamp.asc"
     finally:
         await client.http.aclose()
 

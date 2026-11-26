@@ -30,6 +30,7 @@ REGION_URLS = {
 SOURCE = "crowdstrike"
 MAX_PAGES = 5000
 SPOTLIGHT_EXPOSED_FILTER = "host_info.internet_exposure:'Yes'"
+SPOTLIGHT_WINDOW_LIMIT = 50000
 
 
 class CrowdStrikeError(RuntimeError):
@@ -147,16 +148,54 @@ class CrowdStrikeClient:
             yield batch
 
     async def spotlight(self) -> AsyncIterator[list[dict[str, Any]]]:
-        async for batch in self._pages(
-            "/spotlight/combined/vulnerabilities/v1",
-            params={
-                "limit": 1000,
-                "filter": SPOTLIGHT_EXPOSED_FILTER,
-                "facet": ["host_info", "cve", "remediation", "evaluation_logic"],
-            },
-            cursor_key="after",
-        ):
-            yield batch
+        path = "/spotlight/combined/vulnerabilities/v1"
+        first = await self._request("GET", path, params={
+            "limit": 1, "filter": SPOTLIGHT_EXPOSED_FILTER, "sort": "updated_timestamp.asc",
+        })
+        oldest_rows = _resources(first, path)
+        if not oldest_rows:
+            return
+        last = await self._request("GET", path, params={
+            "limit": 1, "filter": SPOTLIGHT_EXPOSED_FILTER, "sort": "updated_timestamp.desc",
+        })
+        newest_rows = _resources(last, path)
+        oldest = _utc(oldest_rows[0].get("updated_timestamp"))
+        newest = _utc(newest_rows[0].get("updated_timestamp")) if newest_rows else None
+        if oldest is None or newest is None:
+            raise CrowdStrikeError("Spotlight findings are missing timestamps needed for complete pagination.")
+        start = oldest.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = newest.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        pending = [(start, end)]
+        while pending:
+            window_start, window_end = pending.pop()
+            stamp = lambda value: value.strftime("%Y-%m-%dT%H:%M:%SZ")
+            window_filter = (
+                f"{SPOTLIGHT_EXPOSED_FILTER}+updated_timestamp:>='{stamp(window_start)}'"
+                f"+updated_timestamp:<'{stamp(window_end)}'"
+            )
+            sample = await self._request("GET", path, params={"limit": 1, "filter": window_filter})
+            page = (sample.get("meta") or {}).get("pagination") or {}
+            try:
+                count = int(page["total"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CrowdStrikeError("Spotlight did not return a window total for safe pagination.") from exc
+            if count > SPOTLIGHT_WINDOW_LIMIT:
+                span = int((window_end - window_start).total_seconds())
+                if span <= 1:
+                    raise CrowdStrikeError("Spotlight has too many findings in one timestamp window.")
+                middle = window_start + timedelta(seconds=span // 2)
+                pending.extend(((middle, window_end), (window_start, middle)))
+                continue
+            if count:
+                logger.info("CrowdStrike Spotlight window %s to %s: %s findings",
+                            stamp(window_start), stamp(window_end), count)
+                async for batch in self._pages(path, params={
+                    "limit": 1000,
+                    "filter": window_filter,
+                    "sort": "updated_timestamp.asc",
+                    "facet": ["host_info", "cve", "remediation", "evaluation_logic"],
+                }, cursor_key="after"):
+                    yield batch
 
 
 def _client_for(integration: CrowdStrikeIntegration) -> CrowdStrikeClient:
