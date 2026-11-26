@@ -270,6 +270,10 @@ class AgentState(TypedDict, total=False):
     completion_reason: Optional[str]
     # Planning turns in a row that started no tool (orchestrator stall stop).
     idle_planning_turns: int
+    # Operator-declined actions: exact signatures are never retried, and the
+    # run stops only after AGENT_PILOT_MAX_DECLINES declines (declined_actions.py).
+    declined_action_signatures: List[str]
+    operator_declines: int
     
     # Execution tracking
     execution_trace: List[Dict[str, Any]]

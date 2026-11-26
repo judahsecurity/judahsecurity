@@ -2419,6 +2419,16 @@ class AgentOrchestrator:
             step_data["success"] = False
             return {"_current_step": step_data}
 
+        from app.services.agent.declined_actions import PREVIOUSLY_DECLINED, is_declined
+        if is_declined(state.get("declined_action_signatures") or [], tool_name, tool_args):
+            step_data["tool_output"] = (
+                f"Not run: the operator already declined this exact {tool_name} call. "
+                "Choose a different step, such as verifying a pending candidate.")
+            step_data["success"] = False
+            step_data["error_message"] = PREVIOUSLY_DECLINED
+            record_skip(PREVIOUSLY_DECLINED)
+            return {"_current_step": step_data}
+
         try:
             from app.services.agent.cve_applicability import cve_only_tool_block
 
@@ -3090,11 +3100,36 @@ class AgentOrchestrator:
         # A denied pilot action is a stop decision, not a hint to rephrase and
         # retry the same network operation. Preserve the failed step in the
         # trace and finish with an explicit partial-coverage explanation.
-        pilot_stop_errors = {
-            "confirmation_denied", "confirmation_expired", "policy_denied",
-            "confirmation_policy_unavailable", "pilot_policy_denied",
-        }
+        from app.services.agent.declined_actions import (
+            DECLINED, PILOT_STOP_ERRORS, PREVIOUSLY_DECLINED, action_signature,
+            continue_note, max_declines,
+        )
         error_code = str(step_data.get("error_message") or "")
+        # Declining one action means "not this one": remember it so it is never
+        # retried, and keep going so existing evidence can still be verified and
+        # published. Only repeated declines end the run.
+        if error_code in (DECLINED, PREVIOUSLY_DECLINED):
+            signatures = list(state.get("declined_action_signatures") or [])
+            declines = int(state.get("operator_declines") or 0)
+            if error_code == DECLINED:
+                signatures.append(action_signature(
+                    tool_name, dict(step_data.get("tool_args") or {})))
+                declines += 1
+            note = continue_note(tool_name, declines, state.get("engagement_brain"))
+            step_data["output_analysis"] = note
+            updates = {
+                "_current_step": step_data,
+                "execution_trace": (state.get("execution_trace") or []) + [step_data],
+                "declined_action_signatures": signatures[-50:],
+                "operator_declines": declines,
+            }
+            if declines >= max_declines():
+                reason = (f"Stopped after the operator declined {declines} actions; "
+                          "coverage is incomplete")
+                updates.update({"task_complete": True, "completion_reason": reason,
+                                "messages": [AIMessage(content=reason + ".")]})
+            return _cap_persisted_tool_output(updates)
+        pilot_stop_errors = PILOT_STOP_ERRORS
         if state.get("mode") == "pilot" and error_code in pilot_stop_errors:
             reason = f"Pilot stopped after {tool_name}: {error_code}"
             return _cap_persisted_tool_output({

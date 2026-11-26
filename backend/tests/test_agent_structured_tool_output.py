@@ -168,8 +168,9 @@ async def test_pilot_does_not_inject_page_cookies_into_later_browser_read(monkey
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", ["confirmation_denied", "confirmation_expired", "pilot_policy_denied"])
-async def test_denied_pilot_action_stops_without_more_model_calls(error):
+@pytest.mark.parametrize("error", ["confirmation_expired", "pilot_policy_denied"])
+async def test_pilot_stops_on_expiry_or_policy_denial(error):
+    # No operator can approve (expiry) or the server refused (policy): still a stop.
     orchestrator = AgentOrchestrator()
     step = {
         "tool_name": "execute_browser", "tool_output": "Approval timed out",
@@ -182,6 +183,27 @@ async def test_denied_pilot_action_stops_without_more_model_calls(error):
     assert result["task_complete"] is True
     assert result["execution_trace"] == [step]
     assert error in result["completion_reason"]
+
+
+@pytest.mark.asyncio
+async def test_one_operator_decline_continues_the_run():
+    # Declining a single action refuses that action but must not end the run,
+    # so pending candidates can still be verified and published.
+    orchestrator = AgentOrchestrator()
+    step = {
+        "tool_name": "compare_requests", "tool_args": {"url": "https://a.test/x"},
+        "tool_output": "Confirmation denied.", "error_message": "confirmation_denied",
+        "success": False,
+    }
+    result = await orchestrator._analyze_output_node({
+        "mode": "pilot", "execution_trace": [], "_current_step": step,
+        "session_id": "pilot-decline-test",
+        "engagement_brain": {"candidates": [{"id": "c1", "status": "pending"}]},
+    })
+    assert "task_complete" not in result
+    assert result["operator_declines"] == 1
+    assert result["declined_action_signatures"]
+    assert "independent_verify" in result["execution_trace"][-1]["output_analysis"]
 
 
 @pytest.mark.asyncio

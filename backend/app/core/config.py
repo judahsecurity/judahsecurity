@@ -254,6 +254,9 @@ class Settings(BaseSettings):
     AGENT_CRAWL_NOVELTY_STOP: bool = False
     AGENT_CRAWL_NOVELTY_PATIENCE: int = 3
     AGENT_CRAWL_NOVELTY_MIN_PAGES: int = 4
+    # Declining an approval refuses that exact action for the rest of the run;
+    # the run continues (to verify and publish) and stops at this many declines.
+    AGENT_PILOT_MAX_DECLINES: int = 3
     # Where run_custom_probe / run_poc_python execute model-written Python.
     # "off": tool disabled. "isolated": sent to the probe-runner container
     # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).
