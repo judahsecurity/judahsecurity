@@ -31,6 +31,11 @@ class AssessmentProxyError(RuntimeError):
     """The configured assessment proxy answered instead of the target."""
 
 
+# Discovery operations map links, forms and requests; they never need binary assets.
+DISCOVERY_OPERATIONS = frozenset({"map", "crawl", "inspect_js"})
+SKIPPED_DISCOVERY_RESOURCES = frozenset({"image", "media", "font"})
+
+
 def proxy_error_page(status: int | None, title: str, headers: dict | None) -> bool:
     """True when a 5xx page came from the assessment proxy, not the target.
 
@@ -485,6 +490,16 @@ async def check_browser(
                 nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
                 nonlocal xhr_body_match_mode, xhr_volatile_fields
                 nonlocal blocked_marker_navigation, blocked_marker_fetch
+                if (operation in DISCOVERY_OPERATIONS
+                        and route.request.resource_type in SKIPPED_DISCOVERY_RESOURCES
+                        and not urlsplit(route.request.url).query):
+                    # Static images, fonts and media carry no links, forms or
+                    # inputs. Loading them made one crawled page cost dozens of
+                    # target requests. Asset URLs with a query string (e.g. a
+                    # tracking pixel that echoes a search term) still load: they
+                    # can carry an input the map must record.
+                    await route.abort()
+                    return
                 post_mutation = None
                 try:
                     allowed = origin(route.request.url) == expected_origin
