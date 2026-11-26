@@ -520,7 +520,7 @@ def _stats() -> dict[str, int]:
     return {key: 0 for key in (
         "assets_created", "assets_updated", "ports_created", "ports_updated", "vulns_created", "vulns_updated",
         "vulns_resolved", "external_seen", "hosts_seen", "findings_seen",
-        "findings_unmatched", "spotlight_hosts_linked",
+        "findings_unmatched", "findings_unchanged", "spotlight_hosts_linked",
     )}
 
 
@@ -548,11 +548,32 @@ async def sync_integration(db: Session, integration: CrowdStrikeIntegration) -> 
                 ).filter_by(integration_id=integration.id, source_kind="host").all()
                 host_assets = {(cid or "", source_id): asset_id for cid, source_id, asset_id in links}
             if integration.import_spotlight:
+                # Fetch the complete exposed set on every run. A host can become
+                # exposed without changing the timestamp on an older finding.
+                # Avoid repeating SQL/evidence writes for records already seen
+                # at the same provider update timestamp.
+                prior_findings = {
+                    key: stamp for key, stamp in db.query(
+                        Vulnerability.template_id, Vulnerability.last_detected,
+                    ).filter(
+                        Vulnerability.detected_by == SOURCE,
+                        Vulnerability.template_id.like(f"cs:{integration.id}:%"),
+                    ).all() if key
+                }
                 async for batch in client.spotlight():
+                    committed_stamps = {}
                     for source in batch:
                         if isinstance(source, dict):
                             stats["findings_seen"] += 1
+                            finding_id = str(source.get("id") or source.get("vulnerability_id") or "")
+                            key = f"cs:{integration.id}:{finding_id}"[:255]
+                            stamp = _utc(source.get("updated_timestamp"))
+                            if finding_id and stamp is not None and prior_findings.get(key) == stamp:
+                                stats["findings_unchanged"] += 1
+                                continue
                             _upsert_finding(db, integration, source, host_assets, stats)
+                            if finding_id and source.get("aid") and source.get("cid") and stamp is not None:
+                                committed_stamps[key] = stamp
                     # A Spotlight tenant can contain hundreds of thousands of
                     # findings. Keep the transaction bounded and retain every
                     # completed page if a later API page fails.
@@ -561,6 +582,7 @@ async def sync_integration(db: Session, integration: CrowdStrikeIntegration) -> 
                         "sync_heartbeat_at": datetime.utcnow().isoformat(),
                     }
                     db.commit()
+                    prior_findings.update(committed_stamps)
                     logger.info("CrowdStrike Spotlight page committed for org %s: %s findings seen",
                                 integration.organization_id, stats["findings_seen"])
         integration.last_sync_at = datetime.utcnow()
