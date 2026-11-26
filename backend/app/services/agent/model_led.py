@@ -95,11 +95,18 @@ STEERING_MODES = ("strict", "advisory")
 DEFAULT_STEERING_FREE_TURNS = 2
 
 # Steps that stay forced in every mode: the initial application map (nothing
-# can be hunted without it) and proof bookkeeping (a confirmed candidate must
-# not wait behind the model's curiosity).
+# can be hunted without it), proof bookkeeping (a confirmed candidate must
+# not wait behind the model's curiosity), and the bounded first pass over
+# observed inputs. Without the last, a deep run spent its free turns crawling
+# again and its request budget ran out before the SQLi/XSS true-vs-false
+# checks on already-observed parameters ever ran.
 ALWAYS_FORCED_TOOLS = frozenset({
     "execute_interceptor",
     "execute_deep_crawl",
+    # Seeds observed-input hypotheses from the map; sends no target traffic.
+    "sync_engagement_brain",
+    # Capped (32 checks, 180 s) SQLi/XSS first passes on observed inputs.
+    "probe_observed_input_batch",
     "independent_verify",
     "submit_finding_candidate",
     "create_finding",

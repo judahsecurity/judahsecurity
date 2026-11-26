@@ -60,6 +60,18 @@ def test_advisory_never_defers_mapping_proof_or_pilot(monkeypatch):
     assert pipeline_step_due({**state, "mode": "pilot"}, FINGERPRINT)
 
 
+def test_advisory_never_defers_the_observed_input_first_pass(monkeypatch):
+    """The cheap SQLi/XSS first pass runs before the model can crawl again."""
+    monkeypatch.setattr(settings, "AGENT_STEERING_MODE", "advisory")
+    monkeypatch.setattr(settings, "AGENT_STEERING_FREE_TURNS", 2)
+    state = {"mode": "agent", "execution_trace": _trace("forced")}
+    for step in ({"tool_name": "sync_engagement_brain", "tool_args": {}},
+                 {"tool_name": "probe_observed_input_batch", "tool_args": {"max_checks": 32}}):
+        assert always_forced(step) and pipeline_step_due(state, step), step["tool_name"]
+    # Open-ended steps still give the model its free turns first.
+    assert not pipeline_step_due(state, FINGERPRINT)
+
+
 def test_free_turns_are_bounded(monkeypatch):
     monkeypatch.setattr(settings, "AGENT_STEERING_FREE_TURNS", 99)
     assert steering_free_turns() == 10
