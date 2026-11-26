@@ -39,16 +39,9 @@ def proxy_error_page(status: int | None, title: str, headers: dict | None) -> bo
     Treating that page as the target's response would record a fake 500 and
     feed the proxy's own links and forms into the application map.
     """
-    from app.services.agent.assessment_proxy import assessment_proxy_url
+    from app.services.agent.assessment_proxy import proxy_answered
 
-    if status is None or status < 500 or not assessment_proxy_url():
-        return False
-    headers = {str(k).lower(): str(v).lower() for k, v in (headers or {}).items()}
-    return (
-        "caido" in (title or "").lower()
-        or "caido" in headers.get("server", "")
-        or any(name.startswith("x-caido") for name in headers)
-    )
+    return proxy_answered(status, headers, title=title)
 
 
 def proxy_error_message(status: int | None, url: str) -> str:

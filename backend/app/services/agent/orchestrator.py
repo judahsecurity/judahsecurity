@@ -436,7 +436,7 @@ class AgentOrchestrator:
         
         # Add nodes
         builder.add_node("initialize", self._initialize_node)
-        builder.add_node("think", self._think_node)
+        builder.add_node("think", self._guarded_think_node)
         builder.add_node("execute_tool", self._execute_tool_node)
         builder.add_node("analyze_output", self._analyze_output_node)
         builder.add_node("await_approval", self._await_approval_node)
@@ -1235,6 +1235,49 @@ class AgentOrchestrator:
             f"Do NOT call `{tool}` again unless you have genuinely new inputs "
             f"for it. Choose a different, higher-value action now: {alt}."
         )
+
+    async def _guarded_think_node(self, state: AgentState, config=None) -> dict:
+        """Planning step plus a stall stop.
+
+        A planning turn that starts no tool (a rejected "complete", an
+        unparseable decision, a missing tool name) routes straight back to
+        planning. Without a limit the model can re-plan until the iteration
+        budget is gone without testing anything. After
+        AGENT_MAX_IDLE_PLANNING_TURNS such turns in a row the run ends with a
+        reason that says so, so a run with no checks is never read as clean.
+        """
+        updates = await self._think_node(state, config)
+        if not isinstance(updates, dict):
+            return updates
+        merged = {**state, **updates}
+        if self._route_after_think(merged) != "think":
+            updates["idle_planning_turns"] = 0
+            return updates
+        if self._background_work_pending():
+            # Waiting on a background scan is progress, not a stall; ending the
+            # turn here would cancel it.
+            return updates
+        idle = int(state.get("idle_planning_turns") or 0) + 1
+        updates["idle_planning_turns"] = idle
+        limit = int(getattr(settings, "AGENT_MAX_IDLE_PLANNING_TURNS", 4) or 0)
+        if limit and idle >= limit:
+            updates["task_complete"] = True
+            updates["completion_reason"] = (
+                f"Planning stalled: {idle} planning steps in a row started no new check. "
+                "Coverage is incomplete; untested inputs remain unknown, not clean."
+            )
+            logger.warning("Planning stalled after %d idle turns; ending the turn", idle)
+        return updates
+
+    @staticmethod
+    def _background_work_pending() -> bool:
+        try:
+            from app.services.agent.action_ledger import active_run_id
+            from app.services.agent.tool_executions import completion_blocker
+
+            return bool(completion_blocker(active_run_id.get() or ""))
+        except Exception:
+            return False
 
     async def _think_node(self, state: AgentState, config=None) -> dict:
         """Core ReAct reasoning node."""

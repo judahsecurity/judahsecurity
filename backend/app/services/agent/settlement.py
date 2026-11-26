@@ -38,7 +38,7 @@ SETTLEMENT_HEADER = (
 )
 SETTLEMENT_FOOTER = "[END SETTLEMENT LEAD]"
 
-BUDGET_REASON_MARKERS = ("time budget", "iteration budget")
+BUDGET_REASON_MARKERS = ("time budget", "iteration budget", "planning stalled")
 
 SETTLEMENT_PROMPT = """The assessment below ran out of budget. Your only job now is to list
 security leads that the trace shows but that were NOT already submitted as candidates.
@@ -72,7 +72,7 @@ def settlement_enabled() -> bool:
 
 
 def settlement_applies(completion_reason: str) -> bool:
-    """Only budget exhaustion settles; stops, completions and errors do not."""
+    """Budget exhaustion or a planning stall settles; stops, completions and errors do not."""
     reason = (completion_reason or "").lower()
     return any(marker in reason for marker in BUDGET_REASON_MARKERS)
 

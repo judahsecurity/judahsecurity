@@ -7,9 +7,61 @@ internal services. Callers opt in when sending an in-scope target request.
 from __future__ import annotations
 
 import inspect
+import io
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
+
+PROXY_PAGE_SCAN_BYTES = 20000
+
+
+class AssessmentProxyAnswered(RuntimeError):
+    """The assessment proxy answered with its own error page; the target never did.
+
+    Recording that page as the target's response gives every request the same
+    fake 500, so replays, mutations and comparisons all look identical.
+    """
+
+
+def proxy_answered(status: int | None, headers: dict | None, body: str = "",
+                   title: str = "") -> bool:
+    """True when a 5xx response came from the assessment proxy (Caido), not the target."""
+    if status is None or status < 500 or not assessment_proxy_url():
+        return False
+    if not title and body:
+        match = re.search(r"<title[^>]*>(.*?)</title>", body[:PROXY_PAGE_SCAN_BYTES], re.I | re.S)
+        title = match.group(1).strip() if match else ""
+    lowered = {str(k).lower(): str(v).lower() for k, v in (headers or {}).items()}
+    return (
+        "caido" in (title or "").lower()
+        or "caido" in lowered.get("server", "")
+        or any(name.startswith("x-caido") for name in lowered)
+    )
+
+
+def proxy_page_reason(body: str) -> str:
+    """Visible text of the proxy's error page, so the run says why the proxy failed."""
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", body[:PROXY_PAGE_SCAN_BYTES])
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()[:300]
+
+
+def proxy_answered_message(status: int | None, url: str, body: str = "") -> str:
+    reason = proxy_page_reason(body)
+    return (
+        f"The assessment proxy (AEGIS_ASSESSMENT_PROXY_URL) returned its own HTTP {status} "
+        f"page for {urlsplit(url).path or '/'} instead of the target's response. Nothing "
+        "reached the target, so this is not evidence about the target. Check that the proxy "
+        "has an active project and can reach the target (DNS, outbound network, upstream TLS)."
+        + (f" Proxy page said: {reason}" if reason else "")
+    )
+
+
+def _forget_readiness(url: str) -> None:
+    from app.services.agent.assessment_proxy_bootstrap import invalidate
+
+    invalidate(url)
 
 
 def assessment_proxy_url() -> str | None:
@@ -48,7 +100,20 @@ def assessment_ca_bundle(proxy_url: str | None) -> str | bool:
     return False if insecure else (bundle or True)
 
 
+async def _reject_proxy_error_page(response) -> None:
+    """httpx response hook: never let the proxy's own error page pass as the target's."""
+    if response.status_code < 500:
+        return
+    await response.aread()
+    body = response.text or ""
+    if proxy_answered(response.status_code, dict(response.headers), body):
+        url = str(response.request.url)
+        _forget_readiness(url)
+        raise AssessmentProxyAnswered(proxy_answered_message(response.status_code, url, body))
+
+
 def assessment_httpx_options() -> dict:
+    """Options for an httpx.AsyncClient that sends in-scope target traffic."""
     proxy_url = assessment_proxy_url()
     options = {"verify": assessment_ca_bundle(proxy_url), "trust_env": False}
     if proxy_url:
@@ -56,7 +121,35 @@ def assessment_httpx_options() -> dict:
 
         argument = "proxy" if "proxy" in inspect.signature(httpx.AsyncClient).parameters else "proxies"
         options[argument] = proxy_url
+        options["event_hooks"] = {"response": [_reject_proxy_error_page]}
     return options
+
+
+def _proxy_error_page_handler():
+    from urllib.request import BaseHandler
+    from urllib.response import addinfourl
+
+    class ProxyErrorPageHandler(BaseHandler):
+        # Before HTTPErrorProcessor (1000) turns a 5xx into an HTTPError that
+        # probes would record as the target's answer.
+        handler_order = 900
+
+        def http_response(self, request, response):
+            if response.code < 500:
+                return response
+            data = response.read()
+            body = data[:PROXY_PAGE_SCAN_BYTES].decode("utf-8", "replace")
+            if proxy_answered(response.code, dict(response.headers), body):
+                url = request.full_url
+                _forget_readiness(url)
+                raise AssessmentProxyAnswered(proxy_answered_message(response.code, url, body))
+            replay = addinfourl(io.BytesIO(data), response.headers, response.url, response.code)
+            replay.msg = getattr(response, "msg", "")
+            return replay
+
+        https_response = http_response
+
+    return ProxyErrorPageHandler()
 
 
 def assessment_urllib_handlers() -> list:
@@ -69,6 +162,8 @@ def assessment_urllib_handlers() -> list:
     handlers = [ProxyHandler({"http": proxy_url, "https": proxy_url} if proxy_url else {})]
     if isinstance(certificate, str):
         handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=certificate)))
+    if proxy_url:
+        handlers.append(_proxy_error_page_handler())
     return handlers
 
 

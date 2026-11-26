@@ -111,8 +111,12 @@ async def preflight(target: str, *, client=None) -> None:
     client = client or httpx.AsyncClient(timeout=20, follow_redirects=False,
                                          **assessment_httpx_options())
     try:
+        from app.services.agent.assessment_proxy import AssessmentProxyAnswered
+
         try:
             response = await client.get(target)
+        except AssessmentProxyAnswered as exc:
+            raise AssessmentProxyNotReady(str(exc)) from exc
         except Exception as exc:
             raise AssessmentProxyNotReady(
                 f"Request to {target} through the assessment proxy failed: {type(exc).__name__}") from exc

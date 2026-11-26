@@ -268,6 +268,8 @@ class AgentState(TypedDict, total=False):
     current_phase: Phase
     task_complete: bool
     completion_reason: Optional[str]
+    # Planning turns in a row that started no tool (orchestrator stall stop).
+    idle_planning_turns: int
     
     # Execution tracking
     execution_trace: List[Dict[str, Any]]

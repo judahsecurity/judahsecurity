@@ -231,6 +231,9 @@ class Settings(BaseSettings):
     # (services/agent/settlement.py). Never publishes anything.
     AGENT_SETTLEMENT_BACKFILL: bool = False
     AGENT_SETTLEMENT_TIMEOUT_SECONDS: int = 45
+    # End a turn after this many planning steps in a row start no tool, instead
+    # of letting the model re-plan until the iteration budget runs out. 0 = off.
+    AGENT_MAX_IDLE_PLANNING_TURNS: int = 4
     # Where run_custom_probe / run_poc_python execute model-written Python.
     # "off": tool disabled. "isolated": sent to the probe-runner container
     # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).

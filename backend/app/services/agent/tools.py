@@ -10202,7 +10202,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                              use_auth_session: bool = True, timeout: int = 25,
                              follow_redirects: bool = True, identity: Optional[str] = None,
                              hypothesis_id: str = "", coverage_cell_id: str = "",
-                             max_response_bytes: Optional[int] = None) -> Dict[str, Any]:
+                             max_response_bytes: Optional[int] = None,
+                             _proxy_retry: bool = False) -> Dict[str, Any]:
         import time as _time
         from app.services.agent.assessment_sessions import cookie_jar, identity_registry
         from app.services.agent.evidence_store import evidence_store, verification_run, origin
@@ -10284,45 +10285,67 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         start = _time.monotonic()
         # Follow redirects manually: retain RFC cookie scope and never forward an
         # explicit Cookie/Authorization header to a different origin.
-        from app.services.agent.assessment_proxy import assessment_httpx_options
-        async with httpx.AsyncClient(
-            cookies=jar, follow_redirects=False, timeout=timeout,
-            **assessment_httpx_options(),
-        ) as client:
-            req = client.build_request(method, url, headers=hdrs, content=raw_body)
-            if not any(k.lower() == "cookie" for k in hdrs):
-                req.headers.pop("cookie", None)
-                jar.set_cookie_header(req)
-            for hop in range(11):
-                if pilot is not None:
-                    await pilot.acquire(str(req.url), req.method)
-                resp = await client.send(req, stream=max_response_bytes is not None)
-                if max_response_bytes is not None:
-                    chunks, size = [], 0
-                    try:
-                        async for chunk in resp.aiter_bytes():
-                            size += len(chunk)
-                            if size > max_response_bytes:
-                                raise ValueError("Response exceeds configured collection byte budget")
-                            chunks.append(chunk)
-                        resp._content = b"".join(chunks)
-                    finally:
-                        await resp.aclose()
-                jar.extract_cookies(resp)
-                if not follow_redirects or not resp.next_request:
-                    break
-                if hop == 10:
-                    raise ValueError("Too many redirects")
-                nxt = resp.next_request
-                assert_url_in_scope(self, str(nxt.url))
-                assert_method_allowed(self, str(nxt.url), nxt.method)
-                if origin(str(nxt.url)) != origin(str(req.url)):
-                    nxt.headers.pop("authorization", None)
-                    if identity not in (None, "anonymous"):
-                        raise ValueError("Named identity redirect left its registered origin")
-                nxt.headers.pop("cookie", None)
-                jar.set_cookie_header(nxt)
-                req = nxt
+        from app.services.agent.assessment_proxy import (
+            AssessmentProxyAnswered, assessment_httpx_options,
+        )
+        from app.services.agent.assessment_proxy_bootstrap import ensure_assessment_proxy_ready
+
+        # Caido needs a selected project before it forwards anything; without
+        # this check every exchange records Caido's own 500 page as the target's.
+        await ensure_assessment_proxy_ready(url)
+        try:
+            async with httpx.AsyncClient(
+                cookies=jar, follow_redirects=False, timeout=timeout,
+                **assessment_httpx_options(),
+            ) as client:
+                req = client.build_request(method, url, headers=hdrs, content=raw_body)
+                if not any(k.lower() == "cookie" for k in hdrs):
+                    req.headers.pop("cookie", None)
+                    jar.set_cookie_header(req)
+                for hop in range(11):
+                    if pilot is not None:
+                        await pilot.acquire(str(req.url), req.method)
+                    resp = await client.send(req, stream=max_response_bytes is not None)
+                    if max_response_bytes is not None:
+                        chunks, size = [], 0
+                        try:
+                            async for chunk in resp.aiter_bytes():
+                                size += len(chunk)
+                                if size > max_response_bytes:
+                                    raise ValueError("Response exceeds configured collection byte budget")
+                                chunks.append(chunk)
+                            resp._content = b"".join(chunks)
+                        finally:
+                            await resp.aclose()
+                    jar.extract_cookies(resp)
+                    if not follow_redirects or not resp.next_request:
+                        break
+                    if hop == 10:
+                        raise ValueError("Too many redirects")
+                    nxt = resp.next_request
+                    assert_url_in_scope(self, str(nxt.url))
+                    assert_method_allowed(self, str(nxt.url), nxt.method)
+                    if origin(str(nxt.url)) != origin(str(req.url)):
+                        nxt.headers.pop("authorization", None)
+                        if identity not in (None, "anonymous"):
+                            raise ValueError("Named identity redirect left its registered origin")
+                    nxt.headers.pop("cookie", None)
+                    jar.set_cookie_header(nxt)
+                    req = nxt
+        except AssessmentProxyAnswered:
+            # Nothing reached the target. A Caido restart drops its temporary
+            # project, so set it up again and retry read-only requests once.
+            if _proxy_retry or method not in ("GET", "HEAD", "OPTIONS"):
+                raise
+            # The retry runs ensure_assessment_proxy_ready again on entry; the
+            # transport already forgot this origin's cached readiness.
+            return await self._http_exchange(
+                method, url, headers=headers, body=body, cookies=cookies,
+                use_auth_session=use_auth_session, timeout=timeout,
+                follow_redirects=follow_redirects, identity=identity,
+                hypothesis_id=hypothesis_id, coverage_cell_id=coverage_cell_id,
+                max_response_bytes=max_response_bytes, _proxy_retry=True,
+            )
         if identity not in (None, "anonymous"):
             session["cookies"] = [dict(name=c.name, value=c.value, domain=c.domain, path=c.path,
                                        secure=c.secure, expires=c.expires) for c in client.cookies.jar]
