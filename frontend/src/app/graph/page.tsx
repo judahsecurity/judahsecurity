@@ -373,6 +373,12 @@ export default function GraphPage() {
   // Map Neo4j labels to our node types
   const graphNodeLabel = (node: any): string => {
     const properties = node.properties || {};
+    if (node.labels?.includes('IP') && properties.address) {
+      const scope = String(properties.scope_id || 'global');
+      return scope === 'global'
+        ? String(properties.address)
+        : `${properties.address} (${scope.replace(/^org:\d+:/, '')})`;
+    }
     return String(properties.value || properties.name || properties.url || properties.path ||
       properties.title || properties.display_name || properties.asn_number ||
       properties.package_name || properties.symbol_name || properties.sha ||
@@ -394,6 +400,8 @@ export default function GraphPage() {
       DiscoverySource: 'discovery_source',
       ASN: 'asn',
       HostingProvider: 'hosting_provider',
+      CloudSubscription: 'cloud_subscription',
+      CloudRegion: 'cloud_region',
       Certificate: 'certificate',
       JSResource: 'script',
       Endpoint: 'endpoint',
@@ -1188,7 +1196,7 @@ export default function GraphPage() {
                             {path.nodes?.map((node: any, i: number) => (
                               <span key={i} className="flex items-center gap-1">
                                 <Badge variant="secondary" className="text-xs">
-                                  {node.properties?.value || node.labels?.[0] || 'Unknown'}
+                                  {graphNodeLabel(node)}
                                 </Badge>
                                 {i < (path.nodes?.length || 0) - 1 && <span>→</span>}
                               </span>

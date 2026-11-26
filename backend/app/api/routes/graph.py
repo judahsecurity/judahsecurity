@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.services.graph_service import get_graph_service
+from app.services.graph_service import get_graph_service, graph_node_properties
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -247,13 +247,21 @@ async def get_attack_paths(
         if source_id and target_id:
             # Find paths between specific assets (graph stores asset_id, not id)
             query = """
-            MATCH path = shortestPath((source:Asset {asset_id: $source_id})-[*1..6]-(target:Asset {asset_id: $target_id}))
+            MATCH path = (source:Asset {asset_id: $source_id})
+                -[:RESOLVES_TO]->(:IP)-[forward:FORWARDS_TO]->(:IP)
+                <-[:RESOLVES_TO]-(target:Asset {asset_id: $target_id})
             WHERE source.organization_id IS NOT NULL
               AND source.organization_id = target.organization_id
+              AND source.is_active = true AND target.is_active = true
               AND ($org_id IS NULL OR source.organization_id = $org_id)
               AND all(n IN nodes(path) WHERE
                   n.organization_id IS NULL OR n.organization_id = source.organization_id)
+              AND forward.organization_id = source.organization_id
+              AND forward.source = 'f5'
+              AND forward.vip_asset_id = source.asset_id
+              AND forward.member_asset_id = target.asset_id
             RETURN path
+            ORDER BY length(path)
             LIMIT $max_paths
             """
             params = {"source_id": source_id, "target_id": target_id,
@@ -261,20 +269,39 @@ async def get_attack_paths(
         else:
             # Find paths to vulnerable assets
             query = """
-            MATCH path = (entry:Asset {organization_id: $org_id})-[*1..4]->(vuln:Vulnerability)
-            WHERE vuln.severity IN ['critical', 'high']
-              AND all(n IN nodes(path) WHERE
-                  n.organization_id IS NULL OR n.organization_id = $org_id)
+            CALL {
+                MATCH path = (entry:Asset {organization_id: $org_id})
+                    -[:HAS_VULNERABILITY]->(vuln:Vulnerability)
+                WHERE entry.is_active = true AND entry.is_public = true
+                  AND vuln.severity IN ['critical', 'high']
+                RETURN path
+                UNION
+                MATCH path = (entry:Asset {organization_id: $org_id})
+                    -[:RESOLVES_TO]->(:IP)-[forward:FORWARDS_TO]->(:IP)
+                    <-[:RESOLVES_TO]-(target:Asset {organization_id: $org_id})
+                    -[:HAS_VULNERABILITY]->(vuln:Vulnerability)
+                WHERE entry.is_active = true AND entry.is_public = true
+                  AND target.is_active = true
+                  AND vuln.severity IN ['critical', 'high']
+                  AND forward.organization_id = $org_id AND forward.source = 'f5'
+                  AND forward.vip_asset_id = entry.asset_id
+                  AND forward.member_asset_id = target.asset_id
+                RETURN path
+            }
             RETURN path
             LIMIT $max_paths
             """
             params = {"org_id": org_id, "max_paths": max_paths}
         
-        results = graph.query(query, params)
+        if not graph._connected:
+            graph.connect()
+        if not graph._connected:
+            return {"paths": []}
+        with graph.session() as session:
+            results = [record["path"] for record in session.run(query, params)]
         
         paths = []
-        for record in results:
-            path_data = record.get("path")
+        for path_data in results:
             if path_data:
                 nodes = []
                 relationships = []
@@ -285,7 +312,7 @@ async def get_attack_paths(
                         nodes.append({
                             "id": node.element_id if hasattr(node, 'element_id') else str(node.id),
                             "labels": list(node.labels) if hasattr(node, 'labels') else [],
-                            "properties": dict(node) if node else {},
+                            "properties": graph_node_properties(node) if node else {},
                         })
                 
                 if hasattr(path_data, 'relationships'):
@@ -419,6 +446,7 @@ async def get_discovery_tree(
 @router.get("/shared-infrastructure")
 async def get_shared_infrastructure(
     ip: str = Query(..., description="IP address to find co-hosted assets for"),
+    asset_id: Optional[int] = Query(None, description="Asset context for overlapping IPs"),
     organization_id: Optional[int] = Query(None),
     current_user: User = Depends(get_current_user),
 ):
@@ -433,8 +461,16 @@ async def get_shared_infrastructure(
         raise HTTPException(status_code=400, detail="User must belong to an organization")
     try:
         graph = get_graph_service()
-        result = graph.get_shared_infrastructure(ip, org_id)
+        result = graph.get_shared_infrastructure(ip, org_id, asset_id)
+        if result.get("ambiguous"):
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "IP exists in multiple network scopes; select an asset_id.",
+                        "scope_options": result["scope_options"]},
+            )
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Shared infrastructure error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -537,7 +573,7 @@ async def get_assets_by_technology(
         # Query for technologies and their associated assets
         if category:
             cypher = """
-                MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
+                MATCH (a:Asset)-[observed:USES_TECHNOLOGY]->(t:Technology)
                 WHERE a.organization_id = $org_id
                   AND t.categories CONTAINS $category
                 WITH t, collect(DISTINCT {
@@ -545,11 +581,13 @@ async def get_assets_by_technology(
                     value: a.value,
                     is_live: a.is_live,
                     risk_score: a.risk_score,
-                    has_login_portal: a.has_login_portal
-                }) AS assets
+                    has_login_portal: a.has_login_portal,
+                    version: observed.version,
+                    cpe: observed.cpe
+                }) AS assets, collect(DISTINCT observed.cpe) AS cpes
                 RETURN t.name AS technology,
                        t.categories AS categories,
-                       t.cpe AS cpe,
+                       CASE WHEN size(cpes) = 1 THEN head(cpes) ELSE null END AS cpe,
                        size(assets) AS asset_count,
                        assets
                 ORDER BY asset_count DESC
@@ -557,18 +595,20 @@ async def get_assets_by_technology(
             params = {"org_id": org_id, "category": category}
         else:
             cypher = """
-                MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
+                MATCH (a:Asset)-[observed:USES_TECHNOLOGY]->(t:Technology)
                 WHERE a.organization_id = $org_id
                 WITH t, collect(DISTINCT {
                     id: a.asset_id,
                     value: a.value,
                     is_live: a.is_live,
                     risk_score: a.risk_score,
-                    has_login_portal: a.has_login_portal
-                }) AS assets
+                    has_login_portal: a.has_login_portal,
+                    version: observed.version,
+                    cpe: observed.cpe
+                }) AS assets, collect(DISTINCT observed.cpe) AS cpes
                 RETURN t.name AS technology,
                        t.categories AS categories,
-                       t.cpe AS cpe,
+                       CASE WHEN size(cpes) = 1 THEN head(cpes) ELSE null END AS cpe,
                        size(assets) AS asset_count,
                        assets
                 ORDER BY asset_count DESC
@@ -742,12 +782,15 @@ async def get_attack_surface_overview(
         
         # Technology attack vectors - technologies with known issues
         tech_vectors = graph.query("""
-            MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
+            MATCH (a:Asset)-[observed:USES_TECHNOLOGY]->(t:Technology)
             WHERE a.organization_id = $org_id
-            WITH t.name AS technology, t.categories AS categories, t.cpe AS cpe,
+            WITH t.name AS technology, t.categories AS categories,
+                 collect(DISTINCT observed.cpe) AS cpes,
                  count(DISTINCT a) AS usage_count
             WHERE usage_count > 1
-            RETURN technology, categories, cpe, usage_count
+            RETURN technology, categories,
+                   CASE WHEN size(cpes) = 1 THEN head(cpes) ELSE null END AS cpe,
+                   usage_count
             ORDER BY usage_count DESC
             LIMIT 15
         """, {"org_id": org_id})
