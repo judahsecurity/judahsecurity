@@ -998,7 +998,16 @@ def get_vulnerabilities_summary(
 
 
 def _bucket_delphi(priority: Optional[str]) -> str:
-    p = (priority or "none").strip().lower()
+    """Map a Delphi tier to Crit/High/Filtered, or "unscored".
+
+    Delphi only scores findings with a CVE. A missing tier, or "none" (Delphi's
+    "No CVE scoring data available"), means it had nothing to say — not that
+    the finding is unlikely to be exploited. Any real score maps to at least
+    "low", so "none" is never a scored-low result.
+    """
+    p = (priority or "").strip().lower()
+    if p in ("", "none"):
+        return "unscored"
     if p == "critical":
         return "critical"
     if p == "high":
@@ -1057,6 +1066,12 @@ def get_prioritization_funnel(
             "input_total": 0,
             "output_total": 0,
             "reduction_pct": 0,
+            "deprioritized_total": 0,
+        },
+        "value_funnel": {
+            "open_critical_high": 0, "likely_exploitable": 0, "not_scored": 0,
+            "prioritized": 0, "agent_tested": 0, "proven": 0,
+            "proven_outside_priority": 0, "proven_finding_ids": [],
         },
     }
 
@@ -1083,10 +1098,21 @@ def get_prioritization_funnel(
             Vulnerability.oracle_opes_category,
             Vulnerability.oracle_opes_score,
             Vulnerability.metadata_,
+            Vulnerability.verification_level,
+            Vulnerability.last_validation_verdict,
+            Vulnerability.id,
         )
         .all()
     )
+    return build_prioritization_funnel(rows)
 
+
+def build_prioritization_funnel(rows) -> Dict[str, Any]:
+    """Count open Critical/High findings through Delphi -> OPES -> Priority -> proof.
+
+    ``rows`` are (severity, opes_category, opes_score, metadata,
+    verification_level, last_validation_verdict, id). Pure, for testing.
+    """
     # Transition counters between stage buckets
     # keys: (from_kind, to_kind) at each hop
     s_to_d: Dict[tuple, int] = {}
@@ -1097,7 +1123,13 @@ def get_prioritization_funnel(
     opes_c = opes_h = 0
     out_c = out_h = 0
 
-    for severity, opes_cat, opes_score, meta in rows:
+    unscored = 0
+    agent_tested = 0
+    proven = 0
+    proven_elsewhere = 0
+    proven_ids: List[int] = []
+
+    for severity, opes_cat, opes_score, meta, verification_level, verdict, vuln_id in rows:
         scanner = severity.value.lower() if hasattr(severity, "value") else str(severity).lower()
         if scanner == "critical":
             input_c += 1
@@ -1110,7 +1142,19 @@ def get_prioritization_funnel(
         delphi = meta.get("delphi") if isinstance(meta, dict) else {}
         delphi = delphi if isinstance(delphi, dict) else {}
         d_bucket = _bucket_delphi(delphi.get("priority"))
+        if d_bucket == "unscored":
+            # Keep it at scanner severity (as the OPES stage already does for
+            # unscored findings) so it is never counted as noise.
+            unscored += 1
+            d_bucket = scanner
         on_kev = bool(delphi.get("kev"))
+        agent = meta.get("agent_detection") if isinstance(meta, dict) else {}
+        agent = agent if isinstance(agent, dict) else {}
+        verdict_l = (verdict or "").lower()
+        is_proven = verdict_l != "false_positive" and (
+            verification_level == "exploit_verified" or verdict_l == "confirmed"
+        )
+        was_tested = is_proven or bool(agent.get("chain")) or bool(verification_level) or bool(verdict_l)
         o_bucket = _bucket_opes(opes_cat, scanner)
         p_bucket = _bucket_priority(o_bucket, opes_score, on_kev)
 
@@ -1134,6 +1178,17 @@ def get_prioritization_funnel(
                     out_c += 1
                 elif p_bucket == "high":
                     out_h += 1
+                if p_bucket in ("critical", "high"):
+                    if was_tested:
+                        agent_tested += 1
+                    if is_proven:
+                        proven += 1
+                        if len(proven_ids) < 50:
+                            proven_ids.append(int(vuln_id))
+                        continue
+        if is_proven:
+            # Proven but scored down by Delphi/OPES: surfaced, never hidden.
+            proven_elsewhere += 1
 
     filt_d = (input_c + input_h) - (delphi_c + delphi_h)
     filt_o = (delphi_c + delphi_h) - (opes_c + opes_h)
@@ -1216,9 +1271,12 @@ def get_prioritization_funnel(
 
     input_total = input_c + input_h
     output_total = out_c + out_h
+    # One decimal: 2 of 5,666 kept is 99.96%, which must not read as "100%".
     reduction_pct = (
-        int(round((1 - (output_total / input_total)) * 100)) if input_total else 0
+        round((1 - (output_total / input_total)) * 100, 1) if input_total else 0
     )
+    if output_total and reduction_pct >= 100:
+        reduction_pct = 99.9
 
     columns = [
         {
@@ -1260,6 +1318,20 @@ def get_prioritization_funnel(
             "input_total": input_total,
             "output_total": output_total,
             "reduction_pct": max(0, reduction_pct),
+            "deprioritized_total": input_total - output_total,
+        },
+        # Stepped value funnel, each stage nested in the one before:
+        # open Critical/High -> likely exploitable (Delphi, unscored kept)
+        # -> prioritized (OPES + KEV/score rule) -> tested by the agent -> proven.
+        "value_funnel": {
+            "open_critical_high": input_total,
+            "likely_exploitable": delphi_c + delphi_h,
+            "not_scored": unscored,
+            "prioritized": output_total,
+            "agent_tested": agent_tested,
+            "proven": proven,
+            "proven_outside_priority": proven_elsewhere,
+            "proven_finding_ids": proven_ids,
         },
     }
 

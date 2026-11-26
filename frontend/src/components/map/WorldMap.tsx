@@ -44,6 +44,8 @@ interface Asset {
 interface WorldMapProps {
   assets: Asset[];
   onAssetClick?: (asset: Asset) => void;
+  /** Narrow-column mode: no country side panel or legend, shorter map. */
+  compact?: boolean;
 }
 
 // Country code mapping for common mismatches
@@ -60,7 +62,7 @@ const countryCodeMap: Record<string, string> = {
   'BRA': 'BR',
 };
 
-export function WorldMap({ assets, onAssetClick }: WorldMapProps) {
+export function WorldMap({ assets, onAssetClick, compact = false }: WorldMapProps) {
   const [hoveredCountry, setHoveredCountry] = useState<string | null>(null);
   const [position, setPosition] = useState({ coordinates: [0, 20] as [number, number], zoom: 1 });
   const [highlightedCountryCode, setHighlightedCountryCode] = useState<string | null>(null);
@@ -183,7 +185,7 @@ export function WorldMap({ assets, onAssetClick }: WorldMapProps) {
 
   return (
     <Card className="bg-card border-border">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
+      <CardHeader className={`flex flex-row items-center justify-between pb-2 ${compact ? 'flex-wrap gap-2' : ''}`}>
         <CardTitle className="text-sm font-medium text-foreground flex items-center gap-2">
           <Globe className="h-4 w-4 text-cyan-400" />
           Global Asset Distribution
@@ -220,7 +222,7 @@ export function WorldMap({ assets, onAssetClick }: WorldMapProps) {
             </Button>
           </div>
           {/* Legend */}
-          <div className="flex items-center gap-3 text-xs">
+          <div className={compact ? 'hidden' : 'flex items-center gap-3 text-xs'}>
             {viewMode === 'severity' && (
               <>
                 <div className="flex items-center gap-1">
@@ -275,7 +277,7 @@ export function WorldMap({ assets, onAssetClick }: WorldMapProps) {
       <CardContent className="p-0">
         <div className="flex">
           {/* Map Section - Left */}
-          <div className="relative flex-1 h-[400px] rounded-bl-lg overflow-hidden bg-slate-950">
+          <div className={`relative flex-1 ${compact ? 'h-[300px] rounded-b-lg' : 'h-[400px] rounded-bl-lg'} overflow-hidden bg-slate-950`}>
             <ComposableMap
               projection="geoMercator"
               projectionConfig={{
@@ -440,7 +442,7 @@ export function WorldMap({ assets, onAssetClick }: WorldMapProps) {
           </div>
 
           {/* Country Table Section - Right */}
-          <div className="w-[280px] h-[400px] border-l border-slate-800 bg-slate-950/50 flex flex-col">
+          <div className={compact ? 'hidden' : 'w-[280px] h-[400px] border-l border-slate-800 bg-slate-950/50 flex flex-col'}>
             {/* Table Header */}
             <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/50">
               <div className="flex items-center justify-between">

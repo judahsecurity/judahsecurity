@@ -852,17 +852,11 @@ class ScheduleWorker:
                 CrowdStrikeIntegration.continuous_sync_enabled == True,
             ).all()
             for integration in candidates:
-                if integration.is_sync_due(now):
-                    result = await crowdstrike_service.sync_integration(db, integration)
+                if integration.is_sync_due(now) and crowdstrike_service.claim_sync(db, integration.id):
+                    result = await asyncio.to_thread(
+                        crowdstrike_service.sync_and_project_background, integration.id
+                    )
                     logger.info("CrowdStrike sync for org %s: %s", integration.organization_id, result.get("message"))
-                    if result["ok"]:
-                        from app.services.integration_graph_service import project_and_record_graph
-                        graph_result = await asyncio.to_thread(
-                            project_and_record_graph, integration.organization_id, "crowdstrike", integration.id
-                        )
-                        if not graph_result["ok"]:
-                            logger.error("CrowdStrike graph projection failed for org %s: %s",
-                                         integration.organization_id, graph_result.get("error"))
         except Exception:
             logger.exception("CrowdStrike scheduled sync failed")
             db.rollback()
