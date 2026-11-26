@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
 import httpx
 from sqlalchemy.orm import Session
 
+from app.db.database import SessionLocal
 from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.crowdstrike_integration import CrowdStrikeAssetLink, CrowdStrikeIntegration
 from app.models.exposure_evidence import FindingSourceEvidence
@@ -331,6 +332,8 @@ def _upsert_host(db: Session, integration: CrowdStrikeIntegration, source: dict[
     asset, created = _link_asset(db, integration, "host", aid, cid, value=value, asset_type=AssetType.OTHER, name=hostname or aid, allow_match=False)
     stats["assets_created" if created else "assets_updated"] += 1
     _merge_source_metadata(asset, "host", aid, cid, source)
+    if str(source.get("internet_exposure") or "").lower() == "yes":
+        asset.is_public = True
     asset.operating_system = str(source.get("os_product_name") or source.get("platform_name") or asset.operating_system or "")[:200] or None
     ips = []
     for key in ("local_ip", "external_ip"):
@@ -392,20 +395,38 @@ def _upsert_detection_evidence(
     evidence.last_ingested_at = datetime.utcnow()
 
 
-def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], host_assets: dict[tuple[str, str], Asset], stats: dict[str, int]) -> None:
+def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], host_assets: dict[tuple[str, str], int], stats: dict[str, int]) -> None:
     finding_id = str(source.get("id") or source.get("vulnerability_id") or "")
     aid = str(source.get("aid") or "")
     cid = str(source.get("cid") or "")
-    asset = host_assets.get((cid, aid))
-    if not finding_id or asset is None:
+    asset_id = host_assets.get((cid, aid))
+    if not finding_id or not aid or not cid:
+        stats["findings_unmatched"] += 1
         return
+    if asset_id is None:
+        host_info = _as_dict(source.get("host_info"))
+        _upsert_host(db, integration, {
+            "device_id": aid,
+            "cid": cid,
+            "hostname": host_info.get("hostname"),
+            "platform_name": host_info.get("platform"),
+            "local_ip": host_info.get("local_ip"),
+            "last_seen": host_info.get("host_last_seen_timestamp"),
+            "internet_exposure": host_info.get("internet_exposure"),
+        }, stats)
+        link = db.query(CrowdStrikeAssetLink).filter_by(
+            integration_id=integration.id, source_kind="host", source_id=aid,
+        ).one()
+        asset_id = link.asset_id
+        host_assets[(cid, aid)] = asset_id
+        stats["spotlight_hosts_linked"] += 1
     cve = _as_dict(source.get("cve"))
     cve_id = str(cve.get("id") or "") or None
     key = f"cs:{integration.id}:{finding_id}"[:255]
-    vuln = db.query(Vulnerability).filter_by(asset_id=asset.id, detected_by=SOURCE, template_id=key).first()
+    vuln = db.query(Vulnerability).filter_by(asset_id=asset_id, detected_by=SOURCE, template_id=key).first()
     created = vuln is None
     if created:
-        vuln = Vulnerability(asset_id=asset.id, title=cve_id or f"CrowdStrike finding {finding_id}", severity=Severity.MEDIUM, detected_by=SOURCE, template_id=key)
+        vuln = Vulnerability(asset_id=asset_id, title=cve_id or f"CrowdStrike finding {finding_id}", severity=Severity.MEDIUM, detected_by=SOURCE, template_id=key)
         db.add(vuln)
     score = cve.get("base_score")
     try:
@@ -449,6 +470,10 @@ def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: di
     }
     vuln.metadata_ = metadata
     _upsert_detection_evidence(db, integration, vuln, source, finding_id, aid, cve_id)
+    if created:
+        # SessionLocal disables autoflush; make a repeated provider ID in the
+        # same page visible to the next lookup, including its evidence row.
+        db.flush()
     stats["vulns_created" if created else "vulns_updated"] += 1
 
 
@@ -456,12 +481,14 @@ def _stats() -> dict[str, int]:
     return {key: 0 for key in (
         "assets_created", "assets_updated", "ports_created", "ports_updated", "vulns_created", "vulns_updated",
         "vulns_resolved", "external_seen", "hosts_seen", "findings_seen",
+        "findings_unmatched", "spotlight_hosts_linked",
     )}
 
 
 async def sync_integration(db: Session, integration: CrowdStrikeIntegration) -> dict[str, Any]:
     stats = _stats()
-    host_assets: dict[tuple[str, str], Asset] = {}
+    host_assets: dict[tuple[str, str], int] = {}
+    started_at = (integration.last_sync_stats or {}).get("sync_started_at") or datetime.utcnow().isoformat()
     try:
         async with _client_for(integration) as client:
             if integration.import_external_assets:
@@ -477,29 +504,76 @@ async def sync_integration(db: Session, integration: CrowdStrikeIntegration) -> 
                             stats["hosts_seen"] += 1
                             _upsert_host(db, integration, source, stats)
                 db.flush()
-                links = db.query(CrowdStrikeAssetLink).filter_by(integration_id=integration.id, source_kind="host").all()
-                for link in links:
-                    asset = db.get(Asset, link.asset_id)
-                    if asset is not None:
-                        host_assets[(link.cid or "", link.source_id)] = asset
+                links = db.query(
+                    CrowdStrikeAssetLink.cid, CrowdStrikeAssetLink.source_id, CrowdStrikeAssetLink.asset_id
+                ).filter_by(integration_id=integration.id, source_kind="host").all()
+                host_assets = {(cid or "", source_id): asset_id for cid, source_id, asset_id in links}
             if integration.import_spotlight:
                 async for batch in client.spotlight():
                     for source in batch:
                         if isinstance(source, dict):
                             stats["findings_seen"] += 1
                             _upsert_finding(db, integration, source, host_assets, stats)
+                    # A Spotlight tenant can contain hundreds of thousands of
+                    # findings. Keep the transaction bounded and retain every
+                    # completed page if a later API page fails.
+                    integration.last_sync_stats = {
+                        **stats, "sync_in_progress": True, "sync_started_at": started_at,
+                        "sync_heartbeat_at": datetime.utcnow().isoformat(),
+                    }
+                    db.commit()
+                    logger.info("CrowdStrike Spotlight page committed for org %s: %s findings seen",
+                                integration.organization_id, stats["findings_seen"])
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = True
-        integration.last_sync_stats = stats
+        integration.last_sync_stats = {**stats, "sync_in_progress": False}
         integration.last_error = None
         db.commit()
         return {"ok": True, "message": "CrowdStrike assets and findings synchronized.", **stats}
     except Exception as exc:  # noqa: BLE001
         db.rollback()
-        stats = _stats()
         logger.exception("CrowdStrike sync failed for organization %s", integration.organization_id)
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = False
         integration.last_error = str(exc)[:1000] if isinstance(exc, CrowdStrikeError) else "Unexpected sync error."
+        integration.last_sync_stats = {**stats, "sync_in_progress": False}
         db.commit()
         return {"ok": False, "message": integration.last_error, **stats}
+
+
+def claim_sync(db: Session, integration_id: int) -> bool:
+    """Reserve a manual or scheduled run across API and scheduler processes."""
+    integration = db.query(CrowdStrikeIntegration).filter_by(id=integration_id).populate_existing().with_for_update().one()
+    if not integration.is_active:
+        db.rollback()
+        return False
+    state = integration.last_sync_stats or {}
+    if state.get("sync_in_progress"):
+        try:
+            heartbeat = datetime.fromisoformat(state.get("sync_heartbeat_at") or state.get("sync_started_at", ""))
+            if datetime.utcnow() - heartbeat < timedelta(hours=8):
+                db.rollback()
+                return False
+        except (TypeError, ValueError):
+            pass
+    integration.last_sync_stats = {
+        "sync_in_progress": True, "sync_started_at": datetime.utcnow().isoformat(),
+    }
+    db.commit()
+    return True
+
+
+def sync_and_project_background(integration_id: int) -> dict[str, Any]:
+    """Run a long provider import outside the API/scheduler event loop."""
+    with SessionLocal() as db:
+        integration = db.get(CrowdStrikeIntegration, integration_id)
+        if integration is None:
+            return {"ok": False, "message": "CrowdStrike connection no longer exists."}
+        organization_id = integration.organization_id
+        result = asyncio.run(sync_integration(db, integration))
+    from app.services.integration_graph_service import project_and_record_graph
+    graph_result = project_and_record_graph(organization_id, SOURCE, integration_id)
+    if not graph_result["ok"]:
+        logger.error("CrowdStrike graph projection failed for org %s: %s",
+                     organization_id, graph_result.get("error"))
+    return {**result, "graph_projection": graph_result}

@@ -596,6 +596,9 @@ export interface CrowdStrikeIntegration {
     [key: string]: unknown;
     assets_created?: number;
     vulns_created?: number;
+    findings_seen?: number;
+    findings_unmatched?: number;
+    sync_in_progress?: boolean;
     graph_projection?: IntegrationGraphProjection;
   };
   last_error?: string;

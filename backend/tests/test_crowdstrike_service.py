@@ -1,5 +1,6 @@
 """Falcon pagination and exposure import behavior without live credentials."""
 
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -23,6 +24,8 @@ from app.services.crowdstrike_service import (
     _upsert_external,
     _upsert_finding,
     _upsert_host,
+    claim_sync,
+    sync_integration,
     test_connection as _test_crowdstrike_connection,
 )
 from app.services.exposure_path_mapping import map_crowdstrike_path_assets, resolve_crowdstrike_asset_ref
@@ -32,7 +35,7 @@ from app.services.exposure_path_mapping import map_crowdstrike_path_assets, reso
 def db():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
-    with Session(engine) as session:
+    with Session(engine, autoflush=False) as session:
         yield session
     engine.dispose()
 
@@ -181,7 +184,7 @@ def test_spotlight_finding_preserves_analyst_state_and_reopens_provider_resolved
     _upsert_host(db, integration, {"device_id": "aid-1", "cid": "cid-1", "hostname": "server-1"}, _stats())
     db.flush()
     host = db.query(Asset).filter_by(organization_id=integration.organization_id).one()
-    mapping = {("cid-1", "aid-1"): host}
+    mapping = {("cid-1", "aid-1"): host.id}
     source = {"id": "finding-1", "aid": "aid-1", "cid": "cid-1", "status": "open",
               "cve": {"id": "CVE-2026-1234", "severity": "HIGH", "base_score": 8.1},
               "assessment_reason": "installed package detected", "evaluation_logic": {"rule": "package-version"}}
@@ -212,6 +215,31 @@ def test_spotlight_finding_preserves_analyst_state_and_reopens_provider_resolved
     assert finding.status == VulnerabilityStatus.OPEN
     assert db.query(Vulnerability).count() == 1
     assert db.query(FindingSourceEvidence).count() == 1
+
+
+def test_spotlight_finding_links_host_missing_from_device_inventory(db):
+    integration = _integration(db, "tenant")
+    stats = _stats()
+    source = {
+        "id": "finding-1", "aid": "spotlight-aid", "cid": "cid-1", "status": "open",
+        "cve": {"id": "CVE-2026-9876", "severity": "HIGH"},
+        "host_info": {"hostname": "unmanaged.example.org", "platform": "Linux",
+                      "internet_exposure": "Yes", "local_ip": "10.0.0.3"},
+    }
+    host_assets = {}
+    _upsert_finding(db, integration, source, host_assets, stats)
+    _upsert_finding(db, integration, source, host_assets, stats)
+    db.flush()
+    asset = db.query(Asset).one()
+    finding = db.query(Vulnerability).one()
+    assert finding.asset_id == asset.id
+    assert asset.is_public is True
+    assert asset.value == "unmanaged.example.org"
+    assert host_assets[("cid-1", "spotlight-aid")] == asset.id
+    assert db.query(CrowdStrikeAssetLink).count() == 1
+    assert db.query(FindingSourceEvidence).count() == 1
+    assert stats["spotlight_hosts_linked"] == 1
+    assert stats["findings_unmatched"] == 0
 
 
 def test_path_steps_keep_unmatched_source_nodes_and_separate_proof(db):
@@ -255,3 +283,48 @@ def test_update_rejects_null_required_columns():
     with pytest.raises(ValueError, match="import_hosts cannot be null"):
         CrowdStrikeIntegrationUpdate(import_hosts=None)
     assert CrowdStrikeIntegrationUpdate(import_hosts=False).import_hosts is False
+
+
+@pytest.mark.asyncio
+async def test_spotlight_pages_survive_later_api_failure(db, monkeypatch):
+    integration = _integration(db, "tenant")
+    integration.import_external_assets = False
+    integration.import_hosts = True
+    integration.import_spotlight = True
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def hosts(self):
+            yield [{"device_id": "aid-1", "cid": "cid-1", "hostname": "server-1"}]
+
+        async def spotlight(self):
+            yield [{"id": "finding-1", "aid": "aid-1", "cid": "cid-1", "status": "open",
+                    "cve": {"id": "CVE-2026-1234", "severity": "HIGH"}}]
+            raise CrowdStrikeError("Later Spotlight page failed")
+
+    monkeypatch.setattr("app.services.crowdstrike_service._client_for", lambda _: Client())
+    result = await sync_integration(db, integration)
+    db.expire_all()
+    assert result["ok"] is False
+    assert result["findings_seen"] == 1
+    assert db.query(Vulnerability).count() == 1
+    assert db.query(FindingSourceEvidence).count() == 1
+    assert integration.last_sync_stats["sync_in_progress"] is False
+
+
+def test_crowdstrike_sync_claim_prevents_overlap(db):
+    integration = _integration(db, "tenant")
+    assert claim_sync(db, integration.id) is True
+    assert claim_sync(db, integration.id) is False
+    assert integration.is_sync_due() is False
+    integration.last_sync_stats = {
+        "sync_in_progress": True,
+        "sync_started_at": (datetime.utcnow() - timedelta(hours=9)).isoformat(),
+    }
+    db.commit()
+    assert claim_sync(db, integration.id) is True
