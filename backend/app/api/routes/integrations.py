@@ -1286,13 +1286,10 @@ async def sync_crowdstrike_integration(
     integration = _get_crowdstrike_integration(db, _get_org_id(current_user), integration_id)
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This CrowdStrike connection is disabled.")
-    result = await crowdstrike_service.sync_integration(db, integration)
-    if result["ok"]:
-        from app.services.integration_graph_service import project_and_record_graph
-        background_tasks.add_task(
-            project_and_record_graph, integration.organization_id, "crowdstrike", integration.id
-        )
-    return CrowdStrikeSyncResult(**result)
+    if not crowdstrike_service.claim_sync(db, integration.id):
+        raise HTTPException(status_code=409, detail="A CrowdStrike sync is already running.")
+    background_tasks.add_task(crowdstrike_service.sync_and_project_background, integration.id)
+    return CrowdStrikeSyncResult(ok=True, message="CrowdStrike sync started in the background.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

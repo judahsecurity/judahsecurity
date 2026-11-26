@@ -42,13 +42,17 @@ export function CrowdStrikeSection() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CrowdStrikeIntegration | null>(null);
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => { void load(false); }, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-  async function load() {
-    setLoading(true);
+  async function load(showSpinner = true) {
+    if (showSpinner) setLoading(true);
     try { setConnections(await api.getCrowdStrikeIntegrations()); }
     catch { setConnections([]); }
-    finally { setLoading(false); }
+    finally { if (showSpinner) setLoading(false); }
   }
 
   function edit(item: CrowdStrikeIntegration | null) {
@@ -94,7 +98,7 @@ export function CrowdStrikeSection() {
     setBusyId(item.id);
     try {
       const result = kind === 'test' ? await api.testCrowdStrikeIntegration(item.id) : await api.syncCrowdStrikeIntegration(item.id);
-      toast({ title: result.ok ? `CrowdStrike ${kind} complete` : `CrowdStrike ${kind} failed`, description: result.message, variant: result.ok ? undefined : 'destructive' });
+      toast({ title: result.ok ? (kind === 'sync' ? 'CrowdStrike sync started' : 'CrowdStrike test complete') : `CrowdStrike ${kind} failed`, description: result.message, variant: result.ok ? undefined : 'destructive' });
       await load();
     } catch (error) {
       toast({ title: `CrowdStrike ${kind} failed`, description: getApiErrorMessage(error), variant: 'destructive' });
@@ -137,6 +141,12 @@ export function CrowdStrikeSection() {
               {item.last_sync_at && ` · Last sync ${new Date(item.last_sync_at).toLocaleString()}`}
             </p>
             {item.last_sync_ok && item.last_sync_stats && <p className="text-xs text-muted-foreground">{item.last_sync_stats.assets_created || 0} new assets · {item.last_sync_stats.vulns_created || 0} new CVEs</p>}
+            {item.last_sync_stats?.sync_in_progress && (
+              <p className="text-xs text-violet-400">Importing CrowdStrike records… {item.last_sync_stats.findings_seen || 0} Spotlight findings read; {item.last_sync_stats.vulns_created || 0} new findings.</p>
+            )}
+            {!!item.last_sync_stats?.findings_unmatched && (
+              <p className="text-xs text-amber-400">{item.last_sync_stats.findings_unmatched} Spotlight findings could not be linked to a host.</p>
+            )}
             {item.last_sync_stats?.graph_projection && (
               <p className={`text-xs ${item.last_sync_stats.graph_projection.ok ? 'text-green-400' : 'text-red-400'}`}>
                 {item.last_sync_stats.graph_projection.ok
@@ -146,7 +156,7 @@ export function CrowdStrikeSection() {
             )}
             {item.last_error && !item.last_sync_ok && <p className="text-xs text-red-400">{item.last_error}</p>}
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" disabled={busyId === item.id || !item.is_active} onClick={() => void run(item, 'sync')}><Download className="h-4 w-4 mr-2" />Sync now</Button>
+              <Button size="sm" variant="outline" disabled={busyId === item.id || !item.is_active || item.last_sync_stats?.sync_in_progress} onClick={() => void run(item, 'sync')}><Download className="h-4 w-4 mr-2" />Sync now</Button>
               <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void run(item, 'test')}><RefreshCw className="h-4 w-4 mr-2" />Test</Button>
               <Button size="sm" variant="outline" onClick={() => edit(item)}><Settings2 className="h-4 w-4 mr-2" />Edit</Button>
               <Button size="sm" variant="outline" className="text-red-400" onClick={() => setDeleteTarget(item)}><Trash2 className="h-4 w-4 mr-2" />Remove</Button>

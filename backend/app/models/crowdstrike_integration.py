@@ -57,6 +57,14 @@ class CrowdStrikeIntegration(Base):
         return (self.last_sync_at or datetime.utcnow()) + (timedelta(minutes=self.sync_interval_minutes) if self.last_sync_at else timedelta())
 
     def is_sync_due(self, now: datetime | None = None) -> bool:
+        state = self.last_sync_stats or {}
+        if state.get("sync_in_progress"):
+            try:
+                heartbeat = datetime.fromisoformat(state.get("sync_heartbeat_at") or state.get("sync_started_at", ""))
+                if (now or datetime.utcnow()) - heartbeat < timedelta(hours=8):
+                    return False
+            except (TypeError, ValueError):
+                pass
         due = self.next_sync_at
         return due is not None and (now or datetime.utcnow()) >= due
 
