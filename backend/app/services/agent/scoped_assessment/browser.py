@@ -486,6 +486,11 @@ async def check_browser(
                 context_args["storage_state"] = scoped_state
             context = await browser.new_context(**context_args)
 
+            from app.services.agent.request_budget import RequestBudgetExhausted
+            from app.services.agent.request_budget import active as active_request_budget
+
+            request_budget = active_request_budget()
+
             async def route_request(route):
                 nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
                 nonlocal xhr_body_match_mode, xhr_volatile_fields
@@ -500,6 +505,19 @@ async def check_browser(
                     # can carry an input the map must record.
                     await route.abort()
                     return
+                try:
+                    same_origin = origin(route.request.url) == expected_origin
+                except ValueError:
+                    same_origin = False
+                if request_budget is not None and same_origin:
+                    # Out-of-scope requests are aborted below and send nothing.
+                    try:
+                        request_budget.acquire(
+                            "discovery" if operation in DISCOVERY_OPERATIONS else "testing")
+                    except RequestBudgetExhausted:
+                        blocked_requests += 1
+                        await route.abort()
+                        return
                 post_mutation = None
                 try:
                     allowed = origin(route.request.url) == expected_origin

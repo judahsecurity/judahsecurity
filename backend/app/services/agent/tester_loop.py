@@ -1402,10 +1402,17 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             return followup
         return _ready_hypothesis_wave(state, trace, target)
     ran = normalized_tools_run(trace)
-    crawled = bool(ran & _CRAWL_TOOLS)
+    from app.services.agent.request_budget import active as active_request_budget
+
+    # Under an operator request ceiling: background enrichment and the external
+    # Interceptor cannot be counted, so they are skipped, and once discovery's
+    # share is spent the map is final and testing starts.
+    budget = active_request_budget()
+    crawled = bool(ran & _CRAWL_TOOLS) or bool(budget and budget.discovery_exhausted)
     # Respect an operator's no-directory constraint without stalling the
     # observed-input queue behind enrichment that will never be launched.
-    dir_done = bool(ran & _DIR_BRUTE_TOOLS) or bool(state.get("skip_directory_enrichment"))
+    dir_done = (bool(ran & _DIR_BRUTE_TOOLS) or bool(state.get("skip_directory_enrichment"))
+                or budget is not None)
     dir_started = "dir_brute_started" in ran or dir_done
     full_fireteam = _full_fireteam_completed(trace)
     input_signature = observed_input_signature(state)
@@ -1421,7 +1428,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             and step.get("success") is False
             for step in trace
         )
-        if state.get("interceptor_job_id") and not interceptor_failed:
+        if state.get("interceptor_job_id") and not interceptor_failed and budget is None:
             return {
                 "tool_name": "execute_interceptor",
                 "tool_args": {
@@ -1485,7 +1492,22 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             "thought": "Prowl: capture browser actions, inputs, and first-party API traffic for specialist work.",
         }
 
-    # Launch enrichment without waiting for it before testing real browser inputs.
+    # Test the inputs already mapped before spending requests on more
+    # discovery: seed their hypotheses, then run the bounded SQLi/XSS first
+    # pass. Enrichment used to start first and share the request budget with
+    # the crawl, so the first pass never ran.
+    if input_signature and not input_dispatched:
+        if "sync_engagement_brain" not in ran and "build_threat_model" not in ran:
+            return {
+                "tool_name": "sync_engagement_brain",
+                "tool_args": {},
+                "thought": "Seed observed input hypotheses before further discovery.",
+            }
+        batch = _observed_input_batch_step(state, trace, input_signature)
+        if batch:
+            return batch
+
+    # Launch enrichment in the background once the first pass has run.
     if not dir_started:
         return {
             "tool_name": "spawn_recon_workers",
@@ -1494,15 +1516,6 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         }
 
     if input_signature and not input_dispatched:
-        if "sync_engagement_brain" not in ran and "build_threat_model" not in ran:
-            return {
-                "tool_name": "sync_engagement_brain",
-                "tool_args": {},
-                "thought": "Seed observed input hypotheses while enrichment continues.",
-            }
-        batch = _observed_input_batch_step(state, trace, input_signature)
-        if batch:
-            return batch
         return _observed_input_wave(
             target, input_signature, _untested_observed_input_count(state),
             _observed_input_specialists(state),

@@ -332,9 +332,12 @@ async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
 
     root: Dict[str, Any] = {}
     try:
+        from app.services.agent.request_budget import DISCOVERY, httpx_event_hooks
+
         async with httpx.AsyncClient(
             verify=False,
             headers={"User-Agent": "JudahASM-Kickoff/1.0"},
+            event_hooks=httpx_event_hooks(DISCOVERY),
         ) as client:
             root = await _fetch(
                 client,

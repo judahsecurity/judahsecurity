@@ -124,3 +124,50 @@ async def test_deep_crawl_skips_images_fonts_and_media(monkeypatch):
     assert "/" in hits and "/app.js" in hits
     assert "/tracker.gif" in hits
     assert not {"/product1.png", "/product2.png", "/font.woff2", "/clip.mp4"} & set(hits)
+
+
+SHARED_PAGE = b"""<!doctype html><html><head><title>Shop</title>
+<link rel="stylesheet" href="/style.css"><script src="/app.js"></script></head><body>
+<a href="/a">A</a><a href="/b">B</a><a href="/c">C</a></body></html>"""
+
+
+@pytest.mark.skipif(os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
+                    reason="Opt-in local Chromium fixture")
+@pytest.mark.asyncio
+async def test_deep_crawl_downloads_shared_assets_once(monkeypatch):
+    """Routing disables the HTTP cache; the crawl's own cache must not refetch assets."""
+    pytest.importorskip("playwright")
+    from app.services.deep_crawl_service import run_deep_crawl
+
+    monkeypatch.setattr("app.services.agent.assessment_proxy.assessment_proxy_url", lambda: None)
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            hits.append(path)
+            body = b"x{}" if path in ("/style.css", "/app.js") else SHARED_PAGE
+            self.send_response(200)
+            self.send_header("Content-Type", TYPES.get(path, "text/html"))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = await run_deep_crawl({"url": base + "/", "max_pages": 4, "depth": 2,
+                                       "interact": False, "allowed_origin": base})
+    finally:
+        server.shutdown()
+
+    pages = [h for h in hits if h in ("/", "/a", "/b", "/c")]
+    assert len(set(pages)) >= 3
+    assert hits.count("/app.js") == 1 and hits.count("/style.css") == 1
+    assert result["asset_cache_hits"] >= 4
+    # The reported total counts only requests that reached the server.
+    assert result["network_requests_total"] <= len(hits)

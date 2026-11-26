@@ -1249,6 +1249,18 @@ class AgentOrchestrator:
         updates = await self._think_node(state, config)
         if not isinstance(updates, dict):
             return updates
+        from app.services.agent.request_budget import active as active_request_budget
+
+        budget = active_request_budget()
+        if budget is not None and budget.exhausted and not updates.get("task_complete"):
+            used = budget.snapshot()
+            updates["task_complete"] = True
+            updates["completion_reason"] = (
+                f"Request ceiling reached: {used['used']}/{used['limit']} target requests used "
+                f"({used['discovery_used']} on discovery). Coverage is incomplete; untested "
+                "inputs remain unknown, not clean."
+            )
+            return updates
         merged = {**state, **updates}
         if self._route_after_think(merged) != "think":
             updates["idle_planning_turns"] = 0
@@ -4008,6 +4020,7 @@ class AgentOrchestrator:
         # project_settings.agent.assessment_mode, else the global env default.
         effective_mode = assessment_mode or resolve_org_default_mode(organization_id)
         depth_token = set_assessment_depth(effective_mode)
+        budget_token = None
         register_run(session_id, this_task)
         try:
             pilot_policy = None
@@ -4029,6 +4042,16 @@ class AgentOrchestrator:
             # Operator policy arrives through /agent, never through a model tool.
             # SessionValue then isolates it from other organizations and runs.
             set_tenant_context(int(user_id), organization_id, session_id)
+            if mode != "pilot":
+                # The bounded pilot keeps its own Redis budget; every other run
+                # gets the operator's hard request ceiling, if one is set.
+                from app.services.agent.request_budget import (
+                    budget_for_session, current_request_budget, resolve_limit,
+                )
+                limit = resolve_limit(assessment_policy)
+                if limit:
+                    budget_token = current_request_budget.set(
+                        budget_for_session(organization_id, session_id, limit))
             if mode == "agent" or assessment_policy is not None:
                 self.tool_manager.set_scoped_assessment_policy(assessment_policy or {})
             else:
@@ -4182,6 +4205,9 @@ class AgentOrchestrator:
         finally:
             reset_pilot(pilot_token)
             current_assessment_depth.reset(depth_token)
+            if budget_token is not None:
+                from app.services.agent.request_budget import current_request_budget
+                current_request_budget.reset(budget_token)
             await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
@@ -4255,11 +4281,17 @@ class AgentOrchestrator:
         run_token = active_run_id.set(run_id)
         register_run(session_id, this_task)
         pilot_token = None
+        budget_token = None
         if status_callback:
             self.set_status_callback(status_callback)
         
         try:
             config = {"configurable": {"thread_id": session_id}}
+            from app.services.agent.request_budget import (
+                current_request_budget as _budget_var, existing_budget,
+            )
+            _resumed_budget = existing_budget(organization_id, session_id)
+            budget_token = _budget_var.set(_resumed_budget) if _resumed_budget else None
             pilot_token = await self._arm_autonomous_from_state(
                 config, organization_id, session_id,
             )
@@ -4297,6 +4329,9 @@ class AgentOrchestrator:
             if pilot_token is not None:
                 from app.services.agent.pilot_policy import reset_pilot
                 reset_pilot(pilot_token)
+            if budget_token is not None:
+                from app.services.agent.request_budget import current_request_budget
+                current_request_budget.reset(budget_token)
             await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
@@ -4328,11 +4363,17 @@ class AgentOrchestrator:
         run_token = active_run_id.set(run_id)
         register_run(session_id, this_task)
         pilot_token = None
+        budget_token = None
         if status_callback:
             self.set_status_callback(status_callback)
         
         try:
             config = {"configurable": {"thread_id": session_id}}
+            from app.services.agent.request_budget import (
+                current_request_budget as _budget_var, existing_budget,
+            )
+            _resumed_budget = existing_budget(organization_id, session_id)
+            budget_token = _budget_var.set(_resumed_budget) if _resumed_budget else None
             pilot_token = await self._arm_autonomous_from_state(
                 config, organization_id, session_id,
             )
@@ -4369,6 +4410,9 @@ class AgentOrchestrator:
             if pilot_token is not None:
                 from app.services.agent.pilot_policy import reset_pilot
                 reset_pilot(pilot_token)
+            if budget_token is not None:
+                from app.services.agent.request_budget import current_request_budget
+                current_request_budget.reset(budget_token)
             await _cancel_background_executions(run_id)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)

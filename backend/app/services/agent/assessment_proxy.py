@@ -114,14 +114,19 @@ async def _reject_proxy_error_page(response) -> None:
 
 def assessment_httpx_options() -> dict:
     """Options for an httpx.AsyncClient that sends in-scope target traffic."""
+    from app.services.agent.request_budget import httpx_event_hooks
+
     proxy_url = assessment_proxy_url()
     options = {"verify": assessment_ca_bundle(proxy_url), "trust_env": False}
+    hooks = httpx_event_hooks()
     if proxy_url:
         import httpx
 
         argument = "proxy" if "proxy" in inspect.signature(httpx.AsyncClient).parameters else "proxies"
         options[argument] = proxy_url
-        options["event_hooks"] = {"response": [_reject_proxy_error_page]}
+        hooks["response"] = [_reject_proxy_error_page]
+    if hooks:
+        options["event_hooks"] = hooks
     return options
 
 
@@ -164,6 +169,11 @@ def assessment_urllib_handlers() -> list:
         handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=certificate)))
     if proxy_url:
         handlers.append(_proxy_error_page_handler())
+    from app.services.agent.request_budget import urllib_handler
+
+    budget_handler = urllib_handler()
+    if budget_handler is not None:
+        handlers.append(budget_handler)
     return handlers
 
 

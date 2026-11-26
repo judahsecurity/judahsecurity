@@ -3493,6 +3493,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             except (ValueError, TypeError) as exc:
                 return {"success": False, "output": str(exc), "error": "invalid_scoped_browser_args"}
 
+        # -- Request ceiling ----------------------------------------------------
+        # Under an operator request ceiling, tools whose target traffic Aegis
+        # cannot count are refused rather than allowed to exceed it. The bounded
+        # pilot enforces its own budget and tool allowlist.
+        from app.services.agent.pilot_policy import current_pilot as _current_pilot
+        from app.services.agent.request_budget import unmetered_refusal
+        if _current_pilot() is None:
+            refusal = unmetered_refusal(tool_name)
+            if refusal:
+                return refusal
+
         # -- Tool guard -------------------------------------------------------
         # Never-touch destinations (government/military domains by default,
         # plus operator rules) are refused before approval or execution. This

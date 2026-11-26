@@ -111,12 +111,66 @@ def skip_static_asset(resource_type: str, url: str) -> bool:
     return resource_type in SKIPPED_CRAWL_RESOURCES and not urlparse(url).query
 
 
-async def _skip_static_assets(route):
-    if skip_static_asset(route.request.resource_type, route.request.url):
-        await route.abort()
-    else:
-        # Hand the request to the scope route (or the network) unchanged.
-        await route.fallback()
+# Playwright disables the browser HTTP cache whenever request routing is on,
+# and scope enforcement routes every request, so each crawled page used to
+# download the same scripts and stylesheets again. They are cached per crawl.
+CACHED_CRAWL_RESOURCES = frozenset({"script", "stylesheet"})
+MAX_CACHED_ASSET_BYTES = 4 * 1024 * 1024
+
+
+def crawl_asset_route(allowed_origin: str):
+    """Route that skips static media and serves repeat same-origin assets from memory."""
+    from app.services.agent.evidence_store import origin as exact_origin
+    from app.services.agent.pilot_policy import current_pilot
+    from app.services.agent.request_budget import RequestBudgetExhausted, active
+
+    try:
+        expected = exact_origin(allowed_origin) if allowed_origin else ""
+    except ValueError:
+        expected = ""
+    cache: Dict[str, Dict[str, Any]] = {}
+    budget = active()
+    stats = {"cache_hits": 0, "skipped_assets": 0}
+
+    async def route_asset(route):
+        request = route.request
+        if skip_static_asset(request.resource_type, request.url):
+            stats["skipped_assets"] += 1
+            await route.abort()
+            return
+        cacheable = (expected and current_pilot() is None
+                     and request.method.upper() == "GET"
+                     and request.resource_type in CACHED_CRAWL_RESOURCES)
+        if cacheable:
+            try:
+                cacheable = exact_origin(request.url) == expected
+            except ValueError:
+                cacheable = False
+        if not cacheable:
+            # Hand the request to the scope route (or the network) unchanged.
+            await route.fallback()
+            return
+        hit = cache.get(request.url)
+        if hit is not None:
+            stats["cache_hits"] += 1
+            await route.fulfill(status=hit["status"], headers=hit["headers"], body=hit["body"])
+            return
+        if budget is not None:
+            try:
+                budget.acquire("discovery")
+            except RequestBudgetExhausted:
+                await route.abort()
+                return
+        response = await route.fetch()
+        body = await response.body()
+        if response.status == 200 and len(body) <= MAX_CACHED_ASSET_BYTES:
+            cache[request.url] = {"status": response.status,
+                                  "headers": dict(response.headers), "body": body}
+        await route.fulfill(response=response, body=body)
+
+    route_asset.stats = stats
+    route_asset.cache = cache
+    return route_asset
 
 
 _LAUNCH_ARGS = [
@@ -420,6 +474,10 @@ class CrawlResult:
     # Value-free browser traffic and distinct first-party request operations.
     network_requests: List[Dict[str, Any]] = field(default_factory=list)
     network_requests_total: int = 0
+    # Requests the browser issued that never reached the target: static media
+    # skipped and repeat scripts/stylesheets served from the crawl's cache.
+    skipped_assets: int = 0
+    asset_cache_hits: int = 0
     network_requests_dropped: int = 0
     application_operations: List[Dict[str, Any]] = field(default_factory=list)
     action_checkpoints: List[Dict[str, Any]] = field(default_factory=list)
@@ -848,11 +906,13 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         allowed_methods=opts.get("allowed_methods"),
                         approved_post_paths=opts.get("approved_post_paths"),
                         approved_delete_paths=opts.get("approved_delete_paths"),
+                        phase="discovery",
                     )
                 # Registered after the scope route so it runs first (Playwright
                 # runs matching routes in reverse registration order); skipped
                 # assets never reach the scope check or the pilot budget.
-                await context.route("**/*", _skip_static_assets)
+                asset_route = crawl_asset_route(opts.get("allowed_origin") or seed)
+                await context.route("**/*", asset_route)
 
                 # Seed authenticated cookies, if provided.
                 cookies = opts.get("cookies")
@@ -1156,7 +1216,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 # Mine collected JS bundles after the input checks so a large
                 # bundle does not starve the reflection evidence handoff.
                 if capture_js and result.js_files and time.monotonic() < crawl_deadline:
-                    await _mine_js(context, result, deadline=crawl_deadline, allowed_origin=opts.get("allowed_origin"))
+                    await _mine_js(context, result, deadline=crawl_deadline,
+                                   allowed_origin=opts.get("allowed_origin"),
+                                   asset_cache=asset_route.cache)
                 elif capture_js and result.js_files:
                     result.errors.append("skipped JS mining — crawl budget exhausted")
 
@@ -1167,6 +1229,12 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 except Exception as e:
                     result.errors.append(f"storage_state: {str(e)[:120]}")
 
+                # Report requests that actually reached the target.
+                result.skipped_assets = asset_route.stats["skipped_assets"]
+                result.asset_cache_hits = asset_route.stats["cache_hits"]
+                result.network_requests_total = max(
+                    0, result.network_requests_total - result.skipped_assets
+                    - result.asset_cache_hits)
                 await context.close()
             finally:
                 await browser.close()
@@ -1228,6 +1296,8 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
         "network_requests": result.network_requests,
         "network_requests_total": result.network_requests_total,
         "network_requests_dropped": result.network_requests_dropped,
+        "skipped_assets": result.skipped_assets,
+        "asset_cache_hits": result.asset_cache_hits,
         "route_variants_skipped": result.route_variants_skipped,
         "application_operations": result.application_operations,
     }
@@ -1662,8 +1732,17 @@ async def _harvest(page):
     return data.get("links", []), data.get("forms", [])
 
 
-async def _mine_js(context, result: CrawlResult, deadline: Optional[float] = None, allowed_origin: Optional[str] = None) -> None:
-    """Fetch discovered JS bundles with the browser context and extract endpoints."""
+async def _mine_js(context, result: CrawlResult, deadline: Optional[float] = None,
+                   allowed_origin: Optional[str] = None,
+                   asset_cache: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+    """Extract endpoints from discovered JS bundles.
+
+    Bundles the crawl already downloaded come from its asset cache; the rest
+    are fetched (context.request bypasses routes, so each fetch is counted
+    against the run's request ceiling here).
+    """
+    from app.services.agent.request_budget import RequestBudgetExhausted, acquire
+
     js_urls = sorted(result.js_files)[:MAX_JS_FETCH]
     for url in js_urls:
         if deadline is not None and time.monotonic() >= deadline:
@@ -1674,10 +1753,18 @@ async def _mine_js(context, result: CrawlResult, deadline: Optional[float] = Non
                 from app.services.agent.evidence_store import origin
                 if origin(url) != origin(allowed_origin):
                     continue
-            resp = await context.request.get(url, timeout=10000, **({"max_redirects": 0} if allowed_origin else {}))
-            if not resp.ok:
-                continue
-            body = await resp.text()
+            cached = (asset_cache or {}).get(url)
+            if cached is not None:
+                body = cached["body"].decode("utf-8", "replace")
+            else:
+                acquire("discovery")
+                resp = await context.request.get(url, timeout=10000, **({"max_redirects": 0} if allowed_origin else {}))
+                if not resp.ok:
+                    continue
+                body = await resp.text()
+        except RequestBudgetExhausted:
+            result.errors.append("js_mine_request_ceiling")
+            break
         except Exception:
             continue
         if not body:

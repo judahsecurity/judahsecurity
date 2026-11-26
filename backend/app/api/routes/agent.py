@@ -121,6 +121,8 @@ class AgentAssessmentPolicy(BaseModel):
     # objective to match the authorization regex.
     oob_callbacks_allowed: bool = False
     credential_testing_allowed: bool = False
+    # Hard ceiling on requests to the target for this session (request_budget.py).
+    max_target_requests: Optional[int] = Field(default=None, ge=10, le=100_000)
 
     @field_validator("auth_login_path")
     @classmethod

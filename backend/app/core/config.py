@@ -234,6 +234,12 @@ class Settings(BaseSettings):
     # End a turn after this many planning steps in a row start no tool, instead
     # of letting the model re-plan until the iteration budget runs out. 0 = off.
     AGENT_MAX_IDLE_PLANNING_TURNS: int = 4
+    # Hard ceiling on target requests per session (0 = none). An operator's
+    # assessment_policy.max_target_requests overrides it. Discovery (kickoff,
+    # crawls, maps) may use only (1 - AGENT_TESTING_RESERVE_FRACTION) of it;
+    # the rest is reserved for input testing and verification.
+    AGENT_MAX_TARGET_REQUESTS: int = 0
+    AGENT_TESTING_RESERVE_FRACTION: float = 0.6
     # Where run_custom_probe / run_poc_python execute model-written Python.
     # "off": tool disabled. "isolated": sent to the probe-runner container
     # through the scope-enforcing probe-egress relay (AGENT_PROBE_RUNNER_URL).

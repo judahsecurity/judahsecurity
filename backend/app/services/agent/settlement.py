@@ -38,7 +38,8 @@ SETTLEMENT_HEADER = (
 )
 SETTLEMENT_FOOTER = "[END SETTLEMENT LEAD]"
 
-BUDGET_REASON_MARKERS = ("time budget", "iteration budget", "planning stalled")
+BUDGET_REASON_MARKERS = ("time budget", "iteration budget", "planning stalled",
+                         "request ceiling")
 
 SETTLEMENT_PROMPT = """The assessment below ran out of budget. Your only job now is to list
 security leads that the trace shows but that were NOT already submitted as candidates.

@@ -149,11 +149,18 @@ async def configure_browser_origin(
     context, target: str, *, allowed_methods: list[str] | None = None,
     approved_post_paths: list[str] | None = None,
     approved_delete_paths: list[str] | None = None,
+    phase: str = "testing",
 ) -> None:
-    """Apply the same exact-origin boundary to browser and crawler contexts."""
+    """Apply the same exact-origin boundary to browser and crawler contexts.
+
+    ``phase`` is the request-ceiling share this context draws from: crawlers
+    pass "discovery" so they cannot spend the reserve kept for input testing.
+    """
     expected_origin = origin(target)
     from app.services.agent.pilot_policy import PilotDenied, current_pilot
+    from app.services.agent.request_budget import RequestBudgetExhausted, active
     pilot = current_pilot()
+    budget = active()
     methods = set(allowed_methods or ()) if allowed_methods is not None else None
     post_paths = set(approved_post_paths or ())
     delete_paths = set(approved_delete_paths or ())
@@ -171,6 +178,11 @@ async def configure_browser_origin(
             try:
                 await pilot.acquire(route.request.url, route.request.method)
             except PilotDenied:
+                permitted = False
+        if permitted and budget is not None:
+            try:
+                budget.acquire(phase)
+            except RequestBudgetExhausted:
                 permitted = False
         await route.continue_() if permitted else await route.abort()
     await context.route("**/*", scope_route)
