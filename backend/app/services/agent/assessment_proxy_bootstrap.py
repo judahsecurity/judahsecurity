@@ -20,11 +20,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import time
 
 logger = logging.getLogger(__name__)
 
 PROJECT_NAME = "prowl-assessment"
+# The project later bootstraps select. Replaced by a fresh project's name when
+# the named one is broken, so a broken project is never reselected.
+_active_project_name = PROJECT_NAME
 _READY_TTL_SECONDS = 600
 _ready_until: dict[str, float] = {}
 _lock = asyncio.Lock()
@@ -59,8 +63,15 @@ async def _graphql(client, url: str, query: str, variables: dict | None = None,
     return body.get("data") or {}
 
 
-async def ensure_project(api_url: str, *, client=None) -> str:
-    """Log in as guest and select (or create) the assessment project."""
+async def ensure_project(api_url: str, *, client=None, fresh: bool = False) -> str:
+    """Log in as guest and select (or create) the assessment project.
+
+    ``fresh`` always creates and selects a new temporary project. Use it when
+    the selected project cannot store traffic: Caido then fails every proxied
+    request ("Could not acquire a connection to the database"), for example
+    after the host disk filled up, and reselecting it by name never recovers.
+    """
+    global _active_project_name
     import httpx
 
     own = client is None
@@ -81,11 +92,14 @@ async def ensure_project(api_url: str, *, client=None) -> str:
         token = (((login.get("loginAsGuest") or {}).get("token") or {}).get("accessToken") or "")
         if not token:
             raise AssessmentProxyNotReady("Caido guest login returned no token")
-        projects = (await _graphql(client, api_url, _PROJECTS, token=token)).get("projects") or []
-        project_id = next((p["id"] for p in projects if p.get("name") == PROJECT_NAME), "")
+        name = f"{PROJECT_NAME}-{secrets.token_hex(4)}" if fresh else _active_project_name
+        project_id = ""
+        if not fresh:
+            projects = (await _graphql(client, api_url, _PROJECTS, token=token)).get("projects") or []
+            project_id = next((p["id"] for p in projects if p.get("name") == name), "")
         if not project_id:
             created = (await _graphql(client, api_url, _CREATE,
-                                      {"input": {"name": PROJECT_NAME, "temporary": True}},
+                                      {"input": {"name": name, "temporary": True}},
                                       token=token)).get("createProject") or {}
             if created.get("error"):
                 raise AssessmentProxyNotReady(f"Caido project create failed: {created['error']}")
@@ -94,6 +108,7 @@ async def ensure_project(api_url: str, *, client=None) -> str:
                                    token=token)).get("selectProject") or {}
         if selected.get("error") or not project_id:
             raise AssessmentProxyNotReady(f"Caido project select failed: {selected.get('error')}")
+        _active_project_name = name
         return project_id
     finally:
         if own:
@@ -151,7 +166,17 @@ async def ensure_assessment_proxy_ready(target: str) -> None:
         api = proxy_api_url()
         if api:
             await ensure_project(api)
-        await preflight(f"{key}/")
+        try:
+            await preflight(f"{key}/")
+        except AssessmentProxyNotReady as exc:
+            if not api:
+                raise
+            # The selected project may be unable to store traffic; Caido then
+            # answers every request with its own 500. Start a new one once.
+            logger.warning("assessment proxy preflight failed (%s); switching to a fresh "
+                           "Caido project", str(exc)[:200])
+            await ensure_project(api, fresh=True)
+            await preflight(f"{key}/")
         _ready_until[key] = time.monotonic() + _READY_TTL_SECONDS
         logger.info("assessment proxy ready for %s", key)
 
@@ -169,4 +194,6 @@ def invalidate(target: str) -> None:
 
 
 def reset_cache() -> None:
+    global _active_project_name
     _ready_until.clear()
+    _active_project_name = PROJECT_NAME

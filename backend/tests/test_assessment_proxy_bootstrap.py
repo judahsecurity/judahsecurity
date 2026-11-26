@@ -179,3 +179,93 @@ async def test_write_capable_browser_operation_is_not_retried(monkeypatch):
         await manager.scoped_browser_assessment(
             "check_xss", "https://app.example.test/search?q=1")
     assert calls == ["check_xss"]
+
+
+# ------------------------------------------- broken project recovery
+
+def _caido_projects(calls, projects):
+    """A Caido API that records every created project name."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        query = body["query"]
+        if "loginAsGuest" in query:
+            return httpx.Response(200, json={"data": {"loginAsGuest": {"token": {"accessToken": "t"}}}})
+        if "createProject" in query:
+            name = body["variables"]["input"]["name"]
+            assert body["variables"]["input"]["temporary"] is True
+            calls.append(("create", name))
+            projects.append({"id": f"id-{name}", "name": name})
+            return httpx.Response(200, json={"data": {"createProject": {
+                "project": {"id": f"id-{name}"}, "error": None}}})
+        if "projects" in query:
+            return httpx.Response(200, json={"data": {"projects": list(projects)}})
+        if "selectProject" in query:
+            calls.append(("select", body["variables"]["id"]))
+            return httpx.Response(200, json={"data": {"selectProject": {
+                "currentProject": {"project": {"id": body["variables"]["id"]}}, "error": None}}})
+        return httpx.Response(400)
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_fresh_project_is_created_and_reused_afterwards():
+    boot.reset_cache()
+    calls, projects = [], [{"id": "broken", "name": boot.PROJECT_NAME}]
+    async with httpx.AsyncClient(transport=_caido_projects(calls, projects)) as client:
+        fresh = await boot.ensure_project("http://caido:8080", client=client, fresh=True)
+        again = await boot.ensure_project("http://caido:8080", client=client)
+    created = [name for kind, name in calls if kind == "create"]
+    assert len(created) == 1 and created[0].startswith(boot.PROJECT_NAME + "-")
+    # The next bootstrap reselects the fresh project, never the broken one.
+    assert fresh == again == f"id-{created[0]}"
+    assert ("select", "broken") not in calls
+    boot.reset_cache()
+
+
+@pytest.mark.asyncio
+async def test_failed_preflight_switches_to_a_fresh_project(monkeypatch):
+    boot.reset_cache()
+    monkeypatch.setattr(boot, "proxy_api_url", lambda: "http://caido:8080")
+    monkeypatch.setattr("app.services.agent.assessment_proxy.assessment_proxy_url",
+                        lambda: "http://caido:8082")
+    seen = []
+
+    async def ensure_project(api, *, client=None, fresh=False):
+        seen.append(("project", fresh))
+        return "p"
+
+    attempts = iter([boot.AssessmentProxyNotReady("Could not acquire a connection"), None])
+
+    async def preflight(target, *, client=None):
+        seen.append(("preflight", target))
+        error = next(attempts)
+        if error:
+            raise error
+
+    monkeypatch.setattr(boot, "ensure_project", ensure_project)
+    monkeypatch.setattr(boot, "preflight", preflight)
+    await boot.ensure_assessment_proxy_ready("https://app.test/x")
+    assert seen == [("project", False), ("preflight", "https://app.test/"),
+                    ("project", True), ("preflight", "https://app.test/")]
+    assert "https://app.test" in boot._ready_until
+    boot.reset_cache()
+
+
+@pytest.mark.asyncio
+async def test_still_broken_after_fresh_project_fails_clearly(monkeypatch):
+    boot.reset_cache()
+    monkeypatch.setattr(boot, "proxy_api_url", lambda: "http://caido:8080")
+    monkeypatch.setattr("app.services.agent.assessment_proxy.assessment_proxy_url",
+                        lambda: "http://caido:8082")
+
+    async def ensure_project(api, *, client=None, fresh=False):
+        return "p"
+
+    async def preflight(target, *, client=None):
+        raise boot.AssessmentProxyNotReady("Proxy page said: database unavailable")
+
+    monkeypatch.setattr(boot, "ensure_project", ensure_project)
+    monkeypatch.setattr(boot, "preflight", preflight)
+    with pytest.raises(boot.AssessmentProxyNotReady, match="database unavailable"):
+        await boot.ensure_assessment_proxy_ready("https://app.test/")
+    assert "https://app.test" not in boot._ready_until
