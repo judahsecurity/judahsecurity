@@ -59,6 +59,37 @@ def test_session_budget_survives_resume_and_limit_change():
     assert rb.existing_budget(12, "other") is None
 
 
+def test_peak_request_rate_is_enforced_across_one_second(monkeypatch):
+    now = [100.0]
+    delays = []
+
+    def sleep(delay):
+        delays.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr(rb, "_clock", lambda: now[0])
+    monkeypatch.setattr(rb, "_sleep", sleep)
+    b = rb.RequestBudget(limit=12, reserve=0, rate_per_second=10)
+    for _ in range(10):
+        b.acquire()
+    assert now[0] == 100.0
+    b.acquire()
+    assert delays == [1.0]
+    assert b.used == 11
+    assert b.snapshot()["rate_per_second"] == 10
+
+
+def test_session_budget_uses_deployment_rate(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "AGENT_TARGET_REQUESTS_PER_SECOND", 10)
+    b = rb.budget_for_session(12, "rate", 500)
+    assert b.rate_per_second == 10
+    monkeypatch.setattr(settings, "AGENT_TARGET_REQUESTS_PER_SECOND", 5)
+    assert rb.budget_for_session(12, "rate", 500) is b
+    assert b.rate_per_second == 5
+
+
 def test_limit_comes_from_policy_then_settings(monkeypatch):
     from app.core.config import settings
 
