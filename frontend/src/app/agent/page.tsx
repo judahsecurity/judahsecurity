@@ -33,6 +33,7 @@ import { AttackScenarioPanel, ChainData } from '@/components/agent/AttackScenari
 import { EngagementReplay, ReplayStep, TokenUsage } from '@/components/agent/EngagementReplay';
 import { RunLedgerPanel, AgentRunLedger } from '@/components/agent/RunLedgerPanel';
 import { ReviewQueuePanel } from '@/components/agent/ReviewQueuePanel';
+import { FindingValidationPanel } from '@/components/agent/FindingValidationPanel';
 import { CaptureSessionPanel } from '@/components/agent/CaptureSessionPanel';
 import {
   CapabilityMapPanel,
@@ -2316,6 +2317,11 @@ function AgentPageContent() {
                 {runLedger?.run_id && (
                   <div className="mt-4 w-full">
                     <RunLedgerPanel run={runLedger} />
+                  </div>
+                )}
+                {sessionId && runLedger?.run_id && (
+                  <div className="mt-4 w-full">
+                    <FindingValidationPanel sessionId={sessionId} refreshKey={`${runLedger.run_id}:${runLedger.status}`} />
                   </div>
                 )}
                 {sessionId && runLedger?.run_id && (
