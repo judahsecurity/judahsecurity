@@ -1343,6 +1343,23 @@ def test_batch_refuses_stale_map_for_current_target():
     assert result["error"] == "assessment_target_mismatch"
     assert manager.calls == 0
 
+
+@pytest.mark.parametrize("scope,allowed", [
+    ("app.test", True),
+    ("https://app.test", True),
+    ("other.test", False),
+    ("app.test/path", False),
+])
+def test_batch_accepts_only_matching_bare_host_scope(scope, allowed):
+    class Manager:
+        _engagement_brain = EngagementBrain(target="https://app.test").to_dict()
+        _capability_map = {"target": "https://app.test/", "scope": scope}
+
+    result = asyncio.run(run_observed_input_batch(
+        Manager(), target="https://app.test/", max_checks=1,
+    ))
+    assert (result.get("error") != "assessment_target_mismatch") is allowed
+
 @pytest.mark.asyncio
 async def test_nested_first_pass_probe_reserves_gets_without_context_leak():
     from app.services.agent.observed_input_batch import _invoke

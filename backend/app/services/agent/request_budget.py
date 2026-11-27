@@ -23,12 +23,16 @@ session keeps counting. A backend restart resets it.
 from __future__ import annotations
 
 import threading
+import time
+from collections import deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Deque, Dict, Optional, Tuple
 
 DISCOVERY = "discovery"
 TESTING = "testing"
+_clock = time.monotonic
+_sleep = time.sleep
 
 # Tools that send target traffic outside the counted transports.
 UNMETERED_TOOLS = frozenset({
@@ -47,10 +51,12 @@ class RequestBudgetExhausted(RuntimeError):
 class RequestBudget:
     limit: int
     reserve: int
+    rate_per_second: int = 0
     used: int = 0
     discovery_used: int = 0
     refused: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _recent: Deque[float] = field(default_factory=deque, repr=False)
 
     @property
     def discovery_limit(self) -> int:
@@ -65,29 +71,42 @@ class RequestBudget:
         return self.discovery_used >= self.discovery_limit or self.exhausted
 
     def acquire(self, phase: str = TESTING) -> int:
-        """Reserve one outbound target request or raise RequestBudgetExhausted."""
-        with self._lock:
-            if self.used >= self.limit:
-                self.refused += 1
-                raise RequestBudgetExhausted(
-                    f"Request ceiling reached: {self.used}/{self.limit} target requests used. "
-                    "No further target traffic is sent in this run.")
-            if phase == DISCOVERY and self.discovery_used >= self.discovery_limit:
-                self.refused += 1
-                raise RequestBudgetExhausted(
-                    f"Discovery share of the request ceiling is spent ({self.discovery_used}/"
-                    f"{self.discovery_limit}); the remaining {self.limit - self.used} requests are "
-                    "reserved for input testing and verification.")
-            self.used += 1
-            if phase == DISCOVERY:
-                self.discovery_used += 1
-            return self.used
+        """Reserve one outbound request, respecting the ceiling and peak rate."""
+        while True:
+            with self._lock:
+                if self.used >= self.limit:
+                    self.refused += 1
+                    raise RequestBudgetExhausted(
+                        f"Request ceiling reached: {self.used}/{self.limit} target requests used. "
+                        "No further target traffic is sent in this run.")
+                if phase == DISCOVERY and self.discovery_used >= self.discovery_limit:
+                    self.refused += 1
+                    raise RequestBudgetExhausted(
+                        f"Discovery share of the request ceiling is spent ({self.discovery_used}/"
+                        f"{self.discovery_limit}); the remaining {self.limit - self.used} requests are "
+                        "reserved for input testing and verification.")
+                delay = 0.0
+                if self.rate_per_second > 0:
+                    now = _clock()
+                    while self._recent and now - self._recent[0] >= 1.0:
+                        self._recent.popleft()
+                    if len(self._recent) >= self.rate_per_second:
+                        delay = max(0.001, 1.0 - (now - self._recent[0]))
+                    else:
+                        self._recent.append(now)
+                if not delay:
+                    self.used += 1
+                    if phase == DISCOVERY:
+                        self.discovery_used += 1
+                    return self.used
+            _sleep(delay)
 
     def snapshot(self) -> Dict[str, int]:
         with self._lock:
             return {"limit": self.limit, "used": self.used, "reserve": self.reserve,
                     "discovery_limit": self.discovery_limit,
-                    "discovery_used": self.discovery_used, "refused": self.refused}
+                    "discovery_used": self.discovery_used, "refused": self.refused,
+                    "rate_per_second": self.rate_per_second}
 
 
 current_request_budget: ContextVar[Optional[RequestBudget]] = ContextVar(
@@ -116,12 +135,14 @@ def budget_for_session(organization_id: int, session_id: str, limit: int) -> Req
     with _budgets_lock:
         budget = _budgets.get(key)
         reserve = int(round(limit * reserve_fraction()))
+        from app.core.config import settings
+        rate = max(0, int(getattr(settings, "AGENT_TARGET_REQUESTS_PER_SECOND", 0)))
         if budget is None:
-            budget = RequestBudget(limit=limit, reserve=reserve)
+            budget = RequestBudget(limit=limit, reserve=reserve, rate_per_second=rate)
             _budgets[key] = budget
-        elif limit != budget.limit:
+        elif limit != budget.limit or rate != budget.rate_per_second:
             with budget._lock:
-                budget.limit, budget.reserve = limit, reserve
+                budget.limit, budget.reserve, budget.rate_per_second = limit, reserve, rate
         return budget
 
 

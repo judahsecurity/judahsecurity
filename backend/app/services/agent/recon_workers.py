@@ -544,6 +544,13 @@ async def spawn_workers(
     target = _normalize_url(url)
     if not target:
         return []
+    # Background subprocesses send requests outside the counted transports.
+    # This guard also covers automatic kickoff and empty-root enrichment, which
+    # call spawn_workers directly rather than through the model's tool gate.
+    from app.services.agent.request_budget import active as active_request_budget
+    if active_request_budget() is not None:
+        logger.info("Skipping unmetered recon workers under a request ceiling")
+        return []
     sid = (session_id or "").strip() or "default"
     skip = {k.strip() for k in (skip_kinds or []) if k}
 

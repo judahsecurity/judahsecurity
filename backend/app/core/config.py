@@ -239,6 +239,7 @@ class Settings(BaseSettings):
     # crawls, maps) may use only (1 - AGENT_TESTING_RESERVE_FRACTION) of it;
     # the rest is reserved for input testing and verification.
     AGENT_MAX_TARGET_REQUESTS: int = 0
+    AGENT_TARGET_REQUESTS_PER_SECOND: int = 0
     AGENT_TESTING_RESERVE_FRACTION: float = 0.6
     # Run the bounded SQLi/XSS first pass on inputs while execute_deep_crawl is
     # still mapping, instead of only after it returns (streaming_first_pass.py).
