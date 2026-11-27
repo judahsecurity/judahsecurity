@@ -252,8 +252,17 @@ async def run_observed_input_batch(
     active_target = str(target or getattr(manager, "_fallback_target", "") or
                         cmap.get("target") or "")
     active_origin = _origin(active_target)
+    def map_origin(key: str) -> str:
+        value = str(cmap.get(key) or "").strip()
+        # Deep crawl stores its exact-host scope as a bare hostname, while
+        # target is a URL. Normalize that host before comparing origins.
+        if key == "scope" and value and "://" not in value:
+            if any(char in value for char in "/?#@\\"):
+                return ""
+            value = f"{urlsplit(active_origin).scheme}://{value}"
+        return _origin(value)
     map_origins = [
-        _origin(str(cmap[key])) for key in ("target", "scope") if cmap.get(key)
+        map_origin(key) for key in ("target", "scope") if cmap.get(key)
     ]
     if (not active_origin or not map_origins
             or any(origin != active_origin for origin in map_origins)):
