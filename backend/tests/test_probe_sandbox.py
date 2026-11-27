@@ -560,3 +560,29 @@ def test_sandbox_shell_runs_under_policy_and_sends_it(monkeypatch):
     assert "error" not in out, out
     assert sent["method_policy"] == {"approved_post_paths": ["/cart"], "approved_delete_paths": []}
     assert sent["oob_allowed"] is False
+
+
+def test_runner_reports_an_immutable_toolbox_identity():
+    """The runner builds a fingerprint over its image ref and executables, so a
+    tool added mid-job would change it. See probe_sandbox/runner.py."""
+    import importlib.util
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), "..", "probe_sandbox", "runner.py")
+    spec = importlib.util.spec_from_file_location("probe_runner_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    os.environ["PROBE_IMAGE_REF"] = "asm-probe-runner@sha256:test"
+    os.environ.setdefault("PROBE_RUNNER_TOKEN", "x" * 24)
+    spec.loader.exec_module(mod)
+
+    identity = mod.RUNNER_IDENTITY
+    assert identity["image_ref"] == "asm-probe-runner@sha256:test"
+    assert len(identity["fingerprint"]) == 64
+    assert "bash" in identity["tools"] and "python3" in identity["tools"]
+    # Rebuilding with the same image yields the same fingerprint; a different
+    # image reference changes it.
+    assert mod._build_identity()["fingerprint"] == identity["fingerprint"]
+    # IMAGE_REF is read once at startup (immutable for the process); a different
+    # pinned image would produce a different fingerprint.
+    mod.IMAGE_REF = "other"
+    assert mod._build_identity()["fingerprint"] != identity["fingerprint"]

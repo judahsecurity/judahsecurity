@@ -167,6 +167,29 @@ addresses need `PROBE_ALLOW_PRIVATE_TARGETS=true` on `probe-egress`, and
 self-signed lab certificates need `PROBE_UPSTREAM_VERIFY_TLS=false`; never set
 either for customer targets.
 
+### Sandbox job provenance
+
+Every sandbox job (a `sandbox_shell` command or an isolated `run_custom_probe`
+script) carries a signed provenance receipt, so a reviewer can prove which
+session, user and organization submitted it and which toolbox it ran against.
+
+- The runner builds an immutable toolbox identity once at startup: the pinned
+  image reference (`PROBE_IMAGE_REF`, set to the image digest in compose), the
+  version of each core tool, and a hash over every executable on `PATH`. It is
+  returned in each `/run` reply and from `GET /identity`. Because a job runs as
+  an unprivileged uid against a read-only image, nothing can be added mid-job,
+  and any change to the toolbox changes the fingerprint.
+- Each job's receipt (`probe_provenance.py`) binds the command (by SHA-256,
+  never the text) to the active run, and through the run ledger to the session,
+  user and organization. It is HMAC-signed with `SECRET_KEY` and written to the
+  action ledger as a `sandbox_exec` receipt whose `fingerprint` column holds the
+  signature, so a tampered row is detectable.
+- Pin the expected toolbox fingerprint with `AGENT_PROBE_RUNNER_FINGERPRINT`
+  (read it from `GET /identity` of the deployed runner). A job whose runner
+  reports a different fingerprint is recorded as a `sandbox_drift` receipt and
+  the tool result carries a drift warning. Empty pin = trust-on-first-use
+  (recorded but not flagged).
+
 ## Logged-in capture (extension and HAR)
 
 Analysts can hand Prowl sessions it cannot log in to itself. See

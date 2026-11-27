@@ -265,6 +265,11 @@ class Settings(BaseSettings):
     AGENT_CUSTOM_PROBE_MODE: str = "off"
     AGENT_PROBE_RUNNER_URL: str = "http://probe-egress:9000"
     AGENT_PROBE_RUNNER_TOKEN: str = ""
+    # Expected probe-runner toolbox fingerprint (from GET /identity of the pinned
+    # image). When set, a sandbox job whose runner reports a different
+    # fingerprint is flagged as toolbox drift in the provenance receipt, proving
+    # no tool was added mid-engagement. Empty = trust-on-first-use (report only).
+    AGENT_PROBE_RUNNER_FINGERPRINT: str = ""
     # Give specialists sandbox_shell (bash + curl/sqlmap/ffuf/python) inside
     # probe-runner. Needs AGENT_CUSTOM_PROBE_MODE=isolated; never runs in-process.
     AGENT_SANDBOX_SHELL: bool = False

@@ -131,6 +131,7 @@ services:
       - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
       - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
+      - AGENT_PROBE_RUNNER_FINGERPRINT=${AGENT_PROBE_RUNNER_FINGERPRINT:-}
       - AGENT_SANDBOX_SHELL=${AGENT_SANDBOX_SHELL:-true}
       # Legacy optional executor; normal Prowl mode uses the built-in backend tools.
       - PROWL_ASSESSMENT_URL=${PROWL_ASSESSMENT_URL:-}
@@ -375,6 +376,9 @@ services:
     cpus: 1.0
     environment:
       - PROBE_RUNNER_TOKEN=${PROBE_RUNNER_TOKEN:-}
+      # Recorded in each job's provenance receipt as the toolbox the job ran
+      # against. Set to the pinned image digest in production.
+      - PROBE_IMAGE_REF=${PROBE_RUNNER_IMAGE:-asm-probe-runner:latest}
     networks:
       - probe_net
     profiles:
@@ -566,6 +570,7 @@ services:
       - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
       - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
+      - AGENT_PROBE_RUNNER_FINGERPRINT=${AGENT_PROBE_RUNNER_FINGERPRINT:-}
       - AGENT_SANDBOX_SHELL=${AGENT_SANDBOX_SHELL:-true}
       - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}

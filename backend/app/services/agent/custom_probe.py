@@ -500,4 +500,6 @@ async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: flo
         "exchanges_dropped": int(result.get("exchanges_dropped") or 0),
         "tcp": result.get("tcp") if isinstance(result.get("tcp"), dict) else {},
         "allowed_hosts": hosts,
+        "runner_identity": result.get("runner_identity")
+            if isinstance(result.get("runner_identity"), dict) else {},
     }

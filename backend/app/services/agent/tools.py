@@ -7280,6 +7280,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         else:
             result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
         result["execution"] = mode
+        if mode == "isolated":
+            from app.services.agent.probe_provenance import record_sandbox_exec
+            result["provenance"] = record_sandbox_exec(
+                kind="probe", command=source, scope_hosts=hosts,
+                runner_identity=result.pop("runner_identity", None))
         if result.get("exchanges"):
             result["exchanges"] = self._record_probe_exchanges(result["exchanges"])
         oob_allowed = mode != "isolated" or bool(self._oob_callbacks_allowed)
@@ -7331,6 +7336,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             oob_allowed=bool(self._oob_callbacks_allowed),
         )
         result["execution"] = "isolated"
+        from app.services.agent.probe_provenance import record_sandbox_exec
+        result["provenance"] = record_sandbox_exec(
+            kind="shell", command=command,
+            scope_hosts=self._probe_scope_hosts(allowed_hosts),
+            runner_identity=result.pop("runner_identity", None))
         if result.get("exchanges"):
             result["exchanges"] = self._record_probe_exchanges(result["exchanges"])
             result["hint"] = (

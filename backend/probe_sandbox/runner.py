@@ -9,6 +9,8 @@ cannot read the server's environment.
 
 from __future__ import annotations
 
+import glob
+import hashlib
 import hmac
 import json
 import os
@@ -34,6 +36,66 @@ MAX_COMMAND_BYTES = 8000
 SHELL = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+
+# The image this runner was built from, pinned by the deployment (compose sets
+# it to the image digest). Part of the identity a job's provenance is bound to.
+IMAGE_REF = os.environ.get("PROBE_IMAGE_REF", "")
+# Tools whose presence and version define the toolbox a job ran against. A job
+# cannot add to this set (unprivileged uid, read-only image), and any change to
+# the inventory below changes the fingerprint, so a tool that "appeared" shows.
+_INVENTORY_TOOLS = (
+    "bash", "sh", "curl", "wget", "jq", "nmap", "ffuf", "sqlmap",
+    "nc", "proxychains4", "python3",
+)
+
+
+def _tool_version(name: str) -> str:
+    path = shutil.which(name)
+    if not path:
+        return "absent"
+    for flag in ("--version", "-version", "-V"):
+        try:
+            out = subprocess.run([path, flag], capture_output=True, text=True,
+                                 timeout=5)
+            line = (out.stdout or out.stderr or "").strip().splitlines()
+            if line:
+                return line[0][:120]
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return "present"
+
+
+def _path_executables() -> list:
+    """Every executable on PATH, so an added binary changes the inventory hash."""
+    names = set()
+    for directory in ("/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"):
+        try:
+            for entry in glob.glob(os.path.join(directory, "*")):
+                if os.path.isfile(entry) and os.access(entry, os.X_OK):
+                    names.add(os.path.basename(entry))
+        except OSError:
+            continue
+    return sorted(names)
+
+
+def _build_identity() -> dict:
+    tools = {name: _tool_version(name) for name in _INVENTORY_TOOLS}
+    executables = _path_executables()
+    material = json.dumps({"image_ref": IMAGE_REF, "tools": tools,
+                           "executables": executables}, sort_keys=True).encode()
+    return {
+        "image_ref": IMAGE_REF,
+        "tools": tools,
+        "executable_count": len(executables),
+        "executables_sha256": hashlib.sha256(
+            "\n".join(executables).encode()).hexdigest(),
+        "fingerprint": hashlib.sha256(material).hexdigest(),
+        "python": sys.version.split()[0],
+    }
+
+
+# Computed once at startup: the toolbox is immutable for the process lifetime.
+RUNNER_IDENTITY = _build_identity()
 
 
 def _limits() -> None:
@@ -125,12 +187,14 @@ def run_script(script: str, timeout: float, proxy_url: str, ca_pem: str = "",
             except OSError:
                 process.kill()
             process.communicate()
-            return {"ok": False, "error": f"probe timed out after {timeout}s"}
+            return {"ok": False, "error": f"probe timed out after {timeout}s",
+                    "runner_identity": RUNNER_IDENTITY}
         return {
             "ok": process.returncode == 0,
             "exit_code": process.returncode,
             "stdout": stdout.decode("utf-8", "replace")[:MAX_OUTPUT],
             "stderr": stderr.decode("utf-8", "replace")[:2000],
+            "runner_identity": RUNNER_IDENTITY,
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -151,6 +215,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
+        if self.path == "/identity":
+            self._json(200, {"ok": True, "runner_identity": RUNNER_IDENTITY})
+            return
         self._json(200 if self.path == "/healthz" else 404, {"ok": self.path == "/healthz"})
 
     def do_POST(self) -> None:
