@@ -1,5 +1,6 @@
 """Hard per-run request ceiling, its testing reserve, and pipeline order under it."""
 
+import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import build_opener
@@ -111,6 +112,17 @@ def test_unmetered_tools_are_refused_only_under_a_ceiling(budget):
     for name in ("execute_deep_crawl", "execute_browser", "scoped_browser_assessment",
                  "probe_observed_input_batch", "replay_http_request"):
         assert rb.unmetered_refusal(name) is None, name
+
+
+def test_automatic_recon_workers_are_refused_under_a_ceiling(budget):
+    from app.services.agent import recon_workers
+
+    budget(limit=50)
+    spawned = asyncio.run(recon_workers.spawn_workers(
+        url="https://example.test/", session_id="capped-recon-test", pack="early",
+    ))
+    assert spawned == []
+    assert asyncio.run(recon_workers.list_workers("capped-recon-test")) == []
 
 
 @pytest.mark.asyncio
