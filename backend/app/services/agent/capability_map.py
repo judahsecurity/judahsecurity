@@ -621,7 +621,24 @@ ATTACK_SPECIALIST_NAMES = [
     "coverage",
     "finding_judge",
     "vuln_triage",
+    # Surface-triggered stack / perimeter lanes (surface_hunters.py)
+    "grpc_api",
+    "nodejs_express",
+    "deserialization",
+    "m365_entra",
+    "okta_idp",
+    "sharepoint",
+    "enterprise_vpn",
+    "vcenter",
+    "spring_boot",
+    "laravel",
+    "nextjs",
+    "aspnet_iis",
 ]
+
+# A fingerprinted stack/perimeter lane is cheap and specific; keep at most this
+# many of them from being crowded out of a wave by generic hunts.
+_MAX_FORCED_SURFACE_SPECIALISTS = 2
 
 
 def select_specialists_for_map(
@@ -631,6 +648,8 @@ def select_specialists_for_map(
     include_recon: bool = False,
 ) -> List[str]:
     """Pick fireteam specialists from a capability map (tester branching)."""
+    from app.services.agent.surface_hunters import PORTED_SPECIALISTS, SURFACE_HUNT_SPECIALISTS
+
     if isinstance(cmap, dict):
         cmap = build_capability_map_from_dict(cmap)
     if not cmap or not cmap.ready_for_attack:
@@ -664,6 +683,7 @@ def select_specialists_for_map(
             "sqli": "sqli",
             "login_injection": "sqli",
             "ssrf": "ssrf",
+            **SURFACE_HUNT_SPECIALISTS,
         }
         if cmap:
             for item in cmap.ranked_hunt_queue or []:
@@ -709,6 +729,7 @@ def select_specialists_for_map(
         "admin_surface": "auth_logic",
         "realtime": "api_authz",
         "baseline_web": "injection",
+        **SURFACE_HUNT_SPECIALISTS,
     }
     for item in cmap.ranked_hunt_queue:
         name = hunt_to_specialist.get(item.get("hunt", ""))
@@ -728,6 +749,12 @@ def select_specialists_for_map(
         forced.append("content_api")
     if any((item.get("hunt") or "") == "docker_registry" for item in (cmap.ranked_hunt_queue or [])):
         forced.append("coverage")
+    surface_forced = [
+        SURFACE_HUNT_SPECIALISTS[hunt]
+        for hunt in (item.get("hunt") or "" for item in (cmap.ranked_hunt_queue or []))
+        if SURFACE_HUNT_SPECIALISTS.get(hunt) in PORTED_SPECIALISTS
+    ]
+    forced.extend(list(dict.fromkeys(surface_forced))[:_MAX_FORCED_SURFACE_SPECIALISTS])
     ordered: List[str] = []
     for name in ["app_mapper", *forced, *selected]:
         if name and name not in ordered:

@@ -1,29 +1,27 @@
-"""Persistent, label-addressed HTTP sessions for authorized test identities.
+"""Log authorized test identities in on the operator's machine.
 
-Secrets remain inside this module.  Agents receive only identity labels and
-sanitized session status, then reference a label when making a guarded tool
-call.  Requests still flow through ``scanners.run_send_http_request`` so scope
-controls, tracing, and the shared request ledger remain intact.
+``prowl_client.py identities`` uses this to establish each identity from a
+Vanguard identity file (form/JSON login, bearer extraction, failure markers,
+same-origin redirects) and hand only the resulting cookies and headers to
+Prowl. Passwords never leave this machine. Callers see sanitized status only;
+session material comes out through ``session_material`` for the platform API.
 """
 
 from __future__ import annotations
 
 import json
-import hashlib
 import re
 import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from http.cookies import SimpleCookie
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import urlencode, urljoin, urlparse
 
-from agent.authz_probe import _authz_verdict
-
 
 Transport = Callable[[str, str, Dict[str, str], str, bool], Dict[str, Any]]
-_SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization", "set-cookie"}
-_SAFE_RETRY_METHODS = {"GET", "HEAD", "OPTIONS"}
 _AUTH_PATH_RE = re.compile(
     r"(?:login|sign[ -]?in|session|authenticate|account|oauth|sso)", re.I
 )
@@ -51,6 +49,14 @@ def _same_origin(a: str, b: str) -> bool:
         return False
 
 
+_MAX_BODY = 1_000_000
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # never follow; callers decide
+        return None
+
+
 def _default_transport(
     method: str,
     url: str,
@@ -58,16 +64,22 @@ def _default_transport(
     body: str,
     follow_redirects: bool,
 ) -> Dict[str, Any]:
-    import scanners
-
-    return scanners.run_send_http_request(
-        method=method,
-        url=url,
-        headers_json=json.dumps(headers),
-        body=body,
-        follow_redirects=follow_redirects,
-        bridge=None,
+    """One HTTP request without following redirects (status, body, raw_headers)."""
+    _origin(url)
+    request = urllib.request.Request(
+        url, data=body.encode() if body else None, headers=dict(headers), method=method,
     )
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        response = opener.open(request, timeout=20)  # noqa: S310 - operator-scoped URL
+        status, message, raw = response.status, response.headers, response.read(_MAX_BODY)
+    except urllib.error.HTTPError as exc:
+        status, message, raw = exc.code, exc.headers, exc.read(_MAX_BODY)
+    except (urllib.error.URLError, OSError) as exc:
+        return {"status": None, "body": "", "raw_headers": "", "error": str(exc)[:200]}
+    lines = [f"HTTP/1.1 {status}"] + [f"{k}: {v}" for k, v in message.items()]
+    return {"status": status, "body": raw.decode("utf-8", "replace"),
+            "raw_headers": "\r\n".join(lines) + "\r\n\r\n"}
 
 
 def _response_headers(response: Dict[str, Any]) -> Dict[str, str]:
@@ -105,13 +117,6 @@ def _cookie_pairs(value: str) -> Dict[str, str]:
     except Exception:
         return {}
     return {name: morsel.value for name, morsel in cookie.items()}
-
-
-def _safe_headers(response: Dict[str, Any]) -> Dict[str, str]:
-    return {
-        key: "[REDACTED]" if key.lower() in _SENSITIVE_HEADERS else value
-        for key, value in _response_headers(response).items()
-    }
 
 
 class _FormParser(HTMLParser):
@@ -305,14 +310,6 @@ class IdentitySessionManager:
                 f"{name}={value}" for name, value in sorted(runtime.cookies.items())
             )
         response = self._transport(method.upper(), url, merged, body, False)
-        request_id = response.get("request_id")
-        if request_id:
-            try:
-                from agent.request_ledger import get_request_ledger
-
-                get_request_ledger().tag_identity(str(request_id), runtime.label)
-            except Exception:
-                pass
         for value in _set_cookie_values(response):
             parsed = SimpleCookie()
             try:
@@ -492,211 +489,6 @@ class IdentitySessionManager:
                 runtime.state, runtime.error = "error", str(exc)
             return self._public_status(runtime)
 
-    def _refresh_csrf(self, runtime: _IdentityRuntime, url: str) -> None:
-        response = self._send_locked(runtime, "GET", url)
-        name, value = _csrf_value(str(response.get("body") or ""))
-        if not value:
-            raise ValueError("no CSRF token found on refresh page")
-        runtime.csrf_name, runtime.csrf_value = name, value
-
-    def request(
-        self,
-        identity_label: str,
-        method: str,
-        url: str,
-        headers: Optional[Dict[str, str]] = None,
-        body: str = "",
-        csrf_url: str = "",
-        refresh_on_auth_failure: bool = True,
-    ) -> dict:
-        runtime = self._runtime(identity_label)
-        method = method.upper()
-        forbidden = [
-            key for key in (headers or {}) if key.lower() in _SENSITIVE_HEADERS
-        ]
-        if forbidden:
-            return {"error": "identity requests cannot override session headers"}
-        with runtime.lock:
-            if runtime.state not in {"authenticated", "ready_unverified"}:
-                return {
-                    "error": f"identity session is not ready ({runtime.state})",
-                    "identity": runtime.label,
-                }
-            request_headers = dict(headers or {})
-            if "{{csrf}}" in body or any("{{csrf}}" in value for value in request_headers.values()):
-                if csrf_url:
-                    self._validate_url(csrf_url)
-                    self._refresh_csrf(runtime, csrf_url)
-                elif not runtime.csrf_value:
-                    self._refresh_csrf(runtime, url)
-                body = body.replace("{{csrf}}", runtime.csrf_value)
-                request_headers = {
-                    key: value.replace("{{csrf}}", runtime.csrf_value)
-                    for key, value in request_headers.items()
-                }
-            response = self._send_locked(runtime, method, url, request_headers, body)
-            refreshed = False
-            if (
-                refresh_on_auth_failure
-                and method in _SAFE_RETRY_METHODS
-                and response.get("status") in {401, 403}
-                and runtime.username
-            ):
-                self.establish(runtime.label, force=True)
-                if runtime.state == "authenticated":
-                    response = self._send_locked(runtime, method, url, request_headers, body)
-                    refreshed = True
-            result = self._public_response(runtime, response, url, method)
-            result.update({
-                "probe": "identity_request",
-                "identity": runtime.label,
-                "identity_state": runtime.state,
-                "session_refreshed": refreshed,
-                "candidates": [],
-            })
-            return result
-
-    def authz_diff(
-        self,
-        owner_label: str,
-        other_label: str,
-        target_url: str,
-        method: str = "GET",
-        body: str = "",
-        headers: Optional[Dict[str, str]] = None,
-        test_unauth: bool = True,
-    ) -> dict:
-        owner = self.request(
-            owner_label, method, target_url, headers=headers, body=body
-        )
-        if owner.get("error"):
-            return {"probe": "authz", "target": target_url, "candidates": [],
-                    "error": f"owner request failed: {owner['error']}"}
-        other = self.request(
-            other_label, method, target_url, headers=headers, body=body
-        )
-        if other.get("error"):
-            return {"probe": "authz", "target": target_url, "candidates": [],
-                    "error": f"other-identity request failed: {other['error']}"}
-        unauth = None
-        if test_unauth:
-            self._validate_url(target_url)
-            unauth_raw = self._transport(
-                method.upper(), target_url, dict(headers or {}), body, False
-            )
-            if unauth_raw.get("request_id"):
-                try:
-                    from agent.request_ledger import get_request_ledger
-
-                    get_request_ledger().tag_identity(
-                        str(unauth_raw["request_id"]), "anonymous"
-                    )
-                except Exception:
-                    pass
-            unauth = {
-                **unauth_raw,
-                "headers": _safe_headers(unauth_raw),
-            }
-
-        verdict = _authz_verdict(owner, other, unauth)
-        candidates: List[dict] = []
-        finding = verdict.get("finding")
-        if finding:
-            candidates.append({
-                "title": (
-                    "Insecure Direct Object Reference (BOLA)"
-                    if finding == "idor"
-                    else "Broken Access Control — unauthenticated object access"
-                ),
-                "vuln_type": finding,
-                "severity": "high",
-                "url": target_url,
-                "method": method.upper(),
-                "identity": other_label if finding == "idor" else "anonymous",
-                "owner_identity": owner_label,
-                "other_identity": other_label,
-                "evidence": verdict.get("reason"),
-                "similarity": verdict.get("similarity"),
-                "response_evidence": self._brief(
-                    other if finding == "idor" else unauth
-                ),
-                "confirmed": True,
-            })
-        candidate_identity = (
-            other_label if finding == "idor"
-            else "anonymous" if finding == "broken_access_control"
-            else ""
-        )
-        coverage = [
-            {"parameter_spec": "endpoint", "identity": owner_label,
-             "status": "tested_negative", "signals": []},
-            {"parameter_spec": "endpoint", "identity": other_label,
-             "status": "candidate" if candidate_identity == other_label else "tested_negative",
-             "signals": [finding] if candidate_identity == other_label else []},
-        ]
-        if test_unauth:
-            coverage.append({
-                "parameter_spec": "endpoint", "identity": "anonymous",
-                "status": "candidate" if candidate_identity == "anonymous" else "tested_negative",
-                "signals": [finding] if candidate_identity == "anonymous" else [],
-            })
-        return {
-            "probe": "authz",
-            "target": target_url,
-            "method": method.upper(),
-            "tested_identities": [owner_label, other_label]
-                + (["anonymous"] if test_unauth else []),
-            "owner": self._brief(owner),
-            "other": self._brief(other),
-            "unauth": self._brief(unauth) if unauth else None,
-            "verdict": verdict,
-            "coverage": coverage,
-            "candidates": candidates,
-        }
-
-    @staticmethod
-    def _brief(response: Optional[dict]) -> Optional[dict]:
-        if response is None:
-            return None
-        from agent.request_ledger import redact_response_body
-
-        body = str(response.get("body") or "")
-        redacted = redact_response_body(body)
-        return {
-            "status": response.get("status"),
-            "length": len(body),
-            "request_id": response.get("request_id"),
-            "body_sha256": hashlib.sha256(body.encode(errors="replace")).hexdigest(),
-            "body_preview": redacted[:500],
-            "error": response.get("error"),
-        }
-
-    @staticmethod
-    def _public_response(
-        runtime: _IdentityRuntime,
-        response: Dict[str, Any],
-        url: str,
-        method: str,
-    ) -> dict:
-        from agent.request_ledger import redact_response_body
-
-        return {
-            "target": url,
-            "url": url,
-            "method": method,
-            "status": response.get("status"),
-            "headers": _safe_headers(response),
-            "body": redact_response_body(str(response.get("body") or ""))
-                .replace(runtime.csrf_value, "[REDACTED-CSRF]")[:8000]
-                if runtime.csrf_value else
-                redact_response_body(str(response.get("body") or ""))[:8000],
-            "elapsed_ms": response.get("elapsed_ms"),
-            "request_id": response.get("request_id"),
-            "response_classes": response.get("response_classes") or [],
-            "adaptive_hints": response.get("adaptive_hints") or [],
-            "error": response.get("error"),
-        }
-
     @staticmethod
     def _public_status(runtime: _IdentityRuntime) -> dict:
         return {
@@ -714,6 +506,20 @@ class IdentitySessionManager:
             "last_status": runtime.last_status,
             "last_url": runtime.last_url,
         }
+
+    def session_material(self, identity_label: str) -> dict:
+        """Cookies and request headers of an established identity, for handoff.
+
+        Secret-bearing: callers must send it only to the platform API and never
+        log it. Passwords are not included.
+        """
+        runtime = self._runtime(identity_label)
+        with runtime.lock:
+            return {
+                "origin": "{}://{}".format(*urlparse(self._target_url)[:2]).lower(),
+                "cookies": dict(runtime.cookies),
+                "headers": dict(runtime.base_headers),
+            }
 
     def status(self) -> List[dict]:
         with self._lock:

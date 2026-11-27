@@ -59,16 +59,16 @@ COVERAGE_TO_PROOF = {
     "command_injection": "command_injection",
     "authz": "authorization",
     "xxe": "xxe",
-    "prototype_pollution": None,
+    "prototype_pollution": "server_prototype_pollution",
     "csrf": "csrf",
     "race_condition": "race_condition",
     "cors": "cors",
     "graphql": None,
-    "file_upload": None,
-    "oauth": None,
+    "file_upload": "file_upload",
+    "oauth": "oauth",
     "saml_sso": None,
-    "llm_ai": None,
-    "business_logic": None,
+    "llm_ai": "prompt_injection",
+    "business_logic": "authorization",
     "dom_open_redirect": "dom_open_redirect",
     "dom_link_manipulation": None,
     "dom_data_manipulation": None,
@@ -76,9 +76,10 @@ COVERAGE_TO_PROOF = {
     "client_template_injection": "client_template_injection",
     "client_prototype_pollution": "client_prototype_pollution",
     "js_dependency_review": "known_cve",
+    "auth": None,
 }
 
-# Names Vanguard hunters, findings.json and asm_bridge already use.
+# Names Vanguard skills and findings.json files already use.
 VANGUARD_ALIASES = {
     "sqli": "sql_injection", "sql": "sql_injection", "blind_sqli": "sql_injection",
     "xss": "xss", "reflected_xss": "xss", "stored_xss": "xss", "dom_xss": "xss", "dom-xss": "xss",
@@ -96,6 +97,14 @@ VANGUARD_ALIASES = {
     "directory_listing": "exposure", "secret_exposure": "exposure", "exposure": "exposure",
     "cve": "known_cve", "known_cve": "known_cve", "outdated_component": "known_cve",
     "user_enumeration": "account_enumeration", "account_enumeration": "account_enumeration",
+    "username_enumeration": "account_enumeration",
+    "file_upload": "file_upload", "unrestricted_upload": "file_upload",
+    "oauth": "oauth", "oauth_redirect_uri": "oauth", "redirect_uri": "oauth",
+    "cswsh": "cswsh", "websocket_hijacking": "cswsh",
+    "prototype_pollution": "server_prototype_pollution",
+    "server_prototype_pollution": "server_prototype_pollution", "sspp": "server_prototype_pollution",
+    "prompt_injection": "prompt_injection", "llm_prompt_injection": "prompt_injection",
+    "business_logic": "authorization",
 }
 
 

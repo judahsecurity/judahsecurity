@@ -24,7 +24,8 @@ Keep observations, candidates, confirmed findings, refutations, and inconclusive
 PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
     "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "string_time_sqli", "string_union_sqli", "post_error_sqli", "post_boolean_sqli", "oob_callback"}),
-    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
+    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss",
+                          "scoped_browser_intercept_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
     "xxe": frozenset({"oob_callback"}),
@@ -38,7 +39,8 @@ PROOFS_BY_CLASS = {
     "ssti": frozenset({"scoped_ssti_eval"}),
     "nosql": frozenset({"scoped_nosql_operator"}),
     # Blind command injection: a correlated DNS lookup from a server-owned
-    # nslookup payload (cmdi_shell on run_oob_callback_workflow).
+    # nslookup/curl/wget payload (cmdi_shell [+ cmdi_command] on
+    # run_oob_callback_workflow).
     "command_injection": frozenset({"scoped_cmdi_eval", "oob_callback"}),
     "path_traversal": frozenset({"scoped_traversal_read"}),
     "csrf": frozenset({"scoped_csrf_state_change"}),
@@ -48,7 +50,37 @@ PROOFS_BY_CLASS = {
     # proven is filed under that behavior's class (traversal, SSTI, ...);
     # version-only claims are capped at low by finding_gate.
     "known_cve": frozenset(),
-    "account_enumeration": frozenset(),
+    # An operator-captured test account vs two fresh random nonexistent
+    # accounts, two repeats, stable normalized difference (class_probes.py);
+    # or timing under the 10-sample rule, large effect size, two agreeing runs.
+    "account_enumeration": frozenset({"scoped_account_enum_differential"}),
+    # A benign nonce HTML/SVG served back from the target origin as active content.
+    "file_upload": frozenset({"scoped_upload_served_active"}),
+    # The authorization server sends a grant (code/token) to a nonce
+    # prowl.invalid redirect_uri. Redirect_uri bugs only; other OAuth flaws
+    # prove under their own class.
+    "oauth": frozenset({"scoped_oauth_redirect_uri"}),
+    # Cross-site WebSocket hijacking: foreign-Origin handshake with a named
+    # identity reads a value an accepted anonymous or second-identity session does not get
+    # (optionally after one read-only frame copied from the identity's own capture).
+    "cswsh": frozenset({"scoped_cswsh_cross_origin_read"}),
+    # Non-destructive JSON-spaces or error-status gadget with plain control and reset.
+    "server_prototype_pollution": frozenset({"scoped_server_pp_gadget"}),
+    # An instruction embedded in submitted data (or planted in an approved
+    # document field) makes the model emit a token assembled from parts (no
+    # echo can match), or fetch a fresh collector host (correlated callback);
+    # a control does not.
+    "prompt_injection": frozenset({"scoped_llm_canary"}),
+}
+
+# Receipt-backed lanes in scoped_assessment/class_probes.py: proof kind -> class.
+CLASS_PROBE_KINDS = {
+    "scoped_upload_served_active": "file_upload",
+    "scoped_account_enum_differential": "account_enumeration",
+    "scoped_oauth_redirect_uri": "oauth",
+    "scoped_cswsh_cross_origin_read": "cswsh",
+    "scoped_server_pp_gadget": "server_prototype_pollution",
+    "scoped_llm_canary": "prompt_injection",
 }
 
 
@@ -79,19 +111,25 @@ _CLAIM_PATTERNS = (
      r"\bconcurrenc(?:y|e) (?:bug|flaw|abuse)\b|\blimit overrun\b"),
     ("client_template_injection", r"\bclient[ -]?side template injection\b|\bCSTI\b"),
     ("client_prototype_pollution", r"\bclient[ -]?side prototype pollution\b"),
+    ("server_prototype_pollution", r"\bserver[ -]?side prototype pollution\b|\bSSPP\b"),
     ("ssti", r"\bSSTI\b|server[ -]?side template injection|\btemplate injection\b"),
     ("jwt", r"\bJWT\b|JSON web token|\balg(?:orithm)?[\s:=\"']*none\b"),
     ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
     ("xxe", r"\bXXE\b|XML external entity"),
     ("command_injection", r"\b(?:OS|shell|command) injection\b|\bRCE\b|remote code execution"),
     ("path_traversal", r"\bpath traversal\b|\bdirectory traversal\b|\bLFI\b|local file inclusion"),
+    ("cswsh", r"\bCSWSH\b|cross[ -]?site web ?socket hijacking"),
     ("csrf", r"\bCSRF\b|cross[ -]?site request forgery"),
-    ("account_enumeration", r"\baccount enumeration\b|\buser enumeration\b"),
+    ("account_enumeration", r"\b(?:account|user|username|login) enumeration\b"),
+    ("oauth", r"\bredirect_uri\b|\bOAuth\b.{0,40}\bredirect(?:ion)?[ _-]?ur[il]\b"),
+    ("prompt_injection", r"\bprompt injection\b|\bLLM\b.{0,30}\binjection\b"),
     ("authorization", r"\bIDOR\b|\bBOLA\b|\b(?:unauthorized|unauthenticated)\b.{0,50}"
      r"\b(?:mutation|write|update|change|access|action|request|operation)\b|"
      r"\bauthori[sz]ation bypass\b|\bauthentication bypass\b|\bcross[ -]?(?:tenant|user)\b|"
      r"\bmass assignment\b|\baccount takeover\b|\bprivilege escalation\b"),
     ("known_cve", r"\bCVE-\d{4}-\d{4,}\b|\bknown CVE\b"),
+    ("file_upload", r"\b(?:unrestricted|arbitrary|malicious|unsafe) (?:file )?upload\b|"
+     r"\bfile upload\b"),
     ("exposure", r"\bexpos(?:ed|ure)\b|\bdisclos(?:ed|ure)\b|\bdirectory index\b|"
      r"\bdirectory listing\b|\bpublicly accessible\b"),
 )
@@ -203,8 +241,78 @@ def _validate_hunter_verifier_pair(store, candidate, proof: dict,
             or first.get("test_type") != claim or second.get("test_type") != claim
             or first.get("parameter") != second.get("parameter")
             or first.get("request_context") != second.get("request_context")
-            or first.get("recipe") != second.get("recipe")):
+            or first.get("recipe") != second.get("recipe")
+            # NoSQL beyond query/form/JSON (cookie, header, XML, path): the
+            # same method and location as well as the same request context.
+            or (claim == "nosql" and any(first.get(key) != second.get(key)
+                                         for key in ("method", "location")))):
         return False, f"Independent matching {claim} proof on the same input and recipe is required"
+    return True, ""
+
+
+def _validate_class_probe_pair(store, candidate, proof: dict,
+                               evidence_ids: list[str], kind: str) -> tuple[bool, str]:
+    """Hunter receipt plus a later fresh-nonce verifier receipt on the same input.
+
+    Each receipt's verdict is re-derived from its recorded observations
+    (class_probes.class_proof_valid); proof_confirmed alone is not trusted.
+    """
+    from app.services.agent.scoped_assessment.class_probes import class_pair_valid
+
+    claim = CLASS_PROBE_KINDS[kind]
+    hunter_id = proof.get("hunter_artifact_id")
+    verifier_id = proof.get("artifact_id")
+    hunter = (store.records.get(hunter_id)
+              if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
+    verifier = store.records.get(verifier_id) if verifier_id in evidence_ids else None
+    if (not hunter or not verifier or hunter["id"] == verifier["id"]
+            or hunter["kind"] != "scoped_class_probe" or verifier["kind"] != "scoped_class_probe"
+            or hunter["created_at"] >= verifier["created_at"]):
+        return False, "Distinct ordered hunter and verifier execution evidence is required"
+    if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
+        return False, "Both actors must prove the same candidate target"
+    if hunter["identity"] != verifier["identity"]:
+        return False, "Hunter and verifier must use the same test identity"
+    if candidate.vulnerability_class != claim:
+        return False, f"{kind} requires vulnerability_class={claim}"
+    first, second = hunter["payload"], verifier["payload"]
+    if first.get("test_type") != claim or second.get("test_type") != claim:
+        return False, f"Both receipts must be {claim} probes"
+    if not class_pair_valid(claim, first, second):
+        return False, f"Independent {claim} proof with a fresh nonce on the same input is required"
+    from app.services.agent.proof_discipline import marker_ok
+
+    disciplined, why = marker_ok(first, second)
+    return (True, "") if disciplined else (False, why)
+
+
+def _validate_intercept_xss_pair(store, candidate, proof: dict,
+                                 evidence_ids: list[str]) -> tuple[bool, str]:
+    """Hunter and fresh verifier each changed one input of the same intercepted
+    browser request (header, cookie, body field or path segment) and the
+    nonce dialog fired after that mutated response rendered."""
+    from app.services.agent.scoped_assessment.browser_intercept import pair_valid
+
+    hunter_id, verifier_id = proof.get("hunter_artifact_id"), proof.get("artifact_id")
+    hunter = (store.records.get(hunter_id)
+              if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
+    verifier = store.records.get(verifier_id) if verifier_id in evidence_ids else None
+    expected = "scoped_browser_check_intercept_xss"
+    if (not hunter or not verifier or hunter["id"] == verifier["id"]
+            or hunter["kind"] != expected or verifier["kind"] != expected
+            or hunter["created_at"] >= verifier["created_at"]):
+        return False, "Distinct ordered hunter and verifier execution evidence is required"
+    if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
+        return False, "Both actors must prove the same candidate target"
+    if hunter["identity"] != verifier["identity"]:
+        return False, "Hunter and verifier must use the same test identity"
+    first, second = hunter["payload"], verifier["payload"]
+    if (not pair_valid(first, second)
+            or first["request_match"].get("path") != urlsplit(candidate.target).path
+            or (candidate.parameter and candidate.parameter
+                != f"{first['input_location']}:{first['input_parameter']}")):
+        return False, ("Two fresh nonce executions of the same intercepted request "
+                       "(page, request match, location, method and template) are required")
     return True, ""
 
 
@@ -222,6 +330,10 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
+    if kind in CLASS_PROBE_KINDS:
+        return _validate_class_probe_pair(store, candidate, proof, evidence_ids, kind)
+    if kind == "scoped_browser_intercept_xss":
+        return _validate_intercept_xss_pair(store, candidate, proof, evidence_ids)
     if kind in _SERVER_INJECTION_KINDS or kind in {"scoped_csrf_state_change", "scoped_jwt_forgery",
                                                     "scoped_jwt_key_url_fetch"}:
         ok, why = _validate_hunter_verifier_pair(store, candidate, proof, evidence_ids, kind)
@@ -274,6 +386,13 @@ def validate_proof(
             or first.get("source_artifact_id") != second.get("source_artifact_id")
         ):
             return False, "Independent browser GET replay must use the same observed request"
+        if kind in {"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli",
+                    "string_time_sqli", "string_union_sqli"} and any(
+            first.get(key) != second.get(key)
+            for key in ("method", "location", "intent_request", "request_context",
+                        "baseline_value_source")
+        ):
+            return False, "Independent SQLi replay must use the same request shape"
         if kind in {"scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed"}:
             expected_type = {
                 "scoped_response_crlf": "crlf",
@@ -643,7 +762,7 @@ def validate_proof(
             )
         events = p.get("interactions") or []
         if not any(
-            e.get("protocol") in ("dns", "http", "smtp")
+            e.get("protocol") in ("dns", "http", "smtp", "ldap")
             and domain.split(".")[0] in str(e.get("unique_id") or "")
             for e in events
         ):
@@ -651,13 +770,12 @@ def validate_proof(
         claim_class = (getattr(candidate, "vulnerability_class", "")
                        or inferred_vulnerability_class(candidate))
         if claim_class == "command_injection":
-            from app.services.agent.scoped_assessment.cmdi_oob import LOOKUP_COMMAND
+            from app.services.agent.oob_payload_templates import cmdi_callback_in_request
 
-            # The callback must come from the injected lookup, not from a URL
-            # fetch of the planted host (which would be SSRF, not command injection).
-            if not re.search(re.escape(LOOKUP_COMMAND) + r"(?:\s|\+)+[\w.-]*" + re.escape(domain),
-                             request_text):
-                return False, "Command injection callback must follow the server-owned nslookup payload"
+            # The callback must come from the injected nslookup/curl/wget, not
+            # from a URL fetch of the planted host (SSRF) or a JNDI lookup.
+            if not cmdi_callback_in_request(request_text, domain):
+                return False, "Command injection callback must follow the server-owned nslookup/curl/wget payload"
         if claim_class == "xxe":
             hunter_id = proof.get("hunter_artifact_id")
             hunter = (store.records.get(hunter_id)

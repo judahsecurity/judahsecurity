@@ -99,7 +99,7 @@ class RefineRequest(BaseModel):
     """Produce a more accurate template from a confirmed mis-detection.
 
     Provide the mis-detection diagnosis (`template_logic_issue`, typically from the
-    Aegis Vanguard validator) plus either the original `template_yaml` or a `template_id`
+    finding validator) plus either the original `template_yaml` or a `template_id`
     that can be resolved to its YAML (custom DB template or local official catalog).
     """
     organization_id: int
@@ -566,7 +566,7 @@ async def refine_template_endpoint(
     """Generate a more accurate template from a confirmed mis-detection.
 
     Closes the validate → diagnose → refine loop: given the original template and
-    the reason it produced a false positive (e.g. from the Aegis Vanguard validator), the
+    the reason it produced a false positive (e.g. from the finding validator), the
     LLM produces a tightened template saved as a draft. If `recheck` is set and a
     `target` is provided, the refined template is re-run against that known
     false-positive target; if it still fires, the response flags it so the analyst

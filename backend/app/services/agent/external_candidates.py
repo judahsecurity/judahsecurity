@@ -38,6 +38,13 @@ EXTERNAL_SPECIALIST = "vanguard_external"
 MAX_EXTERNAL_CANDIDATES_PER_SESSION = 25
 SEVERITY_ORDER = ("info", "low", "medium", "high", "critical")
 SEVERITY_CAPS = {"known_cve": "low"}
+# Intake-only class for platform re-tests of findings whose class has no proof
+# kind (business logic, IDOR variants Prowl cannot prove, unclassifiable
+# application claims). It is not in PROOFS_BY_CLASS, so proof_kind_allowed
+# refuses every confirmation and capped_severity caps it at low: the candidate
+# can only end refuted (with counterevidence) or inconclusive. Only
+# prowl_revalidation passes allow_retest_class; the public intake route never does.
+RETEST_CLASS = "unproven_retest"
 
 FIELD_LIMITS = {
     "title": 200,
@@ -62,14 +69,27 @@ COVERAGE_TO_PROOF = {
     "sqli": "sql_injection", "xss": "xss", "stored_xss": "xss", "crlf": "crlf",
     "nosql": "nosql", "ssti": "ssti", "ssrf": "ssrf", "open_redirect": "open_redirect",
     "path_traversal": "path_traversal", "command_injection": "command_injection",
-    "authz": "authorization", "xxe": "xxe", "prototype_pollution": None, "csrf": "csrf",
+    "authz": "authorization", "xxe": "xxe",
+    # JSON-body endpoints: server-side gadget proof (scoped_server_pp_assigned).
+    "prototype_pollution": "server_prototype_pollution", "csrf": "csrf",
     "race_condition": "race_condition", "cors": "cors", "graphql": None,
-    "file_upload": None, "oauth": None, "saml_sso": None, "llm_ai": None,
-    "business_logic": None, "dom_open_redirect": "dom_open_redirect",
+    "file_upload": "file_upload",
+    # redirect_uri grant leakage only (scoped_oauth_redirect_assigned).
+    "oauth": "oauth", "saml_sso": None,
+    # Embedded-instruction canary (scoped_llm_canary_assigned).
+    "llm_ai": "prompt_injection",
+    # Business logic has no generic proof. A workflow bypass that is an
+    # authorization failure proves under authorization (workflow receipt,
+    # state_change with a distinct owner readback, or authorization); anything
+    # else stays a lead.
+    "business_logic": "authorization", "dom_open_redirect": "dom_open_redirect",
     "dom_link_manipulation": None, "dom_data_manipulation": None,
     "request_url_override": None, "client_template_injection": "client_template_injection",
     "client_prototype_pollution": "client_prototype_pollution",
     "js_dependency_review": "known_cve",
+    # Login/reset/session/JWT endpoint review. No proof kind confirms it
+    # (JWT forgery proves under "jwt"), so it can only produce leads.
+    "auth": None,
 }
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f​-‏ -‮⁦-⁩﻿]")
@@ -213,6 +233,11 @@ def assert_in_session_scope(seed: str, url: str) -> str:
 
 # ---------------------------------------------------------------- intake
 
+def _is_intent(payload: Any) -> bool:
+    """Inbox items that are operator intents (operator_intents.py), not candidates."""
+    return isinstance(payload, dict) and payload.get("kind") == "operator_intent"
+
+
 def _state_for_save(snapshot: Dict[str, Any], brain: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "engagement_brain": brain,
@@ -279,7 +304,7 @@ def list_candidates(organization_id: int, session_id: str) -> Dict[str, Any]:
     rows = [candidate_summary(r) for r in (brain.get("candidates") or []) if isinstance(r, dict)]
     stored = {r["id"] for r in rows}
     rows += [queued_summary(p) for p in peek_candidate_inbox(session_id, organization_id)
-             if p.get("candidate_id") not in stored]
+             if p.get("candidate_id") not in stored and not _is_intent(p)]
     return {"session_id": session_id, "snapshot_saved_at": snapshot.get("saved_at"),
             "candidates": rows}
 
@@ -302,13 +327,14 @@ def _validated_payload(
     severity: str,
     parameter: str,
     evidence_note: str,
+    allow_retest_class: bool = False,
 ) -> Dict[str, Any]:
     """Scope/class/severity checks + sanitization. Returns the wrapped, inert payload."""
     from app.services.agent.independent_verify import candidate_id, root_cause_key
     from app.services.agent.proof_policy import PROOFS_BY_CLASS
 
     vclass = clean_text(vulnerability_class, FIELD_LIMITS["vulnerability_class"]).lower()
-    if vclass not in PROOFS_BY_CLASS:
+    if vclass not in PROOFS_BY_CLASS and not (allow_retest_class and vclass == RETEST_CLASS):
         raise IntakeError(422, f"vulnerability_class must be one of {sorted(PROOFS_BY_CLASS)}")
     clean_target = clean_text(target, FIELD_LIMITS["target"])
     try:
@@ -393,8 +419,12 @@ def submit_external_candidate(
     severity: str = "medium",
     parameter: str = "",
     evidence_note: str = "",
+    allow_retest_class: bool = False,
 ) -> Dict[str, Any]:
     """Add one pending external candidate to a session.
+
+    ``allow_retest_class`` (platform re-validation only) also accepts
+    ``RETEST_CLASS``, a class with no proof kind that can never be confirmed.
 
     Idle session: appended to the durable brain in the run snapshot.
     Running session: validated identically, then queued (write-through to the
@@ -422,13 +452,16 @@ def submit_external_candidate(
         seed, title=title, target=target, vulnerability_class=vulnerability_class,
         description=description, claimed_request=claimed_request, severity=severity,
         parameter=parameter, evidence_note=evidence_note,
+        allow_retest_class=allow_retest_class,
     )
     capped = payload["severity_capped"]
 
     raw_brain = dict(snapshot.get("engagement_brain") or {})
     brain = engagement_brain_from_dict(raw_brain)
     existing = [r for r in (brain.candidates or []) if isinstance(r, dict)]
-    queued = peek_candidate_inbox(session_id, organization_id)
+    # The inbox also carries operator intents (operator_intents.py); they are
+    # not candidates and do not count toward the candidate limit.
+    queued = [p for p in peek_candidate_inbox(session_id, organization_id) if not _is_intent(p)]
     external = sum(1 for r in existing if r.get("specialist") == EXTERNAL_SPECIALIST) + len(queued)
     if external >= MAX_EXTERNAL_CANDIDATES_PER_SESSION:
         raise IntakeError(429, f"Session already holds {external} external candidates "
@@ -513,6 +546,17 @@ def drain_candidate_inbox_into_brain(
     brain = engagement_brain_from_dict(raw_brain)
     outcomes: List[Dict[str, Any]] = []
     added = False
+    intent_payloads = [p for p in payloads if _is_intent(p)]
+    payloads = [p for p in payloads if not _is_intent(p)]
+    intents_added = False
+    if intent_payloads:
+        from app.services.agent.operator_intents import drain_intent_payloads
+
+        if not brain.target:
+            brain.target = str(raw_brain.get("target") or "")
+        intent_outcomes = drain_intent_payloads(brain, intent_payloads)
+        outcomes.extend(intent_outcomes)
+        intents_added = any(o.get("accepted") for o in intent_outcomes)
     for payload in payloads:
         if not isinstance(payload, dict) or not payload.get("title"):
             continue
@@ -530,9 +574,14 @@ def drain_candidate_inbox_into_brain(
         added = True
         outcomes.append({**base, "accepted": True, "candidate_id": cand.id,
                          "vulnerability_class": payload.get("vulnerability_class")})
-    if not added:
+    if not added and not intents_added:
         return None, outcomes
-    raw_brain["candidates"] = list(brain.candidates)
+    if added:
+        raw_brain["candidates"] = list(brain.candidates)
+    if intents_added:
+        updated = brain.to_dict()
+        for key in ("facts", "intents", "coverage_cells"):
+            raw_brain[key] = updated.get(key, [])
     return raw_brain, outcomes
 
 
@@ -558,9 +607,12 @@ def settle_candidate_inbox(organization_id: Optional[int], session_id: Optional[
     rows = [r for r in (stored.get("candidates") or []) if isinstance(r, dict)]
     full = sum(1 for r in rows if r.get("specialist") == EXTERNAL_SPECIALIST) >= \
         MAX_EXTERNAL_CANDIDATES_PER_SESSION
+    from app.services.agent.operator_intents import settled_intent_keys
+
     done = [p.get("candidate_id") for p in pending
-            if full or _matching_row(rows, p.get("candidate_id") or "",
-                                     p.get("root_cause") or "") is not None]
+            if not _is_intent(p) and (full or _matching_row(
+                rows, p.get("candidate_id") or "", p.get("root_cause") or "") is not None)]
+    done += settled_intent_keys(stored, pending)
     return ack_candidate_inbox(session_id, done, organization_id)
 
 
@@ -569,6 +621,15 @@ def inbox_outcome_note(outcomes: List[Dict[str, Any]]) -> str:
     lines = []
     for item in outcomes:
         title = str(item.get("title") or "")[:120]
+        if _is_intent(item):
+            if item.get("accepted"):
+                lines.append(f"queued operator intent {item.get('intent_id')} added as open: {title}")
+            elif item.get("duplicate_of"):
+                lines.append(f"queued operator intent skipped, duplicate_of={item['duplicate_of']}: "
+                             f"{title}")
+            else:
+                lines.append(f"queued operator intent skipped ({item.get('reason')}): {title}")
+            continue
         if item.get("accepted"):
             lines.append(f"queued external candidate {item.get('candidate_id')} added as pending: {title}")
         elif item.get("duplicate_of"):

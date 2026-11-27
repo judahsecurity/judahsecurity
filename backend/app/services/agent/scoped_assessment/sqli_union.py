@@ -31,7 +31,9 @@ from urllib.parse import quote, unquote_plus, urlsplit, urlunsplit
 from .browser import assert_in_scope, origin
 from .browser_actions import allowed_discovery_path
 from .http_observe import observe_get
-from .sqli_string import _SAFE_VALUE, _observed_value, observed_query_encoding
+from .sqli_string import (
+    _SAFE_VALUE, _observed_value, observed_query_encoding, request_shape_valid,
+)
 
 # Bounded discovery. Column counts 1..MAX_COLUMNS, marker tried in each position,
 # capped by MAX_DISCOVERY total probes so a dead endpoint cannot spend the budget.
@@ -129,7 +131,8 @@ def union_followup_eligible(or_result: dict) -> bool:
 def union_sql_proof_valid(result: dict) -> bool:
     if (result.get("operation") != "sqli_union_string"
             or result.get("proof_recipe") != "string_union_v1"
-            or result.get("method") != "GET" or result.get("location") != "query"
+            # An observed GET query, or one intent-built input (``intent_request``).
+            or not request_shape_valid(result)
             or not result.get("target") or not result.get("parameter")
             or result.get("sql_family") not in FAMILIES
             or result.get("input_encoding", "plain") not in {"plain", "base64"}

@@ -165,6 +165,60 @@ def signal_handler(signum, frame):
     shutdown_requested = True
 
 
+
+_LEGACY_VALIDATOR_MODES = frozenset({"docker", "subprocess"})
+_legacy_mode_warned = False
+
+
+async def route_finding_validation(
+    mode: str,
+    *,
+    run_native,
+    run_prowl,
+    prowl_enabled: bool,
+) -> Optional[dict]:
+    """Pick the validator chain for one VALIDATE_FINDING job.
+
+    native - native replay only
+    prowl  - native; Prowl's independent verifier when native is inconclusive
+    auto   - native; then Prowl (unless AEGIS_VALIDATOR_PROWL=false)
+
+    ``docker`` / ``subprocess`` named the removed Aegis Vanguard validator; they
+    now run as ``auto`` (logged once). Unknown modes also run as ``auto``.
+
+    run_prowl returns None when Prowl cannot take the finding: neither a
+    provable class (proof mode) nor an HTTP(S) application claim (retest mode,
+    which can refute or stay inconclusive but never confirm). A native verdict
+    with ``error="tool_unavailable:<tool>"`` (nuclei / nmap missing on this
+    worker) is an environment issue: Prowl may still take the finding, and
+    otherwise that verdict is the answer. Every finding ends in a native or
+    Prowl verdict.
+    """
+    global _legacy_mode_warned
+    if mode not in ("native", "auto", "prowl"):
+        if not _legacy_mode_warned:
+            logger.warning(
+                f"VALIDATE_FINDING: AEGIS_VALIDATOR_MODE={mode!r} is not supported "
+                "(the Vanguard validator was removed); using auto"
+            )
+            _legacy_mode_warned = True
+        mode = "auto"
+    verdict = await run_native()
+    inconclusive = isinstance(verdict, dict) and verdict.get("verdict") == "needs_more_evidence"
+    if not inconclusive or mode == "native":
+        return verdict
+    if str(verdict.get("error") or "").startswith("tool_unavailable:"):
+        logger.warning(f"VALIDATE_FINDING: native validation could not run ({verdict.get('error')})")
+    if mode == "prowl" or prowl_enabled:
+        prowl_verdict = await run_prowl()
+        if prowl_verdict:
+            prowl_verdict["native_verdict"] = {
+                k: verdict.get(k) for k in ("verdict", "method", "reasoning", "error")
+            }
+            return prowl_verdict
+    return verdict
+
+
 class ScannerWorker:
     """
     Scanner worker that processes scan jobs from SQS or database.
@@ -231,6 +285,13 @@ class ScannerWorker:
         self.scan_semaphore = scan_semaphore
         
         logger.info(f"Scanner worker initialized (max_concurrent={MAX_CONCURRENT_SCANS})")
+        try:
+            # Once per process: a missing nuclei / nmap makes those findings end
+            # needs_more_evidence (tool_unavailable:<tool>) instead of a verdict.
+            from app.services.native_verifiers import log_tool_availability
+            log_tool_availability()
+        except Exception as e:
+            logger.debug(f"validation tool check skipped: {e}")
     
     def get_discovery_service(self, db):
         """Get or create discovery service with db session."""
@@ -1002,17 +1063,17 @@ class ScannerWorker:
         steps_to_reproduce / evidence / description. No Docker required.
 
         Optional modes:
-          - docker / subprocess — Aegis Vanguard LLM validator
-          - auto — native first, escalate to Vanguard when inconclusive
+          - prowl — native first; when inconclusive, re-test with Prowl's
+            independent verifier (HTTP(S) findings in a class Prowl can prove)
+          - auto — native, then Prowl (unless AEGIS_VALIDATOR_PROWL=false): proof
+            mode for provable classes, retest mode (refute / inconclusive only)
+            for other HTTP(S) application claims. Every finding ends in a native
+            or Prowl verdict.
 
         Writes the structured verdict back to FindingValidation and denormalizes
         onto the Vulnerability. A false positive attributed to template logic
         also records DetectionFeedback.
         """
-        import subprocess
-        from pathlib import Path
-        from urllib.parse import urlparse
-
         try:
             from app.models.finding_validation import (
                 FindingValidation,
@@ -1025,9 +1086,6 @@ class ScannerWorker:
                 "in this image — skipping validation job"
             )
             return
-
-        JSON_START = "===VALIDATION_JSON_START==="
-        JSON_END = "===VALIDATION_JSON_END==="
 
         validation_id = job_data.get('validation_id')
         vulnerability_id = job_data.get('vulnerability_id')
@@ -1109,7 +1167,9 @@ class ScannerWorker:
                 source_kind = "manual"
             elif detected_by in ("port_scanner",):
                 source_kind = "network_service"
-            elif detected_by in ("trufflehog", "github_secret_scanner"):
+            elif detected_by in ("trufflehog", "github_secret_scanner", "js_secret_scan") or (
+                detected_by == "jsluice" and "secret" in (vuln.tags or [])
+            ):
                 source_kind = "secret"
             elif detected_by in (
                 "nuclei", "graphql_scanner", "takeover_scanner", "js_recon",
@@ -1169,6 +1229,8 @@ class ScannerWorker:
                 "cve_id": vuln.cve_id,
                 "cwe_id": vuln.cwe_id,
                 "detection_confidence": vuln.detection_confidence,
+                # Lets the verifiers tell "remediated" from "never real".
+                "last_validation_verdict": vuln.last_validation_verdict,
                 "references": vuln.references or [],
                 "tags": vuln.tags or [],
                 "evidence": vuln.evidence,
@@ -1181,24 +1243,12 @@ class ScannerWorker:
                 # Full (trimmed) source metadata so the agent can read source-specific fields.
                 "metadata": trimmed_meta,
             }
-            finding_json = json.dumps(finding_payload, default=str)
-
-            scope = ""
-            if target:
-                host = urlparse(target if "://" in str(target) else f"//{target}").hostname or str(target)
-                scope = host
-
-            # Build the validator invocation.
+            # Validator chain (route_finding_validation):
             # native (default) — replay original detector / steps on this scanner
-            # docker / subprocess — Aegis Vanguard LLM validator (optional)
-            # auto — native first; escalate to docker/subprocess only if native
-            #        returns needs_more_evidence and that backend is available
-            import shutil
-
+            # prowl — native first; Prowl independent verifier when inconclusive
+            # auto — native, then Prowl (unless AEGIS_VALIDATOR_PROWL=false)
             mode = os.getenv("AEGIS_VALIDATOR_MODE", "native").lower()
-            max_turns = os.getenv("AEGIS_VALIDATE_MAX_TURNS", "20")
             timeout_sec = int(os.getenv("AEGIS_VALIDATE_TIMEOUT", "900"))
-            docker_bin = shutil.which("docker")
 
             logger.info(
                 f"VALIDATE_FINDING: validating vuln {vuln.id} (source={source_kind}, "
@@ -1209,110 +1259,45 @@ class ScannerWorker:
             verdict_data = None
             run_error = None
 
+            native_result: dict = {}
+
             async def _run_native():
                 from app.services.finding_revalidation_service import revalidate_finding
-                return await revalidate_finding(finding_payload)
+                result = await revalidate_finding(finding_payload)
+                native_result["verdict"] = result
+                return result
 
-            async def _run_vanguard(vanguard_mode: str):
-                cwd = None
-                if vanguard_mode == "subprocess":
-                    vanguard_path = os.getenv("AEGIS_VANGUARD_PATH") or str(
-                        Path(__file__).resolve().parents[3] / "aegis-vanguard"
+            async def _run_prowl():
+                """Prowl re-test; None when Prowl cannot take this finding."""
+                from app.services.agent.prowl_revalidation import revalidate_with_prowl
+                try:
+                    return await revalidate_with_prowl(
+                        finding_payload,
+                        organization_id=validation.organization_id,
+                        user_id=validation.requested_by_user_id,
+                        # Endpoints the native validator handed over (prowl_retest).
+                        native_verdict=native_result.get("verdict"),
+                        max_iterations=int(os.getenv("AEGIS_PROWL_VALIDATE_MAX_ITERATIONS", "12")),
+                        timeout_sec=timeout_sec,
                     )
-                    cmd = [
-                        "python3", os.path.join(vanguard_path, "validate_finding.py"),
-                        "--finding-json", "-", "--max-turns", str(max_turns),
-                    ]
-                    cwd = vanguard_path
-                else:
-                    if not docker_bin:
-                        raise FileNotFoundError("docker")
-                    image = os.getenv("AEGIS_VANGUARD_IMAGE", "aegis-vanguard:latest")
-                    cmd = [
-                        docker_bin, "run", "--rm", "-i",
-                        "-e", "ANTHROPIC_API_KEY", "-e", "AEGIS_MODEL",
-                        "-e", "AEGIS_LLM_BACKEND",
-                        "-e", "OPENAI_API_KEY",
-                        "-e", "OLLAMA_BASE_URL", "-e", "OLLAMA_API_BASE",
-                        "-e", "OLLAMA_MODEL", "-e", "OLLAMA_FALLBACK_ENABLED",
-                        image,
-                        "python3", "/agent/validate_finding.py",
-                        "--finding-json", "-", "--max-turns", str(max_turns),
-                    ]
-                if scope:
-                    cmd += ["--scope", scope]
+                except Exception as prowl_err:
+                    logger.warning(f"VALIDATE_FINDING: Prowl re-test failed: {prowl_err}")
+                    return None
 
-                def _run():
-                    return subprocess.run(
-                        cmd,
-                        input=finding_json,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout_sec,
-                        cwd=cwd,
-                        env=os.environ.copy(),
-                    )
-
-                proc = await asyncio.to_thread(_run)
-                stdout = proc.stdout or ""
-                if JSON_START in stdout and JSON_END in stdout:
-                    chunk = stdout.split(JSON_START, 1)[1].split(JSON_END, 1)[0].strip()
-                    return json.loads(chunk)
-                logger.warning(
-                    f"VALIDATE_FINDING: no verdict sentinels in output. "
-                    f"stderr tail: {(proc.stderr or '')[-500:]}"
-                )
-                raise RuntimeError("no_verdict_in_output")
-
+            prowl_enabled = os.getenv("AEGIS_VALIDATOR_PROWL", "true").lower() not in ("0", "false", "no")
             try:
-                if mode in ("native", "auto"):
-                    verdict_data = await _run_native()
-                    # Escalate to Vanguard only when native is inconclusive and a
-                    # Vanguard backend is explicitly available / requested via auto.
-                    if (
-                        mode == "auto"
-                        and isinstance(verdict_data, dict)
-                        and verdict_data.get("verdict") == "needs_more_evidence"
-                    ):
-                        vanguard_mode = "docker" if docker_bin else (
-                            "subprocess" if os.getenv("AEGIS_VANGUARD_PATH") else None
-                        )
-                        if vanguard_mode:
-                            logger.info(
-                                f"VALIDATE_FINDING: native inconclusive; escalating to {vanguard_mode}"
-                            )
-                            try:
-                                verdict_data = await _run_vanguard(vanguard_mode)
-                            except Exception as escalate_err:
-                                logger.warning(
-                                    f"VALIDATE_FINDING: vanguard escalate failed, "
-                                    f"keeping native verdict: {escalate_err}"
-                                )
-                elif mode == "subprocess":
-                    verdict_data = await _run_vanguard("subprocess")
-                else:
-                    # docker (legacy) or unknown → docker
-                    verdict_data = await _run_vanguard("docker")
-            except subprocess.TimeoutExpired:
+                verdict_data = await route_finding_validation(
+                    mode, run_native=_run_native, run_prowl=_run_prowl,
+                    prowl_enabled=prowl_enabled,
+                )
+            except asyncio.TimeoutError:
                 run_error = "validator_timeout"
-            except FileNotFoundError as e:
-                missing = getattr(e, "filename", None) or str(e)
-                if "docker" in str(missing).lower() or "docker" in str(e).lower():
-                    run_error = (
-                        "invocation_failed: docker not found — set "
-                        "AEGIS_VALIDATOR_MODE=native (default) to replay "
-                        "detection steps on the scanner"
-                    )
-                else:
-                    run_error = f"invocation_failed: {e}"
-            except json.JSONDecodeError as e:
-                run_error = f"unparseable_verdict: {e}"
             except Exception as e:
                 run_error = f"validator_error: {e}"
 
-            # The port exposure gate applies even when Leo uses Vanguard instead
-            # of the native validator. A filtered/closed port cannot validate an
-            # internet-exposure finding, regardless of the agent's other evidence.
+            # The port exposure gate applies whichever validator answered. A
+            # filtered/closed port cannot validate an internet-exposure
+            # finding, regardless of other evidence.
             if source_kind == "network_service" and (
                 not isinstance(verdict_data, dict)
                 or verdict_data.get("method") != "nmap_port_verify"
@@ -1352,6 +1337,15 @@ class ScannerWorker:
                 db.commit()
                 logger.warning(f"VALIDATE_FINDING: validation {validation.id} failed: {run_error}")
                 return
+
+            try:
+                from app.services.native_verifiers import finalize_verdict
+                verdict_data = finalize_verdict(verdict_data, finding_payload)
+            except Exception as e:
+                logger.debug(f"VALIDATE_FINDING: could not normalize verdict: {e}")
+            # Remediated = it was real and is gone; never count it as a
+            # detection false positive (feedback, patterns, auto-refine).
+            remediated = verdict_data.get("remediation_state") == "remediated"
 
             verdict_str = str(verdict_data.get("verdict", "needs_more_evidence")).lower()
             verdict_map = {
@@ -1423,7 +1417,8 @@ class ScannerWorker:
             db.commit()
 
             # Log a template-logic issue when the FP is attributed to the template.
-            if verdict_enum == ValidationVerdict.FALSE_POSITIVE and vuln.template_id and template_logic_issue:
+            if (verdict_enum == ValidationVerdict.FALSE_POSITIVE and not remediated
+                    and vuln.template_id and template_logic_issue):
                 try:
                     from app.services.detection_feedback_service import record_detection_feedback
                     record_detection_feedback(
@@ -1454,6 +1449,7 @@ class ScannerWorker:
             if (
                 auto_refine
                 and verdict_enum == ValidationVerdict.FALSE_POSITIVE
+                and not remediated
                 and vuln.template_id
                 and template_logic_issue
                 and template_yaml
@@ -1495,7 +1491,7 @@ class ScannerWorker:
             # Re-evaluate the false-positive pattern for this template. A pattern
             # spanning enough hosts raises a suppression recommendation (it never
             # auto-suppresses without analyst approval).
-            if verdict_enum == ValidationVerdict.FALSE_POSITIVE and vuln.template_id:
+            if verdict_enum == ValidationVerdict.FALSE_POSITIVE and not remediated and vuln.template_id:
                 try:
                     from app.services.detection_pattern_service import evaluate_template
                     evaluate_template(

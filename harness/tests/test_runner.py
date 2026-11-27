@@ -12,10 +12,10 @@ def test_slugify():
 
 def test_build_command_appends_target_scope_and_extra_args():
     cfg = default_config()
-    cfg.scanner_cmd = ["python3", "run_pentest.py"]
+    cfg.scanner_cmd = ["python", "-m", "local_harness.prowl_scanner"]
     cfg.scanner_extra_args = ["--fast"]
     cmd = build_command(cfg, "https://x.com", "x.com")
-    assert cmd == ["python3", "run_pentest.py", "--target", "https://x.com",
+    assert cmd == ["python", "-m", "local_harness.prowl_scanner", "--target", "https://x.com",
                    "--scope", "x.com", "--fast"]
 
 

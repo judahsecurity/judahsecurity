@@ -1,0 +1,3 @@
+[+]  CMS Detection Started  [+]
+[i] Checking for CMS
+[!] CMS Detection failed, if you know the cms please help me improve CMSeeK by reporting the cms along with the target

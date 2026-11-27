@@ -906,6 +906,458 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=12,
     ),
+    # ── Surface-triggered stack / perimeter specialists ──
+    # Ported from the Vanguard framework and enterprise hunters. Each activates
+    # only on its fingerprint (surface_hunters.py). A class without a proof kind
+    # in proof_policy.PROOFS_BY_CLASS stays a lead: recorded, never published.
+    SpecialistProfile(
+        name="grpc_api",
+        role=(
+            "gRPC / gRPC-Web specialist. Check server reflection, methods callable "
+            "without auth metadata, and HTTP/JSON gateway twins that are weaker than "
+            "the gRPC front."
+        ),
+        allowed_tools=[
+            "get_api_operation_inventory",
+            "fingerprint_api",
+            "list_captured_requests",
+            "execute_httpx",
+            "execute_curl",
+            "execute_nuclei",
+            "compare_requests",
+            "replay_http_request",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Confirm gRPC first: application/grpc or grpc-web content types, "
+            "/package.Service/Method paths, Envoy gRPC-Web. execute_nuclei -tags grpc. "
+            "Reflection: one ServerReflectionInfo list_services request with execute_curl "
+            "--http2 (gRPC-Web framing if that is all the edge accepts). An enabled "
+            "reflection listing has no proof kind: record it as a lead with save_note "
+            "and update_hypothesis. Unauthenticated methods: call at most one read-only "
+            "method per service; never streaming or mutating methods, never loops. For "
+            "a JSON gateway twin, compare_requests with two verified test identities on "
+            "the same object and submit_finding_candidate(vulnerability_class="
+            "'authorization') only with the authorization proof; otherwise it is a lead."
+        ),
+    ),
+    SpecialistProfile(
+        name="nodejs_express",
+        role=(
+            "Node.js / Express specialist. Server-side prototype pollution, trust-proxy "
+            "IP spoofing, and template/static-path bugs on a fingerprinted Node stack."
+        ),
+        allowed_tools=[
+            "get_parameter_inventory",
+            "list_captured_requests",
+            "execute_curl",
+            "execute_nuclei",
+            "compare_requests",
+            "mutate_captured_request",
+            "replay_http_request",
+            "scoped_injection_probe_assigned",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Confirm Node/Express (X-Powered-By: Express, connect.sid, Express error "
+            "pages). Server-side prototype pollution has no proof kind: it is a lead. "
+            "Detect it only with non-persistent reflection: send a JSON body with a "
+            "unique __proto__ / constructor.prototype key to a captured merge endpoint "
+            "and look for the key inherited in that same response. Never send payloads "
+            "that change process-wide behaviour (status, json spaces, exposedHeaders, "
+            "shell or env options) and never try a gadget chain; other users share the "
+            "process. Trust proxy: compare a protected or IP-restricted path with and "
+            "without X-Forwarded-For: 127.0.0.1; a difference is a lead. EJS/Pug/"
+            "Handlebars SSTI and static-path traversal go through "
+            "scoped_injection_probe_assigned on a leased cell; submit only on its "
+            "receipt (vulnerability_class='ssti' or 'path_traversal')."
+        ),
+    ),
+    SpecialistProfile(
+        name="deserialization",
+        role=(
+            "Insecure deserialization specialist. Java/PHP/Python/.NET serialized-object "
+            "sinks and JNDI lookups, proven only with a correlated canary callback."
+        ),
+        allowed_tools=[
+            "get_parameter_inventory",
+            "list_captured_requests",
+            "execute_curl",
+            "execute_nuclei",
+            "execute_interactsh",
+            "compare_requests",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Look for serialized data in observed traffic: rO0AB / aced0005 (Java), "
+            "O:<n>:\" or phar:// (PHP), pickle/yaml.load hints (Python), "
+            "javax.faces.ViewState, application/x-java-serialized-object. A sink is a "
+            "lead; gadget-chain deserialization has no proof kind, so never send "
+            "ysoserial/phpggc/pickle gadget payloads. JNDI/Log4Shell class: only when "
+            "this run authorizes OOB, call run_oob_callback_workflow with "
+            "location='query_template' (or 'raw') and a body such as "
+            "${jndi:dns://{{callback_host}}/a} on one observed field. A correlated "
+            "callback proves a server-side outbound lookup: "
+            "submit_finding_candidate(vulnerability_class='ssrf') with its oob_callback "
+            "proof, titled as a JNDI lookup, without claiming code execution. Without "
+            "OOB authorization record the sink as a lead. execute_nuclei only with "
+            "-etags intrusive,dos, and -ni unless OOB is authorized."
+        ),
+    ),
+    SpecialistProfile(
+        name="m365_entra",
+        role=(
+            "Microsoft 365 / Entra ID external IdP specialist. Tenant discovery, "
+            "federation and legacy-auth posture, and user-enumeration oracles for the "
+            "in-scope domain only."
+        ),
+        allowed_tools=[
+            "execute_curl",
+            "execute_httpx",
+            "execute_nuclei",
+            "test_saml_sso",
+            "compare_requests",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=6,
+        llm_task="recon",
+        system_prompt_suffix=(
+            "Requests stay subject to scope enforcement; if a Microsoft endpoint is "
+            "blocked, record the lead and stop. Tenant: GET the domain's "
+            "/.well-known/openid-configuration on login.microsoftonline.com and "
+            "getuserrealm.srf (Managed vs Federated, federation endpoint/ADFS). Probe an "
+            "exposed ADFS with test_saml_sso. Tenant metadata is informational: "
+            "save_note. User enumeration (GetCredentialType): one nonexistent canary and "
+            "one address observed on the target, nothing more. A repeatable difference "
+            "here stays a lead: account_enumeration confirms only through "
+            "scoped_account_enum_assigned on an operator-captured test account, which "
+            "this lane does not run. No password spraying, device-code or consent "
+            "phishing, token theft or mailbox access; spraying belongs to "
+            "credential_assault and only when the run grants credential testing."
+        ),
+    ),
+    SpecialistProfile(
+        name="okta_idp",
+        role=(
+            "Okta IdP specialist. Tenant discovery, OIDC metadata, authn/factor "
+            "enumeration posture and exposed admin surfaces for in-scope Okta tenants."
+        ),
+        allowed_tools=[
+            "execute_curl",
+            "execute_httpx",
+            "execute_nuclei",
+            "test_saml_sso",
+            "compare_requests",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=6,
+        llm_task="recon",
+        system_prompt_suffix=(
+            "Confirm the tenant (*.okta.com, oktapreview, or a custom domain via "
+            "/.well-known/okta-organization). GET /.well-known/openid-configuration and "
+            "/oauth2/default/.well-known/oauth-authorization-server; note self-service "
+            "registration and exposed client ids. POST /api/v1/authn with one "
+            "nonexistent canary and one observed username only to read the enumeration "
+            "posture; never a real password, never more than these two. "
+            "A repeatable difference here is a lead: account_enumeration confirms only "
+            "through scoped_account_enum_assigned on an operator-captured test account. "
+            "Hand redirect_uri / SAML ACS issues to saml_sso via "
+            "update_hypothesis. No password spraying, MFA fatigue or lockout testing; "
+            "spraying belongs to credential_assault and only when the run grants "
+            "credential testing."
+        ),
+    ),
+    SpecialistProfile(
+        name="sharepoint",
+        role=(
+            "SharePoint on-prem specialist. Fingerprint the farm build, anonymous "
+            "_api/_vti_bin access, and ToolShell-class preconditions without exploit "
+            "payloads."
+        ),
+        allowed_tools=[
+            "execute_httpx",
+            "execute_curl",
+            "execute_nuclei",
+            "fingerprint_passive_stack",
+            "check_cve_applicability",
+            "search_vulnx",
+            "vulnx_query",
+            "compare_requests",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "On-prem only: *.sharepoint.com is Microsoft SaaS, not this lane. Read the "
+            "build from MicrosoftSharePointTeamServices / X-SharePointHealthScore "
+            "headers and /_vti_pvt/service.cnf. Anonymous GET /_api/web, "
+            "/_vti_bin/listdata.svc and /_layouts/15/viewlsts.aspx: list data returned "
+            "to an anonymous GET is exposure (submit_finding_candidate("
+            "vulnerability_class='exposure') with a response_match proof quoting the "
+            "data; describe what is exposed, no CVE in the title). ToolShell "
+            "(CVE-2025-53770/53771, CVE-2025-49704/49706): version-gate with "
+            "check_cve_applicability and search_vulnx for KEV status; never POST to "
+            "ToolPane.aspx, never send a spoofed SignOut Referer, no webshells. A build "
+            "in range is a known_cve lead with no proof kind, capped low: "
+            "submit_finding_candidate(vulnerability_class='known_cve') with the build "
+            "evidence, or save_note."
+        ),
+    ),
+    SpecialistProfile(
+        name="enterprise_vpn",
+        role=(
+            "SSL VPN / remote-access appliance specialist (Cisco ASA, FortiGate, "
+            "NetScaler, GlobalProtect, Ivanti, F5 BIG-IP, SonicWall). Fingerprint "
+            "product and build, then gate on KEV-listed CVEs."
+        ),
+        allowed_tools=[
+            "execute_httpx",
+            "execute_curl",
+            "execute_nuclei",
+            "fingerprint_passive_stack",
+            "check_cve_applicability",
+            "lookup_component_vulns",
+            "search_cve",
+            "search_vulnx",
+            "vulnx_query",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "log_engagement_approach",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Fingerprint from portal paths and static assets: /+CSCOE+/logon.html "
+            "(ASA), /remote/login (FortiGate), /vpn/index.html or /logon/LogonPoint "
+            "(NetScaler), /global-protect/login.esp (GlobalProtect), /dana-na/ "
+            "(Ivanti/Pulse), /my.policy or /tmui/ (F5), /cgi-bin/welcome (SonicWall). "
+            "Get a build from version endpoints or asset hashes, not a guess. Only "
+            "then check_cve_applicability and search_vulnx; prioritize CVEs that are "
+            "KEV-listed and whose affected range includes the evidenced build. "
+            "execute_nuclei -tags <product> -etags intrusive,dos, with -ni unless OOB "
+            "is authorized. Never run exploit payloads (file read, auth bypass, RCE), "
+            "never touch firmware or sessions, no credential attempts. A build in "
+            "range is a known_cve lead with no proof kind, capped low: "
+            "submit_finding_candidate(vulnerability_class='known_cve') with product, "
+            "build evidence, CVE and KEV status, or save_note when no build is evidenced."
+        ),
+    ),
+    SpecialistProfile(
+        name="vcenter",
+        role=(
+            "VMware vCenter / Aria / Workspace ONE specialist. Fingerprint the "
+            "management plane build and version-gate known unauthenticated CVE classes."
+        ),
+        allowed_tools=[
+            "execute_httpx",
+            "execute_curl",
+            "execute_nuclei",
+            "fingerprint_passive_stack",
+            "check_cve_applicability",
+            "lookup_component_vulns",
+            "search_vulnx",
+            "vulnx_query",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "log_engagement_approach",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=6,
+        system_prompt_suffix=(
+            "Build evidence: POST /sdk RetrieveServiceContent (read-only AboutInfo "
+            "version and build), /ui and /websso banners, Workspace ONE /catalog-portal "
+            "and /SAAS/auth. Then check_cve_applicability and search_vulnx for KEV "
+            "status on the evidenced build. execute_nuclei -tags vmware,vcenter "
+            "-etags intrusive,dos, with -ni unless OOB is authorized. Never upload "
+            "files, never call plugin endpoints with payloads, never power, snapshot "
+            "or migrate VMs, no default-credential attempts. A build in range is a "
+            "known_cve lead with no proof kind, capped low: submit_finding_candidate("
+            "vulnerability_class='known_cve') with the build evidence, or save_note."
+        ),
+    ),
+    SpecialistProfile(
+        name="spring_boot",
+        role=(
+            "Spring Boot specialist. Unauthenticated actuator/jolokia exposure and SpEL "
+            "evaluation on a fingerprinted Spring stack."
+        ),
+        allowed_tools=[
+            "get_parameter_inventory",
+            "execute_httpx",
+            "execute_curl",
+            "execute_ffuf",
+            "execute_nuclei",
+            "scoped_injection_probe_assigned",
+            "compare_requests",
+            "sanitize_evidence",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Confirm Spring (Whitelabel Error Page, X-Application-Context, /actuator). "
+            "Anonymous GET /actuator, then env, configprops, mappings, beans, "
+            "gateway/routes and jolokia (also under /manage or the context path). "
+            "Sensitive data returned to an anonymous GET is exposure: "
+            "submit_finding_candidate(vulnerability_class='exposure') with a "
+            "response_match proof quoting a non-secret literal (a property name or "
+            "route id); redact secret values. heapdump/threaddump: HEAD only, never "
+            "download. Never POST shutdown, refresh, env, loggers or restart, never "
+            "jolokia exec. SpEL: on leased ssti cells call "
+            "scoped_injection_probe_assigned (dollar_brace / hash_brace recipes) and "
+            "submit only on its receipt (vulnerability_class='ssti'). Spring4Shell and "
+            "H2 console RCE are version-gated leads; do not exploit."
+        ),
+    ),
+    SpecialistProfile(
+        name="laravel",
+        role=(
+            "Laravel specialist. APP_DEBUG leakage, Telescope/Horizon/debugbar exposure "
+            "and Ignition version gating on a fingerprinted Laravel stack."
+        ),
+        allowed_tools=[
+            "execute_httpx",
+            "execute_curl",
+            "execute_ffuf",
+            "execute_nuclei",
+            "check_cve_applicability",
+            "compare_requests",
+            "sanitize_evidence",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Confirm Laravel (laravel_session cookie, Ignition/Whoops error page, "
+            "/_ignition/health-check). Anonymous GET /telescope/requests, "
+            "/horizon/api/stats, /_debugbar/open, /.env and storage/logs: data returned "
+            "to an anonymous GET is exposure (submit_finding_candidate("
+            "vulnerability_class='exposure') with a response_match proof quoting a "
+            "non-secret literal; redact APP_KEY, DB and mail secrets). APP_DEBUG: "
+            "trigger one ordinary 404/405 and read the stack trace; env values in it "
+            "are exposure under the same rule. Ignition CVE-2021-3129: version-gate "
+            "only; never call /_ignition/execute-solution and never write to logs or "
+            "phar files. Signed URL tampering is a lead unless a distinct-identity "
+            "authorization proof exists."
+        ),
+    ),
+    SpecialistProfile(
+        name="nextjs",
+        role=(
+            "Next.js specialist. Middleware auth bypass, /_next/image SSRF, Server "
+            "Action exposure and RSC/ISR leakage on a fingerprinted Next.js app."
+        ),
+        allowed_tools=[
+            "list_captured_requests",
+            "get_api_operation_inventory",
+            "execute_httpx",
+            "execute_curl",
+            "execute_nuclei",
+            "execute_interactsh",
+            "compare_requests",
+            "mutate_captured_request",
+            "replay_http_request",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Confirm Next.js (/_next/static, __NEXT_DATA__, x-nextjs-* headers) and "
+            "read the version from the build manifest or nuclei -tags nextjs. "
+            "Middleware bypass (CVE-2025-29927 class, version-gated): for a path that "
+            "redirects anonymous users, compare_requests with x-middleware-subrequest "
+            "set; submit (vulnerability_class='authorization') only with the "
+            "authorization proof (verified identity baseline vs anonymous mutant on "
+            "the same URL returning the owner's field); otherwise it is a lead. "
+            "/_next/image?url=: only when this run authorizes OOB, "
+            "run_oob_callback_workflow location='query' field='url'; a correlated "
+            "callback is vulnerability_class='ssrf' with its oob_callback proof. "
+            "Never point it at metadata or loopback. Server Actions: note Next-Action "
+            "ids from captures and replay them without the UI's preconditions; a state "
+            "change needs the state_change proof. RSC/__NEXT_DATA__ secrets are "
+            "exposure only with a response_match proof."
+        ),
+    ),
+    SpecialistProfile(
+        name="aspnet_iis",
+        role=(
+            "ASP.NET / IIS specialist. elmah.axd/trace.axd exposure, ViewState MAC "
+            "posture and NTLM challenge information leaks."
+        ),
+        allowed_tools=[
+            "execute_httpx",
+            "execute_curl",
+            "execute_ffuf",
+            "execute_nuclei",
+            "compare_requests",
+            "sanitize_evidence",
+            "record_surface_coverage",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=6,
+        system_prompt_suffix=(
+            "Confirm ASP.NET/IIS (X-AspNet-Version, X-Powered-By: ASP.NET, .aspx/.axd, "
+            "__VIEWSTATE). Anonymous GET /elmah.axd and /trace.axd (also under app "
+            "virtual directories): logged requests or error details returned to an "
+            "anonymous GET are exposure (submit_finding_candidate(vulnerability_class="
+            "'exposure') with a response_match proof; redact cookies and auth headers). "
+            "ViewState: decode __VIEWSTATE locally; an unsigned or unencrypted "
+            "ViewState is a lead, never send a crafted ViewState or gadget. NTLM: one "
+            "request with Authorization: NTLM and a Type 1 message to an auth endpoint "
+            "(/autodiscover, /ews, /rpc, /_windows) and decode the Type 2 for NetBIOS/DNS "
+            "domain and host; this is informational and goes in save_note. SharePoint "
+            "farms belong to sharepoint; /api/Settings/SaveSettings belongs to api_authz."
+        ),
+    ),
     SpecialistProfile(
         name="agent_tools",
         role=(
@@ -1164,6 +1616,47 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
     ),
 ]
+
+# Lead-only probe and recon tools ported from Vanguard (tools_ported_probes.py),
+# granted to the lanes that hunt their surface. The tools enforce scope, method
+# policy and the active-testing gate themselves.
+_PORTED_TOOL_GRANTS: dict[str, tuple[str, ...]] = {
+    "grpc_api": ("probe_grpc_reflection",),
+    "nodejs_express": ("probe_server_prototype_pollution",),
+    "api_authz": ("probe_websocket_origin",),
+    "graphql_api": ("probe_graphql",),
+    "content_api": ("probe_vcs_exposure",),
+    "secrets_hunter": ("probe_vcs_exposure",),
+    "web_recon": ("fingerprint_gitlab", "detect_third_party_vendors", "query_mail_security"),
+    "m365_entra": ("query_mail_security",),
+    "okta_idp": ("query_mail_security",),
+}
+# Receipt-backed class proofs (tools_class_proofs.py), granted to the lanes the
+# coverage catalog routes those cells to. Approvals and scope are enforced by
+# the tools; a positive receipt is a candidate the verifier repeats.
+_CLASS_PROOF_TOOL_GRANTS: dict[str, tuple[str, ...]] = {
+    "file_upload": ("scoped_upload_probe_assigned",),
+    "auth_logic": ("scoped_account_enum_assigned", "scoped_oauth_redirect_assigned"),
+    "saml_sso": ("scoped_oauth_redirect_assigned",),
+    "injection": ("scoped_server_pp_assigned",),
+    "nodejs_express": ("scoped_server_pp_assigned",),
+    "api_authz": ("scoped_cswsh_probe",),
+    "agent_tools": ("scoped_llm_canary_assigned", "scoped_llm_oob_fetch_assigned",
+                    "scoped_llm_indirect_canary_assigned"),
+}
+for _profile in DEFAULT_SPECIALISTS:
+    _extra = list(_PORTED_TOOL_GRANTS.get(_profile.name, ()))
+    _extra.extend(_CLASS_PROOF_TOOL_GRANTS.get(_profile.name, ()))
+    # Specialists that log approaches can also record what the WAF blocked.
+    if "log_engagement_approach" in _profile.allowed_tools:
+        _extra.append("record_defense_profile")
+    # Workers claim and complete planned intents; only the main agent adds them.
+    if "submit_finding_candidate" in _profile.allowed_tools:
+        _extra.extend(("graph_overview", "record_fact", "claim_intent", "complete_intent"))
+    # Lanes that compare live requests can also diff stored exchanges for free.
+    if "compare_requests" in _profile.allowed_tools:
+        _extra.append("diff_stored_exchanges")
+    _profile.allowed_tools.extend(t for t in _extra if t not in _profile.allowed_tools)
 
 _SPECIALISTS_BY_NAME: dict[str, SpecialistProfile] = {s.name: s for s in DEFAULT_SPECIALISTS}
 
@@ -2209,7 +2702,7 @@ async def _safe_invoke(
                              if row.get("id") == args["coverage_cell_id"]), None)
                 if (record and record.get("kind") in {
                         "scoped_numeric_sqli", "scoped_string_sqli", "scoped_browser_check_xss",
-                        "scoped_browser_check_form_xss",
+                        "scoped_browser_check_form_xss", "scoped_browser_check_intercept_xss",
                     } and cell and cell.get("lease_id") == args["coverage_lease_id"]
                         and receipt_id in (cell.get("probe_artifact_ids") or [])):
                     ids = list(dict.fromkeys([*ids, receipt_id]))

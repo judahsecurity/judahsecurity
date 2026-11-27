@@ -27,6 +27,46 @@ FORM_INVENTORY_JS = """els => els.slice(0, 30).map((form, dom_index) => {
 })"""
 
 
+# Bounded render feedback for the specialist (never proof): where the nonce
+# landed, without page source or attacker-controlled text.
+REFLECTION_CONTEXT_JS = """token => {
+    const contexts = new Set();
+    const observations = [];
+    const add = (context, representation) => {
+        contexts.add(context);
+        if (observations.length < 8 && !observations.some(
+            row => row.context === context && row.representation === representation
+        )) observations.push({context, representation});
+    };
+    const walker = document.createTreeWalker(document, NodeFilter.SHOW_TEXT);
+    let node, seen = 0;
+    while ((node = walker.nextNode()) && seen++ < 3000) {
+        if (!node.textContent.includes(token)) continue;
+        const tag = node.parentElement?.tagName;
+        if (tag === 'SCRIPT') add('javascript', 'script_text');
+        else if (tag === 'STYLE') add('css', 'style_text');
+        else if (/%(?:3c|3e|22|27)/i.test(node.textContent))
+            add('html_text', 'percent_encoded_text');
+        else if (/<\\s*(?:img|svg)\\b/i.test(node.textContent))
+            add('html_text', 'literal_markup_text');
+        else add('html_text', 'plain_text');
+    }
+    seen = 0;
+    for (const element of document.querySelectorAll('*')) {
+        if (seen++ >= 3000) break;
+        for (const attribute of element.attributes) {
+            if (!attribute.value.includes(token)) continue;
+            if (/^(?:href|src|action|formaction|xlink:href)$/i.test(attribute.name))
+                add('url_attribute', 'url_attribute_value');
+            else if (/^on[a-z]+$/i.test(attribute.name))
+                add('html_attribute', 'event_handler_attribute');
+            else add('html_attribute', 'attribute_value');
+        }
+    }
+    return {contexts: [...contexts].sort(), observations};
+}"""
+
+
 class AssessmentProxyError(RuntimeError):
     """The configured assessment proxy answered instead of the target."""
 
@@ -1317,42 +1357,7 @@ async def check_browser(
                 # Give the specialist bounded render feedback without page
                 # source or attacker-controlled text. This is not proof.
                 try:
-                    reflection = await page.evaluate("""token => {
-                        const contexts = new Set();
-                        const observations = [];
-                        const add = (context, representation) => {
-                            contexts.add(context);
-                            if (observations.length < 8 && !observations.some(
-                                row => row.context === context && row.representation === representation
-                            )) observations.push({context, representation});
-                        };
-                        const walker = document.createTreeWalker(document, NodeFilter.SHOW_TEXT);
-                        let node, seen = 0;
-                        while ((node = walker.nextNode()) && seen++ < 3000) {
-                            if (!node.textContent.includes(token)) continue;
-                            const tag = node.parentElement?.tagName;
-                            if (tag === 'SCRIPT') add('javascript', 'script_text');
-                            else if (tag === 'STYLE') add('css', 'style_text');
-                            else if (/%(?:3c|3e|22|27)/i.test(node.textContent))
-                                add('html_text', 'percent_encoded_text');
-                            else if (/<\\s*(?:img|svg)\\b/i.test(node.textContent))
-                                add('html_text', 'literal_markup_text');
-                            else add('html_text', 'plain_text');
-                        }
-                        seen = 0;
-                        for (const element of document.querySelectorAll('*')) {
-                            if (seen++ >= 3000) break;
-                            for (const attribute of element.attributes) {
-                                if (!attribute.value.includes(token)) continue;
-                                if (/^(?:href|src|action|formaction|xlink:href)$/i.test(attribute.name))
-                                    add('url_attribute', 'url_attribute_value');
-                                else if (/^on[a-z]+$/i.test(attribute.name))
-                                    add('html_attribute', 'event_handler_attribute');
-                                else add('html_attribute', 'attribute_value');
-                            }
-                        }
-                        return {contexts: [...contexts].sort(), observations};
-                    }""", nonce)
+                    reflection = await page.evaluate(REFLECTION_CONTEXT_JS, nonce)
                     result["reflection_contexts"] = reflection["contexts"]
                     result["reflection_observations"] = reflection["observations"]
                 except Exception:

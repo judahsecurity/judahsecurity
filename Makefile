@@ -1,8 +1,7 @@
 # Judah Security ASM - Makefile
 .PHONY: help build up down restart logs shell db-shell init-db clean dev dev-graph deploy \
 	harness-install harness-test harness-batch harness-benchmark \
-	agent-run agent-playbooks agent-status agent-benchmark agent-benchmark-baseline \
-	agent-subscription
+	agent-run agent-playbooks agent-status agent-benchmark agent-benchmark-baseline
 
 # Default target
 help:
@@ -38,8 +37,6 @@ help:
 	@echo "                       make agent-run TARGET=<url> QUESTION=\"find IDORs\" MODE=agent ORG=1"
 	@echo "  agent-benchmark    Benchmark the in-product agent (Glasswing contract) on the corpus"
 	@echo "  agent-benchmark-baseline  Same, but with the verify/coverage gate disabled (baseline)"
-	@echo "  agent-subscription Run Vanguard via Claude Agent SDK on a Pro/Max subscription:"
-	@echo "                       make agent-subscription TARGET=https://example.com"
 	@echo "                       Needs Docker running + an LLM key + backend deps importable."
 	@echo "                       make agent-benchmark ARGS=\"--repos juice-shop --setup\""
 	@echo ""
@@ -170,19 +167,6 @@ agent-benchmark-baseline:
 	  AEGIS_HARNESS_SCANNER_CWD="$(abspath backend)" \
 	  PYTHONPATH=. "$(abspath $(AGENT_PY))" -m local_harness.benchmark.run $(ARGS)
 
-# Run Vanguard through the Claude Agent SDK, billed to a Claude Pro/Max
-# subscription (CLAUDE_CODE_OAUTH_TOKEN). Personal/research use only — see
-# aegis-claude-sdk/README.md for the Terms-of-Service caveat. Runs on the host
-# (needs the `claude` CLI + Python deps), not in Docker.
-#   make agent-subscription TARGET=https://example.com [SCOPE=example.com] [ARGS="--max-risk medium"]
-SUBSCRIPTION_PY ?= python3
-agent-subscription:
-	@[ -n "$(TARGET)" ] || (echo 'Usage: make agent-subscription TARGET=<url> [SCOPE=<domain>] [ARGS="..."]' && exit 1)
-	cd aegis-claude-sdk && "$(SUBSCRIPTION_PY)" pentest_subscription.py \
-	  --target "$(TARGET)" \
-	  $(if $(SCOPE),--scope "$(SCOPE)") \
-	  $(ARGS)
-
 # Deploy to EC2: make deploy EC2=1.2.3.4 KEY=~/.ssh/mykey.pem
 # Only rebuilds backend + oracle; leaves db/redis/scanner untouched.
 deploy:
@@ -197,20 +181,6 @@ deploy:
 	  docker exec asm_backend python scripts/migrate_add_oracle_columns.py --backfill 2>/dev/null || true && \
 	  echo "" && echo "✓ Done." && docker compose ps'
 
-# Deploy Vanguard agent changes to EC2: make deploy-vanguard EC2=1.2.3.4 KEY=~/.ssh/mykey.pem
-# The scanner worker runs `docker run aegis-vanguard:latest` (Dockerfile.scanner),
-# and `make deploy` does NOT rebuild that image — so Vanguard code changes only go
-# live after this target rebuilds aegis-vanguard:latest on the host.
-deploy-vanguard:
-	@[ -n "$(EC2)" ] || (echo "Usage: make deploy-vanguard EC2=<ip> KEY=<path/to/key.pem>" && exit 1)
-	@SSH_OPTS="-o StrictHostKeyChecking=no -i $(KEY)"; \
-	echo "→ Rebuilding aegis-vanguard:latest on ubuntu@$(EC2):/opt/asm"; \
-	ssh $$SSH_OPTS ubuntu@$(EC2) '\
-	  cd /opt/asm && \
-	  git pull && \
-	  docker build -t aegis-vanguard:latest -f aegis-vanguard/Dockerfile . && \
-	  echo "" && echo "✓ aegis-vanguard:latest rebuilt — the scanner worker will use it on the next run." && \
-	  docker image inspect aegis-vanguard:latest --format "  built: {{.Created}}  id: {{.Id}}"'
 
 
 

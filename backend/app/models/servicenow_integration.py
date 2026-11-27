@@ -1,7 +1,7 @@
 """ServiceNow ITSM integration models.
 
 Outbound webhook (Praetorian-style) plus Table API bidirectional status sync
-and optional close-claim validation via Aegis Vanguard.
+and optional close-claim validation through the finding validator.
 """
 
 from datetime import datetime

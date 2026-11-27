@@ -1,0 +1,10 @@
+[
+ {"id":"engine_problem","ip":"/","port":"443","severity":"WARN","finding":"No engine or GOST support via engine with your /usr/bin/openssl"},
+ {"id":"SSLv2","ip":"tls.example.test/203.0.113.30","port":"443","severity":"OK","finding":"not offered"},
+ {"id":"TLS1","ip":"tls.example.test/203.0.113.30","port":"443","severity":"LOW","finding":"offered (deprecated)"},
+ {"id":"heartbleed","ip":"tls.example.test/203.0.113.30","port":"443","severity":"OK","cve":"CVE-2014-0160","cwe":"CWE-119","finding":"not vulnerable, no heartbeat extension"},
+ {"id":"SWEET32","ip":"tls.example.test/203.0.113.30","port":"443","severity":"LOW","cve":"CVE-2016-2183 CVE-2016-6329","cwe":"CWE-327","finding":"uses 64 bit block ciphers"},
+ {"id":"cipherlist_3DES_IDEA","ip":"tls.example.test/203.0.113.30","port":"443","severity":"MEDIUM","cwe":"CWE-310","finding":"offered"},
+ {"id":"ROBOT","ip":"tls.example.test/203.0.113.30","port":"443","severity":"HIGH","cve":"CVE-2017-17382","finding":"VULNERABLE (NOT ok)"},
+ {"id":"cert_expirationStatus","ip":"tls.example.test/203.0.113.30","port":"443","severity":"CRITICAL","finding":"expired"}
+]

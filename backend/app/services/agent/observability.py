@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# USD per million tokens. Keep in sync with aegis-vanguard/agent/tracing.py.
+# USD per million tokens.
 MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
     "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
@@ -54,6 +54,10 @@ def redact_string(value: str) -> str:
     value = re.sub(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b|\bsk_live_[A-Za-z0-9]{16,128}\b|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", _REDACTED, value)
     value = re.sub(r'''(?i)((?:api[_-]?key|client[_-]?secret|access[_-]?token|password)\s*["']?\s*[:=]\s*["'])([^"']+)(["'])''', r"\1[redacted]\3", value)
     value = re.sub(r"(?i)([?&](?:token|api[_-]?key|secret|password|access_token)=)[^&#\s]+", r"\1[redacted]", value)
+    # Credentials embedded in URLs (e.g. a .git/config remote) and Basic/token
+    # Authorization values (e.g. a persisted http.extraheader).
+    value = re.sub(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s@\"'<>?#]+@", r"\1[redacted]@", value)
+    value = re.sub(r"(?i)(authorization\s*:\s*(?:basic|token)\s+)[A-Za-z0-9._\-+=/:]+", r"\1" + _REDACTED, value)
     return value
 
 

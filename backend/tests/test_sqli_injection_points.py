@@ -108,7 +108,7 @@ def test_cookie_header_and_path_rows_seed_sqli_cells():
         "path:path[2]",
     } <= sqli
     assert not {"cookie:PHPSESSID", "cookie:_ga", "header:X-Api-Key"} & sqli
-    assert parameter_test_classes({"location": "cookie", "name": "lang"}) == ("sqli",)
+    assert parameter_test_classes({"location": "cookie", "name": "lang"}) == ("sqli", "xss")
 
 
 def test_sqli_specialist_ranks_cookies_ahead_of_generic_headers():

@@ -152,6 +152,38 @@ def _status(value: Any, default: str = "untested") -> str:
     return value if value in CELL_STATUSES else default
 
 
+# Ledger states that ``_status`` folds into a coarser cell status. The detail
+# keeps what the folded state meant (a candidate signal vs. a cell merely in
+# focus; a refuted candidate vs. a cell that never signalled) without adding
+# a status value existing readers would not recognise.
+STATUS_DETAILS = frozenset({"candidate", "validated", "rejected", "error"})
+
+
+def _status_detail(value: Any) -> str:
+    value = _text(value).lower()
+    return value if value in STATUS_DETAILS else ""
+
+
+# Verdict ordering for recorded results. ``finding`` is sticky: a later clean
+# or inconclusive result on the same cell (a second probe, a flaky retest, a
+# refuted duplicate candidate) cannot erase a published finding. A clean
+# verdict can only be superseded by stronger evidence: a candidate signal
+# (``in_focus``) or a finding. Every other state is a work state and accepts
+# any recorded result, so lease -> result and inconclusive -> retest flows
+# keep working. Unlike the Vanguard ledger, ``inconclusive`` stays an open
+# state that leasing picks up again.
+_CELL_TRANSITIONS: dict[str, frozenset[str]] = {
+    "finding": frozenset({"finding"}),
+    "tested_clean": frozenset({"tested_clean", "in_focus", "finding"}),
+}
+
+
+def can_transition_cell_status(current: Any, new: Any) -> bool:
+    """Whether a recorded result may move a cell from ``current`` to ``new``."""
+    allowed = _CELL_TRANSITIONS.get(_status(current))
+    return allowed is None or _status(new) in allowed
+
+
 def _specialist_for(test_type: str, hypothesis_id: str, brain: Any) -> str:
     for hypothesis in getattr(brain, "hypotheses", None) or []:
         if getattr(hypothesis, "id", "") == hypothesis_id:
@@ -227,6 +259,7 @@ def _new_cell(
         "hypothesis_id": hypothesis_id,
         "specialist": _specialist_for(test_type, hypothesis_id, brain),
         "status": _status(status),
+        "status_detail": _status_detail(status) or _status_detail(trace.get("status_detail")),
         "source": _text(source) or "coverage",
         "reason": _text(reason)[:500],
         "evidence_ids": list(
@@ -339,6 +372,7 @@ def migrate_coverage_cells(
                         "task_lease_id",
                         "attempts",
                         "updated_at",
+                        "status_detail",
                     )
                 },
             },
@@ -1247,8 +1281,27 @@ def record_coverage_cell(
             "Coverage lease is missing, expired, or belongs to another executor"
         )
     updated = _merge_cell(existing or proposed, proposed)
-    updated["status"] = _status(status)
-    updated["reason"] = _text(reason)[:500]
+    requested = _status(status)
+    refused = existing is not None and not can_transition_cell_status(
+        existing.get("status"), requested
+    )
+    if refused:
+        # Keep the stronger verdict and its reason. The new evidence is still
+        # attached so the later observation stays auditable.
+        updated["status"] = _status(existing.get("status"))
+        updated["last_refused_transition"] = {
+            "from": updated["status"],
+            "to": requested,
+            "reason": _text(reason)[:200],
+            "evidence_id": _text(evidence_id),
+            "at": time.time(),
+        }
+    else:
+        updated["status"] = requested
+        updated["status_detail"] = _status_detail(status) or _status_detail(
+            trace.get("status_detail")
+        )
+        updated["reason"] = _text(reason)[:500]
     if evidence_id:
         updated["evidence_ids"] = list(
             dict.fromkeys([*(updated.get("evidence_ids") or []), evidence_id])
@@ -1261,8 +1314,12 @@ def record_coverage_cell(
         "finding_id",
         "finding_title",
     ):
-        if trace.get(key) not in (None, ""):
-            updated[key] = _text(trace.get(key))
+        if trace.get(key) in (None, ""):
+            continue
+        if refused and updated.get(key):
+            # Never re-point a kept verdict's provenance at a weaker result.
+            continue
+        updated[key] = _text(trace.get(key))
     if updated["status"] in CELL_TERMINAL or coverage_lease_id:
         for key, value in (
             ("lease_id", ""),
@@ -1278,6 +1335,8 @@ def record_coverage_cell(
     ]
     if not any(cell.get("id") == updated["id"] for cell in brain.coverage_cells):
         brain.coverage_cells.append(updated)
+    if refused:
+        return {**updated, "transition_refused": True, "requested_status": requested}
     return updated
 
 
@@ -1356,6 +1415,9 @@ def claim_coverage_cell_leases(
             for cell in brain.coverage_cells
             if cell.get("status") in CELL_OPEN
             and not cell.get("lease_id")
+            # A probe found this exact request shape unbuildable; it stays
+            # open (inconclusive) for a human or a future probe, not re-leased.
+            and not cell.get("unsupported_shape")
             and (not allowed_sources or cell.get("source") in allowed_sources)
             and (not excluded_test_types or cell.get("test_type") not in excluded_test_types)
             and (allowed_cell_ids is None or cell.get("id") in allowed_cell_ids)

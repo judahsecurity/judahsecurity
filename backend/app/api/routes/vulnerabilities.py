@@ -98,6 +98,7 @@ def _validation_to_dict(v: FindingValidation) -> dict:
         "error": v.error,
         # Enhanced re-validation signals (from validator JSON / sanity short-circuit)
         "still_open": raw.get("still_open"),
+        "remediation_state": raw.get("remediation_state"),
         "logical_mismatch": raw.get("logical_mismatch"),
         "sanity_flags": raw.get("sanity_flags"),
         "requested_by_user_id": v.requested_by_user_id,
@@ -1843,7 +1844,7 @@ def _maybe_sync_servicenow(
 
 
 # =============================================================================
-# ON-DEMAND FINDING VALIDATION (Aegis Vanguard validator agent)
+# ON-DEMAND FINDING VALIDATION (native replay, then Prowl's independent verifier)
 # =============================================================================
 
 

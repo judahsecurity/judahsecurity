@@ -2,7 +2,7 @@
 """
 Offline stub scanner used by the harness test-suite.
 
-Mimics ``aegis-vanguard/run_pentest.py`` just enough for the harness: it accepts
+Mimics a harness scanner command just enough for the harness: it accepts
 ``--target``/``--scope`` (plus any extra flags), then writes a fixed set of
 findings to the ``AEGIS_FINDINGS_SINK`` JSONL file exactly as the real
 ``ASMBridge`` would. No API key, network, or security tools required.

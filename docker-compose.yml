@@ -56,6 +56,12 @@ services:
       - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
       - AEGIS_INTERACTSH_RPC_ENABLED=${AEGIS_INTERACTSH_RPC_ENABLED:-true}
       - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
+      - AEGIS_OOB_PROVIDER=${AEGIS_OOB_PROVIDER:-interactsh}
+      - AEGIS_OOB_DOMAIN=${AEGIS_OOB_DOMAIN:-}
+      - AEGIS_OOB_POLL_URL=${AEGIS_OOB_POLL_URL:-}
+      - AEGIS_OOB_POLL_KEY=${AEGIS_OOB_POLL_KEY:-}
+      - AEGIS_INTERACTSH_SERVER=${AEGIS_INTERACTSH_SERVER:-}
+      - AEGIS_INTERACTSH_TOKEN=${AEGIS_INTERACTSH_TOKEN:-}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
       - AEGIS_EVIDENCE_RETENTION_SECONDS=${AEGIS_EVIDENCE_RETENTION_SECONDS:-86400}
       - AEGIS_ASSESSMENT_PROXY_URL=${AEGIS_ASSESSMENT_PROXY_URL:-}
@@ -411,14 +417,12 @@ services:
       - NUCLEI_RUNTIME_SECONDS_PER_HOST=${NUCLEI_RUNTIME_SECONDS_PER_HOST:-18}
       - NUCLEI_MAX_RUNTIME_CAP_SECONDS=${NUCLEI_MAX_RUNTIME_CAP_SECONDS:-2700}
       - NUCLEI_MAX_TARGETS_PER_SCAN=${NUCLEI_MAX_TARGETS_PER_SCAN:-75}
-      # Finding validation — native replay of the original detector / steps
-      # on this scanner (no Docker). Override with docker|subprocess|auto if needed.
+      # Finding validation. auto: native replay of the original detector / steps;
+      # when inconclusive, Prowl's independent verifier re-tests HTTP(S)
+      # findings (AEGIS_VALIDATOR_PROWL=false disables). prowl: same, ignoring
+      # the disable flag. native: replay only.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - AEGIS_VALIDATOR_MODE=${AEGIS_VALIDATOR_MODE:-auto}
-      - AEGIS_VANGUARD_IMAGE=${AEGIS_VANGUARD_IMAGE:-aegis-vanguard:latest}
-      - AEGIS_VANGUARD_PATH=${AEGIS_VANGUARD_PATH:-}
-      - AEGIS_MODEL=${AEGIS_MODEL:-claude-sonnet-4-6}
-      - AEGIS_VALIDATE_MAX_TURNS=${AEGIS_VALIDATE_MAX_TURNS:-20}
       - AEGIS_VALIDATE_TIMEOUT=${AEGIS_VALIDATE_TIMEOUT:-900}
       # --- Authenticated crawl credentials (optional) ---
       # Same as the backend: referenced by deep_crawl login as env:/secret: refs.
@@ -438,8 +442,6 @@ services:
       - nuclei_templates:/home/appuser/.config/nuclei
       - scan_outputs:/app/outputs
       - screenshots_data:/app/data/screenshots
-      # Host Docker daemon — required for AEGIS_VALIDATOR_MODE=docker
-      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     networks:
       - asm_network
     cap_add:
@@ -556,6 +558,12 @@ services:
       - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
       - AGENT_SANDBOX_SHELL=${AGENT_SANDBOX_SHELL:-true}
       - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
+      - AEGIS_OOB_PROVIDER=${AEGIS_OOB_PROVIDER:-interactsh}
+      - AEGIS_OOB_DOMAIN=${AEGIS_OOB_DOMAIN:-}
+      - AEGIS_OOB_POLL_URL=${AEGIS_OOB_POLL_URL:-}
+      - AEGIS_OOB_POLL_KEY=${AEGIS_OOB_POLL_KEY:-}
+      - AEGIS_INTERACTSH_SERVER=${AEGIS_INTERACTSH_SERVER:-}
+      - AEGIS_INTERACTSH_TOKEN=${AEGIS_INTERACTSH_TOKEN:-}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
       - AEGIS_ASSESSMENT_PROXY_URL=${AEGIS_ASSESSMENT_PROXY_URL:-}
       - AEGIS_ASSESSMENT_PROXY_API_URL=${AEGIS_ASSESSMENT_PROXY_API_URL:-}

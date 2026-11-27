@@ -1,0 +1,22 @@
+{
+  "Invocation": "testssl.sh --jsonfile-pretty out.json tls.example.test",
+  "at": "scanner:/usr/bin/openssl",
+  "version": "3.0.8",
+  "startTime": "1763625600",
+  "scanResult": [
+    {
+      "targetHost": "tls.example.test", "ip": "203.0.113.30", "port": "443", "rDNS": "", "service": "HTTP",
+      "protocols": [
+        {"id": "SSLv3", "severity": "OK", "finding": "not offered"},
+        {"id": "TLS1_1", "severity": "LOW", "finding": "offered (deprecated)"}
+      ],
+      "vulnerabilities": [
+        {"id": "BREACH", "severity": "MEDIUM", "cve": "CVE-2013-3587", "cwe": "CWE-310", "finding": "potentially NOT ok, uses gzip HTTP compression"},
+        {"id": "LUCKY13", "severity": "LOW", "cve": "CVE-2013-0169", "finding": "potentially vulnerable, uses obsolete CBC ciphers with TLS"}
+      ],
+      "serverDefaults": [
+        {"id": "cert_trust", "severity": "HIGH", "finding": "certificate does not match supplied URI"}
+      ]
+    }
+  ]
+}

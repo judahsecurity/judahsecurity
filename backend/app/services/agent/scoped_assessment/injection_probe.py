@@ -220,8 +220,15 @@ def _stable_digest(body: bytes) -> str:
 
 
 def probe_nosql(urls: dict, *, allowed_origin: str, state: dict | None, nonce: str,
-                fetch=_fetch) -> dict:
-    """Interleaved operator differential; ``urls`` maps each NOSQL_SEQUENCE step."""
+                fetch=_fetch, recipe: str = "operator_ne") -> dict:
+    """Interleaved operator differential; ``urls`` maps each NOSQL_SEQUENCE step.
+
+    ``recipe`` names how the steps were built (``operator_ne`` for operator
+    objects; the string recipes of ``intent_request.NOSQL_PATH_RECIPES`` for
+    a path segment). The standard is the same for every recipe.
+    """
+    if not isinstance(recipe, str) or not re.fullmatch(r"[a-z_]{1,40}", recipe):
+        raise ValueError("A fixed NoSQL recipe name is required")
     if not nonce or len(nonce) < MIN_MARKER_LENGTH or len(nonce) > 40 or not nonce.isalnum():
         raise ValueError("A random alphanumeric nonce of at least 8 characters is required")
     if set(urls) != set(NOSQL_SEQUENCE):
@@ -240,9 +247,9 @@ def probe_nosql(urls: dict, *, allowed_origin: str, state: dict | None, nonce: s
     return {
         "operation": "scoped_injection_probe", "test_type": "nosql",
         "requests_sent": len(NOSQL_SEQUENCE), "checks": checks,
-        "recipe": "operator_ne" if confirmed else "",
+        "recipe": recipe if confirmed else "",
         "control": {"signal": False, "sha256": digest["control_first"]},
-        "probes": [{"recipe": "operator_ne", "signal": confirmed,
+        "probes": [{"recipe": recipe, "signal": confirmed,
                     "sha256": digest["true_first"]}],
         "signature": "operator_differential", "marker_length": len(nonce),
         "proof_confirmed": confirmed,

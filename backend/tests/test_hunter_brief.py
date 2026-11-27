@@ -33,7 +33,7 @@ def test_brief_is_notes_not_dump():
     assert "169.254" in brief
     assert len(brief) < 1600
     assert "httpx output" * 10 not in brief
-    assert "LIVE Interactsh" not in brief
+    assert "LIVE OOB" not in brief
 
 
 def test_brief_does_not_provision_interactsh_by_default(monkeypatch):

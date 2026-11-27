@@ -326,9 +326,9 @@ def generate_payloads(
     needs_oob = any("COLLABORATOR" in p for p in payloads)
     if needs_oob and not collaborator_url:
         try:
-            from app.services.interactsh_service import ensure_session
+            from app.services.oob_collectors import oob_ensure_session
 
-            oob_meta = ensure_session()
+            oob_meta = oob_ensure_session()
             if oob_meta.get("success") and oob_meta.get("payload_domain"):
                 collaborator_url = str(oob_meta["payload_domain"])
         except Exception:  # noqa: BLE001

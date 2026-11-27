@@ -7,7 +7,7 @@ Outbound:
 Inbound:
   - Table API GET to refresh incident state
   - Optional close-claim validation: when ServiceNow closes an incident,
-    queue Aegis Vanguard before accepting the close in ASM.
+    queue a finding validation before accepting the close in ASM.
 """
 
 from __future__ import annotations

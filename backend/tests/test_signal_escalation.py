@@ -220,7 +220,7 @@ async def test_compare_requests_automatically_queues_proof(monkeypatch):
         assert result["next_action"].startswith("Complete the structured proof")
         assert "engagement_brain" not in result
         assert manager._engagement_brain["proof_escalations"][0]["status"] == "pending"
-        monkeypatch.setattr("app.services.agent.tools._tool_output_max_chars", lambda: 1200)
+        monkeypatch.setattr("app.services.agent.tools_http._tool_output_max_chars", lambda: 1200)
         compacted_output = await manager.compare_requests(
             {"method": "GET", "url": "https://app.test/owner"},
             {"method": "GET", "url": "https://app.test/orders"},

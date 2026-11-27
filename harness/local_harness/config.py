@@ -15,10 +15,10 @@ from typing import List, Optional
 
 
 def _repo_root() -> Path:
-    """Locate the repository root (the dir that contains ``aegis-vanguard/``)."""
+    """Locate the repository root (the dir that contains ``harness/``)."""
     here = Path(__file__).resolve()
     for parent in here.parents:
-        if (parent / "aegis-vanguard").is_dir():
+        if (parent / "harness").is_dir() and (parent / "backend").is_dir():
             return parent
     # Fallback: two levels up from this file (harness/local_harness/config.py).
     return here.parents[2]
@@ -37,12 +37,14 @@ class HarnessConfig:
 
     # --- Scanner engine -------------------------------------------------
     # The command used to launch a single scan. The target URL is appended as
-    # ``--target <url>`` and (optionally) ``--scope <domain>``.
+    # ``--target <url>`` and (optionally) ``--scope <domain>``. The default runs
+    # the in-product Prowl agent (local_harness/prowl_scanner.py); it needs a
+    # configured assessment backend (AEGIS_ASSESSMENT_DATABASE_URL, AEGIS_PROWL_*).
     scanner_cmd: List[str] = field(
-        default_factory=lambda: ["python3", "run_pentest.py"]
+        default_factory=lambda: ["python", "-m", "local_harness.prowl_scanner"]
     )
-    # Working directory for the scanner command (where run_pentest.py lives).
-    scanner_cwd: Path = field(default_factory=lambda: _repo_root() / "aegis-vanguard")
+    # Working directory for the scanner command (the harness directory).
+    scanner_cwd: Path = field(default_factory=lambda: _repo_root() / "harness")
     # Extra flags passed to every scan (e.g. ["--fast", "--max-risk", "medium"]).
     scanner_extra_args: List[str] = field(default_factory=list)
     # Hard timeout for a single scan, in seconds.

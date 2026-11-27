@@ -1,0 +1,4 @@
+[*] Probing the target for stability
+[*] Analysing HTTP response for anomalies
+[*] Logicforcing the URL endpoint
+[-] No parameters were discovered.

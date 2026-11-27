@@ -336,6 +336,13 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "or DELETE /api/v1/celery-task/. Do not delete production models. "
         "queue_finding_followups(vuln_type='ml_pipeline_rbac').\n"
         "- On proven read IDOR: queue_finding_followups(vuln_type='idor') for write/export.\n"
+        "- WebSocket CSWSH: when the socket authenticates by cookie, send one upgrade "
+        "request (Connection: Upgrade, Upgrade: websocket, Sec-WebSocket-Version: 13) "
+        "with a never-seen canary Origin and one with the app's own Origin. 101 for the "
+        "canary Origin with the session cookie is a lead: CSWSH has no proof kind, so "
+        "record it with update_hypothesis and save_note. Room/channel joins for another "
+        "user's id are authorization only with two verified identities and the "
+        "authorization proof. Do not hold sockets open or flood messages.\n"
         "- When REST/OpenAPI/GraphQL is mapped: execute_astf on the API base (with bearer token "
         "if available) for complementary OWASP API Top 10 coverage; prove CRITICAL/HIGH with "
         "compare_requests before create_finding."
@@ -500,7 +507,10 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- After anonymous ACR/Docker catalog: scan at most 1–3 image configs/lockfiles "
         "for ghp_*, git+https PATs, ghs_* extraheaders, Artifactory AKCp, NATS operator "
         "chains. A ghp_* in package-lock.json is Critical without re-hitting GitHub. "
-        "Do not authenticate recovered tokens. Redact; queue docker_registry follow-ups."
+        "Do not authenticate recovered tokens. Redact; queue docker_registry follow-ups.\n"
+        "- Cloud keys (AKIA/ASIA, GCP service-account JSON, Azure client secret, SAS): "
+        "classify type and likely privilege from the key shape and co-leaked hints, then "
+        "hand to cloud_audit. Never use a recovered cloud key."
     ),
     "agent_tools": (
         "SKILL PACK — AI agent / chat proxy:\n"
@@ -517,7 +527,17 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "Function App MI roles and Key Vault access. Do not inject code on the app.\n"
         "- *.azurecr.io in inventory: prove anonymousPullEnabled via unauth oauth2 token "
         "+ catalog names (hand to coverage if you lack curl). Disable anonymous pull; "
-        "prefer private endpoint / firewall. Do not push; do not pull the whole catalog."
+        "prefer private endpoint / firewall. Do not push; do not pull the whole catalog.\n"
+        "- Leaked cloud key classification (from js_secrets/secrets_hunter): classify by "
+        "shape, never by using it. AKIA = long-lived IAM user key, ASIA = temporary STS "
+        "session (needs its session token), GCP service-account JSON (client_email + "
+        "private_key), Azure client secret (tenant/client id pair), SAS token (read sp=, "
+        "se=, srt=), Firebase config (apiKey is public; check the rules instead). "
+        "Estimate blast radius from co-leaked hints (bucket names, ARNs, scopes, "
+        "sp=rwdl). Companion misconfig is provable: an anonymous GET that lists a "
+        "bucket/container is exposure with a response_match proof. Never call cloud "
+        "APIs with a recovered key, never fetch 169.254.169.254; document an SSRF-to-IMDS "
+        "chain as a lead. Remediation: rotate, then least privilege."
     ),
     "graphql_api": (
         "SKILL PACK — GraphQL:\n"
@@ -566,7 +586,120 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Static source findings are not runtime-exploited: file them with "
         "verification_level='source_verified'. They are capped at medium until "
         "a runtime proof upgrades them; do not claim high/critical from source alone.\n"
-        "- Mitigated one layer up (caller sanitizes) → kill, don't report."
+        "- Mitigated one layer up (caller sanitizes) → kill, don't report.\n"
+        "- CI supply chain (.github/workflows): pull_request_target or workflow_run that "
+        "checks out the PR head (ref: github.event.pull_request.head.sha) and then runs "
+        "build/test scripts with secrets or a write GITHUB_TOKEN; ${{ github.event.* }} "
+        "title/body/branch interpolated into run: steps; self-hosted runners on public "
+        "PRs; unpinned third-party actions. Cite the workflow lines and the trigger. "
+        "This is source_verified like any SAST lead; never open a PR or push a workflow "
+        "to prove it."
+    ),
+    "grpc_api": (
+        "SKILL PACK — gRPC (Aholiab):\n"
+        "- Rank: reflection-enabled public endpoints, then gRPC-Web edges, then JSON "
+        "gateway twins.\n"
+        "- One reflection list_services call is the whole reflection test; a listing is a "
+        "lead, not a finding.\n"
+        "- One read-only unary call per service without auth metadata; never "
+        "streaming, never mutating, never retry loops.\n"
+        "- Impact needs data that belongs to someone else, proven through the "
+        "authorization proof with two verified identities."
+    ),
+    "nodejs_express": (
+        "SKILL PACK — Node.js / Express (Ithamar):\n"
+        "- Server-side prototype pollution is lead-only here; detect with a unique "
+        "key that is reflected back in the same response, never with payloads that "
+        "alter shared process behaviour.\n"
+        "- trust proxy: X-Forwarded-For / X-Real-IP spoofing against IP-gated paths; a "
+        "difference is a lead.\n"
+        "- Template engines (EJS/Pug/Handlebars) and express.static traversal: only via "
+        "scoped_injection_probe_assigned receipts.\n"
+        "- Next.js-specific paths belong to nextjs."
+    ),
+    "deserialization": (
+        "SKILL PACK — insecure deserialization (Ezekiel):\n"
+        "- Find the sink first (serialized blobs, Java/PHP/.NET/Python markers) in "
+        "captured traffic; a sink is a lead.\n"
+        "- Never send gadget chains, shell commands or file writes.\n"
+        "- The only proof here is a correlated callback from run_oob_callback_workflow "
+        "(query_template or raw with {{callback_host}}) when OOB is authorized; file it "
+        "as ssrf (outbound lookup), not as RCE.\n"
+        "- ViewState MAC posture belongs to aspnet_iis; SSTI/SQLi belong to their lanes."
+    ),
+    "m365_entra": (
+        "SKILL PACK — Entra ID / M365 (Mordecai):\n"
+        "- External, in-scope domain only. Tenant id, namespace type, federation "
+        "brand and ADFS endpoints are informational notes.\n"
+        "- User enumeration: one canary plus one observed address, repeated once for "
+        "stability; account_enumeration stays a lead.\n"
+        "- Legacy auth / Seamless SSO / device-code posture: document preconditions only.\n"
+        "- No spraying, phishing, token theft, Golden SAML or mailbox access."
+    ),
+    "okta_idp": (
+        "SKILL PACK — Okta (Eliakim):\n"
+        "- Tenant discovery and OIDC metadata are notes; exposed admin or agent "
+        "endpoints are leads unless an anonymous GET returns sensitive data "
+        "(exposure with a response_match proof).\n"
+        "- authn enumeration posture: canary plus one observed username, never a real "
+        "password; account_enumeration stays a lead.\n"
+        "- No spraying, MFA push fatigue or lockout tests; hand redirect_uri and ACS "
+        "issues to saml_sso."
+    ),
+    "sharepoint": (
+        "SKILL PACK — SharePoint on-prem (Shaphan):\n"
+        "- Build first (headers, /_vti_pvt/service.cnf), then KEV-gated CVE "
+        "applicability; a build in range is a low known_cve lead.\n"
+        "- Anonymous list/library data via /_api or /_vti_bin is exposure with a "
+        "response_match proof; describe what was exposed.\n"
+        "- ToolShell chain: fingerprint and version only. No ToolPane.aspx POSTs, no "
+        "spoofed Referer, no webshells, no machineKey extraction."
+    ),
+    "enterprise_vpn": (
+        "SKILL PACK — SSL VPN appliances (Benaiah):\n"
+        "- Product from portal path/assets, build from a version endpoint or asset "
+        "hash; no build, no CVE claim.\n"
+        "- search_vulnx for KEV membership; rank KEV-listed, in-range CVEs first.\n"
+        "- Non-intrusive nuclei only (-etags intrusive,dos). No exploit payloads, no "
+        "credential attempts, no firmware or session actions.\n"
+        "- Output per appliance: product, build evidence, CVE, KEV status, precondition. "
+        "known_cve is lead-only and capped low."
+    ),
+    "vcenter": (
+        "SKILL PACK — vCenter / Aria / Workspace ONE (Jethro):\n"
+        "- Read-only build evidence (SDK AboutInfo, banners), then KEV-gated CVE "
+        "applicability; known_cve is lead-only and capped low.\n"
+        "- No uploads, plugin payloads, VM power/snapshot actions or credential attempts."
+    ),
+    "spring_boot": (
+        "SKILL PACK — Spring Boot (Elisha):\n"
+        "- Actuator sweep with anonymous GET only; quote a non-secret literal for the "
+        "response_match proof and redact secrets.\n"
+        "- heapdump: HEAD only. Never POST to actuator endpoints or jolokia exec.\n"
+        "- SpEL through scoped_injection_probe_assigned receipts only (ssti class)."
+    ),
+    "laravel": (
+        "SKILL PACK — Laravel (Zadok):\n"
+        "- Telescope/Horizon/debugbar/.env/logs: anonymous GET exposure with a "
+        "response_match proof; redact APP_KEY and credentials.\n"
+        "- APP_DEBUG: one ordinary error page, read the trace.\n"
+        "- Ignition CVE-2021-3129: version-gate only, never execute-solution."
+    ),
+    "nextjs": (
+        "SKILL PACK — Next.js (Hezekiah):\n"
+        "- Version first; middleware bypass via x-middleware-subrequest is authorization "
+        "only with the two-identity authorization proof.\n"
+        "- /_next/image SSRF only through run_oob_callback_workflow when OOB is "
+        "authorized; never metadata or loopback targets.\n"
+        "- Server Actions: replay captured Next-Action ids; state changes need the "
+        "state_change proof with cleanup."
+    ),
+    "aspnet_iis": (
+        "SKILL PACK — ASP.NET / IIS (Abishai):\n"
+        "- elmah.axd / trace.axd: anonymous GET exposure with a response_match proof; "
+        "redact cookies and tokens.\n"
+        "- ViewState without MAC/encryption is a lead; never send crafted ViewState.\n"
+        "- NTLM Type 2 domain/host disclosure is an informational note."
     ),
 }
 

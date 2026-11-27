@@ -269,8 +269,27 @@ def _stop_locked(sid: str) -> bool:
     return True
 
 
+def operator_defaults(
+    server: Optional[str] = None, token: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Fill a missing server/token from operator settings.
+
+    AEGIS_INTERACTSH_SERVER / AEGIS_INTERACTSH_TOKEN apply only when the call
+    names no server. A token is never paired with a server it was not set for:
+    an explicit server keeps only an explicit token.
+    """
+    server = (server or "").strip() or None
+    token = (token or "").strip() or None
+    if server is None:
+        server = (os.environ.get("AEGIS_INTERACTSH_SERVER") or "").strip() or None
+        if server and token is None:
+            token = (os.environ.get("AEGIS_INTERACTSH_TOKEN") or "").strip() or None
+    return server, token
+
+
 def register(server: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     """Start an interactsh-client session and return its unique payload domain."""
+    server, token = operator_defaults(server, token)
     if _rpc_enabled():
         return _rpc_call("register", server=server, token=token)
     exe = _binary()
@@ -397,6 +416,7 @@ def ensure_session(
     token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Reuse a live Interactsh session or register a new one."""
+    server, token = operator_defaults(server, token)
     if _rpc_enabled():
         return _rpc_call("ensure_session", server=server, token=token)
     with _LOCK:

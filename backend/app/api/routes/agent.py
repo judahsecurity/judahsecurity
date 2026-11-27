@@ -12,10 +12,10 @@ import os
 import time
 import uuid
 from datetime import datetime
-from typing import Optional, Literal, List
+from typing import Any, Optional, Literal, List, Union
 from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect, Query, Response
-from pydantic import BaseModel, field_validator, model_validator, Field
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator, Field
 
 from sqlalchemy.orm import Session
 
@@ -103,9 +103,62 @@ class OwnerOnlyResource(BaseModel):
         return self
 
 
+class TestRecordEndpoint(BaseModel):
+    """How Prowl may create its own dummy record for PUT/PATCH/DELETE probes.
+
+    Write probes only ever touch records Prowl created and verified as its
+    own (``scoped_assessment.test_records``); an existing record is never a
+    write target. Validated again by the policy applier.
+    """
+
+    __test__ = False  # not a pytest class
+    model_config = ConfigDict(extra="forbid")
+
+    create_path: str = Field(min_length=2, max_length=256)
+    create_body: Union[dict[str, Any], str]
+    content_type: Literal["json", "form"]
+    record_path: str = Field(min_length=5, max_length=256)
+    id_source: str = Field(min_length=6, max_length=330)
+    write_methods: list[Literal["PUT", "PATCH", "DELETE"]] = Field(min_length=1, max_length=3)
+    cleanup: Literal["delete", "none"]
+    # cleanup "delete" is the only DELETE Prowl sends besides a DELETE probe on
+    # its own record, so the operator approves it by name.
+    cleanup_delete_approved: bool = False
+
+    @model_validator(mode="after")
+    def validate_endpoint(self):
+        from app.services.agent.scoped_assessment.test_records import normalize_endpoint
+
+        normalize_endpoint(self.model_dump())
+        return self
+
+
+class LlmIndirectField(BaseModel):
+    """Where Prowl may plant an indirect prompt-injection canary.
+
+    ``write_path`` is an exact path Prowl may POST one new document to, or a
+    ``test_record_endpoints`` record_path (with ``{id}``) allowing PUT/PATCH,
+    in which case only a Prowl-owned record is written. ``field`` is the text
+    field that receives the canary; ``read_path`` the exact chat path whose
+    answer is read. Validated again by the policy applier.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    write_path: str = Field(min_length=2, max_length=256)
+    field: str = Field(min_length=1, max_length=330)
+    read_path: str = Field(min_length=2, max_length=256)
+
+
 class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
+    # PUT/PATCH/DELETE probes run only against a dummy record Prowl creates
+    # from one of these endpoints, verifies as its own and cleans up.
+    test_record_endpoints: list[TestRecordEndpoint] = Field(default_factory=list, max_length=4)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
+    # Indirect prompt injection: plant a canary in one approved document field
+    # and read the model's answer on the approved chat path.
+    llm_indirect_fields: list[LlmIndirectField] = Field(default_factory=list, max_length=4)
     # Operator-approved state-changing actions for the race and CSRF proofs.
     # Each needs a matching cleanup path that accepts the __PROWL_NONCE__ canary.
     race_action_paths: list[str] = Field(default_factory=list, max_length=8)
@@ -121,6 +174,18 @@ class AgentAssessmentPolicy(BaseModel):
     # objective to match the authorization regex.
     oob_callbacks_allowed: bool = False
     credential_testing_allowed: bool = False
+    # Timing-only account enumeration (dozens of paced POSTs to a reset form).
+    # Off unless the operator sets it here; objective wording cannot grant it.
+    timing_enumeration_allowed: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_write_method_paths(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "write_method_paths" in data:
+            # Writes to an operator-named existing path could change real data.
+            raise ValueError("write_method_paths is not supported; PUT/PATCH/DELETE probes "
+                             "use Prowl-owned test records (test_record_endpoints)")
+        return data
 
     @field_validator("auth_login_path")
     @classmethod
@@ -143,6 +208,28 @@ class AgentAssessmentPolicy(BaseModel):
                     or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Approved write and cleanup paths must be exact absolute paths without query values")
         return paths
+
+    @model_validator(mode="after")
+    def validate_test_record_endpoints(self):
+        from app.services.agent.scoped_assessment.test_records import validate_endpoints
+
+        endpoints = validate_endpoints([row.model_dump() for row in self.test_record_endpoints])
+        from app.services.agent.scoped_assessment.class_probes import normalize_llm_indirect_fields
+
+        normalize_llm_indirect_fields([row.model_dump() for row in self.llm_indirect_fields],
+                                      endpoints)
+        return self
+
+
+def _record_test_record_endpoints(org_id: int, session_id: str, mode: str,
+                                  policy: Optional[dict]) -> None:
+    """Remember the endpoints this run will apply, so intent intake can check them."""
+    if mode != "agent" and policy is None:
+        return
+    from app.services.agent.run_snapshot import save_session_sidecar
+
+    save_session_sidecar(org_id, session_id,
+                         test_record_endpoints=list((policy or {}).get("test_record_endpoints") or []))
 
 
 class AgentQueryRequest(BaseModel):
@@ -587,6 +674,7 @@ async def query_agent(
     if pilot_config is not None:
         question = _pilot_question(question, pilot_config, request.playbook_id, request.load_session_id)
     assessment_policy = request.assessment_policy.model_dump() if request.assessment_policy else None
+    _record_test_record_endpoints(org_id, session_id, mode, assessment_policy)
     if mode == "agent":
         try:
             question = _agent_question_with_target(question, request.target)
@@ -1030,6 +1118,42 @@ async def upload_har_capture(
     return {"session_id": session_id, "identity": identity, **result}
 
 
+class IdentityHandoff(CaptureTokenRequest):
+    """Session material for one named identity, produced by an operator-side login."""
+    origin: str = Field(..., max_length=300)
+    cookies: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+@router.post("/sessions/{session_id}/identities", status_code=202)
+async def hand_over_identity(
+    session_id: str,
+    payload: IdentityHandoff,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Register a named test identity from cookies and auth headers.
+
+    For tools that log in on the analyst's side (Aegis Vanguard identity files):
+    only the resulting session material is sent, never a password. It is stored
+    encrypted with the capture inbox, checked against the engagement scope when
+    the run drains it, and never shown to the model.
+    """
+    from app.services.agent.operator_capture import (
+        CaptureError, enqueue_session, normalize_session_material, validate_identity,
+    )
+
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    try:
+        identity = validate_identity(payload.identity)
+        material = normalize_session_material(payload.origin, payload.cookies, payload.headers)
+        result = enqueue_session(org_id, session_id, identity=identity, role=payload.role,
+                                 tenant=payload.tenant, material=material, source="identity_handoff")
+    except CaptureError as exc:
+        raise _capture_http_error(exc)
+    return {"session_id": session_id, "identity": identity, **result}
+
+
 @router.get("/sessions/{session_id}/captures")
 async def capture_status(
     session_id: str,
@@ -1055,6 +1179,79 @@ async def list_session_candidates(
     from app.services.agent.run_control import has_running_task
 
     return {**list_candidates(org_id, session_id), "run_in_progress": has_running_task(session_id)}
+
+
+# =============================================================================
+# OPERATOR-DIRECTED PROBING (planned tests -> leased scoped probes)
+# =============================================================================
+
+class OperatorIntentRequest(BaseModel):
+    """One test the operator wants Prowl to run. The note is untrusted text."""
+
+    target: str = Field(min_length=8, max_length=2048)
+    test_type: str = Field(min_length=2, max_length=64)
+    parameter: str = Field(default="", max_length=128)
+    location: str = Field(default="", max_length=20)
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
+    identity: str = Field(default="", max_length=40)
+    note: str = Field(default="", max_length=1000)
+    # The input's ordinary value (numeric/UNION SQLi baseline, a header's JSON
+    # value for NoSQL). Validated in operator_intents; never a payload.
+    baseline_value: Optional[str] = Field(default=None, max_length=512)
+
+
+@router.post("/sessions/{session_id}/intents", status_code=201)
+async def submit_session_intent(
+    session_id: str,
+    request: OperatorIntentRequest,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Plan one operator-directed test as an ``operator`` fact + intent.
+
+    The intent is backed by a coverage cell, so the session's leased scoped
+    probes build its request from these fields even when Prowl never observed
+    the input. Idle session: written to the snapshot (201). Running session:
+    queued for the next think turn (202, ``queued: true``). Never a finding.
+    """
+    conv, org_id = _owned_conversation(db, session_id, current_user)
+    if conv.mode != "agent":
+        raise HTTPException(status_code=409, detail="Operator intents require an agent-mode session")
+    from app.services.agent.external_candidates import IntakeError
+    from app.services.agent.operator_intents import submit_operator_intent
+
+    try:
+        # Synchronous: running-task check and snapshot write share one event-loop slice.
+        result = submit_operator_intent(
+            org_id, session_id, target=request.target, test_type=request.test_type,
+            parameter=request.parameter, location=request.location, method=request.method,
+            identity=request.identity, note=request.note,
+            baseline_value=request.baseline_value,
+        )
+    except IntakeError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from None
+    if result.get("queued"):
+        response.status_code = 202
+    elif not result.get("accepted"):
+        response.status_code = 200
+    logger.info("Operator intent intake user=%s session=%s accepted=%s queued=%s",
+                current_user.id, session_id, result.get("accepted"), bool(result.get("queued")))
+    return {"session_id": session_id, **result}
+
+
+@router.get("/sessions/{session_id}/intents")
+async def list_session_intents(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Planned tests (all creators) from the snapshot plus undrained operator intents."""
+    _conv, org_id = _owned_conversation(db, session_id, current_user)
+    from app.services.agent.operator_intents import list_intents
+    from app.services.agent.run_control import has_running_task
+
+    return {**list_intents(org_id, session_id), "run_in_progress": has_running_task(session_id)}
 
 
 @router.get("/playbooks")
@@ -1731,6 +1928,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 if pilot_config is not None and not saved:
                     await websocket.send_json({"type": "error", "message": "Pilot session could not be persisted"})
                     continue
+                _record_test_record_endpoints(org_id, session_id, mode, assessment_policy)
 
                 async def _run_query(
                     q=question,

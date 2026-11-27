@@ -1,13 +1,3 @@
-httpx>=0.27.0
-pyyaml>=6.0
-playwright>=1.40.0
-anthropic>=0.40.0
-litellm>=1.0.0
-subcat
-# AutoSwagger dependencies (intruder-io/autoswagger — install separately from GitHub)
-# pip install presidio-analyzer presidio-anonymizer  # for PII detection
-# git clone https://github.com/intruder-io/autoswagger /opt/autoswagger
-requests>=2.31.0
-# Optional: expose Vanguard's arsenal over the Model Context Protocol
-# (agent/mcp_server.py). Only needed to run `python3 -m agent.mcp_server`.
-# mcp>=1.0.0
+# prowl_client.py, the skills' _lib helpers and agent/ identity login use the
+# Python standard library only. Tests need pytest.
+pytest>=8,<9

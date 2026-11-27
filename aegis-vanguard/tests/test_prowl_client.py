@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -229,3 +230,306 @@ def test_classes_remote_and_candidates(monkeypatch):
     assert client.main(["classes", "--remote", "--resolve", "idor"]) == 0
     assert client.main(["candidates", "--session", "s1"]) == 0
     assert seen == ["/agent/proof-classes", "/agent/sessions/s1/candidates"]
+
+
+# ---------------------------------------------------------------- identity handoff
+
+LOGIN_HTML = ('<form action="/session" method="post"><input name="email" type="email">'
+              '<input name="password" type="password"></form>')
+
+
+def _identity_file(tmp_path, rows):
+    path = tmp_path / "identities.json"
+    path.write_text(json.dumps(rows))
+    return str(path)
+
+
+def _login_transport(method, url, headers, body, follow_redirects):
+    if url.endswith("/login"):
+        return {"status": 200, "body": LOGIN_HTML, "headers": {}}
+    if url.endswith("/session"):
+        ok = "password=right" in body
+        return {"status": 302 if ok else 200, "body": "" if ok else "Invalid password",
+                "raw_headers": ("HTTP/1.1 302 Found\r\nLocation: /home\r\n"
+                                "Set-Cookie: sid=private-cookie; HttpOnly\r\n\r\n") if ok else ""}
+    if url.endswith("/me"):
+        return {"status": 200, "body": "signed in as owner", "headers": {}}
+    return {"status": 200, "body": "Welcome", "headers": {}}
+
+
+def test_identities_log_in_locally_and_hand_over_sessions_only(scope_file, monkeypatch, tmp_path):
+    path = _identity_file(tmp_path, [
+        {"label": "owner", "role": "admin", "username": "a@example.com", "password": "right",
+         "login": {"url": "https://app.example.com/login"}},
+        {"label": "wrong", "username": "b@example.com", "password": "nope",
+         "login": {"url": "https://app.example.com/login"}},
+        {"label": "api_user", "headers": {"Authorization": "Bearer header-token"},
+         "login": {"verify_url": "https://app.example.com/me", "success_marker": "signed in"}},
+    ])
+    posted = []
+
+    def fake(method, path_, body=None, **kw):
+        posted.append((method, path_, body))
+        return {"origin": body["origin"], "headers": sorted(body["headers"]),
+                "cookies": len(body["cookies"])}
+
+    monkeypatch.setattr(client, "request", fake)
+    prepared = client.prepare_identities(path, "https://app.example.com", transport=_login_transport)
+    rows = client.send_identities("s1", prepared)
+
+    assert [p[1] for p in posted] == ["/agent/sessions/s1/identities"] * 2
+    owner, api_user = posted[0][2], posted[1][2]
+    assert owner["identity"] == "owner" and owner["role"] == "admin"
+    assert owner["cookies"] == {"sid": "private-cookie"} and owner["origin"] == "https://app.example.com"
+    assert "password" not in json.dumps(posted) and "right" not in json.dumps(owner)
+    assert api_user["headers"] == {"Authorization": "Bearer header-token"}
+
+    by_name = {row["identity"]: row for row in rows}
+    assert by_name["owner"]["sent"] and by_name["api_user"]["sent"]
+    assert not by_name["wrong"]["sent"] and by_name["wrong"]["state"] == "rejected"
+    printed = json.dumps(rows)
+    assert "private-cookie" not in printed and "header-token" not in printed
+
+
+def test_identities_refuse_out_of_scope_and_bad_labels(scope_file, monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
+    path = _identity_file(tmp_path, [{"label": "owner", "headers": {"Authorization": "Bearer x"}}])
+    rc = client.main(["identities", "--session", "s1", "--target", "https://evil.com",
+                      "--scope-file", str(scope_file), "--identity-file", path])
+    assert rc == 2
+    bad = _identity_file(tmp_path, [{"label": "legacy", "headers": {"Authorization": "Bearer x"}}])
+    with pytest.raises(client.ProwlError):
+        client.prepare_identities(bad, "https://app.example.com", transport=_login_transport)
+
+
+def test_unverified_identity_needs_explicit_flag(tmp_path):
+    path = _identity_file(tmp_path, [{"label": "plain", "headers": {"Authorization": "Bearer x"}}])
+    [(row, payload)] = client.prepare_identities(path, "https://app.example.com",
+                                                 transport=_login_transport)
+    assert row["state"] == "ready_unverified" and payload is None and "--allow-unverified" in row["skipped"]
+    [(row, payload)] = client.prepare_identities(path, "https://app.example.com",
+                                                 allow_unverified=True, transport=_login_transport)
+    assert payload["headers"] == {"Authorization": "Bearer x"}
+
+
+def test_start_logs_in_before_starting_and_hands_over(scope_file, monkeypatch, tmp_path):
+    path = _identity_file(tmp_path, [
+        {"label": "owner", "username": "a@example.com", "password": "right",
+         "login": {"url": "https://app.example.com/login"}}])
+    calls = []
+    real_prepare = client.prepare_identities
+    monkeypatch.setattr(client, "prepare_identities",
+                        lambda *a, **k: real_prepare(*a, **k, transport=_login_transport))
+
+    def fake(method, path_, body=None, **kw):
+        calls.append(path_)
+        if path_ == "/agent/query":
+            return {"session_id": "s9", "running": True}
+        return {"origin": body["origin"], "headers": [], "cookies": 1}
+
+    monkeypatch.setattr(client, "request", fake)
+    rc = client.main(["start", "--target", "https://app.example.com", "--scope-file", str(scope_file),
+                      "--identity-file", path])
+    assert rc == 0 and calls == ["/agent/query", "/agent/sessions/s9/identities"]
+
+
+# ---------------------------------------------------------------- probe (operator intents)
+
+def _probe(scope_file, *extra):
+    return client.build_parser().parse_args([
+        "probe", "--session", "sess-1", "--scope-file", str(scope_file), *extra])
+
+
+def test_probe_posts_intent_for_unobserved_header(scope_file, monkeypatch):
+    seen = []
+    monkeypatch.setattr(client, "request",
+                        lambda m, p, b=None, **k: seen.append((m, p, b)) or {"accepted": True})
+    args = _probe(scope_file, "--target", "https://app.example.com/render?lang=en",
+                  "--test-type", "template-injection", "--parameter", "X-Template",
+                  "--location", "header", "--note", "seen in a JS bundle")
+    assert args.fn(args) == {"accepted": True}
+    method, path, body = seen[0]
+    assert (method, path) == ("POST", "/agent/sessions/sess-1/intents")
+    assert body == {"target": "https://app.example.com/render?lang=en", "test_type": "ssti",
+                    "parameter": "X-Template", "location": "header", "method": "GET",
+                    "identity": "", "note": "seen in a JS bundle"}
+
+
+@pytest.mark.parametrize("spec,location,parameter", [
+    ("header:X-Diagnostic", "header", "X-Diagnostic"),
+    ("cookie:diagnostic", "cookie", "diagnostic"),
+    ("json:profile.name", "body_json", "/profile/name"),
+    ("form:file", "body_form", "file"),
+])
+def test_probe_accepts_vanguard_mutation_specs(scope_file, monkeypatch, spec, location, parameter):
+    seen = []
+    monkeypatch.setattr(client, "request", lambda m, p, b=None, **k: seen.append(b) or {})
+    method = "POST" if location.startswith("body") else "GET"
+    args = _probe(scope_file, "--target", "https://app.example.com/x", "--test-type", "cmdi",
+                  "--parameter", spec, "--method", method)
+    args.fn(args)
+    assert seen[0]["location"] == location and seen[0]["parameter"] == parameter
+    assert seen[0]["test_type"] == "command_injection"
+
+
+@pytest.mark.parametrize("extra,match", [
+    (["--target", "https://evil.com/x", "--test-type", "ssti"], "out of scope"),
+    (["--target", "https://admin.api.example.com/x", "--test-type", "ssti"], "out of scope"),
+    (["--target", "https://u:p@app.example.com/x", "--test-type", "ssti"], "credentials"),
+    (["--target", "https://app.example.com/x#f", "--test-type", "ssti"], "fragment"),
+    (["--target", "/relative", "--test-type", "ssti"], "absolute"),
+    (["--target", "https://app.example.com/x", "--test-type", "idor-ish"], "unknown test type"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "q", "--location", "smoke"], "--location"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti", "--parameter", "q"],
+     "go together"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti", "--method", "TRACE"],
+     "--method"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "name", "--location", "body_json"], "POST"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "fragment:q"], "client-side"),
+    (["--target", "https://app.example.com/x", "--test-type", "xss",
+      "--parameter", "q", "--location", "query", "--method", "POST"], "GET navigation"),
+    (["--target", "https://app.example.com/x", "--test-type", "xss",
+      "--parameter", "json:note.text", "--method", "PUT"], "intercepted browser request"),
+    (["--target", "https://app.example.com/x", "--test-type", "xss",
+      "--parameter", "header:X-Theme", "--method", "DELETE"], "intercepted browser request"),
+    (["--target", "https://app.example.com/u/alice", "--test-type", "xss",
+      "--parameter", "path:1", "--method", "POST"], "intercepted GET"),
+    (["--target", "https://app.example.com/x", "--test-type", "xss",
+      "--parameter", "form:q"], "POST"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "xml:1bad", "--method", "POST"], "element name"),
+    (["--target", "https://app.example.com/x", "--test-type", "ssti",
+      "--parameter", "path:a/b"], "segment"),
+])
+def test_probe_refuses_before_any_request(scope_file, monkeypatch, extra, match):
+    monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
+    args = _probe(scope_file, *extra)
+    with pytest.raises(client.ProwlError, match=match):
+        args.fn(args)
+
+
+@pytest.mark.parametrize("spec,method,test_type,location,parameter", [
+    ("xml:order.note", "POST", "cmdi", "body_xml", "/order/note"),
+    ("xml:doc", "PUT", "ssti", "body_xml", "doc"),
+    ("path:2", "GET", "sqli", "path", "2"),
+    ("path:alice", "GET", "sql", "path", "alice"),
+    ("json:profile.bio", "PATCH", "ssti", "body_json", "/profile/bio"),
+    ("fragment:q", "GET", "xss", "fragment", "q"),
+    ("header:X-Theme", "GET", "xss", "header", "X-Theme"),
+    ("cookie:lang", "GET", "xss", "cookie", "lang"),
+    ("json:note.text", "POST", "xss", "body_json", "/note/text"),
+    ("xml:note.text", "POST", "xss", "body_xml", "/note/text"),
+    ("form:q", "POST", "xss", "body_form", "q"),
+    ("path:2", "GET", "xss", "path", "2"),
+    ("query:q", "DELETE", "redirect", "query", "q"),
+])
+def test_probe_new_locations_and_write_methods(scope_file, monkeypatch, spec, method,
+                                               test_type, location, parameter):
+    seen = []
+    monkeypatch.setattr(client, "request", lambda m, p, b=None, **k: seen.append(b) or {})
+    args = _probe(scope_file, "--target", "https://app.example.com/api/users/alice",
+                  "--test-type", test_type, "--parameter", spec, "--method", method)
+    args.fn(args)
+    assert (seen[0]["location"], seen[0]["parameter"], seen[0]["method"]) == (
+        location, parameter, method)
+
+
+NOTES_ENDPOINT = {
+    "create_path": "/api/notes", "create_body": {"title": "__PROWL_NONCE__"},
+    "content_type": "json", "record_path": "/api/notes/{id}", "id_source": "location",
+    "write_methods": ["PUT", "DELETE"], "cleanup": "delete", "cleanup_delete_approved": True,
+}
+
+
+def test_policy_file_test_record_endpoints_checked_locally(tmp_path):
+    form = {"create_path": "/api/items", "create_body": "name=__PROWL_NONCE__",
+            "content_type": "form", "record_path": "/api/items/{id}",
+            "id_source": "json:item.id", "write_methods": ["PATCH"], "cleanup": "none"}
+    ok = tmp_path / "ok.json"
+    ok.write_text(json.dumps({"test_record_endpoints": [NOTES_ENDPOINT, form]}))
+    args = SimpleNamespace(policy_file=str(ok), oob=False)
+    assert client.assessment_policy(args)["test_record_endpoints"][1]["cleanup"] == "none"
+    for bad, match in (
+            ({"write_method_paths": [{"method": "PUT", "path": "/api/profile"}]}, "not supported"),
+            ({"test_record_endpoints": [NOTES_ENDPOINT] * 5}, "at most 4"),
+            ({"test_record_endpoints": [NOTES_ENDPOINT, NOTES_ENDPOINT]}, "repeat"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "record_path": "/api/notes/42"}]},
+             "one \\{id\\}"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "record_path": "/a/{id}/{id}"}]},
+             "one \\{id\\}"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "create_path": "/api/notes?x=1"}]},
+             "create_path"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "create_body": {"t": "x"}}]},
+             "__PROWL_NONCE__"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "id_source": "header"}]}, "id_source"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "write_methods": ["POST"]}]},
+             "write_methods"),
+            ({"test_record_endpoints": [{**NOTES_ENDPOINT, "cleanup_delete_approved": False}]},
+             "cleanup_delete_approved"),
+            ({"test_record_endpoints": [{**form, "cleanup_delete_approved": True}]},
+             "cleanup_delete_approved")):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps(bad))
+        with pytest.raises(client.ProwlError, match=match):
+            client.assessment_policy(SimpleNamespace(policy_file=str(path), oob=False))
+
+
+def test_probe_write_method_refuses_path_location(scope_file, monkeypatch):
+    monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
+    args = _probe(scope_file, "--target", "https://app.example.com/api/notes/42",
+                  "--test-type", "ssti", "--parameter", "path:2", "--method", "PUT")
+    with pytest.raises(client.ProwlError, match="own test record"):
+        args.fn(args)
+
+
+def test_intents_listing(monkeypatch):
+    seen = []
+    monkeypatch.setattr(client, "request",
+                        lambda m, p, b=None, **k: seen.append((m, p)) or {"intents": []})
+    args = client.build_parser().parse_args(["intents", "--session", "s 1"])
+    assert args.fn(args) == {"intents": []}
+    assert seen == [("GET", "/agent/sessions/s%201/intents")]
+
+
+
+@pytest.mark.parametrize("extra,expected", [
+    (["--test-type", "sqli", "--parameter", "json:item.id", "--method", "POST",
+      "--baseline-value", "7"], "7"),
+    (["--test-type", "sqli", "--parameter", "json:item.id", "--method", "POST",
+      "--body-sample", '{"item":{"id":42,"x":"y"}}'], "42"),
+    (["--test-type", "sqli", "--parameter", "form:id", "--method", "POST",
+      "--body-sample", "id=9&q=a"], "9"),
+    (["--test-type", "nosql", "--parameter", "header:X-Filter",
+      "--baseline-value", '{"user":"alice"}'], '{"user":"alice"}'),
+    (["--test-type", "sqli", "--parameter", "query:lang", "--baseline-value", "en"], "en"),
+])
+def test_probe_sends_validated_baseline_value(scope_file, monkeypatch, extra, expected):
+    seen = []
+    monkeypatch.setattr(client, "request", lambda m, p, b=None, **k: seen.append(b) or {})
+    args = _probe(scope_file, "--target", "https://app.example.com/api/items?lang=en", *extra)
+    args.fn(args)
+    assert seen[0]["baseline_value"] == expected
+
+
+@pytest.mark.parametrize("extra,match", [
+    (["--test-type", "nosql", "--parameter", "header:X-Filter"], "JSON"),
+    (["--test-type", "nosql", "--parameter", "header:X-Filter", "--baseline-value", "alice"],
+     "JSON object"),
+    (["--test-type", "sqli", "--parameter", "query:lang", "--baseline-value", "de"], "differs"),
+    (["--test-type", "sqli", "--parameter", "query:q", "--baseline-value", "a\nb"], "printable"),
+    (["--test-type", "xss", "--parameter", "fragment:q", "--baseline-value", "x"],
+     "server-side"),
+    (["--test-type", "sqli", "--parameter", "json:id", "--method", "POST",
+      "--body-sample", '{"other":1}'], "no field"),
+    (["--test-type", "sqli", "--parameter", "json:id", "--method", "POST",
+      "--body-sample", '{"id":1}', "--baseline-value", "1"], "not both"),
+    (["--test-type", "sqli", "--parameter", "query:q", "--body-sample", "q=1"], "body param"),
+])
+def test_probe_refuses_bad_baseline_before_any_request(scope_file, monkeypatch, extra, match):
+    monkeypatch.setattr(client, "request", lambda *a, **k: pytest.fail("no request expected"))
+    args = _probe(scope_file, "--target", "https://app.example.com/api/items?lang=en", *extra)
+    with pytest.raises(client.ProwlError, match=match):
+        args.fn(args)

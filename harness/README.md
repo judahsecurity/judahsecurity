@@ -1,8 +1,8 @@
 # Aegis Harness
 
-Workstation-scale tooling for driving the **Aegis Vanguard** autonomous
-pentester (`aegis-vanguard/`) across many targets in batch and for
-**benchmarking its detection accuracy** against a known-vulnerable corpus.
+Workstation-scale tooling for driving **Prowl**, the in-product pentest agent,
+across many targets in batch and for **benchmarking its detection accuracy**
+against a known-vulnerable corpus.
 
 This is the black-box / DAST analogue of a source-code hunting harness: instead
 of cloning repos and running a SAST scanner, it points the live scanner at
@@ -155,16 +155,16 @@ python -m pytest tests/ --cov=local_harness
 
 ## How it works
 
-The scanner already emits every finding it submits. When the environment
-variable `AEGIS_FINDINGS_SINK` is set, `aegis-vanguard/asm_bridge.py` also
-appends each finding to a JSONL file. The harness sets that variable per run,
+The scanner writes every finding it publishes to a JSONL file when the
+environment variable `AEGIS_FINDINGS_SINK` is set (the default scanner,
+`local_harness/prowl_scanner.py`, does this). The harness sets that variable per run,
 so every scan leaves behind a stable, machine-readable artifact — independent
 of the live ASM platform.
 
 ```
 target list / corpus     runner (subprocess)        artifact            judge + tally
 ─────────────────────  →  ───────────────────────  →  ───────────────  →  ─────────────
-REPO_LIST.txt             python3 run_pentest.py       findings.jsonl      recall / precision
+REPO_LIST.txt             prowl_scanner (Prowl agent)  findings.jsonl      recall / precision
 EXAMPLE.json              --target <url>               (via sink hook)     / F1 metrics
 ```
 
@@ -249,21 +249,13 @@ python -m local_harness.benchmark.run \
     --setup --min-success-rate 0.8 --max-guardrail-blocks 0
 ```
 
-The XBEN Docker scanner launcher enables `--benchmark-proof`, which permits the
-agent to record only a synthetic `FLAG{...}` value observed in target evidence.
-The expected value is never passed to the scanner. Normal assessments retain
-their non-exfiltration policy.
+`--benchmark-proof` permits the agent to record only a synthetic `FLAG{...}`
+value observed in target evidence. The expected value is never passed to the
+scanner. Normal assessments retain their non-exfiltration policy.
 
-The launcher forwards the standard Anthropic, OpenAI-compatible, DeepSeek,
-Gemini, OpenRouter, LiteLLM, and Ollama variables plus all `AEGIS_MODEL_*`
-routing overrides. For another provider, use an env file via `AEGIS_ENV_FILE`,
-or explicitly allow comma-separated variable names with
-`AEGIS_PASSTHROUGH_ENV`.
+#### Prowl setup for XBEN
 
-#### Scoring Prowl (the in-product agent) on XBEN
-
-The command above scores Aegis Vanguard. To score Prowl on the same corpus,
-point the runner at `local_harness/prowl_scanner.py`. It runs the product agent
+The default scanner is `local_harness/prowl_scanner.py`. It runs the product agent
 in-process (normal publication gates), so it needs the backend environment, a
 dedicated assessment database, an assessment tenant, and LLM credentials:
 
@@ -370,8 +362,8 @@ Everything is overridable via environment variables (see
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `AEGIS_HARNESS_SCANNER_CMD` | Command that launches one scan | `python3 run_pentest.py` |
-| `AEGIS_HARNESS_SCANNER_CWD` | Working dir for the scanner | `../aegis-vanguard` |
+| `AEGIS_HARNESS_SCANNER_CMD` | Command that launches one scan | `python -m local_harness.prowl_scanner` |
+| `AEGIS_HARNESS_SCANNER_CWD` | Working dir for the scanner | `harness` |
 | `AEGIS_HARNESS_SCANNER_ARGS` | Extra flags for every scan | `` (e.g. `--fast`) |
 | `AEGIS_HARNESS_SCAN_TIMEOUT` | Per-scan timeout (seconds) | `3600` |
 | `AEGIS_HARNESS_WORK_DIR` | Root for harness artifacts | `harness/runs` |
@@ -427,7 +419,7 @@ harness/
 ├── local_harness/
 │   ├── batch/           # multi-target scan + collect
 │   ├── benchmark/       # ground_truth/, judge, tally, xben_import
-│   ├── runner.py        # subprocess driver for run_pentest.py
+│   ├── runner.py        # subprocess driver for the scanner command
 │   └── findings.py      # JSONL sink parsing
 ├── tests/               # offline stub-scanner suite
 └── runs/                # local artifacts (not committed)
@@ -445,6 +437,5 @@ validates the full batch + benchmark flow offline.
 
 ## See also
 
-- [aegis-vanguard/README.md](../aegis-vanguard/README.md) — scanner under test  
 - [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](../docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) — in-product agent control plane  
 - Root [README.md](../README.md) — platform overview

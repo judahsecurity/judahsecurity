@@ -376,22 +376,19 @@
    └──────────────────────────────────────────────────────────┘
 
    ┌──────────────────────────────────────────────────────────┐
-   │              Aegis Vanguard (external agent)              │
+   │        Aegis Vanguard (Claude Code operator skills)      │
    │                                                           │
-   │  aegis-vanguard/  — autonomous ReACT pentest agent        │
-   │                                                           │
-   │  Orchestrator → Recon → Vuln → Exploit → Report           │
+   │  aegis-vanguard/  — /recon /threat-model /code-scan       │
+   │                     /pentest /triage /chain               │
    │         │                                                 │
    │         ▼                                                 │
-   │  asm_bridge.py ──POST /api/v1/ingest/findings──▶ ASM DB   │
+   │  prowl_client.py ──/api/v1/agent/*──▶ Prowl runs,         │
+   │  verify, operator probes, test identities                │
    │                                                           │
    │  On-demand validation:                                    │
    │  Findings UI → /vulnerabilities/{id}/validate             │
-   │            → scanner worker → validate_finding.py         │
+   │            → scanner worker → native replay → Prowl       │
    │            → FindingValidation + verdict on Vulnerability │
-   │                                                           │
-   │  Deploy: standalone Python or Docker (aegis-vanguard:latest)│
-   │  Docs:   aegis-vanguard/README.md + DEPLOYMENT.md         │
    └──────────────────────────────────────────────────────────┘
 ```
 
@@ -765,21 +762,21 @@ See [docs/GRAPH_SCHEMA.md](docs/GRAPH_SCHEMA.md) for full schema, Cypher queries
 
 ## ⚔️ Aegis Vanguard
 
-Autonomous external pentest agent that lives in `aegis-vanguard/` (not inside the Docker Compose stack). It runs recon → vuln → exploit → report via a ReACT multi-agent loop and submits findings to the ASM platform.
+Claude Code operator skills in `aegis-vanguard/`. Live testing runs in Prowl;
+the skills drive it through `prowl_client.py`.
 
 | Piece | Role |
 |-------|------|
-| `run_pentest.py` | Full-target pentest entrypoint |
-| `validate_finding.py` | Re-tests one existing finding (true/false positive) |
-| `asm_bridge.py` | Batches findings to `POST /api/v1/ingest/findings` |
-| `agent/` | Orchestrator, specialized agents, guardrails, tracing |
-| Praetorium | Shared Lictor/Censor/Augur guard layer with the platform agent |
+| `.claude/skills/` | `/recon`, `/threat-model`, `/code-scan`, `/pentest`, `/triage`, `/chain` |
+| `prowl_client.py` | Prowl API client: runs, candidate verify, operator-directed probes, test identities, HAR/capture handoff |
+| `agent/identities.py`, `agent/identity_sessions.py` | Local test-identity login; only cookies/headers go to Prowl |
+| `data/vuln_classes.json` | Offline copy of Prowl's proof classes (`scripts/sync_vuln_classes.py --check`) |
 
-**Auth:** create an agent API key (`tfasm_…`) with `agent_type: aegis_vanguard`.  
-**Image:** `docker build -f aegis-vanguard/Dockerfile -t aegis-vanguard:latest .`  
-**Env (validator worker):** `AEGIS_VALIDATOR_MODE`, `AEGIS_VANGUARD_IMAGE`, `AEGIS_VANGUARD_PATH`, `AEGIS_VALIDATE_MAX_TURNS`, `AEGIS_VALIDATE_TIMEOUT`.
+**Auth:** a user JWT (`AEGIS_API_TOKEN`) for `/api/v1/agent/*`.
+**Validator worker env:** `AEGIS_VALIDATOR_MODE` (native | auto | prowl), `AEGIS_VALIDATOR_PROWL`, `AEGIS_PROWL_VALIDATE_MAX_ITERATIONS`, `AEGIS_VALIDATE_TIMEOUT`.
 
-See [aegis-vanguard/README.md](aegis-vanguard/README.md) and [aegis-vanguard/DEPLOYMENT.md](aegis-vanguard/DEPLOYMENT.md).
+The former standalone CLI (`run_pentest.py`, `validate_finding.py`, the
+`aegis-vanguard` image) was removed; see [docs/VANGUARD_PROWL_PARITY.md](docs/VANGUARD_PROWL_PARITY.md).
 
 ---
 

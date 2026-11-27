@@ -266,6 +266,59 @@ class OperationDirective:
                     "and its evidence_id for independent replay. Without the approvals and a "
                     "readback, leave the proof inconclusive."
                 )
+            elif kind == "file_upload":
+                block += (
+                    " The upload POST path must be in body_replay_paths. Call "
+                    "scoped_upload_probe_assigned with this cell and lease (file_field, and "
+                    "served_url_template when the response does not name the stored file). "
+                    "Only a same-origin 200 serving the nonce marker as text/html, SVG or "
+                    "JavaScript without attachment disposition or CSP sandbox is proof. "
+                    "Submit a positive receipt with vulnerability_class=file_upload; report "
+                    "leftovers it could not clean up."
+                )
+            elif kind == "auth":
+                block += (
+                    " Account enumeration on a login or reset POST: call "
+                    "scoped_account_enum_assigned with this cell and lease and the "
+                    "operator-registered identity whose login request the operator captured. "
+                    "Never guess real usernames. It stops on 429 or lockout text. Submit a "
+                    "positive receipt with vulnerability_class=account_enumeration."
+                )
+            elif kind == "oauth":
+                block += (
+                    " Call scoped_oauth_redirect_assigned with this cell and lease (and a "
+                    "logged-in identity when the server needs one). Only a grant (code or "
+                    "token) sent to the nonce prowl.invalid redirect_uri is proof; an error "
+                    "redirect or a login page is not. Submit with vulnerability_class=oauth."
+                )
+            elif kind == "prototype_pollution":
+                block += (
+                    " Call scoped_server_pp_assigned with this cell and lease and an observed "
+                    "unrelated JSON GET as readback_url. Only the JSON-spaces gadget changing "
+                    "that response's indentation to the chosen value, not after the plain "
+                    "control, is proof. If that gadget shows nothing, gadget=status_code with "
+                    "another body_replay_paths URL as readback_url checks the malformed-JSON "
+                    "error status instead. Submit with vulnerability_class=server_prototype_pollution."
+                )
+            elif kind == "llm_ai":
+                block += (
+                    " Call scoped_llm_canary_assigned with this cell and lease. Only the "
+                    "assembled canary word in the probe output, absent from the control, is "
+                    "proof that the model obeys embedded instructions. With an operator "
+                    "llm_indirect_fields entry for this chat path, "
+                    "scoped_llm_indirect_canary_assigned plants it in a stored document "
+                    "instead; with out-of-band callbacks authorized, "
+                    "scoped_llm_oob_fetch_assigned checks an outbound fetch. Submit with "
+                    "vulnerability_class=prompt_injection; impact needs its own proof."
+                )
+            elif kind == "business_logic":
+                block += (
+                    " Business logic has no generic proof. A step-skip or workflow bypass "
+                    "that is an authorization failure proves under authorization with a "
+                    "workflow receipt (run_authorization_proof), a state_change with a "
+                    "distinct owner readback, or an authorization proof. Anything else "
+                    "stays a lead."
+                )
         if self.js_work:
             if self.js_work.get("test_type") == "dom_xss":
                 block += (

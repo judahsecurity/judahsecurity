@@ -69,6 +69,9 @@ class FindingCandidate:
     review_status: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     verified_at: str = ""
+    # Other specialists that independently submitted the same root cause.
+    # Triage context only: verdicts and publication never read it.
+    corroborated_by: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -804,6 +807,10 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_sql_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_browser_intercept_xss_candidate(
+                    tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 replayed = await _verify_scoped_browser_xss_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
@@ -829,6 +836,9 @@ async def run_independent_verifiers(
                 if replayed is not None:
                     return replayed
                 replayed = await _verify_scoped_jwt_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
+                replayed = await _verify_scoped_class_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
                 report = await _run_specialist(
@@ -937,23 +947,24 @@ async def _verify_scoped_response_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any,
 ) -> Optional[Dict[str, Any]]:
     """Repeat the fixed response-header or Location canary on the same input."""
-    import asyncio
     import secrets
     from urllib.parse import urlsplit
 
+    from app.services.agent.planning_graph import INTENT_CELL_SOURCE
     from app.services.agent.evidence_store import evidence_store
     from app.services.agent.proof_policy import validate_proof
-    from app.services.agent.scoped_assessment.response_probe import probe_response
 
     claim = cand.vulnerability_class
     if claim not in {"crlf", "open_redirect"}:
         return None
     store = evidence_store(tools_manager)
+    shaped = getattr(tools_manager, "_shaped_cell", lambda _cell: False)
     cell = next((row for row in _brain(tools_manager).coverage_cells
                  if row.get("id") == cand.coverage_cell_id
                  and row.get("test_type") == claim
-                 and row.get("source") == "parameter_inventory"
-                 and row.get("method") == "GET"
+                 and (row.get("source") == "parameter_inventory"
+                      or (row.get("source") == INTENT_CELL_SOURCE and shaped(row)))
+                 and row.get("method") in (_SHAPED_METHODS if shaped(row) else {"GET"})
                  and row.get("path") == (urlsplit(cand.target).path or "/")), None)
     identity = str(cand.identity or "anonymous")
     hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
@@ -967,37 +978,19 @@ async def _verify_scoped_response_candidate(
     if cell and hunter:
         hunter_id, receipt = hunter
         location, separator, parameter = str(cell.get("parameter") or "").partition(":")
-        if location == "query" and separator and parameter:
+        if (location == "query" or shaped(cell)) and separator and parameter:
             nonce = secrets.token_hex(8)
             target = urlsplit(cand.target)
             scoped_origin = f"{target.scheme}://{target.netloc}"
-            if claim == "crlf":
-                control_value = "%0D%0AX-Prowl-Probe: " + nonce
-                probe_value = "\r\nX-Prowl-Probe: " + nonce
-            else:
-                control_value = scoped_origin + "/__prowl_control_" + nonce
-                probe_value = "https://prowl.invalid/" + nonce
             try:
-                control_url, context = tools_manager._observed_get_query_template(
-                    cand.target, parameter, control_value, identity,
-                    capture_id=cell.get("capture_id") or "",
+                # Same request builder as the hunter: observed GET query
+                # baseline, or the intent/header/cookie shape of the cell.
+                replay, context = await tools_manager._run_response_probe(
+                    cell, cand.target, parameter, claim, nonce, identity,
+                    scoped_origin=scoped_origin,
                 )
-                probe_url, probe_context = tools_manager._observed_get_query_template(
-                    cand.target, parameter, probe_value, identity,
-                    capture_id=cell.get("capture_id") or "",
-                )
-                if (context == "single_parameter" or probe_context != context
-                        or context != receipt["payload"].get("request_context")):
+                if context != receipt["payload"].get("request_context"):
                     raise ValueError("Observed response baseline changed")
-                tools_manager._scoped_origin(control_url)
-                tools_manager._scoped_origin(probe_url)
-                tools_manager._scoped_claim_gets(2)
-                replay = await asyncio.to_thread(
-                    probe_response, control_url, probe_url, test_type=claim,
-                    allowed_origin=scoped_origin,
-                    state=tools_manager._scoped_state(identity, cand.target),
-                    nonce=nonce,
-                )
                 summary = {"test_type": claim, "parameter": parameter,
                            "path": cell["path"], "request_context": context,
                            "nonce": nonce, **replay}
@@ -1126,6 +1119,60 @@ async def _verify_scoped_cors_candidate(
             "key_findings": [], "tool_calls": 1, "error": None}
 
 
+async def _verify_scoped_class_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat a class_probes plan (upload, enumeration, OAuth, CSWSH, server PP,
+    LLM canary) with a fresh nonce and confirm only from the paired receipts."""
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import CLASS_PROBE_KINDS
+
+    kinds = {claim: kind for kind, claim in CLASS_PROBE_KINDS.items()}
+    claim = cand.vulnerability_class
+    if claim not in kinds:
+        return None
+    store = evidence_store(tools_manager)
+    identity = str(cand.identity or "")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_class_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and (not identity or store.records[eid].get("identity") == identity)
+                   and store.records[eid].get("payload", {}).get("test_type") == claim
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True),
+                  None)
+    failure = f"A positive {claim} class-probe receipt on the candidate target is required"
+    replay = getattr(tools_manager, "replay_class_probe", None)
+    if hunter and replay:
+        hunter_id, receipt = hunter
+        try:
+            artifact_id = await replay(cand, receipt)
+            verifier = store.records.get(artifact_id)
+            if (verifier and verifier.get("run_id") == run.id
+                    and verifier.get("payload", {}).get("proof_confirmed") is True):
+                proof = {"kind": kinds[claim], "hunter_artifact_id": hunter_id,
+                         "artifact_id": artifact_id}
+                ok, why = _confirm_or_explain(
+                    tools_manager, store, cand, run, proof, artifact_id,
+                    f"Fresh {claim} replay reproduced the hunter receipt.")
+                if ok:
+                    return {"candidate_id": cand.id, "title": cand.title,
+                            "status": "confirmed", "verifier_summary":
+                            f"Fresh {claim} probe matched the hunter receipt",
+                            "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why
+            else:
+                failure = f"Fresh {claim} probe did not reproduce the hunter receipt"
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Class-probe verifier replay failed")
+            failure = f"{claim} verifier replay failed: {type(exc).__name__}"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
 def _confirm_or_explain(tools_manager: Any, store: Any, cand: FindingCandidate, run: Any,
                         proof: dict, artifact_id: str, evidence: str) -> tuple[bool, str]:
     """Validate a fresh verifier receipt and apply a confirmed verdict."""
@@ -1145,6 +1192,12 @@ def _confirm_or_explain(tools_manager: Any, store: Any, cand: FindingCandidate, 
             return True, ""
     return False, why or fresh_why or "Proof policy rejected the replay"
 
+
+# Methods an intent-backed (shaped) cell may carry; the replay re-checks the
+# operator's approval (body_replay_paths / test_record_endpoints). PUT/PATCH/DELETE
+# replays create the verifier's own fresh test record (never the hunter's), probe
+# it and clean it up, through the same runners the hunter used.
+_SHAPED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 
 _INJECTION_PROOF_KINDS = {
     "nosql": "scoped_nosql_operator",
@@ -1168,11 +1221,15 @@ async def _verify_scoped_injection_candidate(
     if claim not in _INJECTION_PROOF_KINDS:
         return None
     store = evidence_store(tools_manager)
+    from app.services.agent.planning_graph import INTENT_CELL_SOURCE
+
+    shaped = getattr(tools_manager, "_shaped_cell", lambda _cell: False)
     cell = next((row for row in _brain(tools_manager).coverage_cells
                  if row.get("id") == cand.coverage_cell_id
                  and row.get("test_type") == claim
-                 and row.get("source") == "parameter_inventory"
-                 and row.get("method") in {"GET", "POST"}
+                 and (row.get("source") == "parameter_inventory"
+                      or (row.get("source") == INTENT_CELL_SOURCE and shaped(row)))
+                 and row.get("method") in (_SHAPED_METHODS if shaped(row) else {"GET", "POST"})
                  and row.get("path") == (urlsplit(cand.target).path or "/")), None)
     identity = str(cand.identity or "anonymous")
     hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
@@ -1188,8 +1245,8 @@ async def _verify_scoped_injection_candidate(
         payload = receipt.get("payload", {})
         location, separator, parameter = str(cell.get("parameter") or "").partition(":")
         recipe = str(payload.get("recipe") or "")
-        if (location in {"query", "body_form", "body_json"} and separator and parameter
-                and (recipe or claim == "nosql")):
+        if ((location in {"query", "body_form", "body_json"} or shaped(cell))
+                and separator and parameter and (recipe or claim == "nosql")):
             target = urlsplit(cand.target)
             scoped_origin = f"{target.scheme}://{target.netloc}"
             nonce = secrets.token_hex(8)
@@ -1198,12 +1255,16 @@ async def _verify_scoped_injection_candidate(
                 replay, context = await tools_manager._run_injection_probe(
                     cell, cand.target, parameter, claim, nonce, factors, identity,
                     scoped_origin=scoped_origin,
-                    recipe="" if claim == "nosql" else recipe,
+                    # NoSQL: the hunter's recipe selects the same string recipe on
+                    # a path segment; operator recipes ignore it.
+                    recipe=recipe if claim == "nosql" and shaped(cell) else
+                    "" if claim == "nosql" else recipe,
                 )
                 if context != payload.get("request_context"):
                     raise ValueError("Observed injection baseline changed")
-                summary = {"test_type": claim, "parameter": parameter, "path": cell["path"],
-                           "request_context": context, "nonce": nonce, **replay}
+                summary = {"test_type": claim, "parameter": parameter, "location": location,
+                           "path": cell["path"], "request_context": context, "nonce": nonce,
+                           **replay}
                 artifact_id = store.record(
                     "scoped_injection_probe", summary, target=cand.target,
                     identity=identity, coverage_cell_id=cand.coverage_cell_id,
@@ -1637,6 +1698,11 @@ async def _verify_scoped_sql_candidate(
                     raw["coverage_cell_id"] = cand.coverage_cell_id
             cell["candidate_id"] = cand.id
             tools_manager._engagement_brain = brain.to_dict()
+    from app.services.agent.planning_graph import INTENT_CELL_SOURCE
+
+    if (cell and cell.get("source") == INTENT_CELL_SOURCE and cell.get("test_type") == "sqli"
+            and getattr(tools_manager, "_shaped_cell", lambda _cell: False)(cell)):
+        return await _verify_scoped_intent_sql_candidate(tools_manager, cand, run, cell)
     if cell and cell.get("method") == "POST":
         return await _verify_scoped_post_sql_candidate(tools_manager, cand, run, cell)
     if not cell or cell.get("source") != "parameter_inventory" or (
@@ -1754,6 +1820,89 @@ async def _verify_scoped_sql_candidate(
     }
 
 
+async def _verify_scoped_intent_sql_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any, cell: dict,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the hunter's SQLi recipe on an intent-built input.
+
+    Same request builder as the hunter (``_run_shaped_sqli``): same method,
+    location and input, the same baseline source (operator value, linked
+    capture or intent target), the hunter's recipe (string Boolean/error/time,
+    numeric Boolean, UNION) and SQL family, fresh nonces. The operator's
+    method approval is re-checked by the builder.
+    """
+    import logging
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+
+    location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+    target = urlsplit(cand.target)
+    identity = str(cell.get("identity") or "anonymous")
+    identity = "anonymous" if identity in {"", "unspecified"} else identity
+    if (not separator or not parameter or target.scheme not in {"http", "https"}
+            or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
+            or (target.path or "/") != cell.get("path") or target.query or target.fragment
+            or (cand.identity and cand.identity != identity)
+            or (cand.parameter and cand.parameter != cell.get("parameter"))):
+        return None
+    store = evidence_store(tools_manager)
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") in {"scoped_string_sqli",
+                                                          "scoped_numeric_sqli"}
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("parameter") == parameter
+                   and store.records[eid].get("payload", {}).get("intent_request") is True
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    if hunter is None:
+        return None
+    hunter_id, receipt = hunter
+    payload = receipt["payload"]
+    recipe = str(payload.get("proof_recipe") or "")
+    kind = ("numeric_boolean_sqli" if recipe == "numeric_and_boolean_v1" else
+            "string_union_sqli" if recipe == "string_union_v1" else
+            "string_error_sqli" if recipe == "string_error_v1" else
+            "string_time_sqli" if recipe == "string_time_v1" else "string_boolean_sqli")
+    evidence_kind = receipt.get("kind")
+    if (kind == "numeric_boolean_sqli") != (evidence_kind == "scoped_numeric_sqli"):
+        return None
+    failure = "Fresh SQLi replay did not reproduce the hunter proof"
+    try:
+        replay = await tools_manager._run_shaped_sqli(
+            cell, identity, scoped_origin=f"{target.scheme}://{target.netloc}",
+            recipe=recipe, family=str(payload.get("sql_family") or ""),
+        )
+        if (replay.get("request_context") != payload.get("request_context")
+                or replay.get("baseline_value_source") != payload.get("baseline_value_source")):
+            raise ValueError("Intent SQLi request shape changed")
+        artifact_id = store.record(
+            evidence_kind, replay, target=cand.target, identity=identity,
+            coverage_cell_id=cand.coverage_cell_id, test_type="sqli",
+            success=replay["proof_confirmed"],
+        )
+        if replay.get("proof_confirmed") is True:
+            proof = {"kind": kind, "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+            confirmed, failure = _confirm_or_explain(
+                tools_manager, store, cand, run, proof, artifact_id,
+                "Fresh scoped SQLi controls reproduced the candidate on the intent input.",
+            )
+            if confirmed:
+                return {"candidate_id": cand.id, "title": cand.title, "status": "confirmed",
+                        "verifier_summary": "Fresh scoped SQLi proof matched the hunter receipt",
+                        "key_findings": [], "tool_calls": 1, "error": None}
+        else:
+            failure = "Fresh SQLi controls did not confirm injection"
+    except Exception:
+        logging.getLogger(__name__).exception("Intent SQLi verifier replay failed")
+        failure = "Scoped SQLi replay failed before verification completed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+            "verifier_summary": failure, "key_findings": [], "tool_calls": 1, "error": None}
+
+
 async def _verify_scoped_post_sql_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any, cell: dict,
 ) -> Optional[Dict[str, Any]]:
@@ -1848,6 +1997,109 @@ async def _verify_scoped_post_sql_candidate(
             "verifier_summary": failure, "key_findings": [], "tool_calls": 1, "error": None}
 
 
+async def _verify_scoped_browser_intercept_xss_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Replay an intercepted-request XSS receipt (header, cookie, body, path).
+
+    The verifier rebuilds the interception plan from the coverage cell with
+    the hunter's payload template and rendering page (``_intercept_xss_spec``,
+    the hunter's builder) and requires it to equal the hunter receipt on page,
+    request match, location, method, path template/segment and template. Then
+    it repeats the same interception with a fresh nonce; approval and the
+    protected header/cookie rules are re-checked by the builder.
+    """
+    import logging
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import inferred_vulnerability_class
+    from app.services.agent.scoped_assessment import browser_intercept
+
+    if (cand.vulnerability_class or inferred_vulnerability_class(cand)) != "xss":
+        return None
+    store = evidence_store(tools_manager)
+    hunters = [(eid, store.records[eid]) for eid in cand.evidence_ids
+               if eid in store.records
+               and store.records[eid].get("kind") == "scoped_browser_check_intercept_xss"
+               and store.records[eid].get("target") == cand.target]
+    if not hunters:
+        return None
+    failure = "Intercepted XSS receipt is not bound to its coverage cell"
+    brain = _brain(tools_manager)
+    cell_id = cand.coverage_cell_id or str(
+        (hunters[0][1].get("payload") or {}).get("coverage_cell_id") or "")
+    cell = next((row for row in brain.coverage_cells if row.get("id") == cell_id), None)
+    target = urlsplit(cand.target)
+    location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+    identity = str((cell or {}).get("identity") or "anonymous")
+    identity = "anonymous" if identity in {"", "unspecified"} else identity
+    shaped = getattr(tools_manager, "_shaped_cell", lambda _cell: False)
+    bound = bool(
+        cell and cell.get("test_type") == "xss" and shaped(cell)
+        and location in browser_intercept.INTERCEPT_LOCATIONS and separator and parameter
+        and target.scheme in {"http", "https"}
+        and _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
+        and (target.path or "/") == cell.get("path") and not target.query and not target.fragment
+        and (not cand.identity or cand.identity == identity)
+        and (not cand.parameter or cand.parameter == cell.get("parameter")))
+    if bound and not cand.coverage_cell_id:
+        cand.coverage_cell_id = str(cell["id"])
+        for raw in brain.candidates:
+            if isinstance(raw, dict) and raw.get("id") == cand.id:
+                raw["coverage_cell_id"] = cand.coverage_cell_id
+        cell["candidate_id"] = cand.id
+        tools_manager._engagement_brain = brain.to_dict()
+    scoped_origin = f"{target.scheme}://{target.netloc}"
+    try:
+        for hunter_id, receipt in (hunters[:3] if bound else []):
+            payload = receipt.get("payload") or {}
+            if (receipt.get("identity") != identity
+                    or payload.get("coverage_cell_id") != cell["id"]
+                    or not browser_intercept.receipt_valid(payload)):
+                continue
+            render_page = (urlsplit(payload["target_template"]).path or "/"
+                           if payload["intercept_mode"] == "fetch" else "")
+            try:
+                spec = tools_manager._intercept_xss_spec(
+                    cell, identity, scoped_origin=scoped_origin,
+                    payload_template=payload["payload_template"], render_page=render_page)
+            except ValueError as exc:
+                # Approval withdrawn, protected input, or a shape no longer built.
+                failure = f"Interception plan refused for replay: {str(exc)[:100]}"
+                continue
+            if any(spec.get(key) != payload.get(key) for key in browser_intercept.BINDING_FIELDS):
+                failure = "Hunter interception does not match the request built for this cell"
+                continue
+            replay = await tools_manager._run_intercept_xss(
+                cell, identity, scoped_origin=scoped_origin,
+                payload_template=payload["payload_template"], render_page=render_page)
+            if replay.get("executed") is not True:
+                failure = ("Fresh intercepted replay did not execute the XSS canary"
+                           + (f" ({replay['intercept_error']})" if replay.get("intercept_error")
+                              else ""))
+                continue
+            proof = {"kind": "scoped_browser_intercept_xss", "hunter_artifact_id": hunter_id,
+                     "artifact_id": replay["evidence_id"]}
+            confirmed, failure = _confirm_or_explain(
+                tools_manager, store, cand, run, proof, replay["evidence_id"],
+                "Fresh browser execution reproduced the XSS candidate on the same "
+                "intercepted request input.",
+            )
+            if confirmed:
+                return {"candidate_id": cand.id, "title": cand.title, "status": "confirmed",
+                        "verifier_summary": "Fresh intercepted browser XSS proof matched the "
+                                            "hunter receipt",
+                        "key_findings": [], "tool_calls": 1, "error": None}
+    except Exception:
+        logging.getLogger(__name__).exception("Intercepted XSS verifier replay failed")
+        failure = "Intercepted XSS replay failed before verification completed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+            "verifier_summary": failure, "key_findings": [], "tool_calls": 1, "error": None}
+
+
 async def _verify_scoped_browser_xss_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any,
 ) -> Optional[Dict[str, Any]]:
@@ -1875,6 +2127,15 @@ async def _verify_scoped_browser_xss_candidate(
                     raw["coverage_cell_id"] = cand.coverage_cell_id
             cell["candidate_id"] = cand.id
             tools_manager._engagement_brain = brain.to_dict()
+    from app.services.agent.planning_graph import INTENT_CELL_SOURCE
+
+    # Intent-backed GET query/fragment input: the template must be exactly what
+    # the hunter's builder makes for this cell; the replay reuses it.
+    intent_xss = bool(cell and cell.get("source") == INTENT_CELL_SOURCE
+                      and cell.get("test_type") == "xss" and cell.get("method") == "GET"
+                      and getattr(tools_manager, "_shaped_cell", lambda _cell: False)(cell)
+                      and str(cell.get("parameter") or "").partition(":")[0]
+                      in {"query", "fragment"})
     dom_xss = bool(cell and cell.get("source") == "js_inventory"
                    and cell.get("test_type") == "dom_xss"
                    and cell.get("method") == "GET"
@@ -1884,7 +2145,7 @@ async def _verify_scoped_browser_xss_candidate(
                       and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
                       and cell.get("test_type") == "stored_xss"
                       and cell.get("method") == "POST")
-    if not cell or not (dom_xss or stored_xss or (cell.get("source") == "parameter_inventory"
+    if not cell or not (dom_xss or stored_xss or intent_xss or (cell.get("source") == "parameter_inventory"
                     and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
                     and cell.get("test_type") == "xss" and cell.get("method") in {"GET", "POST"})):
         return None
@@ -1900,7 +2161,10 @@ async def _verify_scoped_browser_xss_candidate(
     form_xss = cell.get("method") == "POST" and location == "body_form" and not post_xhr_xss
     target = urlsplit(cand.target)
     identity = str(cell.get("identity") or "anonymous")
-    if (not (dom_xss or (location == "query" and not form_xss) or form_xss or post_xhr_xss)
+    if intent_xss and identity in {"", "unspecified"}:
+        identity = "anonymous"
+    if (not (dom_xss or intent_xss or (location == "query" and not form_xss) or form_xss
+             or post_xhr_xss)
             or (not dom_xss and (not separator or not parameter))
             or target.scheme not in {"http", "https"}
             or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
@@ -1957,6 +2221,11 @@ async def _verify_scoped_browser_xss_candidate(
                     or "__PROWL_NONCE__" not in str(proof.get("form_payload_template") or "")
                     or parsed.query or parsed.fragment
                     or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)):
+                continue
+        elif intent_xss:
+            if (proof.get("operation") != "check_xss" or xhr_xss
+                    or not tools_manager._shaped_xss_template_matches(
+                        cell, template, f"{target.scheme}://{target.netloc}")):
                 continue
         elif dom_xss:
             if (proof.get("operation") != "check_xss" or xhr_xss
@@ -2305,13 +2574,20 @@ def apply_verdict(
             )
             if cand.proof_run_id:
                 cell["proof_run_id"] = cand.proof_run_id
+            if cell.get("status") == "finding":
+                # A published finding is sticky; a later duplicate candidate's
+                # verdict on the same cell cannot reopen or clear it.
+                continue
             if verdict == "refuted":
-                cell.update(status="tested_clean", reason=cand.verifier_summary or
+                cell.update(status="tested_clean", status_detail="rejected",
+                            reason=cand.verifier_summary or
                             cand.counterevidence.get("observation", "Independent control held"))
             elif verdict == "confirmed":
-                cell.update(status="in_focus", reason="Confirmed candidate awaits publication")
+                cell.update(status="in_focus", status_detail="validated",
+                            reason="Confirmed candidate awaits publication")
             else:
-                cell.update(status="inconclusive", reason=cand.proof_gap.get("reason") or
+                cell.update(status="inconclusive", status_detail="",
+                            reason=cand.proof_gap.get("reason") or
                             "Independent verification was inconclusive")
     if cand.proof_escalation_id:
         from app.services.agent.signal_escalation import apply_verifier_result
@@ -2385,6 +2661,7 @@ def submit_candidate(
 ) -> FindingCandidate:
     vulnerability_class = str(vulnerability_class or "").strip().lower()
     challenge = dict(challenge or {})
+    submitter = str(specialist or "")
     if coverage_cell_id and not proof_escalation_id:
         proof_escalation_id = next(
             (
@@ -2456,6 +2733,10 @@ def submit_candidate(
                     brain.verification_receipts.pop(
                         verify_receipt_key(c.title, c.target), None
                     )
+                if root_cause and c.root_cause == root_cause:
+                    from app.services.agent.brain_memory import record_corroboration
+
+                    record_corroboration(c, submitter)
                 for name, value in (
                     ("hypothesis_id", hypothesis_id), ("threat_id", threat_id),
                     ("specialist", specialist), ("operation_id", operation_id),

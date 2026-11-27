@@ -1,9 +1,8 @@
 """
 aegis_praetorium — Aegis Vanguard's deterministic guard layer.
 
-Houses the three shared "magistrate" components that sit between every agent
-(the platform agent in `backend/` and the Aegis Vanguard agent in `aegis-vanguard/`)
-and every security tool invocation:
+Houses the three "magistrate" components that sit between the platform agent
+(`backend/`) and every security tool invocation:
 
     Censor  — input validator (rejects malformed / dangerous arguments early)
     Lictor  — pre/post tool-execution enforcer (SSRF, scope, destructive flags,

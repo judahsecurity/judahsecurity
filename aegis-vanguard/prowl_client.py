@@ -16,7 +16,7 @@ Commands:
     asset --host HOST                        GET  /assets/?search=HOST&in_scope=true
     start --target ORIGIN --scope-file F     POST /agent/query (mode=agent)
           [--playbook ID] [--objective TXT] [--policy-file P] [--oob]
-          [--asset-id N --executor] [--run-dir D]
+          [--asset-id N --executor] [--run-dir D] [--identity-file I]
     poll --session S [--wait] [--run-dir D]  GET  /agent/conversations/S and /ledger
     findings --asset-id N                    GET  /vulnerabilities/?asset_id=N&detected_by=agent_family
     verify --run-dir D --finding-id ID --target ORIGIN --scope-file F [--session S]
@@ -26,9 +26,23 @@ Commands:
                                              otherwise
                                              POST /agent/query playbook=finding_validation
     candidates --session S                   GET  /agent/sessions/S/candidates
+    probe --session S --target URL --test-type T --scope-file F [--parameter P --location L]
+          [--method GET|POST|PUT|PATCH|DELETE] [--identity I] [--note TXT]
+          [--baseline-value V | --body-sample JSON_OR_FORM]
+                                             POST /agent/sessions/S/intents: one operator-directed
+                                             test (planned intent backed by a coverage cell)
+    intents --session S                      GET  /agent/sessions/S/intents
     verdict --run-dir D --finding-id ID      candidate status (intake) or ledger ->
                                              confirmed | refuted | improve | pending
     stop --session S                         POST /agent/sessions/S/stop
+    identities --session S --target ORIGIN --scope-file F --identity-file I [--allow-unverified]
+                                             log each identity in locally (agent/identity_sessions),
+                                             then POST /agent/sessions/S/identities with the
+                                             session cookies/headers only (never passwords)
+    har --session S --identity NAME --file H [--role R --tenant T]
+                                             POST /agent/sessions/S/har (DevTools HAR of a login)
+    capture-token --session S --identity NAME
+                                             POST /agent/sessions/S/capture-token (capture extension)
     tool --scope-file F --name execute_httpx --args "..."
                                              POST /mcp/call (recon tools only, scope-checked)
 
@@ -39,7 +53,37 @@ written to the snapshot, and ``verify`` resumes it. Running session: 202
 ``verify`` records mode=intake_queued and sends a steer instead of resuming.
 The session's own independent verifier decides. Without a live
 session (or on 404/409) ``verify`` falls back to asking Prowl to reproduce the
-candidate from scratch via the finding_validation playbook. POST /prowl/findings
+candidate from scratch via the finding_validation playbook.
+
+Operator-directed probing (``probe``) plans one test on any in-scope URL and
+input location, including inputs Prowl never observed. Prowl's leased scoped
+probes build the request from it (SSTI/command injection/traversal/CRLF/open
+redirect/string SQLi on query, header, cookie, form/JSON/XML body or one path
+segment; numeric Boolean and UNION SQLi from the input's baseline value;
+NoSQL on query/form/JSON operators, cookie-parser ``j:`` JSON cookies, headers
+whose baseline is a JSON object/array, XML operator elements and string
+``$where``/``$regex`` recipes on a path segment; XSS by browser nonce on GET
+query or fragment, and on header, cookie, form/JSON/XML body (POST) or one path
+segment (GET) by intercepting the one browser request that carries the input
+and changing only that input; PUT/PATCH/DELETE XSS is refused).
+``--baseline-value`` is the input's ordinary value (a positive integer enables
+numeric SQLi; UNION needs an ordinary string whose fresh response shows
+results; NoSQL on a header requires the header's JSON value). ``--body-sample``
+takes a JSON or form body and sends the named field's value as the baseline.
+Without a usable baseline those recipes are skipped or the shape stays open,
+never clean. Specs: ``header:X-A``, ``cookie:c``, ``form:f``, ``json:a.b``,
+``xml:order.note`` and ``path:2`` (0-based segment index) or ``path:alice``
+(the segment's literal). POST needs a body_replay_paths approval;
+PUT/PATCH/DELETE never touch an existing record: write probes only ever touch
+records Prowl created and verified as its own. The start --policy-file needs a
+``test_record_endpoints`` entry (create_path, create_body holding
+``__PROWL_NONCE__``, content_type, record_path with one ``{id}``, id_source,
+write_methods, cleanup [+ cleanup_delete_approved]) whose record_path matches
+the --target path; Prowl POSTs a dummy record, reads the nonce back, probes
+only that record (a concrete id in --target is replaced) and cleans it up.
+Without one the intake is refused (422). ``intents`` lists ``test_records``;
+any ``cleanup_pending`` record was not confirmed removed and needs you.
+It is planning state: a signal still goes through Prowl's verifier. POST /prowl/findings
 still only takes service-produced paired hunter/verifier proofs (see
 docs/skills/README.md).
 """
@@ -153,6 +197,72 @@ def redact(value):
     return value
 
 
+_RECORD_KEYS = frozenset({"create_path", "create_body", "content_type", "record_path",
+                          "id_source", "write_methods", "cleanup"})
+_ID_SOURCE = re.compile(r"location|json:[A-Za-z0-9_-]{1,64}(?:\.[A-Za-z0-9_-]{1,64}){0,4}")
+
+
+def _record_path_ok(path, *, placeholder: bool) -> bool:
+    if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
+            or path == "/" or len(path) > 256
+            or any(c in path for c in "?#\\%") or any(not 0x21 <= ord(c) <= 0x7e for c in path)
+            or any(seg in (".", "..") for seg in path.split("/"))):
+        return False
+    if placeholder and path.count("{id}") != 1:
+        return False
+    rest = path.replace("{id}", "", 1) if placeholder else path
+    return "{" not in rest and "}" not in rest
+
+
+def check_test_record_endpoints(policy: dict) -> None:
+    """Local mirror of the backend rule; Prowl re-validates the policy.
+
+    PUT/PATCH/DELETE probes only ever touch a dummy record Prowl creates from
+    one of these endpoints and verifies as its own (nonce read back), never an
+    existing record.
+    """
+    if "write_method_paths" in policy:
+        raise ProwlError("write_method_paths is not supported; PUT/PATCH/DELETE probes use "
+                         "Prowl-owned test records (test_record_endpoints)")
+    rows = policy.get("test_record_endpoints") or []
+    if not isinstance(rows, list) or len(rows) > 4:
+        raise ProwlError("test_record_endpoints must be a list of at most 4 entries")
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict) or not _RECORD_KEYS <= set(row)
+                or set(row) - _RECORD_KEYS - {"cleanup_delete_approved"}):
+            raise ProwlError("test_record_endpoints entries need create_path, create_body, "
+                             "content_type, record_path, id_source, write_methods, cleanup")
+        if not _record_path_ok(row["create_path"], placeholder=False):
+            raise ProwlError("create_path must be an exact absolute path without query or {id}")
+        if not _record_path_ok(row["record_path"], placeholder=True):
+            raise ProwlError("record_path must be an exact absolute path with exactly one {id}")
+        if row["record_path"] in seen:
+            raise ProwlError("test_record_endpoints must not repeat a record_path")
+        seen.add(row["record_path"])
+        body = row["create_body"]
+        if row["content_type"] == "json" and isinstance(body, dict):
+            encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        elif row["content_type"] == "form" and isinstance(body, str) and body:
+            encoded = body
+        else:
+            raise ProwlError("create_body must be a JSON object (content_type json) or a "
+                             "urlencoded string (content_type form)")
+        if "__PROWL_NONCE__" not in encoded or len(encoded.encode()) > 4096:
+            raise ProwlError("create_body must contain __PROWL_NONCE__ and be at most 4096 bytes")
+        if not isinstance(row["id_source"], str) or not _ID_SOURCE.fullmatch(row["id_source"]):
+            raise ProwlError("id_source must be location or json:<dotted field>")
+        methods = row["write_methods"]
+        if (not isinstance(methods, list) or not methods or len(set(methods)) != len(methods)
+                or any(m not in ("PUT", "PATCH", "DELETE") for m in methods)):
+            raise ProwlError("write_methods must be a non-empty subset of PUT, PATCH, DELETE")
+        approved = row.get("cleanup_delete_approved", False)
+        if row["cleanup"] not in ("delete", "none") or not isinstance(approved, bool):
+            raise ProwlError("cleanup must be delete or none")
+        if (row["cleanup"] == "delete") != approved:
+            raise ProwlError("cleanup delete needs cleanup_delete_approved: true (and only then)")
+
+
 def assessment_policy(args) -> dict:
     """Operator grants for /agent/query (AgentAssessmentPolicy). Paths only, no secrets."""
     policy: dict = {}
@@ -160,6 +270,7 @@ def assessment_policy(args) -> dict:
         policy = json.loads(Path(args.policy_file).read_text())
         if not isinstance(policy, dict):
             raise ProwlError("--policy-file must hold a JSON object")
+        check_test_record_endpoints(policy)
     if getattr(args, "oob", False):
         policy["oob_callbacks_allowed"] = True
     policy.setdefault("oob_callbacks_allowed", False)
@@ -319,9 +430,90 @@ def cmd_asset(args) -> dict | list:
     return request("GET", "/assets/", params={"search": args.host, "in_scope": "true", "limit": 20})
 
 
+_IDENTITY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}\Z")
+
+
+def prepare_identities(path: str, origin: str, *, allow_unverified: bool = False,
+                       transport=None) -> list[tuple[dict, dict | None]]:
+    """Log in each identity on this machine. Returns (public row, handoff payload or None).
+
+    The payload carries cookies and headers only; it must go nowhere but the
+    platform API. Rows are safe to print.
+    """
+    sys.path.insert(0, str(ROOT))
+    from agent.identities import load_identities
+    from agent.identity_sessions import IdentitySessionManager
+
+    identities = load_identities(path)
+    if not identities:
+        raise ProwlError(f"{path} has no identities")
+    for item in identities:
+        if not _IDENTITY_NAME.fullmatch(item["label"]) or item["label"] in ("anonymous", "legacy"):
+            raise ProwlError(f"identity label {item['label']!r} must be 1-40 letters, digits, "
+                             "dot, dash or underscore, and not anonymous or legacy")
+    manager = IdentitySessionManager(transport=transport)
+    manager.configure(identities, origin)
+    prepared = []
+    for item in identities:
+        status = manager.establish(item["label"])
+        row = {"identity": item["label"], "role": status["role"], "tenant": status["tenant"],
+               "state": status["state"], "evidence": status["evidence"], "error": status["error"],
+               "cookie_names": status["cookie_names"], "sent": False}
+        if status["csrf_available"]:
+            row["note"] = "CSRF token captured locally; Prowl does not refresh it per request"
+        material = manager.session_material(item["label"])
+        accepted = status["state"] == "authenticated" or (
+            allow_unverified and status["state"] == "ready_unverified")
+        if not accepted:
+            row["skipped"] = (f"login state {status['state']}"
+                              + ("" if allow_unverified or status["state"] != "ready_unverified"
+                                 else "; pass --allow-unverified to send it anyway"))
+            prepared.append((row, None))
+        elif not (material["cookies"] or material["headers"]):
+            row["skipped"] = "no cookies or session headers to hand over"
+            prepared.append((row, None))
+        else:
+            prepared.append((row, {"identity": item["label"], "role": status["role"],
+                                   "tenant": status["tenant"], **material}))
+    return prepared
+
+
+def send_identities(session: str, prepared: list[tuple[dict, dict | None]]) -> list[dict]:
+    rows = []
+    for row, payload in prepared:
+        if payload is not None:
+            resp = request("POST", f"/agent/sessions/{urllib.parse.quote(session)}/identities", payload)
+            row = {**row, "sent": True, "origin": resp.get("origin"),
+                   "header_names": resp.get("headers"), "cookies": resp.get("cookies")}
+        rows.append(row)
+    return rows
+
+
+def cmd_identities(args) -> dict:
+    origin = origin_of(args.target)
+    require_scope(args.scope_file, origin)
+    prepared = prepare_identities(args.identity_file, origin, allow_unverified=args.allow_unverified)
+    return {"session_id": args.session, "target": origin,
+            "identities": send_identities(args.session, prepared)}
+
+
+def cmd_har(args) -> dict:
+    har = json.loads(Path(args.file).read_text())
+    return request("POST", f"/agent/sessions/{urllib.parse.quote(args.session)}/har",
+                   {"identity": args.identity, "role": args.role, "tenant": args.tenant, "har": har})
+
+
+def cmd_capture_token(args) -> dict:
+    return request("POST", f"/agent/sessions/{urllib.parse.quote(args.session)}/capture-token",
+                   {"identity": args.identity, "role": args.role, "tenant": args.tenant})
+
+
 def cmd_start(args) -> dict:
     origin = origin_of(args.target)
     require_scope(args.scope_file, origin)
+    # Log identities in before starting, so a bad identity file never starts a run.
+    prepared = (prepare_identities(args.identity_file, origin, allow_unverified=args.allow_unverified)
+                if args.identity_file else [])
     out: dict = {"target": origin, "started_at": _now()}
     session_id = args.session
     if args.executor:
@@ -341,6 +533,9 @@ def cmd_start(args) -> dict:
     resp = request("POST", "/agent/query", body)
     out.update(session_id=resp.get("session_id"), running=resp.get("running"),
                playbook=args.playbook)
+    if prepared:
+        # The run picks these up at its next think turn (operator capture drain).
+        out["identities"] = send_identities(out["session_id"], prepared)
     if args.run_dir:
         _write(Path(args.run_dir) / "prowl_run.json", out)
     return out
@@ -471,6 +666,169 @@ def cmd_verdict(args) -> dict:
     return record
 
 
+PROBE_LOCATIONS = ("query", "body_form", "body_json", "body_xml", "header", "cookie", "path",
+                   "fragment")
+PROBE_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+# Vanguard probe names -> Prowl coverage classes (vulnerability_catalog).
+PROBE_TEST_ALIASES = {
+    "cmdi": "command_injection", "os_command_injection": "command_injection", "rce": "command_injection",
+    "lfi": "path_traversal", "traversal": "path_traversal", "directory_traversal": "path_traversal",
+    "redirect": "open_redirect", "template_injection": "ssti", "header_injection": "crlf",
+    "sql": "sqli", "sql_injection": "sqli", "nosqli": "nosql", "idor": "authz", "bola": "authz",
+}
+# XSS locations Prowl proves by intercepting one browser request (not a URL).
+_XSS_INTERCEPT_LOCATIONS = ("header", "cookie", "body_form", "body_json", "body_xml", "path")
+# Vanguard probes.py spec prefixes -> Prowl locations.
+_LOCATION_ALIASES = {"form": "body_form", "json": "body_json", "xml": "body_xml"}
+
+
+def probe_test_type(name: str, data: dict | None = None) -> str:
+    """A Prowl coverage class, or ProwlError. The server re-validates."""
+    data = data or load_classes()
+    key = re.sub(r"[\s-]+", "_", (name or "").strip().lower())
+    key = PROBE_TEST_ALIASES.get(key, key)
+    if key not in data["coverage_to_class"]:
+        raise ProwlError(f"unknown test type {name!r}; coverage classes: "
+                         f"{sorted(data['coverage_to_class'])}")
+    return key
+
+
+def probe_payload(args) -> dict:
+    target = (args.target or "").strip()
+    parts = urllib.parse.urlsplit(target)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ProwlError("--target must be an absolute http(s) URL")
+    if parts.username or parts.password or parts.fragment:
+        raise ProwlError("--target must not carry credentials or a fragment")
+    require_scope(args.scope_file, target)
+    location, parameter = (args.location or "").strip().lower(), (args.parameter or "").strip()
+    if not location and ":" in parameter:
+        # Accept Vanguard probes.py specs such as header:X-Debug or json:profile.name
+        prefix, _, rest = parameter.partition(":")
+        if prefix in PROBE_LOCATIONS or prefix in _LOCATION_ALIASES:
+            location, parameter = prefix, rest
+    location = _LOCATION_ALIASES.get(location, location)
+    if location and location not in PROBE_LOCATIONS:
+        raise ProwlError(f"--location must be one of {list(PROBE_LOCATIONS)}")
+    if bool(location) != bool(parameter):
+        raise ProwlError("--parameter and --location go together")
+    if location == "body_json" and parameter and not parameter.startswith("/") and "." in parameter:
+        parameter = "/" + parameter.replace("~", "~0").replace("/", "~1").replace(".", "/")
+    if location == "body_xml" and parameter and not parameter.startswith("/") and "." in parameter:
+        parameter = "/" + parameter.replace(".", "/")
+    if location == "body_xml" and parameter and not re.fullmatch(
+            r"/?[A-Za-z_][A-Za-z0-9_.-]{0,63}(?:/[A-Za-z_][A-Za-z0-9_.-]{0,63}){0,4}", parameter):
+        raise ProwlError("xml parameter must be an element name or a path of up to 5 names")
+    if location == "path" and parameter and not parameter.isdecimal() and (
+            "/" in parameter or parameter in (".", "..")):
+        raise ProwlError("path parameter must be a 0-based segment index or one segment's literal")
+    method = (args.method or "GET").strip().upper()
+    if method not in PROBE_METHODS:
+        raise ProwlError(f"--method must be one of {list(PROBE_METHODS)}")
+    if location in ("body_form", "body_json", "body_xml") and method == "GET":
+        raise ProwlError("body locations need --method POST (body_replay_paths) or "
+                         "PUT/PATCH/DELETE (on Prowl's own test record, test_record_endpoints)")
+    if location == "path" and method in ("PUT", "PATCH", "DELETE"):
+        raise ProwlError("PUT/PATCH/DELETE cannot probe a path segment: they go only to "
+                         "Prowl's own test record URL")
+    test_type = probe_test_type(args.test_type)
+    if location == "fragment" and test_type != "xss":
+        raise ProwlError("fragment is client-side only; it is probed for --test-type xss")
+    if test_type == "xss" and location in ("query", "fragment") and method != "GET":
+        raise ProwlError("xss on query/fragment is a browser GET navigation; use --method GET")
+    if test_type == "xss" and location in _XSS_INTERCEPT_LOCATIONS:
+        # Prowl intercepts the one browser request that carries the input.
+        if method in ("PUT", "PATCH", "DELETE"):
+            raise ProwlError("xss on header/cookie/body/path is an intercepted browser request; "
+                             "PUT/PATCH/DELETE are not supported (use GET, or POST for bodies)")
+        if location == "path" and method != "GET":
+            raise ProwlError("xss on a path segment is an intercepted GET; use --method GET")
+    baseline = probe_baseline_value(args, target=target, test_type=test_type,
+                                    location=location, parameter=parameter)
+    body = {"target": target, "test_type": test_type,
+            "parameter": parameter, "location": location, "method": method,
+            "identity": (args.identity or "").strip(), "note": (args.note or "")[:1000]}
+    if baseline is not None:
+        body["baseline_value"] = baseline
+    return body
+
+
+MAX_BASELINE_VALUE = 512
+MAX_BODY_SAMPLE = 4096
+
+
+def _sample_field(sample: str, location: str, parameter: str) -> str:
+    """The named field's value in a JSON or form body sample (never sent itself)."""
+    if location == "body_json":
+        try:
+            document = json.loads(sample)
+        except ValueError:
+            raise ProwlError("--body-sample must be JSON for a json/body_json parameter") from None
+        tokens = ([t.replace("~1", "/").replace("~0", "~") for t in parameter.split("/")[1:]]
+                  if parameter.startswith("/") else [parameter])
+        for token in tokens:
+            if not isinstance(document, dict) or token not in document:
+                raise ProwlError(f"--body-sample has no field {parameter}")
+            document = document[token]
+        if isinstance(document, bool) or not isinstance(document, (str, int)):
+            raise ProwlError("--body-sample field must hold a string or integer")
+        return str(document)
+    if location == "body_form":
+        values = [v for k, v in urllib.parse.parse_qsl(sample, keep_blank_values=True)
+                  if k == parameter]
+        if len(values) != 1:
+            raise ProwlError(f"--body-sample must hold {parameter} exactly once")
+        return values[0]
+    raise ProwlError("--body-sample is for form/json body parameters")
+
+
+def probe_baseline_value(args, *, target: str, test_type: str, location: str,
+                         parameter: str) -> str | None:
+    """The optional baseline value, checked locally. The server re-validates."""
+    value = getattr(args, "baseline_value", None)
+    sample = getattr(args, "body_sample", None)
+    if value not in (None, "") and sample not in (None, ""):
+        raise ProwlError("give --baseline-value or --body-sample, not both")
+    if sample not in (None, ""):
+        if len(sample) > MAX_BODY_SAMPLE:
+            raise ProwlError(f"--body-sample is limited to {MAX_BODY_SAMPLE} characters")
+        value = _sample_field(sample, location, parameter)
+    if value in (None, ""):
+        if test_type == "nosql" and location == "header":
+            raise ProwlError("nosql on a header needs --baseline-value with the header's "
+                             "JSON object/array value")
+        return None
+    if len(value) > MAX_BASELINE_VALUE or re.search(r"[\x00-\x1f\x7f]", value):
+        raise ProwlError(f"--baseline-value must be 1-{MAX_BASELINE_VALUE} printable characters")
+    if not location or location == "fragment":
+        raise ProwlError("--baseline-value needs a server-side --location and --parameter")
+    if location == "query":
+        carried = [v for k, v in urllib.parse.parse_qsl(urllib.parse.urlsplit(target).query,
+                                                         keep_blank_values=True)
+                   if k == parameter]
+        if len(carried) == 1 and carried[0] != value:
+            raise ProwlError("--baseline-value differs from the value --target carries")
+    if location == "path" and not parameter.isdecimal() and value != parameter:
+        raise ProwlError("--baseline-value differs from the path segment literal")
+    if test_type == "nosql" and location == "header":
+        try:
+            document = json.loads(value)
+        except ValueError:
+            document = None
+        if not isinstance(document, (dict, list)):
+            raise ProwlError("nosql on a header needs a JSON object/array --baseline-value")
+    return value
+
+
+def cmd_probe(args) -> dict:
+    body = probe_payload(args)
+    return request("POST", f"/agent/sessions/{urllib.parse.quote(args.session)}/intents", body)
+
+
+def cmd_intents(args) -> dict:
+    return request("GET", f"/agent/sessions/{urllib.parse.quote(args.session)}/intents")
+
+
 def cmd_stop(args) -> dict:
     return request("POST", f"/agent/sessions/{urllib.parse.quote(args.session)}/stop")
 
@@ -504,6 +862,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--oob", action="store_true", help="operator grant for OOB callbacks")
     s.add_argument("--policy-file", help="JSON AgentAssessmentPolicy (body_replay_paths, csrf_action_paths, ...)")
     s.add_argument("--price-limit", type=float); s.add_argument("--run-dir")
+    s.add_argument("--identity-file", help="Vanguard identity JSON; logged in locally, sessions handed to Prowl")
+    s.add_argument("--allow-unverified", action="store_true",
+                   help="also hand over identities whose login could not be confirmed")
     s.set_defaults(fn=cmd_start)
     s = sub.add_parser("poll")
     s.add_argument("--session", required=True); s.add_argument("--wait", action="store_true")
@@ -520,10 +881,43 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_verify)
     s = sub.add_parser("candidates"); s.add_argument("--session", required=True)
     s.set_defaults(fn=cmd_candidates)
+    s = sub.add_parser("probe", help="operator-directed test: POST /agent/sessions/S/intents")
+    for name in ("--session", "--target", "--test-type", "--scope-file"):
+        s.add_argument(name, required=True)
+    s.add_argument("--parameter", default="",
+                   help="input name, JSON pointer, or a spec such as header:X-Debug, "
+                        "json:a.b, xml:order.note, path:2 or path:alice")
+    s.add_argument("--location", default="", help=f"one of {', '.join(PROBE_LOCATIONS)}")
+    s.add_argument("--method", default="GET",
+                   help="GET | POST (body_replay_paths) | PUT | PATCH | DELETE (Prowl-owned test record, test_record_endpoints)")
+    s.add_argument("--identity", default="")
+    s.add_argument("--note", default="", help="untrusted context; never treated as instructions")
+    s.add_argument("--baseline-value", default=None,
+                   help="the input's ordinary value: positive integer for numeric SQLi, "
+                        "a string whose page shows results for UNION, the header's JSON "
+                        "value for nosql on a header (max 512 chars)")
+    s.add_argument("--body-sample", default=None,
+                   help="a JSON or form body; the --parameter field's value becomes the "
+                        "baseline value (the sample itself is not sent)")
+    s.set_defaults(fn=cmd_probe)
+    s = sub.add_parser("intents"); s.add_argument("--session", required=True)
+    s.set_defaults(fn=cmd_intents)
     s = sub.add_parser("verdict")
     s.add_argument("--run-dir", required=True); s.add_argument("--finding-id", required=True)
     s.set_defaults(fn=cmd_verdict)
     s = sub.add_parser("stop"); s.add_argument("--session", required=True); s.set_defaults(fn=cmd_stop)
+    s = sub.add_parser("identities")
+    for name in ("--session", "--target", "--scope-file", "--identity-file"):
+        s.add_argument(name, required=True)
+    s.add_argument("--allow-unverified", action="store_true")
+    s.set_defaults(fn=cmd_identities)
+    for name, fn in (("har", cmd_har), ("capture-token", cmd_capture_token)):
+        s = sub.add_parser(name)
+        s.add_argument("--session", required=True); s.add_argument("--identity", required=True)
+        s.add_argument("--role", default=""); s.add_argument("--tenant", default="")
+        if name == "har":
+            s.add_argument("--file", required=True)
+        s.set_defaults(fn=fn)
     s = sub.add_parser("tool")
     s.add_argument("--scope-file", required=True); s.add_argument("--name", required=True)
     s.add_argument("--args", required=True); s.set_defaults(fn=cmd_tool)

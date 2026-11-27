@@ -8,8 +8,8 @@ detection template span enough distinct hosts, the system raises a suppression
                  at ingest, or
   - dismisses -> no enforcement.
 
-Analysts can also send a sample of the template's open findings to the Aegis Vanguard
-validator agent to gather stronger evidence before deciding.
+Analysts can also send a sample of the template's open findings to the finding
+validator to gather stronger evidence before deciding.
 """
 
 import logging

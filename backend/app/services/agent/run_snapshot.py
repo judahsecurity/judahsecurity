@@ -223,6 +223,63 @@ def save_run_snapshot(
         logger.debug("run snapshot save skipped", exc_info=True)
 
 
+_SIDECAR_KEYS = ("test_record_endpoints", "test_records")
+_MAX_SIDECAR_BYTES = 256 * 1024
+
+
+def _sidecar_path(organization_id: int, session_id: str) -> Path:
+    # Never ends in .json, so it cannot collide with any session's snapshot.
+    return _path(int(organization_id), session_id).with_suffix(".test_records")
+
+
+def load_session_sidecar(organization_id: Optional[int],
+                         session_id: Optional[str]) -> Dict[str, Any]:
+    """Operator-approved test-record endpoints and the records Prowl created.
+
+    Written by the agent route (endpoints, from the operator's policy) and by
+    the scoped tools (records). Read by intent intake and the intents view.
+    """
+    if not organization_id or not session_id:
+        return {}
+    path = _sidecar_path(int(organization_id), session_id)
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_SIDECAR_BYTES:
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("session sidecar load skipped", exc_info=True)
+        return {}
+    return {k: data[k] for k in _SIDECAR_KEYS if isinstance(data, dict)
+            and isinstance(data.get(k), list)}
+
+
+def save_session_sidecar(organization_id: Optional[int], session_id: Optional[str],
+                         **fields: Any) -> None:
+    if not organization_id or not session_id:
+        return
+    data = load_session_sidecar(organization_id, session_id)
+    data.update({k: v for k, v in fields.items() if k in _SIDECAR_KEYS and isinstance(v, list)})
+    encoded = json.dumps(data, default=str, separators=(",", ":")).encode()
+    if len(encoded) > _MAX_SIDECAR_BYTES:
+        return
+    try:
+        _DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        destination = _sidecar_path(int(organization_id), session_id)
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
+            os.replace(temporary, destination)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+    except Exception:
+        logger.debug("session sidecar save skipped", exc_info=True)
+
+
 def load_run_snapshot(
     organization_id: Optional[int],
     session_id: Optional[str],

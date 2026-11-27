@@ -1,6 +1,5 @@
 import json
 
-import pytest
 
 from agent.identity_sessions import IdentitySessionManager
 
@@ -81,108 +80,7 @@ def test_login_discovers_form_preserves_cookie_and_hides_secrets():
     assert len(calls) == 3
 
 
-def test_identity_request_injects_fresh_csrf_without_exposing_session():
-    def transport(method, url, headers, body, follow_redirects):
-        if url.endswith("/verify"):
-            return {"status": 200, "body": "private account", "headers": {}}
-        if url.endswith("/settings"):
-            return {
-                "status": 200,
-                "body": '<form><input type="hidden" name="_csrf" value="fresh-token"></form>',
-                "headers": {},
-            }
-        assert url.endswith("/change-email")
-        assert headers["Authorization"] == "Bearer internal-token"
-        assert body == "email=new%40example.test&_csrf=fresh-token"
-        return {
-            "status": 200,
-            "body": "updated fresh-token",
-            "headers": {"Set-Cookie": "session=rotated-secret", "X-Test": "ok"},
-        }
 
-    manager = IdentitySessionManager(transport=transport)
-    manager.configure([{
-        "label": "member",
-        "username": "",
-        "password": "",
-        "role": "member",
-        "tenant": "a",
-        "headers": {"Authorization": "Bearer internal-token"},
-        "login": {"verify_url": "https://example.test/verify"},
-    }], "https://example.test")
-    assert manager.establish("member")["state"] == "ready_unverified"
-
-    result = manager.request(
-        "member",
-        "POST",
-        "https://example.test/change-email",
-        body="email=new%40example.test&_csrf={{csrf}}",
-        csrf_url="https://example.test/settings",
-    )
-
-    assert result["status"] == 200
-    assert result["headers"]["set-cookie"] == "[REDACTED]"
-    rendered = json.dumps(result)
-    assert "internal-token" not in rendered
-    assert "rotated-secret" not in rendered
-    assert "fresh-token" not in rendered
-
-
-def test_identity_authz_diff_uses_labels_and_emits_per_identity_coverage():
-    object_body = json.dumps({"id": 42, "owner": "alice", "private": "x" * 80})
-
-    def transport(method, url, headers, body, follow_redirects):
-        auth = headers.get("Authorization", "")
-        if url.endswith("/private/42"):
-            if auth in {"Bearer owner-token", "Bearer other-token"}:
-                return {"status": 200, "body": object_body, "headers": {}}
-            return {"status": 403, "body": "denied", "headers": {}}
-        return {"status": 200, "body": "public", "headers": {}}
-
-    manager = IdentitySessionManager(transport=transport)
-    manager.configure([
-        {"label": "owner", "headers": {"Authorization": "Bearer owner-token"},
-         "username": "", "password": "", "role": "member", "tenant": "a", "login": {}},
-        {"label": "other", "headers": {"Authorization": "Bearer other-token"},
-         "username": "", "password": "", "role": "member", "tenant": "b", "login": {}},
-    ], "https://example.test")
-    manager.establish("owner")
-    manager.establish("other")
-
-    result = manager.authz_diff(
-        "owner", "other", "https://example.test/private/42"
-    )
-
-    assert result["verdict"]["finding"] == "idor"
-    assert result["candidates"][0]["other_identity"] == "other"
-    states = {item["identity"]: item["status"] for item in result["coverage"]}
-    assert states == {
-        "owner": "tested_negative",
-        "other": "candidate",
-        "anonymous": "tested_negative",
-    }
-
-
-def test_identity_request_rejects_cross_origin_and_session_header_override():
-    manager = IdentitySessionManager(
-        transport=lambda method, url, headers, body, follow: {
-            "status": 200, "body": "ok", "headers": {}
-        }
-    )
-    manager.configure([{
-        "label": "member", "headers": {"Authorization": "Bearer token"},
-        "username": "", "password": "", "role": "member", "tenant": "a", "login": {},
-    }], "https://example.test")
-    manager.establish("member")
-
-    override = manager.request(
-        "member", "GET", "https://example.test/private",
-        headers={"Authorization": "Bearer replacement"},
-    )
-    assert "cannot override" in override["error"]
-
-    with pytest.raises(ValueError, match="target origin"):
-        manager.request("member", "GET", "https://evil.test/private")
 
 
 def test_failed_login_cookie_does_not_create_false_authenticated_state():
@@ -204,17 +102,35 @@ def test_failed_login_cookie_does_not_create_false_authenticated_state():
     assert "failure" in status["error"]
 
 
-def test_identity_tools_reach_validation_and_exploit_phases():
-    from agent.agents import (
-        create_exploit_agent,
-        create_exploit_chain_agent,
-        create_validator_agent,
-    )
+def test_default_transport_does_not_follow_redirects_and_keeps_set_cookie():
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    required = {
-        "identity_session_status", "identity_request", "identity_authz_diff",
-    }
-    for agent in (
-        create_validator_agent(), create_exploit_chain_agent(), create_exploit_agent()
-    ):
-        assert required <= set(agent.tool_names or [])
+    from agent.identity_sessions import _default_transport, _set_cookie_values
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", "/after")
+            self.send_header("Set-Cookie", "sid=abc; HttpOnly")
+            self.send_header("Set-Cookie", "pref=1")
+            self.end_headers()
+
+        do_GET = do_POST
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/session"
+        response = _default_transport("POST", url, {"Content-Type": "text/plain"}, "x=1", False)
+    finally:
+        server.shutdown()
+    assert response["status"] == 302 and seen == ["/session"]
+    assert sorted(_set_cookie_values(response)) == ["pref=1", "sid=abc; HttpOnly"]
+

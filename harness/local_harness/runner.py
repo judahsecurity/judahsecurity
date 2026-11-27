@@ -1,5 +1,5 @@
 """
-Scan runner — invokes the Aegis Vanguard scanner for one target and captures
+Scan runner — invokes the configured scanner (Prowl by default) for one target and captures
 its findings as a stable artifact.
 
 The scanner is launched as a subprocess (configurable via ``HarnessConfig``),

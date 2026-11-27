@@ -1,0 +1,5 @@
+[*] Checking https://api.example.test
+[+] Generic Detection results:
+[*] The site https://api.example.test seems to be behind a WAF or some sort of security solution
+[~] Reason: The server returns a different response code when an attack string is used.
+[~] Number of requests: 7

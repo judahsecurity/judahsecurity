@@ -29,7 +29,7 @@ export AEGIS_API_TOKEN=<user JWT access token>  # from POST /api/v1/auth/login
 `prowl_client.py`: Prowl owns the scoped browser, OOB callbacks, deterministic
 proof probes, the independent verifier and the publication gate. curl in the
 session is for leads only. `--local` hunts without Prowl (medium+ stays
-`improve`). `--cli` runs `python3 run_pentest.py --target …` instead.
+`improve`).
 
 ## Cycle
 
@@ -71,8 +71,13 @@ above only with a proof kind for the class; classes without proof kinds and
 | `verify` (live session) | `POST /agent/sessions/{sid}/candidates`, then `POST /agent/query` (resume `sid`) when idle (201), or `POST /agent/sessions/{sid}/steer` when the run is active (202 `queued`; `mode=intake_queued`) | JWT |
 | `verify` (fallback) | `POST /agent/query` with `playbook_id=finding_validation` + redacted packet | JWT |
 | `candidates` | `GET /agent/sessions/{sid}/candidates` | JWT |
+| `probe` | `POST /agent/sessions/{sid}/intents` (one operator-directed test; scope-checked locally first) | JWT |
+| `intents` | `GET /agent/sessions/{sid}/intents` | JWT |
 | `verdict` | candidate status from `candidates` when intake was used; else ledger receipts | JWT |
 | `stop` | `POST /agent/sessions/{sid}/stop` | JWT |
+| `identities` / `start --identity-file` | logs each identity in locally (`agent/identity_sessions.py`), then `POST /agent/sessions/{sid}/identities` with cookies + auth headers only | JWT |
+| `har` | `POST /agent/sessions/{sid}/har` (DevTools HAR of a logged-in session) | JWT |
+| `capture-token` | `POST /agent/sessions/{sid}/capture-token` (for the capture extension) | JWT |
 | `tool` | `POST /mcp/call` (subfinder, dnsx, httpx, katana, waybackurls; scope-checked) | JWT |
 | `classes` | local `data/vuln_classes.json` | — |
 | `classes --remote` | `GET /agent/proof-classes` | JWT |
@@ -143,6 +148,149 @@ status `queued`, plus `run_in_progress`. `verdict` maps `queued` to `pending`.
 classes with their proof class and lane, `severity_caps` and
 `non_confirmable`. `data/vuln_classes.json` stays as the offline copy.
 
+### Operator-directed probing (closed gap)
+
+`probe --session S --target URL --test-type T --scope-file F [--parameter P
+--location L --method M --identity I --note TXT --baseline-value V |
+--body-sample BODY]` plans one test on any
+in-scope URL and input, including inputs Prowl never observed. The client
+checks the scope file, the class (coverage class or alias: `cmdi`, `lfi`,
+`redirect`, `template_injection`, ...) and the location locally; it also
+accepts `probes.py` specs (`header:X-Debug`, `cookie:theme`, `json:a.b`,
+`form:file`). The backend re-validates: exact URL on the session's seed origin
+(no credentials, fragment or credential-bearing query), coverage class,
+location in `query | body_form | body_json | body_xml | header | cookie | path
+| fragment`, method `GET | POST | PUT | PATCH | DELETE`. It stores an `operator`
+fact plus an intent (`created_by=operator`) backed by a coverage cell. Idle
+session: 201, written to the snapshot. Running session: 202 `queued`, merged at
+the next think turn. Same intent twice: 200 with `duplicate_of`. At most 50
+operator intents per session (429). The note is wrapped as untrusted text and
+never directs the probe.
+
+Prowl's leased scoped probes then build the request from the intent:
+
+| Class | Locations | Methods |
+|-------|-----------|---------|
+| ssti, command_injection, path_traversal | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
+| crlf, open_redirect | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
+| sqli (string Boolean OR/AND, error, UNION, time; numeric Boolean) | query, header, cookie, body_form, body_json, body_xml, path | GET, POST, PUT, PATCH, DELETE |
+| nosql (operator differential) | query, body_form, body_json (operators), cookie (`j:` JSON), header (JSON baseline only), body_xml (operator elements), path (string `$where`/`$regex` recipes) | GET, POST, PUT, PATCH, DELETE (path: GET/POST) |
+| xss (browser nonce execution) | query, fragment | GET |
+| xss (intercepted browser request) | header, cookie, path | GET (header/cookie also POST) |
+| xss (intercepted browser request) | body_form, body_json, body_xml | POST |
+
+Body locations need a non-GET method. `body_xml` takes an element name or a
+path (`xml:order.note` becomes `/order/note`); the value is XML-escaped into
+one text node, no DOCTYPE. `path` names one segment by 0-based index
+(`path:2`) or its exact literal (`path:alice`); only that segment changes.
+`fragment` is client-side only (the server never receives it), so only xss
+tests it (`fragment:q` makes `#q=<payload>`, `fragment:*` makes `#<payload>`).
+
+**Baselines.** `--baseline-value` is the input's ordinary value (1-512
+printable characters; it must match the value the `--target` already carries
+for a query field or path literal). `--body-sample` takes a JSON or form body
+and sends only the named field's value as the baseline. Prowl's own
+`add_intent` can instead cite `source_capture_id`, the browser exchange the
+test comes from (same method, path and identity), and the probe takes the
+baseline value and request from that capture. Numeric Boolean SQLi runs only
+when the baseline is a positive integer; UNION (NULL-padded column discovery,
+hex-encoded marker reflected only by query execution) only when an ordinary
+string baseline's fresh response reflects result data; both first fetch a fresh
+baseline with that exact value. NoSQL on a header needs the header's JSON
+object/array value with exactly one string field (`{"user":"alice"}`); the
+intake refuses it otherwise. Cookies are probed as Express cookie-parser JSON
+cookies (`j:{"$ne":"<nonce>"}` and `j:{"$eq":...}` against the literal), XML as
+`<field><$ne>nonce</$ne></field>` against `<field>nonce</field>` (strict XML
+parsers reject `$`, so they never confirm), path segments only with string
+recipes (`' || 'a'=='a` / `' && 'a'=='b`, the double-quote pair, and
+`<lit>|.*` / `(?:<lit>)`). Every NoSQL location uses the same interleaved
+differential: stable always-true variant that differs from the literal
+control, same-meaning variant equal to the control. Missing baselines leave
+recipes skipped (`numeric_skipped`, `union_skipped`) or the cell open, never
+`tested_clean`. The independent verifier replays the hunter's recipe through
+the same builder and baseline source with fresh nonces.
+
+XSS on header, cookie, body and path inputs loads the rendering page in
+Prowl's browser and intercepts one request: the navigation to the target URL
+(body locations are then sent as a one-field POST), or, when the specialist
+names a `render_page`, that page's fetch/XHR to the target path. Only the one
+input changes (header value, one cookie pair, the body field, the exact path
+segment); redirects are refused, not followed. Proof is the fresh nonce
+dialog after that mutated response renders; reflection alone, an unrelated
+dialog or a request that was never sent stay inconclusive. The receipt binds
+a path probe to the cell by its path template and segment index, and the
+verifier replays the same page, request match and location with a fresh
+nonce (proof kind `scoped_browser_intercept_xss`). PUT/PATCH/DELETE XSS is
+not supported (refused by `probe` and at intake).
+
+Method approval comes from the start `--policy-file`: GET is free; POST needs
+the path in `body_replay_paths`.
+
+**Write probes only ever touch records Prowl created and verified as its
+own.** PUT/PATCH/DELETE never modify a company's existing data, even when the
+intent names a real record. The policy names, at most four times, how Prowl
+may make a dummy record:
+
+```json
+{"test_record_endpoints": [{
+  "create_path": "/api/notes",
+  "create_body": {"title": "__PROWL_NONCE__"},
+  "content_type": "json",
+  "record_path": "/api/notes/{id}",
+  "id_source": "location",
+  "write_methods": ["PUT", "PATCH", "DELETE"],
+  "cleanup": "delete",
+  "cleanup_delete_approved": true
+}]}
+```
+
+Paths are exact (no query, fragment, `%` or dot segments); `record_path` has
+exactly one `{id}` and nowhere else; `create_body` (JSON object, or a form
+string for `content_type: form`) must contain `__PROWL_NONCE__`; `id_source`
+is `location` (the create response's same-origin Location matching
+`record_path`) or `json:<dotted.field>`; ids must be 1-64 of `[A-Za-z0-9_-]`.
+`cleanup: delete` needs `cleanup_delete_approved: true`: that cleanup DELETE is
+the only DELETE Prowl sends besides a DELETE probe on its own record.
+
+For each PUT/PATCH/DELETE probe Prowl: matches the intent path to a
+`record_path` with the method in `write_methods` (a concrete id such as
+`/api/notes/42` is never used; the request is retargeted); POSTs `create_path`
+with a fresh nonce (same identity, exact origin, no redirects); GETs the new
+record and requires the nonce; sends the probe only to that record URL
+(header/cookie/query/body inputs; `path` inputs are refused for writes); then,
+for `cleanup: delete` or a DELETE probe, DELETEs it and GETs again to confirm
+404/410/nonce gone (`cleaned`). A create without a usable id, a record whose
+nonce cannot be read back (never deleted: it may not be Prowl's), a failed
+cleanup or `cleanup: none` leaves the record `cleanup_pending`. A DELETE probe
+uses a fresh record per request. The independent verifier creates its own
+fresh record. Creates and cleanups spend the POST budget. `prowl_client.py
+intents` and the run summary list `test_records`; every `cleanup_pending`
+record is reported for you to remove. Intake refuses (422) a write intent with
+no matching endpoint; without one at run time the probe returns
+`operator_approval_required` and the cell stays open; a record that is not
+provably Prowl's returns `test_record_aborted` and nothing is probed. Host, Cookie,
+Authorization, framing, X-Forwarded-Host and credential-like headers, and
+credential-like or HttpOnly identity cookies, are never mutated. Anything else
+(xss on a protected header/cookie, sqli/server classes on fragment, nosql on
+header/cookie/xml/path, a path segment the URL lacks) stays open/inconclusive
+with `unsupported_shape` and the intent is `blocked`; it is never
+`tested_clean`. A probe signal is still a lead until Prowl's independent
+verifier replays it with the same request builder. `intents --session S` shows
+status, result facts and the backing cell's status.
+
+### Test identities (closed gap)
+
+`identities` (or `start --identity-file`) reads a Vanguard identity file
+(`agent/identities.py` format), logs each identity in on this machine with the
+Vanguard login engine, and hands Prowl only the resulting session: exact
+origin, cookies and auth headers. Passwords never leave this machine. The
+backend stores the material encrypted in the operator-capture inbox, checks it
+against the engagement scope when the run drains it at its next think turn, and
+registers a named identity the model can use but never see. Identities whose
+login is rejected are not sent; `ready_unverified` ones (no success marker) need
+`--allow-unverified`. Prowl does not refresh CSRF tokens or re-login on expiry;
+re-run `identities` for a new session.
+
 ### Remaining API gaps (documented, not invented)
 
 1. **`POST /prowl/findings` is not usable by Vanguard.** It requires the
@@ -188,7 +336,7 @@ Repeat runs resume the latest dir unless `--fresh`.
 
 `SKILL.md` stays under 150 lines. Methodology lives in sibling files
 (`schema.md`, `researchers.md`, `gate.md`), `_lib/*.py`, or Python
-(`run_pentest.py`, `prowl_client.py`).
+(`prowl_client.py`).
 Do not grow skills by pasting platform playbooks.
 
 ## Platform agent (optional)

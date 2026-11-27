@@ -9,8 +9,10 @@
   "pending_upstream": {},
   "classes": {
     "account_enumeration": {
-      "proof_kinds": [],
-      "confirmable": false,
+      "proof_kinds": [
+        "scoped_account_enum_differential"
+      ],
+      "confirmable": true,
       "severity_cap": null,
       "coverage_classes": []
     },
@@ -24,7 +26,8 @@
       "confirmable": true,
       "severity_cap": null,
       "coverage_classes": [
-        "authz"
+        "authz",
+        "business_logic"
       ]
     },
     "client_prototype_pollution": {
@@ -88,6 +91,14 @@
         "csrf"
       ]
     },
+    "cswsh": {
+      "proof_kinds": [
+        "scoped_cswsh_cross_origin_read"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": []
+    },
     "dom_open_redirect": {
       "proof_kinds": [
         "scoped_browser_client"
@@ -106,6 +117,16 @@
       "confirmable": true,
       "severity_cap": null,
       "coverage_classes": []
+    },
+    "file_upload": {
+      "proof_kinds": [
+        "scoped_upload_served_active"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "file_upload"
+      ]
     },
     "jwt": {
       "proof_kinds": [
@@ -134,6 +155,16 @@
         "nosql"
       ]
     },
+    "oauth": {
+      "proof_kinds": [
+        "scoped_oauth_redirect_uri"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "oauth"
+      ]
+    },
     "open_redirect": {
       "proof_kinds": [
         "scoped_response_redirect"
@@ -154,6 +185,16 @@
         "path_traversal"
       ]
     },
+    "prompt_injection": {
+      "proof_kinds": [
+        "scoped_llm_canary"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "llm_ai"
+      ]
+    },
     "race_condition": {
       "proof_kinds": [
         "scoped_race_overrun"
@@ -162,6 +203,16 @@
       "severity_cap": null,
       "coverage_classes": [
         "race_condition"
+      ]
+    },
+    "server_prototype_pollution": {
+      "proof_kinds": [
+        "scoped_server_pp_gadget"
+      ],
+      "confirmable": true,
+      "severity_cap": null,
+      "coverage_classes": [
+        "prototype_pollution"
       ]
     },
     "sql_injection": {
@@ -205,6 +256,7 @@
       "proof_kinds": [
         "browser_xss",
         "scoped_browser_form_xss",
+        "scoped_browser_intercept_xss",
         "scoped_browser_stored_xss",
         "scoped_browser_xhr_xss",
         "scoped_browser_xss",
@@ -229,8 +281,9 @@
     }
   },
   "coverage_to_class": {
+    "auth": null,
     "authz": "authorization",
-    "business_logic": null,
+    "business_logic": "authorization",
     "client_prototype_pollution": "client_prototype_pollution",
     "client_template_injection": "client_template_injection",
     "command_injection": "command_injection",
@@ -240,15 +293,15 @@
     "dom_data_manipulation": null,
     "dom_link_manipulation": null,
     "dom_open_redirect": "dom_open_redirect",
-    "file_upload": null,
+    "file_upload": "file_upload",
     "graphql": null,
     "js_dependency_review": "known_cve",
-    "llm_ai": null,
+    "llm_ai": "prompt_injection",
     "nosql": "nosql",
-    "oauth": null,
+    "oauth": "oauth",
     "open_redirect": "open_redirect",
     "path_traversal": "path_traversal",
-    "prototype_pollution": null,
+    "prototype_pollution": "server_prototype_pollution",
     "race_condition": "race_condition",
     "request_url_override": null,
     "saml_sso": null,
@@ -268,40 +321,54 @@
     "blind_sqli": "sql_injection",
     "bola": "authorization",
     "broken_access_control": "authorization",
+    "business_logic": "authorization",
     "cmdi": "command_injection",
     "cors": "cors",
     "crlf": "crlf",
     "csrf": "csrf",
+    "cswsh": "cswsh",
     "cve": "known_cve",
     "directory_listing": "exposure",
     "directory_traversal": "path_traversal",
     "dom-xss": "xss",
     "dom_xss": "xss",
     "exposure": "exposure",
+    "file_upload": "file_upload",
     "header_injection": "crlf",
     "idor": "authorization",
     "info_disclosure": "exposure",
     "information_disclosure": "exposure",
     "known_cve": "known_cve",
     "lfi": "path_traversal",
+    "llm_prompt_injection": "prompt_injection",
     "mass_assignment": "authorization",
+    "oauth": "oauth",
+    "oauth_redirect_uri": "oauth",
     "open_redirect": "open_redirect",
     "os_command_injection": "command_injection",
     "outdated_component": "known_cve",
     "privilege_escalation": "authorization",
+    "prompt_injection": "prompt_injection",
+    "prototype_pollution": "server_prototype_pollution",
     "race": "race_condition",
     "race_condition": "race_condition",
     "rce": "command_injection",
     "redirect": "open_redirect",
+    "redirect_uri": "oauth",
     "reflected_xss": "xss",
     "secret_exposure": "exposure",
+    "server_prototype_pollution": "server_prototype_pollution",
     "sql": "sql_injection",
     "sqli": "sql_injection",
+    "sspp": "server_prototype_pollution",
     "ssrf": "ssrf",
     "ssti": "ssti",
     "stored_xss": "xss",
     "template_injection": "ssti",
+    "unrestricted_upload": "file_upload",
     "user_enumeration": "account_enumeration",
+    "username_enumeration": "account_enumeration",
+    "websocket_hijacking": "cswsh",
     "xss": "xss",
     "xxe": "xxe"
   }

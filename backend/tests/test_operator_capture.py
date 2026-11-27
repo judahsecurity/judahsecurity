@@ -205,3 +205,66 @@ def test_har_upload(client):
     assert resp.json()["accepted"] == 1
     bad = client.post("/agent/sessions/s1/har", json={"identity": "anonymous", "har": har})
     assert bad.status_code == 422
+
+
+# --- identity session handoff ---------------------------------------------------
+
+def test_session_material_normalizes_cookie_header_and_rejects_unsafe_input():
+    material = oc.normalize_session_material(
+        "https://App.Example.com", {"csrf": "c1"},
+        {"Cookie": "sid=abc123; theme=dark", "authorization": "Bearer tok.en.sig", "X-Tenant": "t1"})
+    assert material["origin"] == "https://app.example.com"
+    assert {"name": "sid", "value": "abc123"} in material["cookies"]
+    assert {"name": "csrf", "value": "c1"} in material["cookies"]
+    assert material["headers"] == {"Authorization": "Bearer tok.en.sig", "X-Tenant": "t1"}
+    for origin, cookies, headers in [
+        ("https://app.example.com/login", {"a": "1"}, {}),
+        ("ftp://app.example.com", {"a": "1"}, {}),
+        ("https://u:p@app.example.com", {"a": "1"}, {}),
+        ("https://app.example.com", {}, {}),
+        ("https://app.example.com", {}, {"Host": "evil"}),
+        ("https://app.example.com", {}, {"X-A": "1\r\nX-B: 2"}),
+        ("https://app.example.com", {"bad name": "1"}, {}),
+    ]:
+        with pytest.raises(oc.CaptureError):
+            oc.normalize_session_material(origin, cookies, headers)
+
+
+def test_session_handoff_is_encrypted_and_registers_in_scope_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("AEGIS_EVIDENCE_DIR", str(tmp_path))
+    good = oc.normalize_session_material("https://app.example.com", {"sid": "abc123"},
+                                         {"Authorization": "Bearer tok.en.sig"})
+    evil = oc.normalize_session_material("https://evil.example.net", {"sid": "zzz"}, {})
+    oc.enqueue_session(3, "s-1", identity="user_a", role="admin", tenant="t1", material=good,
+                       source="identity_handoff")
+    oc.enqueue_session(3, "s-1", identity="user_b", role="", tenant="", material=evil,
+                       source="identity_handoff")
+    on_disk = b"".join(p.read_bytes() for p in tmp_path.rglob("*.capture"))
+    assert b"abc123" not in on_disk and b"tok.en.sig" not in on_disk
+
+    manager = _manager()
+    summary = asyncio.run(oc.apply_batches(manager, oc.drain(3, "s-1")))
+    assert summary["identities"] == ["user_a"]
+    assert summary["sessions"] == 1 and summary["out_of_scope"] == 1 and summary["recorded"] == 0
+    session = identity_registry(manager).resolve("user_a", "https://app.example.com/x")
+    assert {"name": "sid", "value": "abc123"} in session["cookies"]
+    assert session["headers"]["Authorization"] == "Bearer tok.en.sig"
+    assert session["role"] == "admin" and session["tenant"] == "t1"
+    with pytest.raises(ValueError):
+        identity_registry(manager).resolve("user_b", "https://evil.example.net/")
+
+
+def test_identity_handoff_route(client):
+    body = {"identity": "user_a", "role": "admin", "origin": "https://app.example.com",
+            "headers": {"Authorization": "Bearer tok.en.sig"}, "cookies": {"sid": "1"}}
+    resp = client.post("/agent/sessions/s1/identities", json=body)
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["headers"] == ["Authorization"] and resp.json()["cookies"] == 1
+    assert "tok.en.sig" not in resp.text
+    batch = oc.drain(12, "s1")[0]
+    assert batch["identity"] == "user_a" and batch["session"]["origin"] == "https://app.example.com"
+    assert client.post("/agent/sessions/s1/identities",
+                       json={**body, "identity": "legacy"}).status_code == 422
+    assert client.post("/agent/sessions/s1/identities",
+                       json={**body, "headers": {"Host": "x"}}).status_code == 422
+    assert client.post("/agent/sessions/other/identities", json=body).status_code == 404

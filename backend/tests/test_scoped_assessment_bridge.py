@@ -207,7 +207,7 @@ def test_browser_link_inventory_includes_links_after_first_hundred():
 
 @pytest.mark.asyncio
 async def test_scoped_browser_observation_persists_on_bound_asset(monkeypatch):
-    from app.services.agent import tools as agent_tools
+    from app.services.agent import tools_scoped_probes as agent_tools
     from app.services.agent.tools import ASMToolsManager
     from app.services import sitemap_service
 

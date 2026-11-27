@@ -146,6 +146,10 @@ SAFE_RECON_TOOLS = {
     "fingerprint_api",
     "fingerprint_passive_stack",
     "check_cve_applicability",
+    # Ported Vanguard recon: read-only GETs / public DNS only.
+    "fingerprint_gitlab",
+    "query_mail_security",
+    "detect_third_party_vendors",
 }
 
 
