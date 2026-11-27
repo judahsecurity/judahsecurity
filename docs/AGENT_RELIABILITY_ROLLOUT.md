@@ -93,6 +93,27 @@ joins only when `AGENT_CUSTOM_PROBE_MODE=isolated` and the probe sandbox runs.
 Roll back with `AGENT_HUNT_ENGINE=false`. Knobs: `AGENT_HUNT_WORKERS` (3),
 `AGENT_HUNT_MAX_ROUNDS` (8), `AGENT_HUNT_MAX_INTENTS` (24).
 
+## Unauthenticated exposure check (on by default)
+
+`AGENT_EXPOSURE_CHECK` (default `true`) runs `check_exposures` once per target,
+right after the first pass and before enrichment. It sends one anonymous GET,
+without following redirects, to each of about a dozen well-known paths:
+`/.git/config`, `/.env`, `/openapi.json`, `/swagger.json`, `/v2/api-docs`,
+`/v3/api-docs`, `/actuator/env`, `/actuator`, `/server-status`, `/phpinfo.php`,
+`/.aws/credentials`, `/debug/pprof/`. It also checks up to 10 matching paths the
+crawl or enrichment already found (for example `/backup/.env.bak`). Requests go
+through the normal tool path, so they count against the request ceiling.
+
+A hit needs HTTP 200 and a file-specific content signature, so a "not found"
+page served with 200 does not count. Each hit is submitted as an `exposure`
+candidate citing the recorded anonymous GET and a literal of at least 12
+characters from the body (a key name for `.env`, never a secret value), which is
+what the `response_match` proof requires. Pending exposure candidates are
+force-verified. Hunt workers also follow AntiFox's rule: sensitive content
+reachable without login is a finding by itself.
+
+Roll back with `AGENT_EXPOSURE_CHECK=false`.
+
 ## Custom probes (run_custom_probe / run_poc_python)
 
 Specialists can write one-off Python HTTP probes. The original in-process
@@ -104,12 +125,12 @@ is now controlled by `AGENT_CUSTOM_PROBE_MODE`:
 
 | Mode | Behavior |
 |---|---|
-| `off` (default) | Tool refused and removed from specialist tool lists. |
-| `isolated` | Script runs in `probe-runner` via `probe-egress`. |
+| `off` (config default) | Tool refused and removed from specialist tool lists. |
+| `isolated` (compose default) | Script runs in `probe-runner` via `probe-egress`. |
 | `inprocess` | Legacy runner in the backend container. Isolated lab hosts only. |
 
-`isolated` architecture (`backend/probe_sandbox/`, compose profile
-`probe-sandbox`):
+`isolated` architecture (`backend/probe_sandbox/`; `probe-egress` and
+`probe-runner` start with the rest of compose):
 
 - `probe-runner` is attached only to `probe_net`, an `internal: true` network
   with no route out. It holds no backend code, secrets, or volumes, runs with
@@ -139,10 +160,11 @@ is now controlled by `AGENT_CUSTOM_PROBE_MODE`:
 Enable:
 
 ```bash
+# On by default in docker-compose (AGENT_CUSTOM_PROBE_MODE=isolated). The deploy
+# scripts create both tokens when missing; by hand:
 echo "AGENT_PROBE_RUNNER_TOKEN=$(openssl rand -hex 24)" >> .env
 echo "PROBE_RUNNER_TOKEN=$(openssl rand -hex 24)" >> .env
-echo "AGENT_CUSTOM_PROBE_MODE=isolated" >> .env
-docker compose --profile probe-sandbox up -d --build probe-egress probe-runner backend autonomy-worker
+docker compose up -d --build probe-egress probe-runner backend autonomy-worker
 ```
 
 ### sandbox_shell

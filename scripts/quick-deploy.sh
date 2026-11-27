@@ -63,6 +63,12 @@ setup_env() {
         POSTGRES_PASSWORD=$(grep "POSTGRES_PASSWORD=" .env | cut -d'=' -f2)
     fi
     
+    # Probe sandbox tokens (the sandbox runs by default and needs both).
+    PROBE_RELAY_SECRET=$(grep -E "^AGENT_PROBE_RUNNER_TOKEN=.{24,}" .env 2>/dev/null | cut -d'=' -f2 || true)
+    PROBE_RUNNER_SECRET=$(grep -E "^PROBE_RUNNER_TOKEN=.{24,}" .env 2>/dev/null | cut -d'=' -f2 || true)
+    [ -n "$PROBE_RELAY_SECRET" ] || PROBE_RELAY_SECRET=$(openssl rand -hex 24)
+    [ -n "$PROBE_RUNNER_SECRET" ] || PROBE_RUNNER_SECRET=$(openssl rand -hex 24)
+
     # Create .env file
     cat > .env << EOF
 # =============================================================================
@@ -90,6 +96,10 @@ CORS_ORIGINS=["http://localhost","http://localhost:80","http://localhost:3000","
 
 # Redis
 REDIS_PORT=6379
+
+# Probe sandbox (model-written probes and sandbox_shell run here)
+AGENT_PROBE_RUNNER_TOKEN=${PROBE_RELAY_SECRET}
+PROBE_RUNNER_TOKEN=${PROBE_RUNNER_SECRET}
 
 # AWS (optional - for SQS async processing)
 AWS_REGION=${AWS_REGION:-us-east-1}

@@ -55,12 +55,12 @@ rollback() {
   mapfile -t available < <(sudo docker compose config --services)
   build_services=()
   run_services=()
-  for service in backend scanner intel-refresher severity-worker frontend aegis-oracle; do
+  for service in backend scanner intel-refresher severity-worker frontend aegis-oracle probe-egress probe-runner; do
     if printf '%s\n' "${available[@]}" | grep -qx "$service"; then
       build_services+=("$service")
     fi
   done
-  for service in oast-worker backend scanner scheduler autonomy-worker intel-refresher severity-worker frontend aegis-oracle neo4j nginx; do
+  for service in probe-egress probe-runner oast-worker backend scanner scheduler autonomy-worker intel-refresher severity-worker frontend aegis-oracle neo4j nginx; do
     if printf '%s\n' "${available[@]}" | grep -qx "$service"; then
       run_services+=("$service")
     fi
@@ -95,6 +95,17 @@ git merge --ff-only "origin/$deploy_ref"
 deployed_ref="$(git rev-parse HEAD)"
 deployment_started=1
 
+# The probe sandbox runs by default and refuses to start without its tokens.
+ensure_secret() {
+  if ! grep -Eq "^$1=.{24,}" .env 2>/dev/null; then
+    sed -i "/^$1=/d" .env 2>/dev/null || true
+    echo "$1=$(openssl rand -hex 24)" >> .env
+    echo "Generated $1 in .env"
+  fi
+}
+ensure_secret AGENT_PROBE_RUNNER_TOKEN
+ensure_secret PROBE_RUNNER_TOKEN
+
 echo "[2/7] Validating Compose"
 sudo docker compose config --quiet
 
@@ -106,11 +117,11 @@ find backups -type f -name 'pre-deploy-*.sql.gz' -mtime +14 -delete
 
 echo "[4/7] Building images"
 # scanner, scheduler and autonomy-worker share SCANNER_IMAGE; build it once.
-sudo docker compose build backend scanner intel-refresher severity-worker frontend aegis-oracle
+sudo docker compose build backend scanner intel-refresher severity-worker frontend aegis-oracle probe-egress probe-runner
 
 echo "[5/7] Starting services"
 sudo docker compose stop autonomy-worker
-sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher severity-worker frontend aegis-oracle neo4j nginx
+sudo docker compose up -d probe-egress probe-runner oast-worker backend scanner scheduler intel-refresher severity-worker frontend aegis-oracle neo4j nginx
 # Re-resolve backend and frontend service names after Compose recreates them.
 sudo docker compose restart nginx
 

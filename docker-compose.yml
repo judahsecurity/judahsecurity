@@ -126,9 +126,10 @@ services:
       - AGENT_MAX_TARGET_REQUESTS=${AGENT_MAX_TARGET_REQUESTS:-0}
       - AGENT_TESTING_RESERVE_FRACTION=${AGENT_TESTING_RESERVE_FRACTION:-0.6}
       - AGENT_HUNT_ENGINE=${AGENT_HUNT_ENGINE:-true}
+      - AGENT_EXPOSURE_CHECK=${AGENT_EXPOSURE_CHECK:-true}
       - AGENT_CRAWL_NOVELTY_STOP=${AGENT_CRAWL_NOVELTY_STOP:-true}
-      # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
-      - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
+      # Model-written probes: isolated (default; probe-egress + probe-runner) | off | inprocess (lab only).
+      - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-isolated}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
       - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
       - AGENT_PROBE_RUNNER_FINGERPRINT=${AGENT_PROBE_RUNNER_FINGERPRINT:-}
@@ -325,8 +326,10 @@ services:
     networks:
       - asm_network
 
-  # Isolated execution for model-written probe scripts (run_custom_probe).
-  # Enable with `--profile probe-sandbox` and AGENT_CUSTOM_PROBE_MODE=isolated.
+  # Isolated execution for model-written probe scripts and sandbox_shell, on by
+  # default (AGENT_CUSTOM_PROBE_MODE=isolated). Needs AGENT_PROBE_RUNNER_TOKEN and
+  # PROBE_RUNNER_TOKEN in .env; scripts/push-to-ec2.sh and quick-deploy.sh create
+  # them. Set AGENT_CUSTOM_PROBE_MODE=off to turn model-written probes off.
   # probe-runner sits only on probe_net (internal: no route out); its single
   # exit is probe-egress's scope-checking proxy, keyed by a per-job credential.
   probe-egress:
@@ -351,8 +354,6 @@ services:
     networks:
       - asm_network
       - probe_net
-    profiles:
-      - probe-sandbox
 
   probe-runner:
     build:
@@ -381,8 +382,6 @@ services:
       - PROBE_IMAGE_REF=${PROBE_RUNNER_IMAGE:-asm-probe-runner:latest}
     networks:
       - probe_net
-    profiles:
-      - probe-sandbox
 
   # Scanner Worker for async scan tasks
   scanner:
@@ -565,9 +564,10 @@ services:
       - AGENT_MAX_TARGET_REQUESTS=${AGENT_MAX_TARGET_REQUESTS:-0}
       - AGENT_TESTING_RESERVE_FRACTION=${AGENT_TESTING_RESERVE_FRACTION:-0.6}
       - AGENT_HUNT_ENGINE=${AGENT_HUNT_ENGINE:-true}
+      - AGENT_EXPOSURE_CHECK=${AGENT_EXPOSURE_CHECK:-true}
       - AGENT_CRAWL_NOVELTY_STOP=${AGENT_CRAWL_NOVELTY_STOP:-true}
-      # Model-written probes: off | isolated (needs --profile probe-sandbox) | inprocess (lab only).
-      - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-off}
+      # Model-written probes: isolated (default; probe-egress + probe-runner) | off | inprocess (lab only).
+      - AGENT_CUSTOM_PROBE_MODE=${AGENT_CUSTOM_PROBE_MODE:-isolated}
       - AGENT_PROBE_RUNNER_URL=${AGENT_PROBE_RUNNER_URL:-http://probe-egress:9000}
       - AGENT_PROBE_RUNNER_TOKEN=${AGENT_PROBE_RUNNER_TOKEN:-}
       - AGENT_PROBE_RUNNER_FINGERPRINT=${AGENT_PROBE_RUNNER_FINGERPRINT:-}

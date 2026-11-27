@@ -109,6 +109,8 @@ ALWAYS_FORCED_TOOLS = frozenset({
     "probe_observed_input_batch",
     # Bounded hunt over first-pass signals (AGENT_HUNT_ENGINE only).
     "run_hunt_engine",
+    # One anonymous GET per well-known sensitive path, once per target.
+    "check_exposures",
     "independent_verify",
     "submit_finding_candidate",
     "create_finding",

@@ -246,6 +246,10 @@ class Settings(BaseSettings):
     # Event-driven LLM planner + parallel specialist workers over first-pass
     # signals (hunt_engine.py). Off by default; the model calls run_hunt_engine.
     AGENT_HUNT_ENGINE: bool = False
+    # Anonymous GETs to well-known sensitive paths (.git, .env, API schemas,
+    # actuator, server-status, phpinfo...) once per target; hits become
+    # exposure candidates (exposure_check.py). About a dozen requests.
+    AGENT_EXPOSURE_CHECK: bool = True
     AGENT_HUNT_WORKERS: int = 3
     AGENT_HUNT_MAX_ROUNDS: int = 8
     AGENT_HUNT_MAX_INTENTS: int = 24

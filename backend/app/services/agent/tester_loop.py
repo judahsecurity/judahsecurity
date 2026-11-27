@@ -376,6 +376,7 @@ def _observed_input_batch_step(
 # Classes whose independent verifier is a scripted replay of a hunter receipt
 # (no LLM), so a pending candidate can be verified as a forced step.
 DETERMINISTIC_REPLAY_CLASSES = frozenset({
+    "exposure",
     "sql_injection", "xss", "crlf", "open_redirect", "cors", "race_condition",
     "dom_open_redirect", "client_template_injection", "client_prototype_pollution",
     "ssti", "command_injection", "path_traversal", "nosql", "csrf", "jwt",
@@ -1288,6 +1289,33 @@ def _ready_hypothesis_wave(
     }
 
 
+def _exposure_check_step(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
+) -> Optional[Dict[str, Any]]:
+    """Once per target: anonymous GETs to well-known sensitive paths.
+
+    AntiFox reports an unauthenticated config, schema or debug endpoint as a
+    finding; Prowl used to rely on the model noticing one. About a dozen
+    requests, skipped in pilot runs and once the request budget is spent.
+    """
+    from app.core.config import settings
+
+    if not getattr(settings, "AGENT_EXPOSURE_CHECK", True) or state.get("mode") == "pilot":
+        return None
+    from app.services.agent.request_budget import active as active_request_budget
+
+    budget = active_request_budget()
+    if budget is not None and budget.exhausted:
+        return None
+    if any(step.get("tool_name") == "check_exposures" for step in trace):
+        return None
+    return {
+        "tool_name": "check_exposures",
+        "tool_args": {"target": target},
+        "thought": "Check well-known sensitive paths anonymously; a signature hit is an exposure candidate.",
+    }
+
+
 # The hunt engine starts by itself once the first pass has signals. It used to
 # run only when the model chose to call it, so a run could end with first-pass
 # signals nobody followed up. Bounded per run; a new signal set may start another.
@@ -1559,6 +1587,11 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         batch = _observed_input_batch_step(state, trace, input_signature)
         if batch:
             return batch
+
+    # Unauthenticated exposures: a dozen anonymous GETs, before enrichment.
+    exposure = _exposure_check_step(state, trace, target)
+    if exposure:
+        return exposure
 
     # First-pass signals go straight to the hunt engine (when it is enabled),
     # ahead of enrichment and the broad specialist wave.

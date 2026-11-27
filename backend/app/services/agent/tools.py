@@ -787,6 +787,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
             "scoped_stored_xss_assigned": self.scoped_stored_xss_assigned,
             "probe_observed_input_batch": self.probe_observed_input_batch,
+            "check_exposures": self.check_exposures,
             "scoped_assessment_candidate": self.scoped_assessment_candidate,
             "scoped_assessment_publish": self.scoped_assessment_publish,
             "scoped_assessment_status": self.scoped_assessment_status,
@@ -1551,6 +1552,24 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                  "baseline_status": baseline["status"],
                                  "probe_status": probe["status"],
                                  "sql_error_family": probe.get("sql_error_family", "")}}
+
+    async def check_exposures(self, target: str = "", **_: Any) -> Dict[str, Any]:
+        """Request well-known sensitive paths anonymously; submit signature hits.
+
+        Git metadata, .env, API schemas, Spring actuator, server-status, phpinfo,
+        cloud credentials and pprof, plus matching paths the crawl or enrichment
+        already found. Each hit becomes an exposure candidate with the recorded
+        anonymous GET as evidence; the independent verifier still decides.
+        """
+        from app.services.agent.exposure_check import format_result, run_exposure_checks
+
+        cmap = getattr(self, "_capability_map", None) or {}
+        active = str(target or getattr(self, "_fallback_target", "")
+                     or (cmap.get("target") if isinstance(cmap, dict) else "") or "")
+        result = await run_exposure_checks(self, active, cmap)
+        return {"success": bool(result.get("success")), "output": format_result(result),
+                "exposure": result,
+                "engagement_brain": getattr(self, "_engagement_brain", None) or {}}
 
     async def probe_observed_input_batch(
         self, max_checks: int = 32, max_seconds: int = 180,

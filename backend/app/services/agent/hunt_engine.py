@@ -105,6 +105,10 @@ WORKER_RULES = """Worker rules:
 - Mark a negative "observed" only when you exhausted those variants; otherwise mark it
   "inferred" so the planner can re-check it rather than abandon the route.
 - Check recorded traffic (search_evidence) before re-sending a request already made.
+- Sensitive content reachable without logging in is a finding by itself: an admin or
+  debug interface, API docs, config, backup or source files, credentials. If an
+  anonymous GET returned it, submit vulnerability_class "exposure" citing that GET's
+  evidence_id and quote at least 12 characters from the body in the evidence.
 - Prove with evidence. Submit a finding candidate only for what you triggered in this
   run; the independent verifier decides.
 - In your final done JSON add "facts": an array with one object per distinct

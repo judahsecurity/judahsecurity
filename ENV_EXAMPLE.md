@@ -294,10 +294,11 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # AGENT_STEERING_FREE_TURNS=2
 # AGENT_HUNT_DISCIPLINE_PROMPT=true
 
-# Model-written probe scripts: off (default) | isolated | inprocess (lab only).
-# isolated needs `docker compose --profile probe-sandbox` and two random tokens
-# (openssl rand -hex 24). See docs/AGENT_RELIABILITY_ROLLOUT.md.
-# AGENT_CUSTOM_PROBE_MODE=off
+# Model-written probes and sandbox_shell: isolated (compose default) | off |
+# inprocess (lab only). isolated runs probe-egress + probe-runner and needs two
+# random tokens (openssl rand -hex 24); push-to-ec2.sh and quick-deploy.sh
+# generate them when missing. See docs/AGENT_RELIABILITY_ROLLOUT.md.
+# AGENT_CUSTOM_PROBE_MODE=isolated
 # AGENT_PROBE_RUNNER_TOKEN=
 # PROBE_RUNNER_TOKEN=
 
