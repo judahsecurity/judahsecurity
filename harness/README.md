@@ -448,3 +448,25 @@ validates the full batch + benchmark flow offline.
 - [aegis-vanguard/README.md](../aegis-vanguard/README.md) — scanner under test  
 - [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](../docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) — in-product agent control plane  
 - Root [README.md](../README.md) — platform overview
+
+## Gin & Juice Shop scorecard
+
+Scores a run against the expected issues in
+`local_harness/benchmark/ground_truth/GINANDJUICE.json` (PortSwigger's
+deliberately vulnerable shop). Each expected issue lands in one bucket:
+verified, unverified, refuted or missed. Prowl misses get a likely cause from
+the run record (no coverage planned, browser/OAST/POST tooling never ran,
+budget end).
+
+On the deployment box, after the scan finishes:
+
+```bash
+cd /opt/asm && sudo docker exec asm_backend python -m scripts.export_agent_run --target ginandjuice.shop > ~/gj_run.json
+cd /opt/asm/harness && python3 -m local_harness.benchmark.ginandjuice_scorecard ~/gj_run.json
+```
+
+To compare against another scanner (AntiFox, Burp, ZAP), save its findings as a
+JSON list (`title`, optional `url`, `vulnerability_class`, `verified`) and pass
+`--compare other.json`. The ground truth's endpoints are best guesses; matching
+is by vulnerability class first. Update the file when a run shows the exact
+location.

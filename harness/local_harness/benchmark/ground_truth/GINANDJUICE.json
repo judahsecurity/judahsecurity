@@ -1,0 +1,180 @@
+{
+  "_comment": "Expected issues on PortSwigger's Gin & Juice Shop (https://ginandjuice.shop), a deliberately vulnerable app for testing scanners. PortSwigger does not publish a full answer key. Entries marked source=burp_sample_report are issue types listed in PortSwigger's Burp Scanner sample report of this app (https://portswigger.net/burp/samplereport/burpscannersamplereport.html); entries marked source=widely_reported are well known but not in that report summary. endpoint_hint is a best guess used only as a tie-breaker: matching is by vulnerability class first. confidence says how sure we are that the issue exists as described. Refine this file when a run (or Burp) shows the exact location. Only scan targets you are authorized to test; ginandjuice.shop is published by PortSwigger for scanner testing.",
+  "target": "https://ginandjuice.shop",
+  "expected_findings": [
+    {
+      "id": "GJ-SQLI-CATALOG",
+      "title": "SQL injection in the catalog category filter",
+      "tier": "core",
+      "classes": [
+        "sql_injection"
+      ],
+      "keywords": "sql.?injection|\\bsqli\\b",
+      "endpoint_hint": "/catalog",
+      "parameter_hint": "category",
+      "needs": [],
+      "source": "widely_reported",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-XXE-STOCK",
+      "title": "XML external entity injection in the stock checker",
+      "tier": "core",
+      "classes": [
+        "xxe"
+      ],
+      "keywords": "\\bxxe\\b|xml.?external.?entit",
+      "endpoint_hint": "/catalog/product/stock",
+      "parameter_hint": "XML body",
+      "needs": [
+        "post_xml",
+        "oast"
+      ],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-XSS-REFLECTED",
+      "title": "Reflected cross-site scripting",
+      "tier": "core",
+      "classes": [
+        "xss"
+      ],
+      "keywords": "\\bxss\\b|cross.?site.?script",
+      "endpoint_hint": "",
+      "parameter_hint": "",
+      "needs": [
+        "browser"
+      ],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-CSTI",
+      "title": "Client-side (AngularJS) template injection",
+      "tier": "core",
+      "classes": [
+        "client_template_injection"
+      ],
+      "keywords": "client.?side.?template|angular.?(?:js)?.?(?:template|expression)|\\bcsti\\b",
+      "endpoint_hint": "",
+      "parameter_hint": "",
+      "needs": [
+        "browser"
+      ],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-DOM-OPEN-REDIRECT",
+      "title": "DOM-based open redirection",
+      "tier": "core",
+      "classes": [
+        "dom_open_redirect",
+        "open_redirect"
+      ],
+      "keywords": "open.?redirect",
+      "endpoint_hint": "",
+      "parameter_hint": "",
+      "needs": [
+        "browser"
+      ],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-PROTOTYPE-POLLUTION",
+      "title": "Client-side prototype pollution",
+      "tier": "core",
+      "classes": [
+        "client_prototype_pollution"
+      ],
+      "keywords": "prototype.?pollution",
+      "endpoint_hint": "",
+      "parameter_hint": "",
+      "needs": [
+        "browser"
+      ],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-EXTERNAL-INTERACTION",
+      "title": "External service interaction (HTTP and DNS)",
+      "tier": "core",
+      "classes": [
+        "ssrf"
+      ],
+      "keywords": "\\bssrf\\b|server.?side.?request|external.?service.?interaction|out.?of.?band",
+      "endpoint_hint": "",
+      "parameter_hint": "",
+      "needs": [
+        "oast"
+      ],
+      "source": "burp_sample_report",
+      "confidence": "medium"
+    },
+    {
+      "id": "GJ-VULN-JS-DEPENDENCY",
+      "title": "Vulnerable JavaScript dependency",
+      "tier": "core",
+      "classes": [
+        "known_cve"
+      ],
+      "keywords": "vulnerable.?(?:javascript|js).?(?:dependency|library)|outdated.?(?:javascript|js|library)|known.?vulnerab.*(?:library|dependency)|\\bcve-\\d{4}-\\d+.*(?:angular|jquery|lodash)",
+      "endpoint_hint": "",
+      "parameter_hint": "",
+      "needs": [],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-REQUEST-URL-OVERRIDE",
+      "title": "Request URL override (X-Original-URL / X-Rewrite-URL)",
+      "tier": "core",
+      "classes": [],
+      "keywords": "url.?override|x-original-url|x-rewrite-url",
+      "endpoint_hint": "",
+      "parameter_hint": "header",
+      "needs": [],
+      "source": "burp_sample_report",
+      "confidence": "medium"
+    },
+    {
+      "id": "GJ-COOKIE-NO-HTTPONLY",
+      "title": "Cookie without the HttpOnly flag",
+      "tier": "hygiene",
+      "classes": [],
+      "keywords": "httponly",
+      "endpoint_hint": "",
+      "parameter_hint": "",
+      "needs": [],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-HSTS",
+      "title": "Strict transport security not enforced",
+      "tier": "hygiene",
+      "classes": [],
+      "keywords": "strict.?transport|\\bhsts\\b",
+      "endpoint_hint": "",
+      "parameter_hint": "",
+      "needs": [],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    },
+    {
+      "id": "GJ-PASSWORD-AUTOCOMPLETE",
+      "title": "Password field with autocomplete enabled",
+      "tier": "hygiene",
+      "classes": [],
+      "keywords": "autocomplete",
+      "endpoint_hint": "/login",
+      "parameter_hint": "",
+      "needs": [],
+      "source": "burp_sample_report",
+      "confidence": "high"
+    }
+  ]
+}
