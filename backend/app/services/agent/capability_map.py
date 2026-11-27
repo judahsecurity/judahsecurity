@@ -47,6 +47,8 @@ class CapabilityMap:
     # Action-linked browser discovery and an inventory without query/body values.
     action_checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     surface_inventory: Dict[str, Any] = field(default_factory=dict)
+    # Id-like response fields later sent in another request (value_flow.py).
+    value_flows: List[Dict[str, Any]] = field(default_factory=list)
 
     # Derived capability flags (tester mental model)
     has_auth: bool = False
@@ -152,6 +154,7 @@ def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
             reflection_observations=list(getattr(crawl, "reflection_observations", []) or [])[:20],
             action_checkpoints=list(getattr(crawl, "action_checkpoints", []) or [])[:200],
             surface_inventory=build_application_surface_inventory(crawl),
+            value_flows=[dict(f) for f in getattr(crawl, "value_flows", []) or []][:100],
         )
     )
 
@@ -785,6 +788,13 @@ def format_capability_map_for_prompt(cmap: Optional[CapabilityMap | Dict[str, An
         lines.append("Sample APIs:")
         for e in cmap.api_endpoints[:10]:
             lines.append(f"  - {e.get('method')} {e.get('host')}{e.get('path')}")
+    if cmap.value_flows:
+        from app.services.agent.value_flow import describe_flow
+
+        lines.append("Value flows (an id from one response sent in a later request; "
+                     "authorization and IDOR candidates):")
+        for flow in cmap.value_flows[:8]:
+            lines.append(f"  - {describe_flow(flow)}")
     inventory = cmap.surface_inventory or {}
     endpoints = inventory.get("endpoints") or []
     parameters = inventory.get("parameters") or []
@@ -917,11 +927,27 @@ def merge_capability_maps(
         parameter_inventory=_uniq(list(old.parameter_inventory) + list(new.parameter_inventory))[:4000],
         reflection_observations=_uniq(list(old.reflection_observations) + list(new.reflection_observations))[:80],
         action_checkpoints=_uniq(list(old.action_checkpoints) + list(new.action_checkpoints))[:200],
+        value_flows=_merge_flows(old.value_flows, new.value_flows),
         surface_inventory=merge_application_surface_inventories(
             old.surface_inventory, new.surface_inventory
         ),
     )
     return finalize_capability_map(merged).to_dict()
+
+
+def _merge_flows(old: Iterable[Any], new: Iterable[Any], limit: int = 150) -> List[Dict[str, Any]]:
+    from app.services.agent.value_flow import flow_key
+
+    rows: Dict[str, Dict[str, Any]] = {}
+    for flow in list(old or []) + list(new or []):
+        if not isinstance(flow, dict):
+            continue
+        key = flow_key(flow)
+        if key in rows:
+            rows[key]["seen"] = max(int(rows[key].get("seen") or 1), int(flow.get("seen") or 1))
+        elif len(rows) < limit:
+            rows[key] = dict(flow)
+    return list(rows.values())
 
 
 def ingest_passive_urls(

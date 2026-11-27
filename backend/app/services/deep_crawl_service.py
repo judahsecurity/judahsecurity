@@ -484,6 +484,9 @@ class CrawlResult:
     js_file_actions: Dict[str, str] = field(default_factory=dict)
     js_endpoint_sources: Dict[str, Set[str]] = field(default_factory=dict)
     reflection_observations: List[Dict[str, Any]] = field(default_factory=list)
+    # Value-free links: an id-like field of one response sent in a later
+    # request (agent/value_flow.py). Producer, field, consumer, location.
+    value_flows: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _check_playwright() -> bool:
@@ -945,6 +948,20 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 from app.services.browser_automation_service import MAX_NETWORK_REQUESTS, _request_metadata
                 request_rows: Dict[int, int] = {}
                 api_sample_rows: Dict[int, int] = {}
+                from app.services.agent.value_flow import MAX_BODY_BYTES, ValueFlowTracker
+                value_flows = ValueFlowTracker(result.value_flows)
+                body_reads: Set[asyncio.Future] = set()
+
+                async def _read_json_body(resp, method: str, url: str, content_type: str,
+                                          seen_at: float) -> None:
+                    try:
+                        length = int((resp.headers or {}).get("content-length") or 0)
+                        if length > MAX_BODY_BYTES:
+                            return
+                        body = await resp.body()
+                        value_flows.observe_response(method, url, content_type, body, seen_at)
+                    except Exception:
+                        pass
                 api_sample_families: Set[tuple] = set()
 
                 def _on_request(req):
@@ -961,6 +978,16 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                                     request, identity=str(opts.get("identity") or "anonymous"),
                                     source="deep_crawl",
                                 )
+                                # Which navigation or click sent this request.
+                                for operation in operations:
+                                    operation["action_refs"] = [current_action_ref]
+                                try:
+                                    value_flows.observe_request(
+                                        req.method, req.url, req.post_data,
+                                        (req.headers or {}).get("content-type", ""),
+                                        current_action_ref)
+                                except Exception:
+                                    pass
                                 result.application_operations = merge_operations(
                                     result.application_operations, operations
                                 )
@@ -1038,6 +1065,13 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                             )
                         if req.resource_type not in ("xhr", "fetch"):
                             return
+                        if metadata is not None and metadata["in_scope"] and resp.ok:
+                            content_type = str((resp.headers or {}).get("content-type") or "")
+                            if "json" in content_type.lower() and len(body_reads) < 200:
+                                task = asyncio.ensure_future(_read_json_body(
+                                    resp, req.method, req.url, content_type, time.monotonic()))
+                                body_reads.add(task)
+                                task.add_done_callback(body_reads.discard)
                         sample_index = api_sample_rows.pop(id(req), None)
                         if sample_index is not None:
                             sample = result.api_samples[sample_index]
@@ -1241,6 +1275,13 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     result.storage_state = await context.storage_state()
                 except Exception as e:
                     result.errors.append(f"storage_state: {str(e)[:120]}")
+
+                # Let pending JSON body reads finish so their value flows land.
+                if body_reads:
+                    try:
+                        await asyncio.wait(set(body_reads), timeout=5)
+                    except Exception:
+                        pass
 
                 # Report requests that actually reached the target.
                 result.skipped_assets = asset_route.stats["skipped_assets"]

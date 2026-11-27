@@ -152,6 +152,13 @@ def merge_operations(existing: list[dict], incoming: list[dict]) -> list[dict]:
         row = rows[item["id"]]
         for key in ("identities", "sources", "parameters", "capture_ids"):
             row[key] = sorted(set(row.get(key, [])) | set(item.get(key, [])))
+        if item.get("action_refs"):
+            # The first few actions that sent this operation, in order.
+            refs = list(row.get("action_refs") or [])
+            for ref in item["action_refs"]:
+                if ref not in refs and len(refs) < 5:
+                    refs.append(ref)
+            row["action_refs"] = refs
         for key in ("status", "content_type", "request_content_type"):
             if item.get(key) is not None and not row.get(key):
                 row[key] = item[key]

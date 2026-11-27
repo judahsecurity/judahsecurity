@@ -219,3 +219,59 @@ async def test_deep_crawl_stops_when_no_new_functionality(monkeypatch):
     pages = len((result.get("capability_map") or {}).get("pages_visited") or [])
     assert pages < 8, pages
     assert "novelty_stop" in (result.get("error") or "")
+
+
+SPA_PAGE = b"""<!doctype html><html><head><title>Orders</title></head><body>
+<div id="out"></div><script>
+fetch('/api/orders').then(r => r.json()).then(d =>
+  fetch('/api/orders/' + d.orders[0].id).then(r => r.json()).then(o => {
+    document.getElementById('out').textContent = o.total; }));
+</script></body></html>"""
+
+
+@pytest.mark.skipif(os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
+                    reason="Opt-in local Chromium fixture")
+@pytest.mark.asyncio
+async def test_deep_crawl_records_an_id_flowing_between_api_calls(monkeypatch):
+    pytest.importorskip("playwright")
+    import json as _json
+
+    from app.services.deep_crawl_service import run_deep_crawl
+
+    monkeypatch.setattr("app.services.agent.assessment_proxy.assessment_proxy_url", lambda: None)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            if path == "/api/orders":
+                body, kind = _json.dumps({"orders": [{"id": 4711}]}).encode(), "application/json"
+            elif path == "/api/orders/4711":
+                body, kind = _json.dumps({"id": 4711, "total": 12}).encode(), "application/json"
+            else:
+                body, kind = SPA_PAGE, "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = await run_deep_crawl({"url": base + "/", "max_pages": 1, "depth": 1,
+                                       "interact": False, "allowed_origin": base})
+    finally:
+        server.shutdown()
+
+    assert result["success"], result.get("output")
+    flows = result["capability_map"]["value_flows"]
+    assert {(f["producer"], f["field"], f["consumer"], f["location"]) for f in flows} == {
+        ("GET /api/orders", "orders[].id", "GET /api/orders/{id}", "path:3")}
+    assert "4711" not in _json.dumps(flows)
+    # The request that consumed the id records the action that sent it.
+    op = next(o for o in result["application_operations"] if o["path"] == "/api/orders/4711")
+    assert op.get("action_refs")

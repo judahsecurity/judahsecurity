@@ -1301,6 +1301,13 @@ def _first_pass_signal_ids(state: Dict[str, Any]) -> List[str]:
         if isinstance(cell, dict) and cell.get("first_pass_outcome") in ("proof_signal", "inconclusive"):
             ids.append(str(cell.get("id") or "|".join(
                 str(cell.get(k) or "") for k in ("method", "path", "parameter", "test_type"))))
+    # A value flow (an id from one response reused in a later request) is an
+    # authorization lead the first pass does not test; it starts the hunt too.
+    from app.services.agent.value_flow import flow_key
+
+    for flow in ((state.get("capability_map") or {}).get("value_flows") or []):
+        if isinstance(flow, dict) and flow.get("consumer"):
+            ids.append("flow:" + flow_key(flow))
     return sorted(set(ids))
 
 
@@ -1329,8 +1336,8 @@ def _hunt_engine_step(
         "tool_name": "run_hunt_engine",
         "tool_args": {"target": target, "max_seconds": HUNT_AUTO_SECONDS,
                       "signal_signature": signature, "signal_count": len(signals)},
-        "thought": (f"The first pass raised {len(signals)} signal(s); hand them to the hunt "
-                    "planner and parallel specialists before more discovery."),
+        "thought": (f"The first pass and crawl raised {len(signals)} signal(s); hand them to "
+                    "the hunt planner and parallel specialists before more discovery."),
     }
 
 

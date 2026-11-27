@@ -11638,7 +11638,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "leads": list(getattr(report, "leads", []) or [])}
 
         def _seed_facts() -> List[Dict[str, Any]]:
-            return facts_from_brain(getattr(self, "_engagement_brain", None) or {})
+            return facts_from_brain(getattr(self, "_engagement_brain", None) or {},
+                                    getattr(self, "_capability_map", None) or {})
 
         def _known_evidence(evidence_id: str) -> bool:
             # Facts may cite only evidence this run actually recorded.

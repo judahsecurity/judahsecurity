@@ -195,15 +195,34 @@ def _clean_ids(values: Any, limit: int = 8) -> List[str]:
     return out[:limit]
 
 
-def facts_from_brain(brain: Any) -> List[Dict[str, Any]]:
-    """Origin facts from the deterministic passes and the verifier.
+def facts_from_brain(brain: Any, capability_map: Any = None) -> List[Dict[str, Any]]:
+    """Origin facts from the deterministic passes, the crawl and the verifier.
 
     First-pass signals become facts (a held proof signal is observed, an
-    inconclusive one inferred), and each candidate becomes a fact carrying
-    the verifier's verdict. Keys are stable so re-seeding adds only new facts.
+    inconclusive one inferred), each candidate becomes a fact carrying the
+    verifier's verdict, and each value flow the crawl saw (an id from one
+    response sent in a later request) becomes an observed fact pointing at
+    an authorization test. Keys are stable so re-seeding adds only new facts.
     """
     brain = brain if isinstance(brain, dict) else {}
     rows: List[Dict[str, Any]] = []
+    cmap = capability_map if isinstance(capability_map, dict) else {}
+    if cmap.get("value_flows"):
+        from app.services.agent.value_flow import describe_flow, flow_key
+
+        for flow in cmap.get("value_flows") or []:
+            if not isinstance(flow, dict) or not flow.get("consumer"):
+                continue
+            consumer = str(flow["consumer"])
+            rows.append({
+                "key": "flow:" + flow_key(flow),
+                "source": "value_flow",
+                "summary": ("Crawl saw " + describe_flow(flow)
+                            + "; test whether another object's id is accepted there"),
+                "confidence": "observed", "negative": False,
+                "target": consumer.split(" ", 1)[-1],
+                "parameter": str(flow.get("location") or ""),
+            })
     for cell in brain.get("coverage_cells") or []:
         if not isinstance(cell, dict):
             continue
