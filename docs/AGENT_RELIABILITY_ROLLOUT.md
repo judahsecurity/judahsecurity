@@ -73,6 +73,26 @@ met. Each deferral is logged as `Advisory steering: deferring pipeline step`.
 Suggested sequence: strict baseline, then `AGENT_HUNT_DISCIPLINE_PROMPT=true`,
 then that plus `AGENT_STEERING_MODE=advisory`, all at the same budget.
 
+## Hunt engine (on by default in docker-compose)
+
+`AGENT_HUNT_ENGINE` (off in config, `true` in `docker-compose.yml`) runs an
+LLM planner and parallel specialists over what the deterministic first pass
+found. The pipeline starts it by itself as soon as the first pass raises a
+signal (proof signal or inconclusive), ahead of enrichment; a run with no
+signals never starts it. It runs again for a new signal set, at most twice per
+run, not in bounded pilots, and not once the request budget is spent. Every
+worker request goes through scope, method policy and the request ceiling, and
+workers only submit candidates for the independent verifier.
+
+The planner works from facts with lineage: first-pass signals, verifier
+verdicts, and each worker's positive and negative conclusions. Every task must
+name the facts it builds on, a finished route is retried only with a newer
+fact, and dependent steps run in order. The explorer worker (sandbox shell)
+joins only when `AGENT_CUSTOM_PROBE_MODE=isolated` and the probe sandbox runs.
+
+Roll back with `AGENT_HUNT_ENGINE=false`. Knobs: `AGENT_HUNT_WORKERS` (3),
+`AGENT_HUNT_MAX_ROUNDS` (8), `AGENT_HUNT_MAX_INTENTS` (24).
+
 ## Custom probes (run_custom_probe / run_poc_python)
 
 Specialists can write one-off Python HTTP probes. The original in-process
