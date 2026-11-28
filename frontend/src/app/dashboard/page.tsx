@@ -361,6 +361,9 @@ export default function DashboardPage() {
       console.error('Failed to fetch dashboard data:', error);
       setLoading(false);
       setMapLoading(false);
+      // The attack-path load is started after the aggregates succeed; if they
+      // failed it never ran, so clear its spinner too instead of "Loading…" forever.
+      setPathsLoading(false);
     }
   }, [syncFindingsGroups, findingsGroupBy]);
 
@@ -468,20 +471,6 @@ export default function DashboardPage() {
       />
 
       <div className="p-6 space-y-6">
-        {/* Proof-ranked priorities and live activity, Upwind-style */}
-        <WhatMattersNow
-          paths={attackPaths}
-          findings={recentVulns}
-          engagements={engagements}
-          counts={{
-            critical: stats?.critical_count || 0,
-            high: stats?.high_count || 0,
-            medium: stats?.medium_count || 0,
-            low: stats?.low_count || 0,
-          }}
-          loading={loading || pathsLoading}
-        />
-
         {/* Headline numbers: one slim row instead of four large tiles */}
         <div className="grid grid-cols-2 divide-border overflow-hidden rounded-lg border border-border bg-card md:grid-cols-4 md:divide-x">
           {statCards.map((stat) => (
@@ -498,6 +487,20 @@ export default function DashboardPage() {
             </Link>
           ))}
         </div>
+
+        {/* Proof-ranked priorities and live activity, Upwind-style */}
+        <WhatMattersNow
+          paths={attackPaths}
+          findings={recentVulns}
+          engagements={engagements}
+          counts={{
+            critical: stats?.critical_count || 0,
+            high: stats?.high_count || 0,
+            medium: stats?.medium_count || 0,
+            low: stats?.low_count || 0,
+          }}
+          loading={loading || pathsLoading}
+        />
 
         {/* Value story: alerts -> proof funnel beside the severity re-scoring */}
         <ValueFunnelSection />
