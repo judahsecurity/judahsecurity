@@ -14,9 +14,10 @@ from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetStatus, AssetType
 from app.db.database import SessionLocal
-from app.models.wiz_integration import WizApplicationEndpoint
+from app.models.wiz_integration import WizApplicationEndpoint, WizAssetLink
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
 from app.models.wiz_integration import WizIntegration
+from app.services.integration_asset_reconciliation import mark_asset_seen, reconcile_asset_membership
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ class WizClient:
 
     PAGE_SIZE = 100
     VM_PAGE_SIZE = 500
-    MAX_PAGES = 500
+    MAX_PAGES = 10000
     ENDPOINT_MAX_PAGES = 2000
 
     def __init__(
@@ -312,31 +313,45 @@ class WizClient:
             return payload.get("data") or {}
         raise WizApiError("Wiz GraphQL request failed after retries.")
 
-    async def get_vulnerability_findings(self, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        findings: List[Dict[str, Any]] = []
+    async def iter_vulnerability_findings(
+        self, *, limit: Optional[int] = None
+    ) -> AsyncIterator[List[Dict[str, Any]]]:
+        """Stream findings until Wiz confirms the last page; never accept a page cap as complete."""
         cursor: Optional[str] = None
+        cursors: set[str] = set()
+        seen = 0
         self.findings_truncated = False
         for _ in range(self.MAX_PAGES):
             data = await self.graphql(
                 VULNERABILITY_FINDINGS_QUERY,
-                {"first": min(self.PAGE_SIZE, limit or self.PAGE_SIZE), "after": cursor},
+                {"first": min(self.PAGE_SIZE, limit - seen) if limit is not None else self.PAGE_SIZE,
+                 "after": cursor},
             )
             connection = data.get("vulnerabilityFindings") or {}
-            batch = connection.get("nodes") or []
+            batch = connection.get("nodes")
             if not isinstance(batch, list):
                 raise WizApiError("Wiz returned an unexpected vulnerability findings payload.")
-            findings.extend(item for item in batch if isinstance(item, dict))
+            rows = [item for item in batch if isinstance(item, dict)]
+            seen += len(rows)
+            if rows:
+                yield rows
             page_info = connection.get("pageInfo") or {}
-            if limit and len(findings) >= limit:
+            if limit is not None and seen >= limit:
                 self.findings_truncated = bool(page_info.get("hasNextPage"))
-                return findings[:limit]
+                return
             if not page_info.get("hasNextPage"):
-                break
-            cursor = page_info.get("endCursor")
-            if not cursor:
-                raise WizApiError("Wiz vulnerability finding pagination cursor was missing.")
-        else:
-            self.findings_truncated = True
+                return
+            next_cursor = page_info.get("endCursor")
+            if not next_cursor or next_cursor in cursors:
+                raise WizApiError("Wiz vulnerability finding pagination cursor was missing or repeated.")
+            cursors.add(next_cursor)
+            cursor = next_cursor
+        raise WizApiError("Wiz vulnerability finding pagination exceeded the page limit.")
+
+    async def get_vulnerability_findings(self, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        findings: List[Dict[str, Any]] = []
+        async for page in self.iter_vulnerability_findings(limit=limit):
+            findings.extend(page)
         return findings
 
     async def iter_virtual_machines(
@@ -398,6 +413,7 @@ class WizClient:
         """Stream complete endpoint pages; stable Wiz IDs deduplicate moving pages."""
         cursor: Optional[str] = None
         seen: set[str] = set()
+        reported_total: Optional[int] = None
         page_size = self.PAGE_SIZE
         for _ in range(self.ENDPOINT_MAX_PAGES):
             remaining = limit - len(seen) if limit is not None else page_size
@@ -420,6 +436,8 @@ class WizClient:
                     page_size = max(1, page_size // 2)
                     logger.warning("Wiz application endpoint page size reduced to %s after API limit error", page_size)
             connection = data.get("applicationEndpoints") or {}
+            if reported_total is None and isinstance(connection.get("totalCount"), int):
+                reported_total = connection["totalCount"]
             nodes = connection.get("nodes")
             if not isinstance(nodes, list):
                 raise WizApiError("Wiz returned an unexpected application endpoints payload.")
@@ -435,6 +453,8 @@ class WizClient:
                 yield batch
             page_info = connection.get("pageInfo") or {}
             if not page_info.get("hasNextPage"):
+                if limit is None and reported_total is not None and len(seen) < reported_total:
+                    raise WizApiError("Wiz application endpoint inventory ended before its reported total.")
                 return
             next_cursor = page_info.get("endCursor")
             if not next_cursor or next_cursor == cursor:
@@ -633,6 +653,10 @@ class _Stats:
     def __init__(self) -> None:
         self.assets_created = 0
         self.assets_updated = 0
+        self.assets_retired = 0
+        self.vm_links_removed = 0
+        self.endpoint_links_removed = 0
+        self.legacy_vm_links_bootstrapped = 0
         self.vulns_created = 0
         self.vulns_updated = 0
         self.findings_seen = 0
@@ -656,15 +680,24 @@ class _Stats:
         return vars(self).copy()
 
 
-def _upsert_asset(db: Session, org_id: int, source: Dict[str, Any], stats: _Stats) -> Asset:
+def _upsert_asset(
+    db: Session, integration: WizIntegration, source: Dict[str, Any], stats: _Stats, seen_at: datetime,
+) -> Asset:
     value = _asset_value(source)
     if not value:
         raise ValueError("Wiz virtual machine has no stable identifier")
-    asset = db.query(Asset).filter(Asset.organization_id == org_id, Asset.value == value).first()
+    wiz_id = str(source.get("id") or value)[:255]
+    link = db.query(WizAssetLink).filter_by(integration_id=integration.id, wiz_id=wiz_id).first()
+    asset = db.get(Asset, link.asset_id) if link else None
+    if asset is None:
+        asset = db.query(Asset).filter(
+            Asset.organization_id == integration.organization_id, Asset.value == value,
+        ).first()
     ips = [str(ip) for ip in (source.get("ipAddresses") or []) if ip]
     metadata = dict(asset.metadata_ or {}) if asset else {}
     metadata["wiz"] = {
         "id": source.get("id"),
+        "integration_id": integration.id,
         "provider_unique_id": source.get("providerUniqueId"),
         "cloud_platform": source.get("cloudPlatform"),
         "cloud_provider_url": source.get("cloudProviderURL"),
@@ -683,7 +716,9 @@ def _upsert_asset(db: Session, org_id: int, source: Dict[str, Any], stats: _Stat
     }
     if asset:
         asset.name = str(source.get("name") or asset.name)[:255]
-        asset.last_seen = datetime.utcnow()
+        if asset.discovery_source == DISCOVERY_SOURCE:
+            asset.value = value[:500]
+        asset.last_seen = seen_at
         operating_system = source.get("operatingSystem")
         if operating_system:
             asset.operating_system = str(operating_system)[:200]
@@ -695,33 +730,39 @@ def _upsert_asset(db: Session, org_id: int, source: Dict[str, Any], stats: _Stat
         asset.hosting_type = "cloud"
         asset.is_public = _is_internet_exposed(source)
         asset.metadata_ = metadata
-        tags = list(asset.tags or [])
-        if "source:wiz" not in tags:
-            tags.append("source:wiz")
-            asset.tags = tags
+        mark_asset_seen(asset, DISCOVERY_SOURCE)
         stats.assets_updated += 1
-        return asset
-    asset = Asset(
-        name=str(source.get("name") or value)[:255],
-        asset_type=AssetType.CLOUD_RESOURCE,
-        value=value[:500],
-        organization_id=org_id,
-        status=AssetStatus.DISCOVERED,
-        discovery_source=DISCOVERY_SOURCE,
-        association_reason="Virtual machine attributed to the organization by Wiz",
-        association_confidence=95,
-        tags=["source:wiz"],
-        metadata_=metadata,
-        operating_system=(str(source.get("operatingSystem"))[:200] if source.get("operatingSystem") else None),
-        ip_addresses=ips,
-        ip_address=ips[0] if ips else None,
-        hosting_type="cloud",
-        hosting_provider=str(source.get("cloudPlatform") or "").lower()[:100] or None,
-        is_public=_is_internet_exposed(source),
-    )
-    db.add(asset)
-    db.flush()
-    stats.assets_created += 1
+    else:
+        asset = Asset(
+            name=str(source.get("name") or value)[:255],
+            asset_type=AssetType.CLOUD_RESOURCE,
+            value=value[:500],
+            organization_id=integration.organization_id,
+            status=AssetStatus.DISCOVERED,
+            discovery_source=DISCOVERY_SOURCE,
+            association_reason="Virtual machine attributed to the organization by Wiz",
+            association_confidence=95,
+            tags=["source:wiz"],
+            metadata_=metadata,
+            operating_system=(str(source.get("operatingSystem"))[:200] if source.get("operatingSystem") else None),
+            ip_addresses=ips,
+            ip_address=ips[0] if ips else None,
+            hosting_type="cloud",
+            hosting_provider=str(source.get("cloudPlatform") or "").lower()[:100] or None,
+            is_public=_is_internet_exposed(source),
+        )
+        db.add(asset)
+        db.flush()
+        stats.assets_created += 1
+    if link is None:
+        db.add(WizAssetLink(
+            integration_id=integration.id, asset_id=asset.id, wiz_id=wiz_id,
+            last_seen=seen_at, is_active=True,
+        ))
+    else:
+        link.asset_id = asset.id
+        link.last_seen = seen_at
+        link.is_active = True
     return asset
 
 
@@ -941,15 +982,17 @@ def _upsert_endpoint_batch(
             if tag not in tags:
                 tags.append(tag)
         asset.tags = tags
+        mark_asset_seen(asset, DISCOVERY_SOURCE)
         row.asset = asset
     db.add_all(new_rows)
     db.flush()
 
 
 async def _sync_application_endpoints(
-    db: Session, integration: WizIntegration, client: WizClient, stats: _Stats
-) -> None:
-    started_at = datetime.utcnow()
+    db: Session, integration: WizIntegration, client: WizClient, stats: _Stats,
+    started_at: Optional[datetime] = None,
+) -> set[int]:
+    started_at = started_at or datetime.utcnow()
     async for batch in client.iter_application_endpoints():
         _upsert_endpoint_batch(db, integration, batch, stats, started_at)
         db.commit()
@@ -989,16 +1032,22 @@ async def _sync_application_endpoints(
             stats.endpoint_issue_count_mismatches += int(analytics_count != item["issue_count"])
         db.commit()
     await _sync_ai_endpoint_graph(db, integration, client, stats, started_at)
-    db.query(WizApplicationEndpoint).filter(
+    stale_query = db.query(WizApplicationEndpoint).filter(
         WizApplicationEndpoint.integration_id == integration.id,
         WizApplicationEndpoint.last_seen < started_at,
-    ).update({WizApplicationEndpoint.is_active: False}, synchronize_session=False)
-    db.commit()
+        WizApplicationEndpoint.is_active.is_(True),
+    )
+    stale_asset_ids = {row[0] for row in stale_query.with_entities(
+        WizApplicationEndpoint.asset_id,
+    ).filter(WizApplicationEndpoint.asset_id.is_not(None)).distinct().all()}
+    stats.endpoint_links_removed = stale_query.count()
+    stale_query.update({WizApplicationEndpoint.is_active: False}, synchronize_session=False)
     stats.ai_endpoints_seen = db.query(WizApplicationEndpoint).filter(
         WizApplicationEndpoint.integration_id == integration.id,
         WizApplicationEndpoint.is_active.is_(True),
         WizApplicationEndpoint.is_ai.is_(True),
     ).count()
+    return stale_asset_ids
 
 
 async def _sync_ai_endpoint_graph(
@@ -1072,62 +1121,131 @@ async def _sync_ai_endpoint_graph(
 
 
 async def _sync_virtual_machines(
-    db: Session, integration: WizIntegration, client: WizClient, stats: _Stats
+    db: Session, integration: WizIntegration, client: WizClient, stats: _Stats,
+    started_at: Optional[datetime] = None,
 ) -> None:
     if not integration.import_assets:
         return
+    started_at = started_at or datetime.utcnow()
     async for page in client.iter_virtual_machines(
         exposed_only=integration.internet_exposed_only
     ):
         for source in page:
             if not _asset_value(source):
                 continue
-            _upsert_asset(db, integration.organization_id, source, stats)
+            _upsert_asset(db, integration, source, stats, started_at)
             stats.virtual_machines_seen += 1
         db.commit()
     stats.virtual_machines_total_count = client.virtual_machines_total_count
+    if (stats.virtual_machines_total_count is not None
+            and stats.virtual_machines_seen < stats.virtual_machines_total_count):
+        raise WizApiError("Wiz virtual machine inventory count did not match the completed pages.")
+
+
+def _bootstrap_legacy_vm_links(db: Session, integration: WizIntegration, stats: _Stats) -> set[int]:
+    """Attribute pre-link Wiz VMs when their connection can be identified safely."""
+    connection_count = db.query(WizIntegration.id).filter(
+        WizIntegration.organization_id == integration.organization_id,
+    ).count()
+    existing = {wiz_id: asset_id for wiz_id, asset_id in db.query(
+        WizAssetLink.wiz_id, WizAssetLink.asset_id,
+    ).filter(WizAssetLink.integration_id == integration.id).all()}
+    orphan_ids: set[int] = set()
+    for asset in db.query(Asset).filter(
+        Asset.organization_id == integration.organization_id,
+        Asset.discovery_source == DISCOVERY_SOURCE,
+        Asset.asset_type == AssetType.CLOUD_RESOURCE,
+    ).all():
+        wiz = (asset.metadata_ or {}).get("wiz") or {}
+        wiz_id = str(wiz.get("id") or "")[:255]
+        owner = wiz.get("integration_id")
+        if not wiz_id or (owner is None and connection_count != 1) or (owner is not None and owner != integration.id):
+            continue
+        if wiz_id in existing:
+            if existing[wiz_id] != asset.id:
+                orphan_ids.add(asset.id)
+            continue
+        db.add(WizAssetLink(
+            integration_id=integration.id, asset_id=asset.id, wiz_id=wiz_id,
+            last_seen=datetime.min, is_active=True,
+        ))
+        existing[wiz_id] = asset.id
+        stats.legacy_vm_links_bootstrapped += 1
+    db.flush()
+    return orphan_ids
+
+
+def _reconcile_wiz_assets(
+    db: Session, integration: WizIntegration, stats: _Stats,
+    started_at: datetime, stale_endpoint_asset_ids: set[int],
+) -> None:
+    if not integration.import_assets:
+        return
+    candidate_ids = set(stale_endpoint_asset_ids)
+    candidate_ids.update(row[0] for row in db.query(WizApplicationEndpoint.asset_id).filter(
+        WizApplicationEndpoint.integration_id == integration.id,
+        WizApplicationEndpoint.is_active.is_(False),
+        WizApplicationEndpoint.asset_id.is_not(None),
+    ).distinct().all())
+    candidate_ids.update(_bootstrap_legacy_vm_links(db, integration, stats))
+    stale_links = db.query(WizAssetLink).filter(
+        WizAssetLink.integration_id == integration.id,
+        WizAssetLink.is_active.is_(True),
+        WizAssetLink.last_seen < started_at,
+    ).all()
+    for link in stale_links:
+        link.is_active = False
+        candidate_ids.add(link.asset_id)
+    stats.vm_links_removed = len(stale_links)
+    db.flush()
+    stats.assets_retired = reconcile_asset_membership(
+        db, DISCOVERY_SOURCE, integration.organization_id, candidate_ids,
+    )
+    db.commit()
 
 
 async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str, Any]:
     stats = _Stats()
+    started_at = datetime.utcnow()
     try:
         client = _client_for(integration)
-        await _sync_virtual_machines(db, integration, client, stats)
-        if integration.import_vulnerabilities:
-            findings = await client.get_vulnerability_findings()
-            stats.findings_seen = len(findings)
-            stats.findings_truncated = client.findings_truncated
-        else:
-            findings = []
+        await _sync_virtual_machines(db, integration, client, stats, started_at)
         asset_cache: Dict[str, Asset] = {}
-        for finding in findings:
-            source = finding.get("vulnerableAsset") or {}
-            if not isinstance(source, dict) or not _is_virtual_machine(source):
-                stats.findings_filtered += 1
-                continue
-            if integration.internet_exposed_only and not _is_internet_exposed(source):
-                stats.findings_filtered += 1
-                continue
-            value = _asset_value(source)
-            if not value:
-                stats.findings_filtered += 1
-                continue
-            asset = asset_cache.get(value)
-            if asset is None:
-                existing = db.query(Asset).filter(
-                    Asset.organization_id == integration.organization_id,
-                    Asset.value == value,
-                ).first()
-                if not integration.import_assets and existing is None:
-                    stats.findings_filtered += 1
-                    continue
-                asset = _upsert_asset(db, integration.organization_id, source, stats)
-                asset_cache[value] = asset
-            if integration.import_vulnerabilities:
-                _upsert_vulnerability(db, asset, finding, stats)
-
-        db.commit()
-        await _sync_application_endpoints(db, integration, client, stats)
+        if integration.import_vulnerabilities:
+            async for findings in client.iter_vulnerability_findings():
+                stats.findings_seen += len(findings)
+                for finding in findings:
+                    source = finding.get("vulnerableAsset") or {}
+                    if not isinstance(source, dict) or not _is_virtual_machine(source):
+                        stats.findings_filtered += 1
+                        continue
+                    if integration.internet_exposed_only and not _is_internet_exposed(source):
+                        stats.findings_filtered += 1
+                        continue
+                    value = _asset_value(source)
+                    if not value:
+                        stats.findings_filtered += 1
+                        continue
+                    asset = asset_cache.get(value)
+                    if asset is None:
+                        existing = db.query(Asset).filter(
+                            Asset.organization_id == integration.organization_id,
+                            Asset.value == value,
+                        ).first()
+                        if not integration.import_assets and existing is None:
+                            stats.findings_filtered += 1
+                            continue
+                        asset = _upsert_asset(db, integration, source, stats, started_at)
+                        asset_cache[value] = asset
+                    _upsert_vulnerability(db, asset, finding, stats)
+                db.commit()
+            stats.findings_truncated = client.findings_truncated
+            if stats.findings_truncated:
+                raise WizApiError("Wiz vulnerability findings feed did not complete.")
+        stale_endpoint_assets = await _sync_application_endpoints(
+            db, integration, client, stats, started_at,
+        )
+        _reconcile_wiz_assets(db, integration, stats, started_at, stale_endpoint_assets or set())
 
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = True
@@ -1184,8 +1302,9 @@ async def sync_integration_background(integration_id: int) -> None:
     with SessionLocal() as db:
         integration = db.query(WizIntegration).filter_by(id=integration_id).first()
         if integration is not None:
-            await sync_integration(db, integration)
-            from app.services.integration_graph_service import project_and_record_graph
-            await asyncio.to_thread(
-                project_and_record_graph, integration.organization_id, "wiz", integration.id
-            )
+            result = await sync_integration(db, integration)
+            if result["ok"]:
+                from app.services.integration_graph_service import project_and_record_graph
+                await asyncio.to_thread(
+                    project_and_record_graph, integration.organization_id, "wiz", integration.id
+                )

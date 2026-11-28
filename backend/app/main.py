@@ -23,7 +23,7 @@ from app.models.finding_exception import FindingException  # Required for Vulner
 from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F401 — ensure tables are created
 from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created
 from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
-from app.models.wiz_integration import WizIntegration, WizApplicationEndpoint  # noqa: F401 — ensure tables are created
+from app.models.wiz_integration import WizIntegration, WizApplicationEndpoint, WizAssetLink  # noqa: F401 — ensure tables are created
 from app.models.tenable_integration import TenableVmIntegration  # noqa: F401 — ensure table is created
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink  # noqa: F401 — ensure tables are created
 from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 — ensure table is created
@@ -329,6 +329,7 @@ async def startup_event():
     apply_scan_profile_migrations()
     apply_agent_ledger_migrations()
     apply_rbac_migrations()
+    apply_integration_asset_migrations()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -370,6 +371,17 @@ async def shutdown_event():
     if _evidence_cleanup_task is not None:
         _evidence_cleanup_task.cancel()
     logger.info("Shutting down application")
+
+
+def apply_integration_asset_migrations():
+    """Add source membership state to pre-existing CrowdStrike links."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE crowdstrike_asset_links "
+            "ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
 
 
 def apply_oracle_migrations():

@@ -26,3 +26,16 @@ CREATE TABLE IF NOT EXISTS wiz_integrations (
 
 CREATE INDEX IF NOT EXISTS ix_wiz_integrations_organization_id
     ON wiz_integrations (organization_id);
+
+CREATE TABLE IF NOT EXISTS wiz_asset_links (
+    id SERIAL PRIMARY KEY,
+    integration_id INTEGER NOT NULL REFERENCES wiz_integrations(id) ON DELETE CASCADE,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    wiz_id VARCHAR(255) NOT NULL,
+    last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    CONSTRAINT uq_wiz_asset_link_source UNIQUE (integration_id, wiz_id)
+);
+CREATE INDEX IF NOT EXISTS ix_wiz_asset_links_integration_id ON wiz_asset_links (integration_id);
+CREATE INDEX IF NOT EXISTS ix_wiz_asset_links_asset_id ON wiz_asset_links (asset_id);
+CREATE INDEX IF NOT EXISTS ix_wiz_asset_links_integration_seen ON wiz_asset_links (integration_id, last_seen);

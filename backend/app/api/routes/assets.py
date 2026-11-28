@@ -432,6 +432,7 @@ def list_assets(
     status: Optional[AssetStatus] = None,
     search: Optional[str] = None,
     is_live: Optional[bool] = Query(None, description="Filter by live status (true=live, false=not live)"),
+    active_only: bool = Query(False, description="Exclude inactive and archived assets"),
     in_scope: Optional[bool] = Query(None, description="Filter by scope (true=in scope, false=out of scope)"),
     has_open_ports: Optional[bool] = None,
     has_risky_ports: Optional[bool] = None,
@@ -480,6 +481,8 @@ def list_assets(
     
     if status:
         query = query.filter(Asset.status == status)
+    elif active_only:
+        query = query.filter(Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]))
     if search:
         query = query.filter(
             (Asset.name.ilike(f"%{search}%")) |
@@ -534,6 +537,8 @@ def list_assets(
     
     if status:
         count_query = count_query.filter(Asset.status == status)
+    elif active_only:
+        count_query = count_query.filter(Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]))
     if search:
         count_query = count_query.filter(
             (Asset.name.ilike(f"%{search}%")) |

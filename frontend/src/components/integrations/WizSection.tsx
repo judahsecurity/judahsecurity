@@ -287,7 +287,7 @@ export function WizSection() {
                   </div>
                   {item.last_sync_stats && item.last_sync_ok && (
                     <p className="text-xs text-muted-foreground mt-1">
-                      {item.last_sync_stats.endpoints_seen || 0} endpoints ({item.last_sync_stats.ai_endpoints_seen || 0} AI), {item.last_sync_stats.virtual_machines_seen || 0} VMs, {item.last_sync_stats.assets_created || 0} new assets, {item.last_sync_stats.vulns_created || 0} new findings.
+                      {item.last_sync_stats.endpoints_seen || 0} endpoints ({item.last_sync_stats.ai_endpoints_seen || 0} AI), {item.last_sync_stats.virtual_machines_seen || 0} VMs, {item.last_sync_stats.assets_created || 0} new assets, {item.last_sync_stats.assets_retired || 0} removed from the active inventory, {item.last_sync_stats.vulns_created || 0} new findings.
                     </p>
                   )}
                   {item.last_sync_stats?.findings_truncated === true && item.last_sync_ok && (

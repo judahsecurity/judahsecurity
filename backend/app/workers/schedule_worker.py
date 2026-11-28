@@ -760,6 +760,7 @@ class ScheduleWorker:
         """Run scheduled Wiz endpoint, vulnerability, and VM imports when due."""
         from app.models.wiz_integration import WizIntegration
         from app.services import wiz_service
+        from app.services.integration_graph_service import graph_projection_retry_due, project_and_record_graph
 
         db = self.get_db_session()
         if not db:
@@ -770,12 +771,21 @@ class ScheduleWorker:
                 WizIntegration.is_active == True,
                 WizIntegration.continuous_sync_enabled == True,
             ).all()
-            due = [connection for connection in candidates if connection.is_sync_due(now)]
+            due = [connection for connection in candidates
+                   if connection.is_sync_due(now) or graph_projection_retry_due(connection, now)]
             if not due:
                 return
             logger.info(f"Wiz: {len(due)} connection(s) due for continuous sync")
             for integration in due:
                 try:
+                    if not integration.is_sync_due(now):
+                        graph_result = await asyncio.to_thread(
+                            project_and_record_graph, integration.organization_id, "wiz", integration.id
+                        )
+                        if not graph_result["ok"]:
+                            logger.error("Wiz graph projection retry failed for org %s: %s",
+                                         integration.organization_id, graph_result.get("error"))
+                        continue
                     if not wiz_service.claim_sync(db, integration.id):
                         continue
                     result = await wiz_service.sync_integration(db, integration)
@@ -783,13 +793,13 @@ class ScheduleWorker:
                         f"Wiz sync (org {integration.organization_id}, "
                         f"'{integration.connection_name}'): {result.get('message')}"
                     )
-                    from app.services.integration_graph_service import project_and_record_graph
-                    graph_result = await asyncio.to_thread(
-                        project_and_record_graph, integration.organization_id, "wiz", integration.id
-                    )
-                    if not graph_result["ok"]:
-                        logger.error("Wiz graph projection failed for org %s: %s",
-                                     integration.organization_id, graph_result.get("error"))
+                    if result["ok"]:
+                        graph_result = await asyncio.to_thread(
+                            project_and_record_graph, integration.organization_id, "wiz", integration.id
+                        )
+                        if not graph_result["ok"]:
+                            logger.error("Wiz graph projection failed for org %s: %s",
+                                         integration.organization_id, graph_result.get("error"))
                 except Exception as exc:
                     logger.error(
                         f"Wiz sync failed for connection {integration.id}: {exc}",
@@ -841,6 +851,7 @@ class ScheduleWorker:
         """Run due Falcon Exposure Management imports."""
         from app.models.crowdstrike_integration import CrowdStrikeIntegration
         from app.services import crowdstrike_service
+        from app.services.integration_graph_service import graph_projection_retry_due, project_and_record_graph
 
         db = self.get_db_session()
         if not db:
@@ -852,7 +863,14 @@ class ScheduleWorker:
                 CrowdStrikeIntegration.continuous_sync_enabled == True,
             ).all()
             for integration in candidates:
-                if integration.is_sync_due(now) and crowdstrike_service.claim_sync(db, integration.id):
+                if graph_projection_retry_due(integration, now) and not integration.is_sync_due(now):
+                    graph_result = await asyncio.to_thread(
+                        project_and_record_graph, integration.organization_id, "crowdstrike", integration.id
+                    )
+                    if not graph_result["ok"]:
+                        logger.error("CrowdStrike graph projection retry failed for org %s: %s",
+                                     integration.organization_id, graph_result.get("error"))
+                elif integration.is_sync_due(now) and crowdstrike_service.claim_sync(db, integration.id):
                     result = await asyncio.to_thread(
                         crowdstrike_service.sync_and_project_background, integration.id
                     )
