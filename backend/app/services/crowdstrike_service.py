@@ -17,6 +17,7 @@ from app.models.crowdstrike_integration import CrowdStrikeAssetLink, CrowdStrike
 from app.models.exposure_evidence import FindingSourceEvidence
 from app.models.port_service import PortService, PortState, Protocol
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
+from app.services.integration_asset_reconciliation import mark_asset_seen, reconcile_asset_membership
 
 logger = logging.getLogger(__name__)
 
@@ -116,16 +117,26 @@ class CrowdStrikeClient:
     async def _pages(self, path: str, *, params: dict[str, Any], cursor_key: str) -> AsyncIterator[list[Any]]:
         cursor: str | None = None
         seen: set[str] = set()
+        expected_total: int | None = None
+        received = 0
         for _ in range(MAX_PAGES):
             query = dict(params)
             if cursor:
                 query[cursor_key] = cursor
             payload = await self._request("GET", path, params=query)
             batch = _resources(payload, path)
-            yield batch
             page = (payload.get("meta") or {}).get("pagination") or {}
+            if expected_total is None:
+                try:
+                    expected_total = int(page["total"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+            received += len(batch)
+            yield batch
             following = page.get("after") or page.get("next")
             if not following:
+                if expected_total is not None and received < expected_total:
+                    raise CrowdStrikeError(f"CrowdStrike {path} ended before its reported total.")
                 return
             if not isinstance(following, str) or following in seen or following == cursor:
                 raise CrowdStrikeError(f"CrowdStrike {path} returned a repeated page cursor.")
@@ -189,13 +200,17 @@ class CrowdStrikeClient:
             if count:
                 logger.info("CrowdStrike Spotlight window %s to %s: %s findings",
                             stamp(window_start), stamp(window_end), count)
+                received = 0
                 async for batch in self._pages(path, params={
                     "limit": 1000,
                     "filter": window_filter,
                     "sort": "updated_timestamp.asc",
                     "facet": ["host_info", "cve", "remediation", "evaluation_logic"],
                 }, cursor_key="after"):
+                    received += len(batch)
                     yield batch
+                if received != count:
+                    raise CrowdStrikeError("CrowdStrike Spotlight window count changed during pagination.")
 
 
 def _client_for(integration: CrowdStrikeIntegration) -> CrowdStrikeClient:
@@ -248,7 +263,8 @@ def _external_identity(source: dict[str, Any]) -> tuple[AssetType, str] | None:
     return None
 
 
-def _link_asset(db: Session, integration: CrowdStrikeIntegration, kind: str, source_id: str, cid: str, *, value: str, asset_type: AssetType, name: str, allow_match: bool) -> tuple[Asset, bool]:
+def _link_asset(db: Session, integration: CrowdStrikeIntegration, kind: str, source_id: str, cid: str, *, value: str, asset_type: AssetType, name: str, allow_match: bool, seen_at: datetime | None = None) -> tuple[Asset, bool]:
+    seen_at = seen_at or datetime.utcnow()
     link = db.query(CrowdStrikeAssetLink).filter_by(integration_id=integration.id, source_kind=kind, source_id=source_id).first()
     asset = db.get(Asset, link.asset_id) if link else None
     created = False
@@ -265,10 +281,13 @@ def _link_asset(db: Session, integration: CrowdStrikeIntegration, kind: str, sou
         db.flush()
         created = True
     if link is None:
-        db.add(CrowdStrikeAssetLink(integration_id=integration.id, asset_id=asset.id, source_kind=kind, source_id=source_id[:255], cid=cid, last_seen=datetime.utcnow()))
+        db.add(CrowdStrikeAssetLink(integration_id=integration.id, asset_id=asset.id, source_kind=kind, source_id=source_id[:255], cid=cid, last_seen=seen_at, is_active=True))
         db.flush()  # Make the link visible to later records when SessionLocal has autoflush disabled.
     else:
-        link.last_seen = datetime.utcnow()
+        link.cid = cid
+        link.last_seen = seen_at
+        link.is_active = True
+    mark_asset_seen(asset, SOURCE)
     return asset, created
 
 
@@ -290,14 +309,14 @@ def _merge_source_metadata(asset: Asset, kind: str, source_id: str, cid: str, so
     asset.last_seen = _utc(source.get("last_seen")) or datetime.utcnow()
 
 
-def _upsert_external(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], stats: dict[str, int]) -> None:
+def _upsert_external(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], stats: dict[str, int], seen_at: datetime | None = None) -> None:
     identity = _external_identity(source)
     source_id = str(source.get("id") or "")
     if not identity or not source_id:
         return
     asset_type, value = identity
     cid = str(source.get("cid") or "")
-    asset, created = _link_asset(db, integration, "external", source_id, cid, value=value, asset_type=asset_type, name=value, allow_match=True)
+    asset, created = _link_asset(db, integration, "external", source_id, cid, value=value, asset_type=asset_type, name=value, allow_match=True, seen_at=seen_at)
     stats["assets_created" if created else "assets_updated"] += 1
     _merge_source_metadata(asset, "external", source_id, cid, source)
     parent_domain = str(_as_dict(source.get("dns_domain")).get("parent_domain") or "").strip().lower().rstrip(".")
@@ -361,14 +380,14 @@ def _upsert_port(db: Session, asset: Asset, source: dict[str, Any], stats: dict[
     record.last_seen = _utc(source.get("last_seen")) or datetime.utcnow()
 
 
-def _upsert_host(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], stats: dict[str, int]) -> None:
+def _upsert_host(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], stats: dict[str, int], seen_at: datetime | None = None) -> None:
     aid = str(source.get("device_id") or source.get("aid") or "")
     if not aid:
         return
     cid = str(source.get("cid") or "")
     hostname = str(source.get("hostname") or "").strip()
     value = hostname or f"crowdstrike:{cid}:{aid}"
-    asset, created = _link_asset(db, integration, "host", aid, cid, value=value, asset_type=AssetType.OTHER, name=hostname or aid, allow_match=False)
+    asset, created = _link_asset(db, integration, "host", aid, cid, value=value, asset_type=AssetType.OTHER, name=hostname or aid, allow_match=False, seen_at=seen_at)
     stats["assets_created" if created else "assets_updated"] += 1
     _merge_source_metadata(asset, "host", aid, cid, source)
     if str(source.get("internet_exposure") or "").lower() == "yes":
@@ -434,7 +453,7 @@ def _upsert_detection_evidence(
     evidence.last_ingested_at = datetime.utcnow()
 
 
-def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], host_assets: dict[tuple[str, str], int], stats: dict[str, int]) -> None:
+def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], host_assets: dict[tuple[str, str], int], stats: dict[str, int], seen_at: datetime | None = None) -> None:
     finding_id = str(source.get("id") or source.get("vulnerability_id") or "")
     aid = str(source.get("aid") or "")
     cid = str(source.get("cid") or "")
@@ -452,7 +471,7 @@ def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: di
             "local_ip": host_info.get("local_ip"),
             "last_seen": host_info.get("host_last_seen_timestamp"),
             "internet_exposure": host_info.get("internet_exposure"),
-        }, stats)
+        }, stats, seen_at=seen_at)
         link = db.query(CrowdStrikeAssetLink).filter_by(
             integration_id=integration.id, source_kind="host", source_id=aid,
         ).one()
@@ -521,12 +540,43 @@ def _stats() -> dict[str, int]:
         "assets_created", "assets_updated", "ports_created", "ports_updated", "vulns_created", "vulns_updated",
         "vulns_resolved", "external_seen", "hosts_seen", "findings_seen",
         "findings_unmatched", "findings_unchanged", "spotlight_hosts_linked",
+        "external_links_removed", "host_links_removed", "assets_retired",
     )}
+
+
+def _reconcile_crowdstrike_assets(
+    db: Session, integration: CrowdStrikeIntegration, started_at: datetime,
+    stats: dict[str, int],
+) -> None:
+    candidates: set[int] = set()
+    for kind, enabled in (
+        ("external", integration.import_external_assets),
+        ("host", integration.import_hosts or integration.import_spotlight),
+    ):
+        if not enabled:
+            continue
+        query = db.query(CrowdStrikeAssetLink).filter(
+            CrowdStrikeAssetLink.integration_id == integration.id,
+            CrowdStrikeAssetLink.source_kind == kind,
+            CrowdStrikeAssetLink.is_active.is_(True),
+        )
+        stale = query.filter(CrowdStrikeAssetLink.last_seen < started_at).all()
+        for link in stale:
+            link.is_active = False
+            candidates.add(link.asset_id)
+        stats[f"{kind}_links_removed"] = len(stale)
+    db.flush()
+    stats["assets_retired"] = reconcile_asset_membership(
+        db, SOURCE, integration.organization_id, candidates,
+    )
+    db.commit()
 
 
 async def sync_integration(db: Session, integration: CrowdStrikeIntegration) -> dict[str, Any]:
     stats = _stats()
     host_assets: dict[tuple[str, str], int] = {}
+    host_link_ids: dict[tuple[str, str], int] = {}
+    run_started_at = datetime.utcnow()
     started_at = (integration.last_sync_stats or {}).get("sync_started_at") or datetime.utcnow().isoformat()
     try:
         async with _client_for(integration) as client:
@@ -535,18 +585,20 @@ async def sync_integration(db: Session, integration: CrowdStrikeIntegration) -> 
                     for source in batch:
                         if isinstance(source, dict):
                             stats["external_seen"] += 1
-                            _upsert_external(db, integration, source, stats)
+                            _upsert_external(db, integration, source, stats, seen_at=run_started_at)
             if integration.import_hosts or integration.import_spotlight:
                 async for batch in client.hosts():
                     for source in batch:
                         if isinstance(source, dict):
                             stats["hosts_seen"] += 1
-                            _upsert_host(db, integration, source, stats)
+                            _upsert_host(db, integration, source, stats, seen_at=run_started_at)
                 db.flush()
                 links = db.query(
-                    CrowdStrikeAssetLink.cid, CrowdStrikeAssetLink.source_id, CrowdStrikeAssetLink.asset_id
+                    CrowdStrikeAssetLink.id, CrowdStrikeAssetLink.cid,
+                    CrowdStrikeAssetLink.source_id, CrowdStrikeAssetLink.asset_id,
                 ).filter_by(integration_id=integration.id, source_kind="host").all()
-                host_assets = {(cid or "", source_id): asset_id for cid, source_id, asset_id in links}
+                host_assets = {(cid or "", source_id): asset_id for _, cid, source_id, asset_id in links}
+                host_link_ids = {(cid or "", source_id): link_id for link_id, cid, source_id, _ in links}
             if integration.import_spotlight:
                 # Fetch the complete exposed set on every run. A host can become
                 # exposed without changing the timestamp on an older finding.
@@ -562,18 +614,33 @@ async def sync_integration(db: Session, integration: CrowdStrikeIntegration) -> 
                 }
                 async for batch in client.spotlight():
                     committed_stamps = {}
+                    page_host_links: set[int] = set()
+                    page_host_assets: set[int] = set()
                     for source in batch:
                         if isinstance(source, dict):
                             stats["findings_seen"] += 1
+                            host_key = (str(source.get("cid") or ""), str(source.get("aid") or ""))
+                            if host_key in host_link_ids:
+                                page_host_links.add(host_link_ids[host_key])
+                                page_host_assets.add(host_assets[host_key])
                             finding_id = str(source.get("id") or source.get("vulnerability_id") or "")
                             key = f"cs:{integration.id}:{finding_id}"[:255]
                             stamp = _utc(source.get("updated_timestamp"))
                             if finding_id and stamp is not None and prior_findings.get(key) == stamp:
                                 stats["findings_unchanged"] += 1
                                 continue
-                            _upsert_finding(db, integration, source, host_assets, stats)
+                            _upsert_finding(db, integration, source, host_assets, stats, seen_at=run_started_at)
                             if finding_id and source.get("aid") and source.get("cid") and stamp is not None:
                                 committed_stamps[key] = stamp
+                    if page_host_links:
+                        db.query(CrowdStrikeAssetLink).filter(
+                            CrowdStrikeAssetLink.id.in_(page_host_links),
+                        ).update({
+                            CrowdStrikeAssetLink.last_seen: run_started_at,
+                            CrowdStrikeAssetLink.is_active: True,
+                        }, synchronize_session=False)
+                        for asset in db.query(Asset).filter(Asset.id.in_(page_host_assets)).all():
+                            mark_asset_seen(asset, SOURCE)
                     # A Spotlight tenant can contain hundreds of thousands of
                     # findings. Keep the transaction bounded and retain every
                     # completed page if a later API page fails.
@@ -585,6 +652,7 @@ async def sync_integration(db: Session, integration: CrowdStrikeIntegration) -> 
                     prior_findings.update(committed_stamps)
                     logger.info("CrowdStrike Spotlight page committed for org %s: %s findings seen",
                                 integration.organization_id, stats["findings_seen"])
+        _reconcile_crowdstrike_assets(db, integration, run_started_at, stats)
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = True
         integration.last_sync_stats = {**stats, "sync_in_progress": False}
@@ -632,6 +700,8 @@ def sync_and_project_background(integration_id: int) -> dict[str, Any]:
             return {"ok": False, "message": "CrowdStrike connection no longer exists."}
         organization_id = integration.organization_id
         result = asyncio.run(sync_integration(db, integration))
+    if not result["ok"]:
+        return result
     from app.services.integration_graph_service import project_and_record_graph
     graph_result = project_and_record_graph(organization_id, SOURCE, integration_id)
     if not graph_result["ok"]:

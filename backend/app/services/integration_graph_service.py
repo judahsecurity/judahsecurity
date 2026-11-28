@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 from sqlalchemy import text
@@ -121,7 +121,7 @@ def _asset_row(asset: Asset) -> dict[str, Any]:
         "value": asset.value,
         "asset_type": asset.asset_type.value if asset.asset_type else None,
         "discovery_source": asset.discovery_source,
-        "sources": [source for source in ("wiz", "crowdstrike") if f"source:{source}" in tags or source in metadata],
+        "sources": [source for source in ("wiz", "crowdstrike") if f"source:{source}" in tags],
         "is_active": asset.status not in (AssetStatus.INACTIVE, AssetStatus.ARCHIVED),
         "is_public": bool(asset.is_public),
         "is_live": bool(asset.is_live),
@@ -281,7 +281,8 @@ def sync_integration_graph(
         raise ValueError("Graph projection limit must be positive")
     stats: dict[str, Any] = {"ok": False, "assets": 0, "vulnerabilities": 0,
                              "endpoints": 0, "direct_issue_links": 0, "resource_links": 0,
-                             "partial": limit is not None}
+                             "partial": limit is not None,
+                             "attempted_at": datetime.utcnow().isoformat()}
     with SessionLocal() as db:
         engine = db.get_bind()
         with engine.connect() as lock_conn:
@@ -388,3 +389,21 @@ def project_and_record_graph(organization_id: int, source: str, integration_id: 
             integration.last_sync_stats = state
             db.commit()
     return result
+
+
+def graph_projection_retry_due(integration: WizIntegration | CrowdStrikeIntegration,
+                               now: datetime | None = None) -> bool:
+    """Retry a failed graph write without repeating a completed provider pull."""
+    if not integration.is_active or not integration.last_sync_ok:
+        return False
+    state = integration.last_sync_stats or {}
+    if state.get("sync_in_progress"):
+        return False
+    graph_state = state.get("graph_projection") or {}
+    if graph_state.get("ok") is not False:
+        return False
+    try:
+        attempted_at = datetime.fromisoformat(graph_state["attempted_at"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return (now or datetime.utcnow()) >= attempted_at + timedelta(hours=1)

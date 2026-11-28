@@ -83,6 +83,20 @@ async def test_vulnerability_findings_follow_cursor_pagination():
 
 
 @pytest.mark.asyncio
+async def test_vulnerability_findings_page_limit_fails_instead_of_succeeding_truncated():
+    client = WizClient("https://api.us17.app.wiz.io/graphql", "client", "secret")
+    client.MAX_PAGES = 2
+    client.graphql = AsyncMock(side_effect=[
+        {"vulnerabilityFindings": {"nodes": [{"id": "one"}],
+                                   "pageInfo": {"hasNextPage": True, "endCursor": "one"}}},
+        {"vulnerabilityFindings": {"nodes": [{"id": "two"}],
+                                   "pageInfo": {"hasNextPage": True, "endCursor": "two"}}},
+    ])
+    with pytest.raises(WizApiError, match="exceeded the page limit"):
+        await client.get_vulnerability_findings()
+
+
+@pytest.mark.asyncio
 async def test_vm_inventory_paginates_and_deduplicates_wiz_ids():
     client = WizClient("https://api.us17.app.wiz.io/graphql", "client", "secret")
     client.graphql = AsyncMock(side_effect=[
@@ -175,9 +189,10 @@ async def test_sync_imports_vm_inventory_before_findings(monkeypatch):
                 yield [{"id": "vm-1", "name": "VM one", "providerUniqueId": "i-1",
                         "hasLimitedInternetExposure": True}]
 
-            async def get_vulnerability_findings(self):
+            async def iter_vulnerability_findings(self):
                 events.append("findings")
-                return []
+                if False:
+                    yield []
 
         async def fake_endpoints(*args):
             events.append("endpoints")

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user
+from app.models.asset import AssetStatus
 from app.models.user import User
 from app.services.graph_service import get_graph_service
 from app.core.config import settings
@@ -252,7 +253,8 @@ async def get_attack_paths(
               AND source.organization_id = target.organization_id
               AND ($org_id IS NULL OR source.organization_id = $org_id)
               AND all(n IN nodes(path) WHERE
-                  n.organization_id IS NULL OR n.organization_id = source.organization_id)
+                  (n.organization_id IS NULL OR n.organization_id = source.organization_id)
+                  AND (NOT n:Asset OR coalesce(n.is_active, true)))
             RETURN path
             LIMIT $max_paths
             """
@@ -264,7 +266,8 @@ async def get_attack_paths(
             MATCH path = (entry:Asset {organization_id: $org_id})-[*1..4]->(vuln:Vulnerability)
             WHERE vuln.severity IN ['critical', 'high']
               AND all(n IN nodes(path) WHERE
-                  n.organization_id IS NULL OR n.organization_id = $org_id)
+                  (n.organization_id IS NULL OR n.organization_id = $org_id)
+                  AND (NOT n:Asset OR coalesce(n.is_active, true)))
             RETURN path
             LIMIT $max_paths
             """
@@ -539,6 +542,7 @@ async def get_assets_by_technology(
             cypher = """
                 MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
                 WHERE a.organization_id = $org_id
+                  AND coalesce(a.is_active, true)
                   AND t.categories CONTAINS $category
                 WITH t, collect(DISTINCT {
                     id: a.asset_id,
@@ -559,6 +563,7 @@ async def get_assets_by_technology(
             cypher = """
                 MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
                 WHERE a.organization_id = $org_id
+                  AND coalesce(a.is_active, true)
                 WITH t, collect(DISTINCT {
                     id: a.asset_id,
                     value: a.value,
@@ -582,6 +587,7 @@ async def get_assets_by_technology(
         category_cypher = """
             MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
               AND t.categories IS NOT NULL
             WITH t.categories AS cat, count(DISTINCT a) AS count
             RETURN cat AS category, count
@@ -623,6 +629,7 @@ async def get_assets_by_port(
             cypher = """
                 MATCH (a:Asset)-[:HAS_PORT]->(p:Port)
                 WHERE a.organization_id = $org_id
+                  AND coalesce(a.is_active, true)
                   AND p.is_risky = true
                 WITH p.port AS port_number, p.protocol AS protocol,
                      collect(DISTINCT {
@@ -645,6 +652,7 @@ async def get_assets_by_port(
             cypher = """
                 MATCH (a:Asset)-[:HAS_PORT]->(p:Port)
                 WHERE a.organization_id = $org_id
+                  AND coalesce(a.is_active, true)
                 WITH p.port AS port_number, p.protocol AS protocol, p.is_risky AS is_risky,
                      collect(DISTINCT {
                          id: a.asset_id,
@@ -670,6 +678,7 @@ async def get_assets_by_port(
         risky_cypher = """
             MATCH (a:Asset)-[:HAS_PORT]->(p:Port)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
               AND p.is_risky = true
             RETURN count(DISTINCT p) AS risky_port_count,
                    count(DISTINCT a) AS affected_asset_count
@@ -709,6 +718,7 @@ async def get_attack_surface_overview(
         entry_points = graph.query("""
             MATCH (a:Asset)-[:HAS_PORT]->(p:Port)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
               AND a.is_live = true
             WITH a, count(DISTINCT p) AS port_count
             OPTIONAL MATCH (a)-[:HAS_VULNERABILITY]->(v:Vulnerability)
@@ -728,6 +738,7 @@ async def get_attack_surface_overview(
         high_value = graph.query("""
             MATCH (a:Asset)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
               AND (a.has_login_portal = true OR a.criticality = 'critical')
             OPTIONAL MATCH (a)-[:HAS_VULNERABILITY]->(v:Vulnerability)
             WITH a, collect(DISTINCT v.severity) AS vuln_severities
@@ -744,6 +755,7 @@ async def get_attack_surface_overview(
         tech_vectors = graph.query("""
             MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
             WITH t.name AS technology, t.categories AS categories, t.cpe AS cpe,
                  count(DISTINCT a) AS usage_count
             WHERE usage_count > 1
@@ -756,6 +768,7 @@ async def get_attack_surface_overview(
         port_vectors = graph.query("""
             MATCH (a:Asset)-[:HAS_PORT]->(p:Port)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
               AND p.is_risky = true
             OPTIONAL MATCH (p)-[:RUNS_SERVICE]->(s:Service)
             WITH p.port AS port, s.name AS service, count(DISTINCT a) AS exposure_count
@@ -768,6 +781,7 @@ async def get_attack_surface_overview(
         risk_dist = graph.query("""
             MATCH (a:Asset)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
             RETURN 
                 sum(CASE WHEN a.risk_score >= 80 THEN 1 ELSE 0 END) AS critical_risk,
                 sum(CASE WHEN a.risk_score >= 60 AND a.risk_score < 80 THEN 1 ELSE 0 END) AS high_risk,
@@ -780,6 +794,7 @@ async def get_attack_surface_overview(
         discovery_sources = graph.query("""
             MATCH (a:Asset)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
             WITH CASE 
                 WHEN a.discovery_source IS NULL THEN 'manual'
                 ELSE a.discovery_source
@@ -822,6 +837,7 @@ async def get_graph_statistics(
         node_counts = graph.query("""
             MATCH (n)
             WHERE n.organization_id = $org_id
+              AND (NOT n:Asset OR coalesce(n.is_active, true))
             RETURN labels(n)[0] AS label, count(n) AS count
             ORDER BY count DESC
         """, {"org_id": org_id})
@@ -830,6 +846,8 @@ async def get_graph_statistics(
         rel_counts = graph.query("""
             MATCH (n)-[r]->(m)
             WHERE n.organization_id = $org_id
+              AND (NOT n:Asset OR coalesce(n.is_active, true))
+              AND (NOT m:Asset OR coalesce(m.is_active, true))
             RETURN type(r) AS type, count(r) AS count
             ORDER BY count DESC
         """, {"org_id": org_id})
@@ -838,6 +856,7 @@ async def get_graph_statistics(
         vuln_dist = graph.query("""
             MATCH (a:Asset)-[:HAS_VULNERABILITY]->(v:Vulnerability)
             WHERE a.organization_id = $org_id
+              AND coalesce(a.is_active, true)
             RETURN v.severity AS severity, count(v) AS count
         """, {"org_id": org_id})
         
@@ -888,7 +907,7 @@ async def get_assets_by_technology_fallback(
         ).join(
             Asset,
             Asset.id == asset_technologies.c.asset_id
-        )
+        ).filter(Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]))
         
         if org_id:
             tech_query = tech_query.filter(Asset.organization_id == org_id)
@@ -914,7 +933,8 @@ async def get_assets_by_technology_fallback(
             ).join(
                 Technology,
                 Technology.id == asset_technologies.c.technology_id
-            ).filter(Technology.name == tech.name)
+            ).filter(Technology.name == tech.name,
+                     Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]))
             
             if org_id:
                 assets_query = assets_query.filter(Asset.organization_id == org_id)
@@ -985,7 +1005,7 @@ async def get_assets_by_port_fallback(
         ).join(
             Asset,
             Asset.id == PortService.asset_id
-        )
+        ).filter(Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]))
         
         if org_id:
             port_query = port_query.filter(Asset.organization_id == org_id)
@@ -1013,7 +1033,8 @@ async def get_assets_by_port_fallback(
                 Asset.id == PortService.asset_id
             ).filter(
                 PortService.port == port.port,
-                PortService.protocol == port.protocol
+                PortService.protocol == port.protocol,
+                Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]),
             )
             
             if org_id:
@@ -1045,7 +1066,8 @@ async def get_assets_by_port_fallback(
         ).join(
             Asset,
             Asset.id == PortService.asset_id
-        ).filter(PortService.is_risky == True)
+        ).filter(PortService.is_risky == True,
+                 Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]))
         
         if org_id:
             risky_summary = risky_summary.filter(Asset.organization_id == org_id)
@@ -1094,7 +1116,8 @@ async def get_attack_surface_overview_fallback(
             PortService,
             Asset.id == PortService.asset_id
         ).filter(
-            Asset.is_live == True
+            Asset.is_live == True,
+            Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]),
         )
         
         if org_id:
@@ -1122,7 +1145,8 @@ async def get_attack_surface_overview_fallback(
             Asset.asset_type,
             Asset.has_login_portal
         ).filter(
-            Asset.has_login_portal == True
+            Asset.has_login_portal == True,
+            Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]),
         )
         
         if org_id:
@@ -1148,7 +1172,7 @@ async def get_attack_surface_overview_fallback(
         ).join(
             Asset,
             Asset.id == asset_technologies.c.asset_id
-        )
+        ).filter(Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]))
         
         if org_id:
             tech_query = tech_query.filter(Asset.organization_id == org_id)
@@ -1174,7 +1198,8 @@ async def get_attack_surface_overview_fallback(
             Asset,
             Asset.id == PortService.asset_id
         ).filter(
-            PortService.is_risky == True
+            PortService.is_risky == True,
+            Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]),
         )
         
         if org_id:
@@ -1193,10 +1218,14 @@ async def get_attack_surface_overview_fallback(
         ]
         
         # Total counts
-        total_assets = db.query(func.count(Asset.id)).filter(Asset.organization_id == org_id).scalar() if org_id else 0
+        total_assets = db.query(func.count(Asset.id)).filter(
+            Asset.organization_id == org_id,
+            Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]),
+        ).scalar() if org_id else 0
         live_assets = db.query(func.count(Asset.id)).filter(
             Asset.organization_id == org_id,
-            Asset.is_live == True
+            Asset.is_live == True,
+            Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]),
         ).scalar() if org_id else 0
         
         # Risk distribution (so frontend risk cards work without Neo4j)
@@ -1208,16 +1237,17 @@ async def get_attack_surface_overview_fallback(
             "total_assets": total_assets or 0,
         }
         if org_id:
-            base_filter = Asset.organization_id == org_id
-            risk_distribution["critical_risk"] = db.query(Asset).filter(base_filter, Asset.risk_score >= 80).count()
+            base_filter = (Asset.organization_id == org_id,
+                           Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]))
+            risk_distribution["critical_risk"] = db.query(Asset).filter(*base_filter, Asset.risk_score >= 80).count()
             risk_distribution["high_risk"] = db.query(Asset).filter(
-                base_filter, Asset.risk_score >= 60, Asset.risk_score < 80
+                *base_filter, Asset.risk_score >= 60, Asset.risk_score < 80
             ).count()
             risk_distribution["medium_risk"] = db.query(Asset).filter(
-                base_filter, Asset.risk_score >= 40, Asset.risk_score < 60
+                *base_filter, Asset.risk_score >= 40, Asset.risk_score < 60
             ).count()
             risk_distribution["low_risk"] = db.query(Asset).filter(
-                base_filter, Asset.risk_score < 40
+                *base_filter, Asset.risk_score < 40
             ).count()
         
         # Discovery sources (so frontend discovery section works without Neo4j)
@@ -1227,7 +1257,8 @@ async def get_attack_surface_overview_fallback(
             source_query = db.query(
                 func.coalesce(Asset.discovery_source, "manual").label("source"),
                 func.count(Asset.id).label("count")
-            ).filter(Asset.organization_id == org_id).group_by(
+            ).filter(Asset.organization_id == org_id,
+                     Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED])).group_by(
                 func.coalesce(Asset.discovery_source, "manual")
             ).order_by(func.count(Asset.id).desc()).all()
             discovery_sources = [{"source": r.source, "count": r.count} for r in source_query]

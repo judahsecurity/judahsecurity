@@ -140,7 +140,7 @@ export function CrowdStrikeSection() {
               {[item.import_external_assets && 'External assets', item.import_hosts && 'Hosts', item.import_spotlight && 'Spotlight'].filter(Boolean).join(' · ')}
               {item.last_sync_at && ` · Last sync ${new Date(item.last_sync_at).toLocaleString()}`}
             </p>
-            {item.last_sync_ok && item.last_sync_stats && <p className="text-xs text-muted-foreground">{item.last_sync_stats.assets_created || 0} new assets · {item.last_sync_stats.vulns_created || 0} new CVEs</p>}
+            {item.last_sync_ok && item.last_sync_stats && <p className="text-xs text-muted-foreground">{item.last_sync_stats.assets_created || 0} new assets · {item.last_sync_stats.assets_retired || 0} removed from the active inventory · {item.last_sync_stats.vulns_created || 0} new findings</p>}
             {item.last_sync_stats?.sync_in_progress && (
               <p className="text-xs text-violet-400">Importing CrowdStrike records… {item.last_sync_stats.findings_seen || 0} Spotlight findings read; {item.last_sync_stats.vulns_created || 0} new findings.</p>
             )}

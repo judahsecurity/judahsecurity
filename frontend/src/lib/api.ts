@@ -458,6 +458,9 @@ export interface WizLastSyncStats {
   ai_endpoints_seen?: number;
   virtual_machines_seen?: number;
   assets_created?: number;
+  assets_retired?: number;
+  vm_links_removed?: number;
+  endpoint_links_removed?: number;
   vulns_created?: number;
   findings_truncated?: boolean;
   graph_projection?: IntegrationGraphProjection;
@@ -595,6 +598,9 @@ export interface CrowdStrikeIntegration {
   last_sync_stats?: {
     [key: string]: unknown;
     assets_created?: number;
+    assets_retired?: number;
+    external_links_removed?: number;
+    host_links_removed?: number;
     vulns_created?: number;
     findings_seen?: number;
     findings_unmatched?: number;
@@ -1222,6 +1228,7 @@ class ApiClient {
     asset_type?: string;
     status?: string;
     is_live?: boolean;
+    active_only?: boolean;
     in_scope?: boolean;
     has_open_ports?: boolean;
     has_risky_ports?: boolean;
