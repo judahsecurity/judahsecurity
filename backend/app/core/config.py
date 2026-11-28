@@ -254,8 +254,10 @@ class Settings(BaseSettings):
     AGENT_HUNT_WORKERS: int = 3
     AGENT_HUNT_MAX_ROUNDS: int = 8
     AGENT_HUNT_MAX_INTENTS: int = 24
+    # spa_client covers client-side classes (template injection, DOM sinks,
+    # prototype pollution, vulnerable JS libraries) that no other hunt worker can.
     AGENT_HUNT_SPECIALISTS: str = ("sqli,xss,ssrf,injection,server_injection,"
-                                   "auth_logic,business_logic,api_authz,explorer")
+                                   "auth_logic,business_logic,api_authz,spa_client,explorer")
     AGENT_CRAWL_NOVELTY_STOP: bool = False
     AGENT_CRAWL_NOVELTY_PATIENCE: int = 3
     AGENT_CRAWL_NOVELTY_MIN_PAGES: int = 4

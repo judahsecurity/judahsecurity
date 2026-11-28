@@ -439,7 +439,9 @@ def fingerprint_from_map(cmap: Dict[str, Any], *, target: str = "") -> Dict[str,
     observed_metadata: List[Dict[str, Any]] = []
     extra: List[str] = []
     if isinstance(cmap, dict):
-        root = urlparse(str(cmap.get("scope") or cmap.get("target") or target or ""))
+        from app.services.agent.capability_map import capability_map_origin
+
+        root = urlparse(capability_map_origin(cmap, target) or str(target or ""))
         for endpoint in (cmap.get("api_endpoints") or [])[:300]:
             if not isinstance(endpoint, dict):
                 continue

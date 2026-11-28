@@ -273,10 +273,111 @@ def facts_from_brain(brain: Any, capability_map: Any = None) -> List[Dict[str, A
     return rows
 
 
+_LIBRARY_RE = re.compile(
+    r"^(?P<name>[a-z][a-z0-9.]*?(?:[-_.][a-z][a-z0-9]*)*?)[-_.@]v?"
+    r"(?P<version>\d+(?:[._-]\d+){1,3})(?:[-_.](?:min|slim|bundle|prod|production))*\.js$",
+    re.I)
+MAX_MAP_FACTS = 25
+
+
+def facts_from_map(capability_map: Any) -> List[Dict[str, Any]]:
+    """Leads from the application map, so the planner can plan beyond SQLi/XSS.
+
+    The first pass only tests SQLi and XSS on GET inputs, and the planner
+    must ground every task in a fact, so with signal facts alone it could
+    never plan a client-side, XML or library task. These facts are generic
+    observations: versioned JavaScript libraries, the first-party script
+    names (which often name a feature), forms, request bodies the browser
+    sends, and inputs the crawl saw reflected. None is a vulnerability claim.
+    """
+    from urllib.parse import urlsplit
+
+    cmap = capability_map if isinstance(capability_map, dict) else {}
+    rows: List[Dict[str, Any]] = []
+    scripts: List[str] = []
+    seen_paths = set()
+    for raw in list(cmap.get("js_files") or []) + [
+            str(row.get("url") or "") for row in cmap.get("js_sources") or [] if isinstance(row, dict)]:
+        path = urlsplit(str(raw)).path
+        if not path.endswith(".js") or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        name = path.rsplit("/", 1)[-1]
+        scripts.append(name)
+        match = _LIBRARY_RE.match(name)
+        if match:
+            library = match.group("name").replace("_", "-")
+            version = re.sub(r"[_-]", ".", match.group("version"))
+            rows.append({
+                "key": f"map:lib:{path}", "source": "map", "confidence": "observed",
+                "summary": (f"Page loads {library} {version} ({path}); check it for known "
+                            "vulnerabilities and, if it is a client-side framework, for "
+                            "template injection or DOM sinks"),
+                "target": path, "parameter": "",
+            })
+    if scripts:
+        rows.append({
+            "key": "map:scripts:" + ",".join(sorted(scripts)[:40]), "source": "map",
+            "confidence": "observed",
+            "summary": ("First-party scripts (names often reveal client features worth "
+                        "testing): " + ", ".join(sorted(scripts)[:30])),
+            "target": "", "parameter": "",
+        })
+    for form in (cmap.get("forms") or [])[:30]:
+        if not isinstance(form, dict) or form.get("loose"):
+            continue
+        method = str(form.get("method") or "GET").upper()
+        action = urlsplit(str(form.get("action") or form.get("page") or "")).path or "(self)"
+        inputs = [str(i) for i in form.get("inputs") or [] if i][:12]
+        rows.append({
+            "key": f"map:form:{method}:{action}:{','.join(inputs)}", "source": "map",
+            "confidence": "observed",
+            "summary": f"Form {method} {action} with inputs [{', '.join(inputs) or 'none'}]",
+            "target": action, "parameter": ",".join(inputs),
+        })
+    for sample in (cmap.get("api_samples") or [])[:40]:
+        if not isinstance(sample, dict):
+            continue
+        method = str(sample.get("method") or "GET").upper()
+        kind = str((sample.get("headers") or {}).get("content-type") or "").split(";")[0]
+        if method == "GET" or not kind:
+            continue
+        path = urlsplit(str(sample.get("url") or "")).path
+        rows.append({
+            "key": f"map:body:{method}:{path}:{kind}", "source": "map", "confidence": "observed",
+            "summary": (f"The browser sends {method} {path} with a {kind} body"
+                        + ("; XML bodies are an XXE lead" if "xml" in kind else "")),
+            "target": path, "parameter": "body",
+        })
+    for item in (cmap.get("reflection_observations") or [])[:20]:
+        if isinstance(item, dict) and item.get("reflected"):
+            rows.append({
+                "key": f"map:reflect:{item.get('path')}:{item.get('parameter')}",
+                "source": "map", "confidence": "observed",
+                "summary": (f"Input {item.get('parameter')} on {item.get('path')} is reflected "
+                            "in the page; browser execution not yet tested"),
+                "target": str(item.get("path") or ""), "parameter": str(item.get("parameter") or ""),
+            })
+    # De-duplicate by key, keep the first MAX_MAP_FACTS.
+    unique: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        unique.setdefault(row["key"], row)
+    return list(unique.values())[:MAX_MAP_FACTS]
+
+
+def hunt_fact_signature(rows: List[Dict[str, Any]]) -> str:
+    """Stable digest of the seed facts a hunt would plan over."""
+    import hashlib
+
+    keys = sorted(str(row.get("key") or row.get("summary") or "") for row in rows
+                  if isinstance(row, dict))
+    return hashlib.sha256("\n".join(keys).encode()).hexdigest()
+
+
 # Specialist -> the vulnerability class its tasks try to prove. Generic
 # specialists (explorer, injection) may chase any class on an input.
 SPECIALIST_CLASS = {
-    "sqli": "sql_injection", "xss": "xss", "ssrf": "ssrf",
+    "sqli": "sql_injection", "xss": "xss", "ssrf": "ssrf", "spa_client": "",
     "server_injection": "", "injection": "", "explorer": "",
 }
 

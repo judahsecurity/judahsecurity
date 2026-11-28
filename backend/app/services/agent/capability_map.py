@@ -105,6 +105,36 @@ _AI_AGENT_RE = re.compile(
 )
 
 
+def capability_map_origin(cmap: Any, fallback_target: str = "") -> str:
+    """The map's exact origin as ``scheme://host[:port]``, or "".
+
+    The deep crawl stores ``scope`` as a bare host ("ginandjuice.shop") while
+    ``target`` is a URL. Code that did urlsplit(scope or target) got an empty
+    scheme and host from the bare scope and reported scope_mismatch for every
+    input (the assigned browser XSS check and the JS dependency review).
+    """
+    from urllib.parse import urlsplit
+
+    cmap = cmap if isinstance(cmap, dict) else {}
+    target = str(cmap.get("target") or fallback_target or "").strip()
+    scope = str(cmap.get("scope") or "").strip()
+    parsed_target = urlsplit(target) if "://" in target else None
+    if scope and "://" in scope:
+        parts = urlsplit(scope)
+        return f"{parts.scheme}://{parts.netloc}".lower() if parts.netloc else ""
+    if scope:
+        if any(char in scope for char in "/?#@\\ "):
+            return ""
+        scheme = parsed_target.scheme if parsed_target and parsed_target.scheme else "https"
+        # A bare scope names the exact host; keep the target's port when it is the same host.
+        if parsed_target and parsed_target.hostname == scope.lower():
+            return f"{scheme}://{parsed_target.netloc}".lower()
+        return f"{scheme}://{scope}".lower()
+    if parsed_target and parsed_target.netloc:
+        return f"{parsed_target.scheme}://{parsed_target.netloc}".lower()
+    return ""
+
+
 def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
     """Build a CapabilityMap from a deep_crawl CrawlResult (or duck-typed)."""
     from app.services.agent.application_surface_inventory import build_application_surface_inventory

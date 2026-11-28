@@ -2942,7 +2942,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 result["assigned_operation"] = result.get("operation", "")
                 return result
             cmap = getattr(self, "_capability_map", None) or {}
-            origin = urlsplit(str(cmap.get("scope") or cmap.get("target") or ""))
+            from app.services.agent.capability_map import capability_map_origin
+
+            origin = urlsplit(capability_map_origin(cmap))
             if (origin.scheme not in {"http", "https"} or
                     origin.netloc.lower() != str(cell.get("host") or "").lower()):
                 return {"success": False, "error": "scope_mismatch",
@@ -6291,7 +6293,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             return json.dumps({"success": False, "error": "invalid_coverage_lease"})
         url = str(cell.get("script_url") or "")
         cmap = getattr(self, "_capability_map", None) or {}
-        target = urlsplit(str(cmap.get("scope") or cmap.get("target") or ""))
+        from app.services.agent.capability_map import capability_map_origin
+
+        target = urlsplit(capability_map_origin(cmap))
         script = urlsplit(url)
         if ((script.scheme, script.netloc) != (target.scheme, target.netloc)
                 or script.scheme not in {"http", "https"} or not script.path
@@ -11644,7 +11648,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.hunt_engine import (
             DEFAULT_MAX_INTENTS, DEFAULT_MAX_ROUNDS, DEFAULT_WORKERS,
             HuntEngine, Intent, brain_overview, confirmed_inputs, facts_from_brain,
-            format_summary, worker_mission,
+            facts_from_map, format_summary, worker_mission,
         )
         from app.services.agent.pilot_policy import current_pilot
 
@@ -11660,7 +11664,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         specialists = [s for s in getattr(settings, "AGENT_HUNT_SPECIALISTS",
                        "sqli,xss,ssrf,injection,server_injection,auth_logic,business_logic,"
-                       "api_authz,explorer").split(",") if s.strip()]
+                       "api_authz,spa_client,explorer").split(",") if s.strip()]
         from app.services.agent.custom_probe import custom_probe_mode
         if not (custom_probe_mode() == "isolated"
                 and getattr(settings, "AGENT_SANDBOX_SHELL", False)):
@@ -11704,8 +11708,23 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "leads": list(getattr(report, "leads", []) or [])}
 
         def _seed_facts() -> List[Dict[str, Any]]:
-            return facts_from_brain(getattr(self, "_engagement_brain", None) or {},
-                                    getattr(self, "_capability_map", None) or {})
+            current_map = getattr(self, "_capability_map", None) or {}
+            return [*facts_from_brain(getattr(self, "_engagement_brain", None) or {}, current_map),
+                    *facts_from_map(current_map)]
+
+        # The main model called run_hunt_engine again and again in one run. A
+        # repeat with nothing new since the last hunt re-plans the same facts.
+        from app.services.agent.hunt_engine import hunt_fact_signature
+
+        brain_now = getattr(self, "_engagement_brain", None)
+        signature = hunt_fact_signature(_seed_facts())
+        previous = [row for row in ((brain_now or {}).get("recon_observations") or [])
+                    if isinstance(row, dict) and row.get("kind") == "hunt_engine"]
+        if previous and previous[-1].get("signature") == signature:
+            return {"success": False, "error": "hunt_already_ran_on_these_facts",
+                    "output": ("The hunt engine already planned over exactly these facts "
+                               f"({previous[-1].get('value')}). Nothing new has been observed "
+                               "since; run it again after new signals, candidates or map leads.")}
 
         def _known_evidence(evidence_id: str) -> bool:
             # Facts may cite only evidence this run actually recorded.
@@ -11732,6 +11751,19 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             confirmed=lambda: confirmed_inputs(getattr(self, "_engagement_brain", None) or {}),
         )
         summary = await engine.run()
+        brain_after = getattr(self, "_engagement_brain", None)
+        if isinstance(brain_after, dict):
+            from datetime import datetime
+
+            rows = list(brain_after.get("recon_observations") or [])
+            rows.append({
+                "id": f"hunt-{signature[:12]}", "kind": "hunt_engine", "signature": signature,
+                "target": active_target, "source": "run_hunt_engine",
+                "value": (f"{len(summary['tasks'])} tasks, {len(summary.get('facts') or [])} facts, "
+                          f"stopped: {summary['stop_reason']}"),
+                "observed_at": datetime.utcnow().isoformat() + "Z",
+            })
+            brain_after["recon_observations"] = rows[-200:]
         # Workers submitted candidates into the live brain; hand it back so the
         # orchestrator persists it and the verifier verdicts reach the UI panel.
         return {"success": True, "output": format_summary(summary), "hunt": summary,

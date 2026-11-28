@@ -1344,6 +1344,13 @@ def _first_pass_signal_ids(state: Dict[str, Any]) -> List[str]:
     for flow in ((state.get("capability_map") or {}).get("value_flows") or []):
         if isinstance(flow, dict) and flow.get("consumer"):
             ids.append("flow:" + flow_key(flow))
+    # Map leads (versioned JS libraries, forms, non-GET bodies, reflections)
+    # start the hunt too: the first pass never tests those classes. The bare
+    # list of script names is context, not a lead.
+    from app.services.agent.hunt_engine import facts_from_map
+
+    ids += [row["key"] for row in facts_from_map(state.get("capability_map") or {})
+            if not row["key"].startswith("map:scripts:")]
     return sorted(set(ids))
 
 
