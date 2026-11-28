@@ -374,7 +374,7 @@ async def shutdown_event():
 
 
 def apply_integration_asset_migrations():
-    """Add source membership state to pre-existing CrowdStrike links."""
+    """Apply source membership and finding lookup changes to existing databases."""
     from sqlalchemy import text
 
     with engine.begin() as conn:
@@ -382,6 +382,12 @@ def apply_integration_asset_migrations():
             "ALTER TABLE crowdstrike_asset_links "
             "ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"
         ))
+    if engine.dialect.name == "postgresql":
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_vulnerabilities_asset_detected_by "
+                "ON vulnerabilities (asset_id, detected_by)"
+            ))
 
 
 def apply_oracle_migrations():
