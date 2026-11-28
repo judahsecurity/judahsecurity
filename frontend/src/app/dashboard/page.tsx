@@ -361,6 +361,9 @@ export default function DashboardPage() {
       console.error('Failed to fetch dashboard data:', error);
       setLoading(false);
       setMapLoading(false);
+      // The attack-path load is started after the aggregates succeed; if they
+      // failed it never ran, so clear its spinner too instead of "Loading…" forever.
+      setPathsLoading(false);
     }
   }, [syncFindingsGroups, findingsGroupBy]);
 
