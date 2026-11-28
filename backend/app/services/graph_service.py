@@ -297,7 +297,7 @@ class GraphService:
             "type": asset.asset_type.value if asset.asset_type else None,
             "org_id": org_id,
             "root_domain": asset.root_domain,
-            "is_active": asset.status not in (AssetStatus.INACTIVE, AssetStatus.ARCHIVED),
+            "is_active": getattr(asset, "status", None) not in (AssetStatus.INACTIVE, AssetStatus.ARCHIVED),
             "is_live": getattr(asset, 'is_live', False),
             "first_seen": asset.first_seen.isoformat() if asset.first_seen else None,
             "ars_score": getattr(asset, 'ars_score', None),
