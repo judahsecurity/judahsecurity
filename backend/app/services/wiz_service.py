@@ -26,8 +26,9 @@ DEFAULT_AUTH_URL = "https://auth.app.wiz.io/oauth/token"
 DEFAULT_AUDIENCE = "wiz-api"
 
 VULNERABILITY_FINDINGS_QUERY = """
-query JudahWizVulnerabilityFindings($first: Int!, $after: String) {
-  vulnerabilityFindings(first: $first, after: $after) {
+query JudahWizVulnerabilityFindings($first: Int!, $after: String, $filterBy: VulnerabilityFindingFilters) {
+  vulnerabilityFindings(first: $first, after: $after, filterBy: $filterBy) {
+    totalCount
     nodes {
       id
       portalUrl
@@ -40,6 +41,7 @@ query JudahWizVulnerabilityFindings($first: Int!, $after: String) {
       status
       firstDetectedAt
       lastDetectedAt
+      updatedAt
       resolvedAt
       description
       remediation
@@ -246,6 +248,7 @@ class WizClient:
         self._token: Optional[str] = None
         self.findings_truncated = False
         self.virtual_machines_total_count: Optional[int] = None
+        self.vulnerability_findings_total_count: Optional[int] = None
 
     async def authenticate(self) -> str:
         try:
@@ -314,20 +317,23 @@ class WizClient:
         raise WizApiError("Wiz GraphQL request failed after retries.")
 
     async def iter_vulnerability_findings(
-        self, *, limit: Optional[int] = None
+        self, *, limit: Optional[int] = None, filter_by: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[List[Dict[str, Any]]]:
         """Stream findings until Wiz confirms the last page; never accept a page cap as complete."""
         cursor: Optional[str] = None
         cursors: set[str] = set()
         seen = 0
         self.findings_truncated = False
+        self.vulnerability_findings_total_count = None
         for _ in range(self.MAX_PAGES):
             data = await self.graphql(
                 VULNERABILITY_FINDINGS_QUERY,
                 {"first": min(self.PAGE_SIZE, limit - seen) if limit is not None else self.PAGE_SIZE,
-                 "after": cursor},
+                 "after": cursor, "filterBy": filter_by or {}},
             )
             connection = data.get("vulnerabilityFindings") or {}
+            if self.vulnerability_findings_total_count is None:
+                self.vulnerability_findings_total_count = connection.get("totalCount")
             batch = connection.get("nodes")
             if not isinstance(batch, list):
                 raise WizApiError("Wiz returned an unexpected vulnerability findings payload.")
@@ -340,6 +346,9 @@ class WizClient:
                 self.findings_truncated = bool(page_info.get("hasNextPage"))
                 return
             if not page_info.get("hasNextPage"):
+                if (limit is None and isinstance(self.vulnerability_findings_total_count, int)
+                        and seen < self.vulnerability_findings_total_count):
+                    raise WizApiError("Wiz vulnerability findings ended before their reported total.")
                 return
             next_cursor = page_info.get("endCursor")
             if not next_cursor or next_cursor in cursors:
@@ -348,9 +357,11 @@ class WizClient:
             cursor = next_cursor
         raise WizApiError("Wiz vulnerability finding pagination exceeded the page limit.")
 
-    async def get_vulnerability_findings(self, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    async def get_vulnerability_findings(
+        self, *, limit: Optional[int] = None, filter_by: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         findings: List[Dict[str, Any]] = []
-        async for page in self.iter_vulnerability_findings(limit=limit):
+        async for page in self.iter_vulnerability_findings(limit=limit, filter_by=filter_by):
             findings.extend(page)
         return findings
 
@@ -661,7 +672,12 @@ class _Stats:
         self.vulns_updated = 0
         self.findings_seen = 0
         self.findings_filtered = 0
+        self.findings_unchanged = 0
         self.findings_truncated = False
+        self.findings_total_count: Optional[int] = None
+        self.findings_scope = "related_issues_on_internet_accessible_virtual_machines"
+        self.assets_complete = False
+        self.findings_complete = False
         self.virtual_machines_total_count: Optional[int] = None
         self.virtual_machines_seen = 0
         self.endpoints_seen = 0
@@ -810,6 +826,7 @@ def _upsert_vulnerability(
         "source": DISCOVERY_SOURCE,
         "wiz_finding_id": finding_id or None,
         "wiz_status": raw_status,
+        "wiz_updated_at": finding.get("updatedAt"),
         "vendor_severity": finding.get("vendorSeverity"),
         "nvd_severity": finding.get("nvdSeverity"),
         "version": finding.get("version"),
@@ -1210,9 +1227,45 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
     try:
         client = _client_for(integration)
         await _sync_virtual_machines(db, integration, client, stats, started_at)
-        asset_cache: Dict[str, Asset] = {}
+        stale_endpoint_assets = await _sync_application_endpoints(
+            db, integration, client, stats, started_at,
+        )
+        _reconcile_wiz_assets(db, integration, stats, started_at, stale_endpoint_assets or set())
+        stats.assets_complete = True
+        integration.last_sync_stats = {
+            **stats.as_dict(), "sync_in_progress": True,
+            "sync_started_at": (integration.last_sync_stats or {}).get("sync_started_at") or started_at.isoformat(),
+        }
+        db.commit()
+
         if integration.import_vulnerabilities:
-            async for findings in client.iter_vulnerability_findings():
+            finding_filter: Dict[str, Any] = {
+                "assetType": ["VIRTUAL_MACHINE"], "hasRelatedIssue": True,
+            }
+            if integration.internet_exposed_only:
+                finding_filter["isAssetAccessibleFromInternet"] = True
+            else:
+                stats.findings_scope = "related_issues_on_virtual_machines"
+            asset_cache: Dict[str, Asset] = {
+                str(wiz_id): asset for wiz_id, asset in db.query(WizAssetLink.wiz_id, Asset).join(
+                    Asset, WizAssetLink.asset_id == Asset.id,
+                ).filter(
+                    WizAssetLink.integration_id == integration.id,
+                    WizAssetLink.is_active.is_(True),
+                    WizAssetLink.last_seen >= started_at,
+                ).all()
+            } if integration.import_assets else {}
+            existing_finding_stamps = {
+                (asset_id, template_id): (metadata or {}).get("wiz_updated_at")
+                for asset_id, template_id, metadata in db.query(
+                    Vulnerability.asset_id, Vulnerability.template_id, Vulnerability.metadata_,
+                ).join(Asset, Vulnerability.asset_id == Asset.id).filter(
+                    Asset.organization_id == integration.organization_id,
+                    Vulnerability.detected_by == DISCOVERY_SOURCE,
+                    Vulnerability.template_id.is_not(None),
+                ).all()
+            }
+            async for findings in client.iter_vulnerability_findings(filter_by=finding_filter):
                 stats.findings_seen += len(findings)
                 for finding in findings:
                     source = finding.get("vulnerableAsset") or {}
@@ -1222,30 +1275,33 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
                     if integration.internet_exposed_only and not _is_internet_exposed(source):
                         stats.findings_filtered += 1
                         continue
-                    value = _asset_value(source)
-                    if not value:
+                    asset = asset_cache.get(str(source.get("id") or ""))
+                    if asset is None and not integration.import_assets:
+                        value = _asset_value(source)
+                        if value:
+                            asset = db.query(Asset).filter(
+                                Asset.organization_id == integration.organization_id,
+                                Asset.value == value,
+                            ).first()
+                    if asset is None:
                         stats.findings_filtered += 1
                         continue
-                    asset = asset_cache.get(value)
-                    if asset is None:
-                        existing = db.query(Asset).filter(
-                            Asset.organization_id == integration.organization_id,
-                            Asset.value == value,
-                        ).first()
-                        if not integration.import_assets and existing is None:
-                            stats.findings_filtered += 1
-                            continue
-                        asset = _upsert_asset(db, integration, source, stats, started_at)
-                        asset_cache[value] = asset
+                    finding_id = str(finding.get("id") or "").strip()
+                    updated_at = finding.get("updatedAt")
+                    if finding_id and updated_at and existing_finding_stamps.get(
+                        (asset.id, f"wiz:{finding_id}"[:255])
+                    ) == updated_at:
+                        stats.findings_unchanged += 1
+                        continue
                     _upsert_vulnerability(db, asset, finding, stats)
                 db.commit()
+            stats.findings_total_count = client.vulnerability_findings_total_count
             stats.findings_truncated = client.findings_truncated
             if stats.findings_truncated:
                 raise WizApiError("Wiz vulnerability findings feed did not complete.")
-        stale_endpoint_assets = await _sync_application_endpoints(
-            db, integration, client, stats, started_at,
-        )
-        _reconcile_wiz_assets(db, integration, stats, started_at, stale_endpoint_assets or set())
+        else:
+            stats.findings_scope = "disabled"
+        stats.findings_complete = True
 
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = True
@@ -1303,7 +1359,7 @@ async def sync_integration_background(integration_id: int) -> None:
         integration = db.query(WizIntegration).filter_by(id=integration_id).first()
         if integration is not None:
             result = await sync_integration(db, integration)
-            if result["ok"]:
+            if result["ok"] or result.get("assets_complete"):
                 from app.services.integration_graph_service import project_and_record_graph
                 await asyncio.to_thread(
                     project_and_record_graph, integration.organization_id, "wiz", integration.id

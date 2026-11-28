@@ -233,6 +233,104 @@ async def test_wiz_failed_inventory_does_not_retire_prior_vm(db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wiz_findings_failure_does_not_block_completed_asset_reconciliation(db, monkeypatch):
+    session, org = db
+    integration = _wiz(session, org)
+    integration.import_vulnerabilities = True
+    asset = Asset(
+        organization_id=org.id, name="VM", value="vm-old", asset_type=AssetType.CLOUD_RESOURCE,
+        discovery_source="wiz", status=AssetStatus.DISCOVERED, tags=["source:wiz"],
+    )
+    session.add(asset)
+    session.flush()
+    session.add(WizAssetLink(
+        integration_id=integration.id, asset_id=asset.id, wiz_id="vm-old",
+        last_seen=datetime(2026, 1, 1), is_active=True,
+    ))
+    session.commit()
+
+    class Client:
+        PAGE_SIZE = 100
+        virtual_machines_total_count = 0
+
+        async def iter_virtual_machines(self, *, exposed_only):
+            if False:
+                yield []
+
+        async def iter_application_endpoints(self, *, ids=None):
+            if False:
+                yield []
+
+        async def iter_endpoint_issues(self):
+            if False:
+                yield []
+
+        async def iter_ai_endpoint_paths(self):
+            if False:
+                yield []
+
+        async def iter_vulnerability_findings(self, *, filter_by=None):
+            assert filter_by["hasRelatedIssue"] is True
+            raise wiz_service.WizApiError("Findings page failed")
+            yield []
+
+    monkeypatch.setattr(wiz_service, "_client_for", lambda _: Client())
+    result = await wiz_service.sync_integration(session, integration)
+    assert result["ok"] is False and result["assets_complete"] is True
+    session.refresh(asset)
+    assert asset.status == AssetStatus.INACTIVE
+
+
+@pytest.mark.asyncio
+async def test_wiz_unchanged_finding_is_not_rewritten_on_daily_sync(db, monkeypatch):
+    session, org = db
+    integration = _wiz(session, org)
+    integration.import_vulnerabilities = True
+    finding = {
+        "id": "finding-1", "name": "CVE-2026-1234", "severity": "HIGH",
+        "status": "OPEN", "updatedAt": "2026-11-28T12:00:00Z",
+        "vulnerableAsset": {
+            "id": "vm-1", "__typename": "VulnerableAssetVirtualMachine",
+            "providerUniqueId": "vm-1", "hasLimitedInternetExposure": True,
+        },
+    }
+
+    class Client:
+        PAGE_SIZE = 100
+        virtual_machines_total_count = 1
+        vulnerability_findings_total_count = 1
+        findings_truncated = False
+
+        async def iter_virtual_machines(self, *, exposed_only):
+            yield [{"id": "vm-1", "providerUniqueId": "vm-1"}]
+
+        async def iter_application_endpoints(self, *, ids=None):
+            if False:
+                yield []
+
+        async def iter_endpoint_issues(self):
+            if False:
+                yield []
+
+        async def iter_ai_endpoint_paths(self):
+            if False:
+                yield []
+
+        async def iter_vulnerability_findings(self, *, filter_by=None):
+            yield [finding]
+
+    monkeypatch.setattr(wiz_service, "_client_for", lambda _: Client())
+    first = await wiz_service.sync_integration(session, integration)
+    second = await wiz_service.sync_integration(session, integration)
+    assert first["ok"] and first["vulns_created"] == 1
+    assert second["ok"] and second["findings_unchanged"] == 1
+    assert second["vulns_updated"] == 0
+    finding["updatedAt"] = "2026-11-28T13:00:00Z"
+    third = await wiz_service.sync_integration(session, integration)
+    assert third["ok"] and third["vulns_updated"] == 1
+
+
+@pytest.mark.asyncio
 async def test_crowdstrike_spotlight_keeps_host_seen_without_device_row(db, monkeypatch):
     session, org = db
     integration = _crowdstrike(session, org)

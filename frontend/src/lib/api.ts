@@ -454,6 +454,12 @@ export interface IntegrationGraphProjection {
 export interface WizLastSyncStats {
   [key: string]: unknown;
   sync_in_progress?: boolean;
+  assets_complete?: boolean;
+  findings_complete?: boolean;
+  findings_scope?: string;
+  findings_seen?: number;
+  findings_unchanged?: number;
+  findings_total_count?: number;
   endpoints_seen?: number;
   ai_endpoints_seen?: number;
   virtual_machines_seen?: number;
