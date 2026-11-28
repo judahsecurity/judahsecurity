@@ -1309,6 +1309,14 @@ def _exposure_check_step(
         return None
     if any(step.get("tool_name") == "check_exposures" for step in trace):
         return None
+    # The trace does not survive a restart; the brain (run snapshot) does.
+    from app.services.agent.exposure_check import _origin
+
+    origin = _origin(target)
+    if any(isinstance(row, dict) and row.get("kind") == "exposure_check"
+           and row.get("target") == origin
+           for row in ((state.get("engagement_brain") or {}).get("recon_observations") or [])):
+        return None
     return {
         "tool_name": "check_exposures",
         "tool_args": {"target": target},
@@ -1553,7 +1561,11 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             ),
         }
 
-    if state.get("mode") == "agent" and (
+    # inspect_js is discovery: once discovery's share of the request ceiling
+    # is spent, every browser request it sends is refused (it used to fail
+    # with net::ERR_FAILED, three times in one run). Move on to testing.
+    discovery_spent = bool(budget and budget.discovery_exhausted)
+    if state.get("mode") == "agent" and not discovery_spent and (
         not input_signature or (
             bool((state.get("capability_map") or {}).get("js_files")
                  or (state.get("capability_map") or {}).get("js_sources"))

@@ -181,7 +181,7 @@ async def configure_browser_origin(
                 permitted = False
         if permitted and budget is not None:
             try:
-                budget.acquire(phase)
+                await budget.acquire_async(phase)
             except RequestBudgetExhausted:
                 permitted = False
         await route.continue_() if permitted else await route.abort()

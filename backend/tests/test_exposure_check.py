@@ -69,6 +69,8 @@ class FakeManager:
 
         assert method == "GET" and kw["use_auth_session"] is False
         assert kw["follow_redirects"] is False
+        # A probed path is not part of the application: keep it out of the map.
+        assert kw["map_traffic"] is False
         path = urlsplit(url).path
         self.requests.append(path)
         if path in self.fail_on:
@@ -142,3 +144,31 @@ def test_pending_exposure_candidates_are_force_verified():
         "id": "c1", "status": "pending", "vulnerability_class": "exposure"}]}}
     step = tester_loop._pending_candidate_verify_step(state, [])
     assert step and step["tool_name"] == "independent_verify"
+
+
+def test_a_restart_does_not_rerun_the_check(monkeypatch):
+    """The trace is lost on restart; the brain's marker is in the run snapshot."""
+    monkeypatch.setattr(settings, "AGENT_EXPOSURE_CHECK", True, raising=False)
+    state = {"mode": "agent", "engagement_brain": {"recon_observations": [
+        {"kind": "exposure_check", "target": "https://shop.test"}]}}
+    assert tester_loop._exposure_check_step(state, [], "https://shop.test/catalog") is None
+    other = {"mode": "agent", "engagement_brain": {"recon_observations": [
+        {"kind": "exposure_check", "target": "https://other.test"}]}}
+    assert tester_loop._exposure_check_step(other, [], "https://shop.test/") is not None
+
+
+def test_check_exposures_tool_records_the_marker(monkeypatch):
+    from app.services.agent.tools import ASMToolsManager
+
+    async def fake_run(manager, target, cmap):
+        return {"success": True, "checked": 12, "hits": [], "errors": [],
+                "origin": "https://shop.test"}
+
+    monkeypatch.setattr(exposure_check, "run_exposure_checks", fake_run)
+    manager = SimpleNamespace(_capability_map={"target": "https://shop.test"},
+                              _engagement_brain={"recon_observations": []},
+                              _fallback_target="")
+    result = asyncio.run(ASMToolsManager.check_exposures(manager, "https://shop.test"))
+    rows = result["engagement_brain"]["recon_observations"]
+    assert rows[-1]["kind"] == "exposure_check" and rows[-1]["target"] == "https://shop.test"
+    assert "12 paths" in rows[-1]["value"]

@@ -13,8 +13,13 @@ longer spend the whole ceiling. When discovery's share is gone, crawls stop
 and the pipeline moves on to testing.
 
 Tools whose traffic Aegis cannot count (subprocess scanners, background recon
-workers, the external Interceptor, the probe sandbox, MCP calls) are refused
-while a ceiling is active and reported as not run.
+workers, the external Interceptor, MCP calls) are refused while a ceiling is
+active and reported as not run. The probe sandbox is metered: each job
+reserves a block (``reserve_block``), probe-egress refuses requests past it
+and reports what it sent, and the unused part is refunded.
+
+Async callers must use ``acquire_async``: ``acquire`` sleeps the thread while
+the per-second rate is full, which on the event loop stalls every session.
 
 The budget lives in-process, keyed by organization and session, so a resumed
 session keeps counting. A backend restart resets it.
@@ -34,11 +39,15 @@ TESTING = "testing"
 _clock = time.monotonic
 _sleep = time.sleep
 
-# Tools that send target traffic outside the counted transports.
+# Tools that send target traffic outside the counted transports. The probe
+# sandbox is metered (reserve_block + probe-egress's per-job cap), so
+# sandbox_shell and run_custom_probe are not listed.
 UNMETERED_TOOLS = frozenset({
     "spawn_recon_workers", "wait_recon_workers", "execute_interceptor",
-    "sandbox_shell", "run_custom_probe", "run_poc_python", "mcp_call", "mcp_connect",
+    "mcp_call", "mcp_connect",
 })
+# Requests one sandbox job may spend (probe-egress refuses the rest).
+SANDBOX_JOB_REQUESTS = 100
 # execute_* tools that do go through counted transports.
 METERED_EXECUTE_TOOLS = frozenset({"execute_deep_crawl", "execute_browser"})
 
@@ -71,8 +80,31 @@ class RequestBudget:
         return self.discovery_used >= self.discovery_limit or self.exhausted
 
     def acquire(self, phase: str = TESTING) -> int:
-        """Reserve one outbound request, respecting the ceiling and peak rate."""
+        """Reserve one outbound request, respecting the ceiling and peak rate.
+
+        Blocks the calling thread while the rate limit is full. Never call it
+        from async code: use ``acquire_async``, or the event loop stalls.
+        """
         while True:
+            used, delay = self._try_acquire(phase)
+            if used:
+                return used
+            _sleep(delay)
+
+    async def acquire_async(self, phase: str = TESTING) -> int:
+        """``acquire`` for async callers: waits with asyncio.sleep, so a full
+        rate window delays only this request, not every task on the loop."""
+        import asyncio
+
+        while True:
+            used, delay = self._try_acquire(phase)
+            if used:
+                return used
+            await asyncio.sleep(delay)
+
+    def _try_acquire(self, phase: str) -> Tuple[int, float]:
+        """(used, 0.0) when a request was reserved, else (0, seconds to wait)."""
+        if True:
             with self._lock:
                 if self.used >= self.limit:
                     self.refused += 1
@@ -98,8 +130,33 @@ class RequestBudget:
                     self.used += 1
                     if phase == DISCOVERY:
                         self.discovery_used += 1
-                    return self.used
-            _sleep(delay)
+                    return self.used, 0.0
+                return 0, delay
+
+    def reserve_block(self, wanted: int, phase: str = TESTING) -> int:
+        """Reserve up to ``wanted`` requests at once for a job that counts its
+        own traffic (the probe sandbox). Returns how many were granted, 0 when
+        the ceiling (or discovery's share) is spent. Refund the unused part."""
+        with self._lock:
+            room = self.limit - self.used
+            if phase == DISCOVERY:
+                room = min(room, self.discovery_limit - self.discovery_used)
+            granted = max(0, min(int(wanted), room))
+            if not granted:
+                self.refused += 1
+                return 0
+            self.used += granted
+            if phase == DISCOVERY:
+                self.discovery_used += granted
+            return granted
+
+    def refund(self, unused: int, phase: str = TESTING) -> None:
+        """Return the part of a reserved block a job did not send."""
+        unused = max(0, int(unused))
+        with self._lock:
+            self.used = max(0, self.used - unused)
+            if phase == DISCOVERY:
+                self.discovery_used = max(0, self.discovery_used - unused)
 
     def snapshot(self) -> Dict[str, int]:
         with self._lock:
@@ -175,6 +232,12 @@ def acquire(phase: str = TESTING) -> None:
         budget.acquire(phase)
 
 
+async def acquire_async(phase: str = TESTING) -> None:
+    budget = current_request_budget.get()
+    if budget is not None:
+        await budget.acquire_async(phase)
+
+
 def is_unmetered_tool(tool_name: str) -> bool:
     name = str(tool_name or "")
     return name in UNMETERED_TOOLS or (
@@ -204,7 +267,7 @@ def httpx_event_hooks(phase: str = TESTING) -> dict:
         return {}
 
     async def count(_request) -> None:
-        budget.acquire(phase)
+        await budget.acquire_async(phase)
 
     return {"request": [count]}
 

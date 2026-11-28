@@ -157,7 +157,7 @@ def crawl_asset_route(allowed_origin: str):
             return
         if budget is not None:
             try:
-                budget.acquire("discovery")
+                await budget.acquire_async("discovery")
             except RequestBudgetExhausted:
                 await route.abort()
                 return

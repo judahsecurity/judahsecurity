@@ -1155,3 +1155,30 @@ def test_operator_login_path_reaches_first_crawl_without_inline_credentials():
     assert first["tool_name"] == "execute_deep_crawl"
     assert json.loads(first["tool_args"]["args"])["login"] == login
     assert "hunter2" not in first["tool_args"]["args"]
+
+
+def test_inspect_js_is_not_forced_once_discovery_budget_is_spent(monkeypatch):
+    """Every request of a discovery operation is refused once discovery's share
+    is spent; forcing inspect_js then failed with net::ERR_FAILED, three times."""
+    from app.services.agent import request_budget as rb
+
+    state = {
+        "mode": "agent", "original_objective": "Assess https://shop.test",
+        "target_info": {"primary_target": "https://shop.test"},
+        "capability_map": {"target": "https://shop.test", "js_files": ["https://shop.test/app.js"]},
+        "execution_trace": [
+            {"tool_name": "execute_deep_crawl", "success": True,
+             "tool_args": {"args": '{"url":"https://shop.test"}'}},
+            {"tool_name": "sync_engagement_brain", "success": True, "tool_args": {}},
+        ],
+    }
+    open_budget = rb.RequestBudget(limit=100, reserve=60)
+    token = rb.current_request_budget.set(open_budget)
+    try:
+        step = forced_next_step(state)
+        assert step and step["tool_name"] == "scoped_browser_assessment"
+        open_budget.discovery_used = open_budget.discovery_limit
+        step = forced_next_step(state)
+        assert not (step and step["tool_name"] == "scoped_browser_assessment")
+    finally:
+        rb.current_request_budget.reset(token)

@@ -586,3 +586,74 @@ def test_runner_reports_an_immutable_toolbox_identity():
     # pinned image would produce a different fingerprint.
     mod.IMAGE_REF = "other"
     assert mod._build_identity()["fingerprint"] != identity["fingerprint"]
+
+
+def test_egress_caps_each_job_at_its_reserved_requests(policy_proxy):
+    """The backend reserves a block from the run ceiling; the relay sends at
+    most that many requests and counts only those it actually sent."""
+    proxy_port, target_port, job, seen = policy_proxy
+    job.update(max_requests=2, sent=0)
+    assert _via_proxy(proxy_port, target_port, "GET", "/a") == 200
+    assert _via_proxy(proxy_port, target_port, "POST", "/checkout") == 403  # refused, not counted
+    assert _via_proxy(proxy_port, target_port, "GET", "/b") == 200
+    assert _via_proxy(proxy_port, target_port, "GET", "/c") == 429
+    assert job["sent"] == 2 and ("GET", "/c") not in seen
+
+
+def test_socks_connections_count_against_the_job_cap(socks):
+    port, target_port, job = socks
+    job.update(max_requests=1, sent=0)
+    assert _socks_connect(port, "socks-token", "127.0.0.1", target_port)[1] == 0
+    assert _socks_connect(port, "socks-token", "127.0.0.1", target_port)[1] == 2
+    assert job["sent"] == 1
+
+
+def test_relay_jobs_reserve_and_refund_the_run_budget(monkeypatch):
+    import asyncio
+
+    from app.services.agent import custom_probe
+    from app.services.agent import request_budget as rb
+
+    budget = rb.RequestBudget(limit=150, reserve=0)
+    token = rb.current_request_budget.set(budget)
+    sent_payloads = []
+
+    async def fake_once(job, hosts, timeout_sec, **kw):
+        sent_payloads.append(job)
+        return {"ok": True, "requests_sent": 7}
+
+    monkeypatch.setattr(custom_probe, "_post_to_relay_once", fake_once)
+    try:
+        first = asyncio.run(custom_probe._post_to_relay({"command": "id"}, ["t"], 10))
+        assert sent_payloads[0]["max_requests"] == rb.SANDBOX_JOB_REQUESTS
+        assert first["requests_metered"] == 7 and budget.used == 7
+        # Only 143 left: the next job is capped at what remains.
+        budget.used = 145
+        asyncio.run(custom_probe._post_to_relay({"command": "id"}, ["t"], 10))
+        # Granted 5; the relay claims 7 but can only have sent the 5 it was allowed.
+        assert sent_payloads[1]["max_requests"] == 5 and budget.used == 150
+        budget.used = 150
+        refused = asyncio.run(custom_probe._post_to_relay({"command": "id"}, ["t"], 10))
+        assert refused["error"] == "request_ceiling_reached" and len(sent_payloads) == 2
+    finally:
+        rb.current_request_budget.reset(token)
+
+
+def test_relay_without_a_count_is_charged_in_full(monkeypatch):
+    import asyncio
+
+    from app.services.agent import custom_probe
+    from app.services.agent import request_budget as rb
+
+    budget = rb.RequestBudget(limit=500, reserve=0)
+    token = rb.current_request_budget.set(budget)
+
+    async def old_relay(job, hosts, timeout_sec, **kw):
+        return {"ok": True, "requests_sent": None}
+
+    monkeypatch.setattr(custom_probe, "_post_to_relay_once", old_relay)
+    try:
+        asyncio.run(custom_probe._post_to_relay({"command": "id"}, ["t"], 10))
+        assert budget.used == rb.SANDBOX_JOB_REQUESTS
+    finally:
+        rb.current_request_budget.reset(token)

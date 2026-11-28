@@ -341,6 +341,57 @@ def string_sql_proof_valid(result: dict) -> bool:
     return true_size - controls >= max(512, controls // 10)
 
 
+def string_sql_proof_gaps(result: dict) -> list[str]:
+    """Name the controls an OR-recipe result failed, in the validator's order.
+
+    string_sql_proof_valid() answers yes or no; an analyst needs to know
+    which control broke. Empty when the proof holds. Other recipes report
+    the recipe name only.
+    """
+    if string_sql_proof_valid(result):
+        return []
+    recipe = result.get("proof_recipe")
+    if result.get("operation") != "sqli_boolean_string" or recipe not in {
+        "string_or_boolean_v1", "string_and_boolean_v1", "string_or_json_rows_v1",
+    }:
+        return [f"no boolean SQLi recipe ran (operation={result.get('operation')}, recipe={recipe})"]
+    if recipe != "string_or_boolean_v1":
+        return [f"{recipe} controls not met"]
+    checks = result.get("checks")
+    if not isinstance(checks, dict) or not all(isinstance(checks.get(k), dict) for k in CHECK_ORDER):
+        return ["incomplete control set"]
+    rows = {key: checks[key] for key in CHECK_ORDER}
+    gaps: list[str] = []
+    for key, row in rows.items():
+        if row.get("truncated") is not False:
+            gaps.append(f"{key} response truncated")
+        if row.get("redirected") is not False:
+            gaps.append(f"{key} response redirected")
+    for key in CHECK_ORDER:
+        if key != "quote_error" and rows[key].get("status") != 200:
+            gaps.append(f"{key} returned {rows[key].get('status')}, expected 200")
+    if not 500 <= rows["quote_error"].get("status", 0) < 600:
+        gaps.append(f"quote_error returned {rows['quote_error'].get('status')}, expected 5xx")
+    types = {rows[k].get("content_type") for k in CHECK_ORDER if k != "quote_error"}
+    if len(types) > 1:
+        gaps.append("content type changed between controls")
+    size = lambda key: int(rows[key].get("bytes_captured") or 0)
+    stable = lambda a, b: abs(a - b) <= max(64, max(a, b) // 100)
+    for first, second in (("baseline_first", "baseline_last"), ("true_first", "true_second"),
+                          ("false_first", "false_second")):
+        if not stable(size(first), size(second)):
+            gaps.append(f"{first}/{second} sizes unstable ({size(first)} vs {size(second)} bytes)")
+    if rows["true_first"].get("body_sha256") == rows["false_first"].get("body_sha256"):
+        gaps.append("true and false responses identical")
+    true_size = min(size("true_first"), size("true_second"))
+    controls = max(size("baseline_first"), size("false_first"), size("escaped_quote"))
+    need = max(512, controls // 10)
+    if true_size - controls < need:
+        gaps.append(f"true branch grew {true_size - controls} bytes over the largest control; "
+                    f"needs {need}")
+    return gaps or ["controls not met"]
+
+
 def probe_string_boolean(
     baseline: str, variants: dict[str, str], nonce: str, *, parameter: str,
     allowed_origins: list[str], storage_state: dict | None,

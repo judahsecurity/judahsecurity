@@ -453,6 +453,42 @@ async def run_sandbox_shell(
 async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: float, *,
                          method_policy: dict | None = None,
                          oob_allowed: bool = True) -> dict[str, Any]:
+    """Send one job to probe-egress, metered against the run's request ceiling.
+
+    Under a ceiling, a block of requests is reserved first and passed to the
+    relay as a hard per-job cap; the relay reports what it actually sent and
+    the rest is refunded, so parallel jobs can never overshoot the ceiling.
+    """
+    from app.services.agent.request_budget import SANDBOX_JOB_REQUESTS, active
+
+    budget = active()
+    granted = None
+    if budget is not None:
+        granted = budget.reserve_block(SANDBOX_JOB_REQUESTS)
+        if not granted:
+            return {"ok": False, "error": "request_ceiling_reached",
+                    "detail": f"The run's request ceiling is spent ({budget.used}/{budget.limit}); "
+                              "the sandbox job was not sent."}
+        job = {**job, "max_requests": granted}
+    try:
+        result = await _post_to_relay_once(job, hosts, timeout_sec, method_policy=method_policy,
+                                           oob_allowed=oob_allowed)
+    except BaseException:
+        if budget is not None and granted:
+            budget.refund(granted)
+        raise
+    if budget is not None and granted:
+        sent = result.get("requests_sent")
+        # A relay that did not report (old image, failure) is charged in full.
+        sent = granted if not isinstance(sent, int) else max(0, min(sent, granted))
+        budget.refund(granted - sent)
+        result["requests_metered"] = sent
+    return result
+
+
+async def _post_to_relay_once(job: dict[str, Any], hosts: List[str], timeout_sec: float, *,
+                              method_policy: dict | None = None,
+                              oob_allowed: bool = True) -> dict[str, Any]:
     import httpx
 
     from app.core.config import settings
@@ -460,7 +496,7 @@ async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: flo
     url = str(getattr(settings, "AGENT_PROBE_RUNNER_URL", "") or "").rstrip("/")
     token = str(getattr(settings, "AGENT_PROBE_RUNNER_TOKEN", "") or "")
     if not url or not token:
-        return {"ok": False, "error": "probe runner is not configured "
+        return {"ok": False, "requests_sent": 0, "error": "probe runner is not configured "
                 "(AGENT_PROBE_RUNNER_URL / AGENT_PROBE_RUNNER_TOKEN)"}
     payload = {
         **job,
@@ -499,6 +535,8 @@ async def _post_to_relay(job: dict[str, Any], hosts: List[str], timeout_sec: flo
                       if isinstance(item, dict)],
         "exchanges_dropped": int(result.get("exchanges_dropped") or 0),
         "tcp": result.get("tcp") if isinstance(result.get("tcp"), dict) else {},
+        "requests_sent": result.get("requests_sent")
+            if isinstance(result.get("requests_sent"), int) else None,
         "allowed_hosts": hosts,
         "runner_identity": result.get("runner_identity")
             if isinstance(result.get("runner_identity"), dict) else {},

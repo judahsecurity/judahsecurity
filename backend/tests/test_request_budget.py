@@ -104,13 +104,15 @@ def test_limit_comes_from_policy_then_settings(monkeypatch):
 def test_unmetered_tools_are_refused_only_under_a_ceiling(budget):
     assert rb.unmetered_refusal("execute_nuclei") is None
     budget(limit=50)
-    for name in ("execute_nuclei", "execute_ffuf", "spawn_recon_workers", "sandbox_shell",
+    for name in ("execute_nuclei", "execute_ffuf", "spawn_recon_workers",
                  "execute_interceptor", "mcp_call"):
         refusal = rb.unmetered_refusal(name)
         assert refusal and refusal["error"] == "request_ceiling_unmetered_tool", name
         assert "not run" in refusal["output"]
+    # The probe sandbox is metered (reserve_block + probe-egress per-job cap).
     for name in ("execute_deep_crawl", "execute_browser", "scoped_browser_assessment",
-                 "probe_observed_input_batch", "replay_http_request"):
+                 "probe_observed_input_batch", "replay_http_request",
+                 "sandbox_shell", "run_custom_probe"):
         assert rb.unmetered_refusal(name) is None, name
 
 
@@ -243,3 +245,53 @@ def test_spent_ceiling_ends_the_run(monkeypatch, budget):
     assert out["task_complete"] is True
     assert out["completion_reason"].startswith("Request ceiling reached: 10/10")
     assert orch._route_after_think({**out}) == "generate_response"
+
+
+def test_async_acquire_waits_without_blocking_the_event_loop(monkeypatch):
+    """A full rate window used to time.sleep on the event loop, stalling every
+    session. acquire_async must yield so other tasks keep running."""
+    def no_thread_sleep(_seconds):
+        raise AssertionError("acquire_async must not block the thread")
+
+    monkeypatch.setattr(rb, "_sleep", no_thread_sleep)
+    b = rb.RequestBudget(limit=50, reserve=0, rate_per_second=2)
+
+    async def scenario():
+        ticks = []
+
+        async def heartbeat():
+            for _ in range(20):
+                ticks.append(1)
+                await asyncio.sleep(0.02)
+
+        beat = asyncio.create_task(heartbeat())
+        started = asyncio.get_running_loop().time()
+        for _ in range(3):  # the third request must wait for the window
+            await b.acquire_async()
+        waited = asyncio.get_running_loop().time() - started
+        await beat
+        return waited, len(ticks)
+
+    waited, ticks = asyncio.run(scenario())
+    assert waited >= 0.5 and b.used == 3
+    assert ticks == 20  # the loop kept running while the budget waited
+
+
+def test_httpx_hook_uses_the_async_path(budget, monkeypatch):
+    b = budget(limit=5)
+    monkeypatch.setattr(b, "acquire", lambda *_: (_ for _ in ()).throw(
+        AssertionError("sync acquire called from async hook")))
+    hook = rb.httpx_event_hooks()["request"][0]
+    asyncio.run(hook(None))
+    assert b.used == 1
+
+
+def test_reserve_block_and_refund_are_exact(budget):
+    b = budget(limit=10, reserve_fraction=0.0)
+    assert b.reserve_block(6) == 6 and b.used == 6
+    assert b.reserve_block(6) == 4 and b.used == 10   # only what is left
+    assert b.reserve_block(1) == 0 and b.refused == 1
+    b.refund(4)                                        # the job sent 0 of its 4
+    assert b.used == 6
+    b.refund(100)
+    assert b.used == 0

@@ -192,6 +192,16 @@ def connect_checked(addresses: list[str], port: int, timeout: float) -> tuple[so
     raise error
 
 
+def _reserve_sent(job: dict) -> bool:
+    """Count one upstream request or connection against the job's cap."""
+    with _jobs_lock:
+        sent = int(job.get("sent") or 0)
+        if sent >= job.get("max_requests", MAX_REQUESTS_PER_JOB):
+            return False
+        job["sent"] = sent + 1
+        return True
+
+
 def _job_for(header: str | None) -> tuple[str, dict] | tuple[None, None]:
     if not header or not header.lower().startswith("basic "):
         return None, None
@@ -585,6 +595,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             entry.update(allowed=False, reason=why)
             self._deny(403, why, wfile)
             return
+        # Counted only once the request will actually be sent upstream.
+        if not _reserve_sent(job):
+            entry.update(allowed=False, reason="run request ceiling reached")
+            self._deny(429, "the run's request ceiling allows no more requests from this job", wfile)
+            return
         started = time.monotonic()
         try:
             upstream, entry["ip"] = connect_checked(addresses, port, SOCKET_TIMEOUT)
@@ -771,6 +786,10 @@ class SocksHandler(socketserver.BaseRequestHandler):
                 _tcp_note(job, host, port, False, reason)
                 client.sendall(_socks_reply(2))
                 return
+            if not _reserve_sent(job):
+                _tcp_note(job, host, port, False, "run request ceiling reached")
+                client.sendall(_socks_reply(2))
+                return
             try:
                 upstream, _address = connect_checked(addresses, port, 10)
             except ConnectionRefusedError:
@@ -839,6 +858,11 @@ class RelayHandler(BaseHTTPRequestHandler):
             allowed = [str(h) for h in req.get("allowed_hosts") or []]
             oob = [str(h) for h in req.get("oob_suffixes") or []]
             policy = parse_method_policy(req.get("method_policy"))
+            # The backend reserves this many requests from the run's ceiling
+            # for the job; requests past it are refused and never sent.
+            max_requests = req.get("max_requests")
+            max_requests = (MAX_REQUESTS_PER_JOB if max_requests is None
+                            else max(0, min(int(max_requests), MAX_REQUESTS_PER_JOB)))
             ceiling = MAX_SHELL_TIMEOUT if command else MAX_TIMEOUT
             timeout = max(3.0, min(float(req.get("timeout_sec") or 20), ceiling))
         except (ValueError, KeyError, TypeError):
@@ -850,7 +874,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         token = secrets.token_urlsafe(24)
         job = {"allowed": allowed, "oob": oob, "log": [], "exchanges": [],
                "recorded_bytes": 0, "dropped": 0, "tcp": {}, "tcp_count": 0,
-               "policy": policy}
+               "policy": policy, "max_requests": max_requests, "sent": 0}
         with _jobs_lock:
             _jobs[token] = job
         try:
@@ -865,6 +889,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         result["egress"] = job["log"]
         result["exchanges"] = job["exchanges"]
         result["exchanges_dropped"] = job["dropped"]
+        # Upstream requests and TCP connections actually sent to targets, so
+        # the backend charges exactly that against the run's ceiling.
+        result["requests_sent"] = int(job.get("sent") or 0)
         result["tcp"] = _tcp_summary(job)
         self._json(200, result)
 

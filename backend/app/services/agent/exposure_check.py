@@ -187,9 +187,11 @@ async def run_exposure_checks(manager: Any, target: str,
     for path, checks in plan:
         url = urljoin(origin + "/", path.lstrip("/"))
         try:
+            # map_traffic=False: a 404 on /.env is not part of the application,
+            # and mapping it planned a coverage check for every probed path.
             result = await manager._http_exchange(
                 "GET", url, use_auth_session=False, follow_redirects=False,
-                timeout=15, max_response_bytes=MAX_BODY_BYTES)
+                timeout=15, max_response_bytes=MAX_BODY_BYTES, map_traffic=False)
         except Exception as exc:  # scope, budget, oversized body, network
             message = str(exc)[:120]
             errors.append(f"{path}: {type(exc).__name__}: {message}")

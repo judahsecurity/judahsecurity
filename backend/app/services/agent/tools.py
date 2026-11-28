@@ -1567,6 +1567,20 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         active = str(target or getattr(self, "_fallback_target", "")
                      or (cmap.get("target") if isinstance(cmap, dict) else "") or "")
         result = await run_exposure_checks(self, active, cmap)
+        brain = getattr(self, "_engagement_brain", None)
+        if result.get("success") and isinstance(brain, dict):
+            # Durable "already checked" marker: the run snapshot keeps the
+            # brain across restarts, the execution trace does not.
+            from datetime import datetime
+
+            rows = list(brain.get("recon_observations") or [])
+            rows.append({
+                "id": f"exposure-check-{result.get('origin')}", "kind": "exposure_check",
+                "target": result.get("origin"), "source": "check_exposures",
+                "value": f"{result.get('checked')} paths requested, {len(result.get('hits') or [])} exposed",
+                "observed_at": datetime.utcnow().isoformat() + "Z",
+            })
+            brain["recon_observations"] = rows[-200:]
         return {"success": bool(result.get("success")), "output": format_result(result),
                 "exposure": result,
                 "engagement_brain": getattr(self, "_engagement_brain", None) or {}}
@@ -1576,8 +1590,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         surface_signature: str = "", pending_input_count: int = 0,
         pending_batch_signature: str = "",
         target: str = "",
+        **ignored: Any,
     ) -> Dict[str, Any]:
-        """Run a bounded first pass over queued observed SQLi and XSS checks."""
+        """Run a bounded first pass over queued observed SQLi and XSS checks.
+
+        Takes only max_checks, max_seconds and target; any other argument is
+        ignored and named in the result instead of failing the whole batch.
+        """
         from app.services.agent.observed_input_batch import run_observed_input_batch
 
         result = await run_observed_input_batch(
@@ -1585,6 +1604,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         )
         result["surface_signature"] = surface_signature
         result["pending_batch_signature"] = pending_batch_signature
+        if ignored:
+            result["ignored_arguments"] = sorted(ignored)
+            note = (f"Ignored unsupported arguments: {', '.join(sorted(ignored))}. "
+                    "The batch takes only max_checks, max_seconds and target.")
+            result["output"] = (str(result.get("output") or "") + "\n" + note).strip()
         return result
 
     async def scoped_dom_xss_assigned(
@@ -7280,6 +7304,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         )
 
         mode = custom_probe_mode()
+        if mode == "inprocess":
+            from app.services.agent.request_budget import active as active_budget
+
+            if active_budget() is not None:
+                # Only the isolated sandbox is metered (probe-egress counts it).
+                return json.dumps({
+                    "error": "request_ceiling_unmetered_tool",
+                    "detail": "In-process probes cannot be counted against this run's request "
+                              "ceiling; use AGENT_CUSTOM_PROBE_MODE=isolated.",
+                })
         if self._scoped_policy_applied and mode != "isolated":
             return json.dumps({"error": "In-process custom probes cannot enforce operator method and path approvals; use structured replay tools or the isolated probe runner."})
         if mode == "off":
@@ -10259,6 +10293,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                              follow_redirects: bool = True, identity: Optional[str] = None,
                              hypothesis_id: str = "", coverage_cell_id: str = "",
                              max_response_bytes: Optional[int] = None,
+                             map_traffic: bool = True,
                              _proxy_retry: bool = False) -> Dict[str, Any]:
         import time as _time
         from app.services.agent.assessment_sessions import cookie_jar, identity_registry
@@ -10400,7 +10435,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 use_auth_session=use_auth_session, timeout=timeout,
                 follow_redirects=follow_redirects, identity=identity,
                 hypothesis_id=hypothesis_id, coverage_cell_id=coverage_cell_id,
-                max_response_bytes=max_response_bytes, _proxy_retry=True,
+                max_response_bytes=max_response_bytes, map_traffic=map_traffic,
+                _proxy_retry=True,
             )
         if identity not in (None, "anonymous"):
             session["cookies"] = [dict(name=c.name, value=c.value, domain=c.domain, path=c.path,
@@ -10417,8 +10453,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                          "body": body_text, "body_preview": body_text[:4000], "length": len(resp.content),
                          "elapsed_s": round(_time.monotonic() - start, 3)},
         }
-        await self.map_application_traffic([dict(method=method, url=url, headers=hdrs, body=raw_body)],
-                                           identity=label, source="http_exchange")
+        if map_traffic:
+            await self.map_application_traffic([dict(method=method, url=url, headers=hdrs, body=raw_body)],
+                                               identity=label, source="http_exchange")
         if not trace.get("operation_id"):
             from app.services.agent.runtime_mapper import normalize_request
 
@@ -11732,6 +11769,68 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             from langchain_anthropic import ChatAnthropic
             return ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
 
+    async def _attach_structured_sqli_receipt(
+        self, target: str, claim: str, evidence_ids: List[str],
+    ) -> Optional[tuple]:
+        """Give a GET SQLi candidate the structured receipt its proof needs.
+
+        Returns (target, evidence_ids, note) after running scoped_string_sqli
+        (or scoped_numeric_sqli for a numeric value) on the claimed query
+        input, or None when the candidate already has a structured receipt or
+        is not a GET query input. A probe that does not hold its controls is
+        still attached, so the verifier reports which control failed.
+        """
+        from urllib.parse import parse_qsl, urlsplit
+        from app.services.agent.evidence_store import evidence_store
+
+        structured = {"scoped_string_sqli", "scoped_numeric_sqli",
+                      "scoped_body_sqli_error", "scoped_body_sqli_boolean"}
+        store = evidence_store(self)
+        if any((store.records.get(item) or {}).get("kind") in structured
+               for item in evidence_ids or []):
+            return None
+        params = parse_qsl(urlsplit(target or "").query, keep_blank_values=True)
+        if not params:
+            return None
+        lowered = (claim or "").lower()
+        named = [p for p in params if p[0].lower() in lowered]
+        ordered = (named or params)[:3]
+        last, failures = None, []
+        for name, value in ordered:
+            probe = (self.scoped_numeric_sqli if str(value).isdigit()
+                     else self.scoped_string_sqli)
+            try:
+                raw = await probe(url=target, parameter=name)
+                result = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+            except Exception as exc:
+                failures.append(f"{name}: {str(exc)[:120]}")
+                continue
+            if not result.get("evidence_id"):
+                failures.append(f"{name}: {str(result.get('error') or 'no receipt')[:120]}")
+                continue
+            last = (name, result)
+            if result.get("proof_confirmed"):
+                break
+        if last is None:
+            if failures:
+                logger.info("structured SQLi receipt not attached: %s", "; ".join(failures))
+            return None
+        name, result = last
+        if result.get("proof_confirmed"):
+            outcome = "held its controls"
+        else:
+            from app.services.agent.scoped_assessment.sqli_string import string_sql_proof_gaps
+
+            gaps = (string_sql_proof_gaps(result)
+                    if result.get("operation") == "sqli_boolean_string" else [])
+            outcome = "did not hold its controls: " + (
+                "; ".join(gaps[:4]) if gaps
+                else str(result.get("reason") or result.get("error") or "see receipt")[:160])
+        note = (f"Structured {result.get('operation') or 'SQLi'} probe on parameter {name} "
+                f"(receipt {result['evidence_id']}) {outcome}.")
+        return (str(result.get("target") or target),
+                list(dict.fromkeys([*(evidence_ids or []), result["evidence_id"]])), note)
+
     async def submit_finding_candidate(
         self,
         title: str,
@@ -11823,6 +11922,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 if prior:
                     title = str(prior["title"])
                 vulnerability_class = "sql_injection"
+            else:
+                # The verifier can confirm GET SQLi only from a matching pair of
+                # structured receipts (hunter + fresh verifier). A candidate built
+                # from manual comparisons has none, so it could never confirm:
+                # run the structured probe on the claimed input now.
+                attached = await self._attach_structured_sqli_receipt(
+                    target, f"{title} {description} {claimed_request}", evidence_ids or [])
+                if attached:
+                    target, evidence_ids, note = attached
+                    vulnerability_class = "sql_injection"
+                    evidence = (evidence + "\n" if evidence else "") + note
         if evidence_ids:
             from app.services.agent.evidence_store import evidence_store
 

@@ -432,6 +432,9 @@ async def check_browser(
     expected_origin = origin(final_target)
     requests: list[dict] = []
     blocked_requests = 0
+    # Requests the run's request ceiling refused. A refused navigation shows
+    # up as Playwright's opaque net::ERR_FAILED; this lets us say why.
+    budget_refusals: list[str] = []
     dialogs: list[str] = []
     script_tasks: list[asyncio.Task] = []
     traffic_tasks: list[asyncio.Task] = []
@@ -512,10 +515,12 @@ async def check_browser(
                 if request_budget is not None and same_origin:
                     # Out-of-scope requests are aborted below and send nothing.
                     try:
-                        request_budget.acquire(
+                        await request_budget.acquire_async(
                             "discovery" if operation in DISCOVERY_OPERATIONS else "testing")
-                    except RequestBudgetExhausted:
+                    except RequestBudgetExhausted as exc:
                         blocked_requests += 1
+                        if len(budget_refusals) < 3:
+                            budget_refusals.append(str(exc))
                         await route.abort()
                         return
                 post_mutation = None
@@ -898,12 +903,21 @@ async def check_browser(
                         # fail the operation instead of recording fake pages.
                         raise
                     except Exception as exc:
+                        if budget_refusals:
+                            # The ceiling refused this page; every later page
+                            # would be refused too.
+                            pages.append({"url": page_url, "error": "RequestBudgetExhausted"})
+                            break
                         pages.append({"url": page_url, "error": type(exc).__name__})
+                if budget_refusals and not any(p.get("status") for p in pages):
+                    raise RequestBudgetExhausted(
+                        f"The browser was not run: {budget_refusals[0]}")
                 result = {
                     "operation": "crawl", "target_template": url,
                     "final_origin": expected_origin, "pages": pages,
                     "pages_visited": len(pages), "requests": requests,
                     "blocked_requests": blocked_requests,
+                    "budget_refusals": budget_refusals,
                     "get_form_observations": form_observations,
                 }
                 await settle_capture()
@@ -913,6 +927,9 @@ async def check_browser(
             try:
                 response = await page.goto(final_target, wait_until="domcontentloaded", timeout=20_000)
             except Exception:
+                if budget_refusals:
+                    raise RequestBudgetExhausted(
+                        f"The browser was not run: {budget_refusals[0]}") from None
                 if (operation != "check_client" or not client_initial_response_ok
                         or not blocked_marker_navigation):
                     raise
