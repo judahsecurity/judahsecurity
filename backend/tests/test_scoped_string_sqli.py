@@ -19,6 +19,7 @@ from app.services.agent.independent_verify import (
     check_verify_receipt, run_independent_verifiers,
     submit_candidate,
 )
+from app.services.agent.parameter_inventory import collect_parameter_inventory
 from app.services.agent.proof_policy import validate_proof
 from app.services.agent.scoped_assessment import sqli_string
 from app.services.agent.scoped_assessment import browser_post_replay
@@ -494,6 +495,47 @@ async def test_unusable_identity_does_not_consume_sqli_get_budget(monkeypatch):
         await manager.scoped_string_sqli(URL, "category", identity="legacy")
     assert getattr(manager, "_scoped_get_count", 0) == 0
     assert getattr(manager, "_scoped_general_get_count", 0) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "parameter", "value"), [
+    ("/catalog/product", "productId", "1"),
+    ("/blog/post", "postId", "3"),
+])
+@pytest.mark.parametrize("canonical_url", [False, True])
+async def test_string_tool_accepts_visited_get_query_promoted_to_form_action(
+    monkeypatch, path, parameter, value, canonical_url,
+):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    url = f"https://app.example.test{path}?{parameter}={value}"
+    manager._capability_map = {
+        "scope": "https://app.example.test",
+        "pages_visited": [url],
+        "forms": [{"method": "GET", "action": url, "fields": ["unrelated"]}],
+    }
+    mapped = next(row for row in collect_parameter_inventory(manager._capability_map)
+                  if row["name"] == parameter)
+    assert mapped["source"] == "form_action" and mapped["testable"]
+
+    def fake_probe(baseline, true_url, false_url, nonce, **kwargs):
+        assert baseline == url and true_url != false_url
+        return {"target": f"https://app.example.test{path}",
+                "operation": "sqli_boolean_numeric", "proof_confirmed": True,
+                "nonce": nonce, "parameter": parameter}
+
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.sqli_boolean.probe_numeric_boolean",
+        fake_probe,
+    )
+    requested = f"https://app.example.test{path}" if canonical_url else url
+    result = json.loads(await manager.scoped_string_sqli(requested, parameter))
+    assert result["baseline_source"] == "observed_url"
+    assert result["delegated_from"] == "scoped_string_sqli"
+    assert result["operation"] == "sqli_boolean_numeric"
+    assert result["finding"] is False
+    assert evidence_store(manager).records[result["evidence_id"]]["kind"] == "scoped_numeric_sqli"
 
 
 @pytest.mark.asyncio
