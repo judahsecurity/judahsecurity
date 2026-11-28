@@ -8,6 +8,12 @@ an assessment is resumed. The revision is recorded in the engagement snapshot
 so the same wave is not launched again on a later turn. The existing specialist
 leases, scope checks, and independent finding verification still apply.
 
+Observation follow-ups now give the planner up to five earlier, in-scope observations
+from the same run. The packet contains request shapes and evidence IDs, not query
+values or HTTP bodies. A proposal can combine those clues and reopen an earlier
+observed target, but must cite evidence from each supporting observation. Target,
+class, identity, and scope are validated before a coverage cell is assigned.
+
 Scheduled `tester_process` hunts continue partial runs in the same assessment
 session while saved hypotheses, coverage cells, or candidates remain actionable
 when the schedule config sets `autonomous_followup: true`. Without that opt-in,
@@ -96,6 +102,13 @@ These are minimum proof requirements, not a universal vulnerability oracle. The 
 
 Confirmed receipts bind to the current candidate revision. Refutation invalidates the receipt. Changing the candidate's description, severity, or evidence requires reverification. Publication must use the verified target, description, and severity. Risk assessment remains a separate step.
 
+An independently verified finding also stores a `proof_packet` in finding metadata.
+It links the hunter and fresh verifier evidence IDs, their artifact digests and
+available request shapes. Query values are redacted; private artifacts stay in
+the evidence store. If no reproduction steps were supplied, the finding uses
+these artifact references as its review steps. An evicted artifact is marked
+unavailable instead of being reconstructed from the model's description.
+
 ## Configure two test identities
 
 Register sessions supplied for the engagement using the tool API:
@@ -166,6 +179,13 @@ Use captured requests from an authorized normal-user walkthrough, not invented e
 An unexpected response remains evidence and makes the workflow inconclusive; it does not itself confirm a vulnerability. Cleanup steps run after failed prerequisites, and failed cleanup stays visible. Resume a returned `workflow_id` without repeating completed mutations. Workflow checkpoints currently live within the worker's assessment session, not across worker restarts.
 
 Specialists return `hypothesis_results`, one entry per hypothesis, citing HTTP evidence IDs captured with that hypothesis ID. A lane summary cannot close all its cards. Missing results remain open; tool errors do not kill a hypothesis. Only independent verification marks a discovery proven.
+
+Weak negative hypothesis verdicts get one recheck by default. Only testing tools
+bound to the cited receipts count; a budget-exhausted or blocked run cannot
+establish clean coverage. Evidence IDs and tool names from the first and second
+attempts are combined. If the recheck still lacks two receipts from distinct
+testing tools, the task is blocked and the hypothesis remains open rather than
+being marked killed.
 
 Clean coverage records now cite live HTTP/browser evidence and name the test type. Identity, parameter, methodology, and evidence are retained as separate checks on the surface. Browser-derived capability maps and retrieved memories are delimited as untrusted data. Tool output containing indirect prompt-injection patterns is not promoted into durable memory.
 

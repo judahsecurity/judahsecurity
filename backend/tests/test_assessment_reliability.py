@@ -975,7 +975,7 @@ def test_summary_does_not_close_unrelated_hypotheses():
             ],
         ),
     )
-    assert graph.nodes["a"].status == "killed"
+    assert graph.nodes["a"].status in {"ready", "retry"}  # thin negative needs a recheck
     assert graph.nodes["b"].status != "killed"
 
 
@@ -1097,7 +1097,8 @@ async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
     leased_id = result["task_leases"]["api_authz"]["hypothesis_id"]
     rows = manager._engagement_brain["task_graph"]["nodes"]
     sibling_id = ({"authz-a", "authz-b"} - {leased_id}).pop()
-    assert rows[leased_id]["status"] == "killed"
+    assert rows[leased_id]["status"] == "ready"
+    assert rows[leased_id]["rechecked"] is True
     assert rows[leased_id]["evidence_ids"] == ["http-denied"]
     assert rows[sibling_id]["status"] == "ready"
     assert manager._engagement_brain["hypothesis_wave_history"] == ["wave-test"]

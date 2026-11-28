@@ -294,7 +294,7 @@ def test_lease_records_structured_evidence_ids():
         ),
     )
     node = graph.nodes[lease.hypothesis_id]
-    assert node.status == "killed"
+    assert node.status == NODE_READY  # a weak negative keeps its evidence and gets rechecked
     assert node.evidence_ids == ["http-1", "http-2"]
     assert node.lease_id == ""
 
