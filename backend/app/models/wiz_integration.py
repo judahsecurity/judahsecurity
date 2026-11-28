@@ -79,8 +79,8 @@ class WizIntegration(Base):
         sync_state = self.last_sync_stats or {}
         if sync_state.get("sync_in_progress"):
             try:
-                started = datetime.fromisoformat(sync_state.get("sync_started_at", ""))
-                if (now or datetime.utcnow()) - started < timedelta(hours=2):
+                heartbeat = datetime.fromisoformat(sync_state.get("sync_heartbeat_at") or sync_state.get("sync_started_at", ""))
+                if (now or datetime.utcnow()) - heartbeat < timedelta(hours=8):
                     return False
             except (TypeError, ValueError):
                 pass

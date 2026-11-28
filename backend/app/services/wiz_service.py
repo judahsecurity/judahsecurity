@@ -696,6 +696,21 @@ class _Stats:
         return vars(self).copy()
 
 
+def _commit_sync_progress(
+    db: Session, integration: WizIntegration, stats: _Stats, started_at: datetime,
+) -> None:
+    """Keep a claimed run visible and prevent a slow page stream from being claimed twice."""
+    state = integration.last_sync_stats or {}
+    if state.get("sync_in_progress"):
+        integration.last_sync_stats = {
+            **stats.as_dict(),
+            "sync_in_progress": True,
+            "sync_started_at": state.get("sync_started_at") or started_at.isoformat(),
+            "sync_heartbeat_at": datetime.utcnow().isoformat(),
+        }
+    db.commit()
+
+
 def _upsert_asset(
     db: Session, integration: WizIntegration, source: Dict[str, Any], stats: _Stats, seen_at: datetime,
 ) -> Asset:
@@ -1012,7 +1027,7 @@ async def _sync_application_endpoints(
     started_at = started_at or datetime.utcnow()
     async for batch in client.iter_application_endpoints():
         _upsert_endpoint_batch(db, integration, batch, stats, started_at)
-        db.commit()
+        _commit_sync_progress(db, integration, stats, started_at)
     async for batch in client.iter_endpoint_issues():
         ids = [item["id"] for item in batch]
         rows = {
@@ -1047,7 +1062,7 @@ async def _sync_application_endpoints(
             stats.endpoints_with_issues += int(bool(item["issues"]))
             analytics_count = (row.endpoint_data.get("issueAnalytics") or {}).get("issueCount")
             stats.endpoint_issue_count_mismatches += int(analytics_count != item["issue_count"])
-        db.commit()
+        _commit_sync_progress(db, integration, stats, started_at)
     await _sync_ai_endpoint_graph(db, integration, client, stats, started_at)
     stale_query = db.query(WizApplicationEndpoint).filter(
         WizApplicationEndpoint.integration_id == integration.id,
@@ -1074,6 +1089,7 @@ async def _sync_ai_endpoint_graph(
     paths_by_endpoint: Dict[str, Dict[tuple[str, str], Dict[str, Any]]] = {}
     async for batch in client.iter_ai_endpoint_paths():
         stats.ai_graph_paths_seen += len(batch)
+        _commit_sync_progress(db, integration, stats, started_at)
         for path in batch:
             entities = path.get("entities") or []
             components = [e for e in entities if e and e.get("type") in AI_COMPONENT_TYPES]
@@ -1124,7 +1140,7 @@ async def _sync_ai_endpoint_graph(
             row.ai_components = list(paths_by_endpoint[wiz_id].values())
             row.ai_graph_seen_at = started_at
             row.is_ai = True
-        db.commit()
+        _commit_sync_progress(db, integration, stats, started_at)
     stale = db.query(WizApplicationEndpoint).filter(
         WizApplicationEndpoint.integration_id == integration.id,
         WizApplicationEndpoint.ai_graph_seen_at.is_not(None),
@@ -1134,7 +1150,7 @@ async def _sync_ai_endpoint_graph(
         row.ai_components = []
         row.ai_graph_seen_at = None
         row.is_ai = _endpoint_is_ai(row.endpoint_data)
-    db.commit()
+    _commit_sync_progress(db, integration, stats, started_at)
 
 
 async def _sync_virtual_machines(
@@ -1152,7 +1168,7 @@ async def _sync_virtual_machines(
                 continue
             _upsert_asset(db, integration, source, stats, started_at)
             stats.virtual_machines_seen += 1
-        db.commit()
+        _commit_sync_progress(db, integration, stats, started_at)
     stats.virtual_machines_total_count = client.virtual_machines_total_count
     if (stats.virtual_machines_total_count is not None
             and stats.virtual_machines_seen < stats.virtual_machines_total_count):
@@ -1218,7 +1234,7 @@ def _reconcile_wiz_assets(
     stats.assets_retired = reconcile_asset_membership(
         db, DISCOVERY_SOURCE, integration.organization_id, candidate_ids,
     )
-    db.commit()
+    _commit_sync_progress(db, integration, stats, started_at)
 
 
 async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str, Any]:
@@ -1232,11 +1248,7 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
         )
         _reconcile_wiz_assets(db, integration, stats, started_at, stale_endpoint_assets or set())
         stats.assets_complete = True
-        integration.last_sync_stats = {
-            **stats.as_dict(), "sync_in_progress": True,
-            "sync_started_at": (integration.last_sync_stats or {}).get("sync_started_at") or started_at.isoformat(),
-        }
-        db.commit()
+        _commit_sync_progress(db, integration, stats, started_at)
 
         if integration.import_vulnerabilities:
             finding_filter: Dict[str, Any] = {
@@ -1294,7 +1306,7 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
                         stats.findings_unchanged += 1
                         continue
                     _upsert_vulnerability(db, asset, finding, stats)
-                db.commit()
+                _commit_sync_progress(db, integration, stats, started_at)
             stats.findings_total_count = client.vulnerability_findings_total_count
             stats.findings_truncated = client.findings_truncated
             if stats.findings_truncated:
@@ -1339,15 +1351,15 @@ def claim_sync(db: Session, integration_id: int) -> bool:
     state = integration.last_sync_stats or {}
     if state.get("sync_in_progress"):
         try:
-            started = datetime.fromisoformat(state.get("sync_started_at", ""))
-            if datetime.utcnow() - started < timedelta(hours=2):
+            heartbeat = datetime.fromisoformat(state.get("sync_heartbeat_at") or state.get("sync_started_at", ""))
+            if datetime.utcnow() - heartbeat < timedelta(hours=8):
                 db.rollback()
                 return False
         except (TypeError, ValueError):
             pass
+    now = datetime.utcnow().isoformat()
     integration.last_sync_stats = {
-        **state, "sync_in_progress": True,
-        "sync_started_at": datetime.utcnow().isoformat(),
+        "sync_in_progress": True, "sync_started_at": now, "sync_heartbeat_at": now,
     }
     db.commit()
     return True

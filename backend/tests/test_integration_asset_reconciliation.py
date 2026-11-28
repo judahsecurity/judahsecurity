@@ -63,6 +63,54 @@ def test_failed_daily_sync_retries_in_one_hour(db):
         assert integration.next_sync_at == integration.last_sync_at + timedelta(days=1)
 
 
+def test_wiz_progress_heartbeat_prevents_duplicate_long_sync(db):
+    session, org = db
+    integration = _wiz(session, org)
+    integration.last_sync_at = datetime.utcnow() - timedelta(days=1)
+    integration.continuous_sync_enabled = True
+    integration.last_sync_stats = {
+        "sync_in_progress": True,
+        "sync_started_at": (datetime.utcnow() - timedelta(hours=3)).isoformat(),
+        "sync_heartbeat_at": datetime.utcnow().isoformat(),
+    }
+    session.commit()
+    assert integration.is_sync_due() is False
+    assert wiz_service.claim_sync(session, integration.id) is False
+
+    integration.last_sync_stats = {
+        "sync_in_progress": True,
+        "sync_started_at": (datetime.utcnow() - timedelta(hours=9)).isoformat(),
+        "sync_heartbeat_at": (datetime.utcnow() - timedelta(hours=9)).isoformat(),
+    }
+    session.commit()
+    assert integration.is_sync_due() is True
+    assert wiz_service.claim_sync(session, integration.id) is True
+    assert integration.last_sync_stats["sync_heartbeat_at"]
+    assert "assets_complete" not in integration.last_sync_stats
+
+
+@pytest.mark.asyncio
+async def test_wiz_vm_page_persists_progress_heartbeat(db):
+    session, org = db
+    integration = _wiz(session, org)
+    assert wiz_service.claim_sync(session, integration.id) is True
+
+    class Client:
+        virtual_machines_total_count = 1
+
+        async def iter_virtual_machines(self, *, exposed_only):
+            yield [{"id": "vm-1", "providerUniqueId": "vm-1"}]
+
+    started_at = datetime.utcnow()
+    await wiz_service._sync_virtual_machines(
+        session, integration, Client(), wiz_service._Stats(), started_at,
+    )
+    session.refresh(integration)
+    assert integration.last_sync_stats["virtual_machines_seen"] == 1
+    assert integration.last_sync_stats["sync_in_progress"] is True
+    assert datetime.fromisoformat(integration.last_sync_stats["sync_heartbeat_at"]) >= started_at
+
+
 def test_failed_graph_projection_retries_separately(db):
     session, org = db
     integration = _wiz(session, org)
