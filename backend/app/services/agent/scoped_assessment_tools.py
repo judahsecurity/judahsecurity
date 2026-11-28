@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 from contextvars import ContextVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
@@ -42,6 +43,14 @@ SCOPED_ASSESSMENT_TOOLS = (
     "complete_scoped_assessment",
     "get_finding_candidate",
 )
+
+# The inventory can promote a visited page's query input to form_action when
+# a GET form points at that same URL. It remains an observed GET input.
+_OBSERVED_GET_SQL_SOURCES = frozenset({
+    "page_url", "form_action", "observed_form", "captured_api",
+    "browser_traffic", "browser_link", "browser_request", "api_endpoint",
+    "application_operation",
+})
 
 # Exploratory probes cannot consume the capacity needed to give observed
 # SQLi/XSS inputs a first pass. The total cap still bounds target traffic.
@@ -1303,13 +1312,23 @@ class ScopedAssessmentTools:
             and row.get("path") == (parts.path or "/")
             and row.get("name") == parameter and row.get("location") == "query"
             and row.get("identity") == identity and row.get("testable")
-            and row.get("source") in {
-                "page_url", "observed_form", "captured_api", "browser_traffic",
-                "browser_link", "browser_request", "api_endpoint",
-                "application_operation",
-            }), None)
+            and row.get("source") in _OBSERVED_GET_SQL_SOURCES), None)
         if observed is None:
             raise self._unmapped_parameter_error("String SQLi", url, parameter, identity)
+        if observed.get("value_type") == "positive_integer":
+            values = [value for name, value in parse_qsl(parts.query, keep_blank_values=True)
+                      if name == parameter]
+            if not parts.query or (len(values) == 1 and re.fullmatch(r"[1-9][0-9]{0,8}", values[0])):
+                # The model sometimes calls the string tool for a numeric GET
+                # input. Use the observed numeric baseline and six-control
+                # proof instead of rejecting a mapped parameter or sending
+                # string probes against an integer value.
+                numeric = json.loads(await self.scoped_numeric_sqli(
+                    artifact_id=artifact_id if private else "", parameter=parameter,
+                    identity=identity, url="" if private else url,
+                ))
+                numeric["delegated_from"] = "scoped_string_sqli"
+                return json.dumps(numeric)
         needs_preflight = False
         baseline_source = observed["source"]
         if not parts.query:
@@ -1380,11 +1399,7 @@ class ScopedAssessmentTools:
                         query=urlencode([*pairs, (parameter, canary)]),
                     ))
                     break
-                if not baseline and observed["source"] in {
-                    "browser_link", "browser_request", "browser_traffic",
-                    "page_url", "captured_api", "application_operation",
-                    "observed_form", "api_endpoint",
-                }:
+                if not baseline and observed["source"] in _OBSERVED_GET_SQL_SOURCES:
                     # Browser maps intentionally expose parameter names without
                     # link values. A fresh, harmless value can still establish
                     # an execution-owned baseline for an observed safe GET input.
