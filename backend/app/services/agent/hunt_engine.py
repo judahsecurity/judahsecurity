@@ -63,6 +63,8 @@ Rules:
   genuinely new mechanism AND a parent fact recorded after the earlier attempt, or the
   earlier attempt only produced an inferred negative worth one re-check. Rewording or
   "try again" is not new. Queued or running tasks are never repeated.
+- An input with a confirmed candidate is done for that class: do not plan more tasks
+  on it. Spend the budget on inputs nothing has proven yet.
 - Negative facts with confidence "observed" are dead ends: do not plan against them.
   An "inferred" negative is weak evidence; one re-check task is allowed if the route matters.
 - Keep two or three fundamentally different attack routes alive (for example an
@@ -271,6 +273,47 @@ def facts_from_brain(brain: Any, capability_map: Any = None) -> List[Dict[str, A
     return rows
 
 
+# Specialist -> the vulnerability class its tasks try to prove. Generic
+# specialists (explorer, injection) may chase any class on an input.
+SPECIALIST_CLASS = {
+    "sqli": "sql_injection", "xss": "xss", "ssrf": "ssrf",
+    "server_injection": "", "injection": "", "explorer": "",
+}
+
+
+def _input_key(url: str, parameter: str) -> tuple:
+    from urllib.parse import urlsplit
+
+    path = urlsplit(str(url or "")).path or "/"
+    name = str(parameter or "").strip().lower()
+    for prefix in ("query:", "body:", "path:", "header:"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    return path, name
+
+
+def confirmed_inputs(brain: Any) -> List[Dict[str, str]]:
+    """Inputs with an independently confirmed finding, as (path, parameter, class).
+
+    A confirmed input is done: the run on ginandjuice.shop kept planning more
+    SQLi work on catalog?category after the verifier had confirmed it.
+    """
+    from urllib.parse import parse_qsl, urlsplit
+
+    rows: List[Dict[str, str]] = []
+    for cand in (brain or {}).get("candidates") or [] if isinstance(brain, dict) else []:
+        if not isinstance(cand, dict) or str(cand.get("status") or "") != "confirmed":
+            continue
+        target = str(cand.get("target") or "")
+        names = [str(cand.get("parameter") or "")] if cand.get("parameter") else [
+            name for name, _ in parse_qsl(urlsplit(target).query, keep_blank_values=True)]
+        for name in names or [""]:
+            path, param = _input_key(target, name)
+            rows.append({"path": path, "parameter": param,
+                         "class": str(cand.get("vulnerability_class") or "")})
+    return rows
+
+
 _FACTS_MARK = re.compile(r"FACTS:\s*", re.IGNORECASE)
 
 
@@ -413,6 +456,7 @@ class HuntEngine:
         planner_tick: float = 15.0,
         seed_facts: Optional[Callable[[], List[Dict[str, Any]]]] = None,
         known_evidence: Optional[Callable[[str], bool]] = None,
+        confirmed: Optional[Callable[[], List[Dict[str, str]]]] = None,
     ):
         self._plan = plan
         self._run_worker = run_worker
@@ -444,6 +488,7 @@ class HuntEngine:
         self._finished = asyncio.Event()
         self._seed_facts = seed_facts
         self._known_evidence = known_evidence
+        self._confirmed = confirmed
         self.facts: List[Fact] = []
         self._fact_keys: set = set()
         self.todo: List[Dict[str, Any]] = []
@@ -570,6 +615,8 @@ class HuntEngine:
             reason = "parent_ids name facts that do not exist"
         elif self.facts and not parents:
             reason = "task cites no existing fact"
+        elif self._already_confirmed(specialist, target, parameter):
+            reason = "input already has a confirmed finding of this class"
         elif len(self.intents) >= self.max_intents:
             reason = "task limit reached"
         if reason:
@@ -591,6 +638,24 @@ class HuntEngine:
                 return None
             intent.retry_of = finished[-1].id
         return intent
+
+    def _already_confirmed(self, specialist: str, target: str, parameter: str) -> bool:
+        if self._confirmed is None:
+            return False
+        try:
+            rows = self._confirmed() or []
+        except Exception:
+            return False
+        path, name = _input_key(target, parameter)
+        wanted = SPECIALIST_CLASS.get(specialist)
+        for row in rows:
+            if row.get("path") != path or (row.get("parameter") or "") != name:
+                continue
+            # A generic specialist on a confirmed input only re-proves it; a
+            # class-specific one is blocked only for that same class.
+            if not wanted or wanted == row.get("class"):
+                return True
+        return False
 
     def _retry_block(self, finished: List[Intent], intent: Intent, known: Dict[str, Fact]) -> str:
         """Why a retry of a finished route is refused; empty when it is allowed."""

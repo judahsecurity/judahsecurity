@@ -11643,8 +11643,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.core.config import settings
         from app.services.agent.hunt_engine import (
             DEFAULT_MAX_INTENTS, DEFAULT_MAX_ROUNDS, DEFAULT_WORKERS,
-            HuntEngine, Intent, brain_overview, facts_from_brain, format_summary,
-            worker_mission,
+            HuntEngine, Intent, brain_overview, confirmed_inputs, facts_from_brain,
+            format_summary, worker_mission,
         )
         from app.services.agent.pilot_policy import current_pilot
 
@@ -11729,6 +11729,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             max_seconds=max_seconds,
             should_stop=lambda: is_stop_requested(session_id),
             seed_facts=_seed_facts, known_evidence=_known_evidence,
+            confirmed=lambda: confirmed_inputs(getattr(self, "_engagement_brain", None) or {}),
         )
         summary = await engine.run()
         # Workers submitted candidates into the live brain; hand it back so the

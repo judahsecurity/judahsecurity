@@ -32,6 +32,9 @@ def test_export_finds_the_latest_run_for_a_target(monkeypatch, tmp_path):
     for tool in ("execute_deep_crawl", "check_exposures", "run_hunt_engine"):
         action_ledger.append_action(run_id, f"a-{tool}", "started", tool)
         action_ledger.append_action(run_id, f"a-{tool}", "completed", tool)
+    action_ledger.append_action(run_id, "a-num", "started", "scoped_numeric_sqli")
+    action_ledger.append_action(run_id, "a-num", "failed", "scoped_numeric_sqli",
+                                detail="Numeric input is not an observed link")
     action_ledger.finish_run(run_id, "timeout", "Request ceiling reached")
     run_snapshot.save_run_snapshot(5, "gj-1", {
         "engagement_brain": {
@@ -51,6 +54,9 @@ def test_export_finds_the_latest_run_for_a_target(monkeypatch, tmp_path):
                                    "status": "confirmed", "target": "https://ginandjuice.shop/catalog"}]
     assert data["coverage"]["by_test_type"] == {"sqli": 1, "xss": 1}
     assert data["coverage"]["tested_test_types"] == ["sqli"]
-    assert data["tools"]["runs"] == {"execute_deep_crawl": 1, "check_exposures": 1, "run_hunt_engine": 1}
+    assert data["tools"]["runs"] == {"execute_deep_crawl": 1, "check_exposures": 1,
+                                     "run_hunt_engine": 1, "scoped_numeric_sqli": 1}
+    assert data["failed_actions"][0]["tool"] == "scoped_numeric_sqli"
+    assert data["failed_actions"][0]["detail"] == "Numeric input is not an observed link"
     assert data["map"] == {"pages": 2, "api_endpoints": 0, "forms": 0, "value_flows": 1}
     json.dumps(data, default=str)

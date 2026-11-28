@@ -361,3 +361,38 @@ def test_worker_mission_carries_parent_facts_and_rules():
     assert "F1 [observed]" in text and "evidence=ev-pair" in text
     assert "Do only this task" in text and '"facts"' in text
     assert "inferred" in text
+
+
+# -- confirmed inputs are done -------------------------------------------------
+
+from app.services.agent.hunt_engine import confirmed_inputs  # noqa: E402
+
+CONFIRMED_BRAIN = {"candidates": [
+    {"id": "c1", "status": "confirmed", "vulnerability_class": "sql_injection",
+     "target": f"{SCOPE}/catalog?category=Gin"},
+    {"id": "c2", "status": "pending", "vulnerability_class": "xss",
+     "target": f"{SCOPE}/blog/?search=x"},
+]}
+
+
+def test_confirmed_inputs_come_from_confirmed_candidates_only():
+    rows = confirmed_inputs(CONFIRMED_BRAIN)
+    assert rows == [{"path": "/catalog", "parameter": "category", "class": "sql_injection"}]
+
+
+def test_planner_cannot_send_more_work_to_a_confirmed_input():
+    plan = _plan_sequence({"intents": [
+        _sqli_task(title="dump tables", parameter="category"),
+        _sqli_task(title="explore it", specialist="explorer", parameter="query:category"),
+        _sqli_task(title="xss on same input", specialist="xss", parameter="category"),
+        _sqli_task(title="other input", target=f"{SCOPE}/catalog?sort=price", parameter="sort"),
+    ]})
+    ran = []
+    engine = _engine(plan, _worker(ran), seed_facts=lambda: facts_from_brain(SIGNAL_BRAIN),
+                     confirmed=lambda: confirmed_inputs(CONFIRMED_BRAIN))
+    summary = asyncio.run(engine.run())
+    titles = {t["id"]: t["title"] for t in summary["tasks"]}
+    assert sorted(titles.values()) == ["other input", "xss on same input"]
+    blocked = [r for r in summary["rejected"]
+               if r["reason"] == "input already has a confirmed finding of this class"]
+    assert {r["title"] for r in blocked} == {"dump tables", "explore it"}

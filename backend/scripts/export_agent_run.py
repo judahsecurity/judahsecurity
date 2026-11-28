@@ -123,6 +123,12 @@ def export_run(session_id: Optional[str] = None, target: Optional[str] = None) -
         },
         "tools": {"runs": dict(tool_runs), "failures": dict(tool_failures),
                   "first_started_after_s": first_tool_seconds},
+        # Why actions failed, from the ledger (already redacted, 300 chars).
+        "failed_actions": [
+            {"tool": a.tool_name, "event": a.event, "detail": a.detail,
+             "after_s": round((a.created_at - actions[0].created_at).total_seconds(), 1)}
+            for a in actions if a.event in ("failed", "interrupted")
+        ][:60],
         "notes": [str(n)[:300] for n in (brain.get("notes") or [])[-20:]],
     }
 
