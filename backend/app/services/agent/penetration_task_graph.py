@@ -67,6 +67,7 @@ class TaskNode:
     recovery_required: bool = False
     # Set once a weak negative has been sent back for its one re-check.
     rechecked: bool = False
+    negative_tool_names: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -488,6 +489,14 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
                       for i in getattr(call, "evidence_ids", [])}
         if set(row["evidence_ids"]).issubset(direct_ids | scoped_ids):
             backed = dict(row)
+            backed["evidence_tool_names"] = sorted({str(getattr(call, "tool", ""))
+                for call in tool_calls if getattr(call, "success", False)
+                and set(getattr(call, "evidence_ids", [])) & set(row["evidence_ids"])
+                and (getattr(call, "args", {}).get("hypothesis_id") == hypothesis_id
+                     or (getattr(call, "tool", "") == "scoped_input_probe_assigned"
+                         and assigned_hypothesis == hypothesis_id
+                         and getattr(call, "args", {}).get("coverage_cell_id") == assigned_cell
+                         and getattr(call, "args", {}).get("coverage_lease_id") == assigned_cell_lease))})
             if backed.get("verdict") == "killed" and scoped_ids and not direct_ids:
                 # One scoped probe only covers its chosen technique. Preserve
                 # the receipt without declaring the whole hypothesis clean.
@@ -533,8 +542,13 @@ def recheck_weak_negatives_enabled() -> bool:
 
 def weak_negative_reason(result: Dict[str, Any], summary: "ExecutorSummary") -> str:
     """Why a killed verdict is too thin to close the hypothesis, or ""."""
+    if summary.stop_reason in {"exhausted", "blocked"}:
+        return f"run stopped as {summary.stop_reason} before negative coverage was complete"
     evidence_ids = {str(i) for i in result.get("evidence_ids") or [] if i}
-    techniques = {t for t in (summary.tools_run or []) if t and t not in _BOOKKEEPING_TOOLS}
+    # Real reports bind these tool names to the cited execution receipts. Do not
+    # let unrelated recon/bookkeeping calls make a negative look well tested.
+    tools = result.get("evidence_tool_names", summary.tools_run)
+    techniques = {t for t in (tools or []) if t and t not in _BOOKKEEPING_TOOLS}
     if len(evidence_ids) < 2:
         return f"only {len(evidence_ids)} evidence receipt"
     if len(techniques) < 2:
@@ -604,9 +618,25 @@ def apply_executor_summary(
             continue
         verdict = result.get("verdict")
         evidence = str(result.get("evidence") or "")[:2000]
-        node.evidence_ids = [str(item) for item in result.get("evidence_ids", [])][:50]
+        current_ids = [str(item) for item in result.get("evidence_ids", [])][:50]
+        if verdict == "killed" and recheck_weak_negatives_enabled():
+            # A re-check should combine its new receipts with the first pass;
+            # otherwise two distinct single-receipt techniques can never close.
+            current_tools = result.get("evidence_tool_names", summary.tools_run) or []
+            node.evidence_ids = list(dict.fromkeys([
+                *(node.evidence_ids if node.rechecked else []), *current_ids,
+            ]))[:50]
+            node.negative_tool_names = list(dict.fromkeys([
+                *(node.negative_tool_names if node.rechecked else []),
+                *(str(tool) for tool in current_tools if tool),
+            ]))[:24]
+            negative_result = {**result, "evidence_ids": node.evidence_ids,
+                               "evidence_tool_names": node.negative_tool_names}
+        else:
+            node.evidence_ids = current_ids
+            negative_result = result
         weak_reason = (
-            weak_negative_reason(result, summary)
+            weak_negative_reason(negative_result, summary)
             if verdict == "killed" and recheck_weak_negatives_enabled() else ""
         )
         if (weak_reason and not node.rechecked and node.attempts < node.max_attempts
@@ -618,6 +648,11 @@ def apply_executor_summary(
             node.last_failure = f"Weak negative sent for re-check: {weak_reason}"[:500]
             node.rewritten_test = recheck_instruction(weak_reason, summary)
             _append_recheck_to_hypothesis(brain, node.id, node.rewritten_test)
+        elif weak_reason:
+            # A second thin negative is an unresolved test, not proof that the
+            # vulnerability class is absent. Avoid an automatic retry loop.
+            node.status, hyp_status = NODE_BLOCKED, "open"
+            node.blocked_reason = f"Negative coverage incomplete: {weak_reason}"[:500]
         elif verdict == "killed" and result.get("evidence_ids") and evidence:
             node.status, hyp_status = NODE_KILLED, "killed"
         elif verdict == "blocked":

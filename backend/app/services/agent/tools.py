@@ -5591,6 +5591,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 db.flush()
                 logger.info(f"create_finding auto-added asset: {asset.value} (id={asset.id})")
             steps = steps_to_reproduce or kwargs.get("steps_to_reproduce")
+            proof_packet = None
+            if verified is not None:
+                from app.services.agent.evidence_store import evidence_store
+                from app.services.agent.finding_proof_packet import (
+                    build_verified_proof_packet, proof_packet_steps,
+                )
+
+                proof_packet = build_verified_proof_packet(
+                    evidence_store(self), verified, receipt
+                )
+                if not steps and proof_packet["steps"]:
+                    steps = proof_packet_steps(proof_packet)
             poc = proof_of_concept or kwargs.get("proof_of_concept") or kwargs.get("poc")
             component = affected_component or kwargs.get("affected_component")
             impact_text = impact or kwargs.get("impact")
@@ -5657,7 +5669,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                             "reason": "source_verified findings are "
                                             "capped at medium without a runtime proof"}
                            if severity_capped else None,
-                           "trace": trace_metadata},
+                           "trace": trace_metadata,
+                           "proof_packet": proof_packet},
             )
             db.add(vuln)
             db.commit()

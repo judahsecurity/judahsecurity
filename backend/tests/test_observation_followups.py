@@ -18,13 +18,16 @@ from app.services.agent.observation_followups import (
     FOLLOWUP_SOURCE,
     FollowupPlanner,
     FollowupPolicy,
+    apply_proposals,
     capture_facts,
     chain_report,
     claim_followup,
     commit_observation,
     complete_followup,
+    fact_packet,
     record_first_request,
     release_held_proposals,
+    validate_proposal,
 )
 
 T0 = 1_800_000_000.0
@@ -148,6 +151,74 @@ async def test_captured_order_request_creates_each_followup_once():
     assert first["first_request_to_verdict_ms"] == 7000
     assert first["observation_to_verdict_ms"] is not None
     assert first["waiting"]["model_ms"] is not None
+
+
+@pytest.mark.asyncio
+async def test_followup_can_combine_two_recorded_observations_without_inventing_evidence():
+    brain = EngagementBrain(target="https://app.test")
+    earlier, _ = _capture(brain, evidence="cap-profile",
+                          url="https://app.test/profile?user_id=7", at=T0)
+    current, _ = _capture(brain, evidence="cap-order", at=T0 + 1)
+    proposal = {**AUTHZ, "evidence_ids": ["cap-order", "cap-profile"],
+                "supporting_event_ids": [earlier["id"]]}
+    llm = FakeLLM(json.dumps({"proposals": [proposal]}))
+    planner = FollowupPlanner(lambda: llm)
+    policy = _policy("user-a", "user-b")
+
+    summary = await planner.drain(brain, policy)
+    assert summary["accepted"] == 1
+    assert earlier["id"] in llm.messages[1][1].content
+    [cell] = _cells(brain, "authz")
+    assert set(cell["evidence_ids"]) == {"cap-order", "cap-profile"}
+    assert set(cell["followup"]["event_ids"]) == {earlier["id"], current["id"]}
+    assert claim_followup(brain, "auth_logic", policy) is not None
+
+    invented = {**proposal, "supporting_event_ids": ["obs-invented"]}
+    assert validate_proposal(brain, current, invented, policy).reason == "supporting_event_not_observed"
+    uncited = {**proposal, "evidence_ids": ["cap-order"]}
+    assert validate_proposal(brain, current, uncited, policy).reason == "evidence_not_on_event"
+
+
+def test_new_clue_can_reopen_an_earlier_observed_target():
+    brain = EngagementBrain(target="https://app.test")
+    earlier, _ = _capture(brain, evidence="cap-order", at=T0)
+    current, _ = _capture(brain, evidence="cap-profile",
+                          url="https://app.test/profile?user_id=7", at=T0 + 1)
+    policy = _policy("user-a", "user-b")
+    proposal = {**AUTHZ, "target_event_id": earlier["id"],
+                "supporting_event_ids": [earlier["id"]],
+                "evidence_ids": ["cap-order", "cap-profile"]}
+
+    assert apply_proposals(brain, current, [proposal], policy)["accepted"] == 1
+    [cell] = _cells(brain, "authz")
+    assert cell["path"] == "/orders" and cell["capture_id"] == "cap-order"
+    assert set(cell["followup"]["event_ids"]) == {earlier["id"], current["id"]}
+    assert validate_proposal(brain, current,
+                             {**proposal, "supporting_event_ids": []}, policy).reason == "target_event_not_cited"
+
+
+def test_context_excludes_other_runs_and_out_of_scope_observations():
+    brain = EngagementBrain(target="https://app.test")
+    other_run, _ = commit_observation(
+        brain, run_id="run-2", kind="capture", evidence_ids=["other-run"],
+        identity="user-a", facts=capture_facts("GET", "https://app.test/other?key=secret"),
+        observed_at=T0,
+    )
+    out_of_scope, _ = commit_observation(
+        brain, run_id="run-1", kind="capture", evidence_ids=["other-host"],
+        identity="user-a", facts=capture_facts("GET", "https://evil.test/other?key=secret"),
+        observed_at=T0 + 1,
+    )
+    current, _ = _capture(brain, at=T0 + 2)
+    policy = _policy("user-a", "user-b")
+
+    packet = fact_packet(brain, current, policy)
+    assert packet["context_events"] == []
+    assert "secret" not in json.dumps(packet)
+    for prior in (other_run, out_of_scope):
+        proposal = {**AUTHZ, "supporting_event_ids": [prior["id"]],
+                    "evidence_ids": ["cap-1", prior["evidence_ids"][0]]}
+        assert validate_proposal(brain, current, proposal, policy).reason == "supporting_event_not_observed"
 
 
 @pytest.mark.asyncio
