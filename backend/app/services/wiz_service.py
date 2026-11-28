@@ -226,6 +226,7 @@ class WizClient:
     """Read-only OAuth2 + GraphQL client for Wiz findings and endpoints."""
 
     PAGE_SIZE = 100
+    FINDING_PAGE_SIZE = 500
     VM_PAGE_SIZE = 500
     MAX_PAGES = 10000
     ENDPOINT_MAX_PAGES = 2000
@@ -328,7 +329,7 @@ class WizClient:
         for _ in range(self.MAX_PAGES):
             data = await self.graphql(
                 VULNERABILITY_FINDINGS_QUERY,
-                {"first": min(self.PAGE_SIZE, limit - seen) if limit is not None else self.PAGE_SIZE,
+                {"first": min(self.FINDING_PAGE_SIZE, limit - seen) if limit is not None else self.FINDING_PAGE_SIZE,
                  "after": cursor, "filterBy": filter_by or {}},
             )
             connection = data.get("vulnerabilityFindings") or {}

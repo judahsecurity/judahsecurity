@@ -79,6 +79,7 @@ async def test_vulnerability_findings_follow_cursor_pagination():
     findings = await client.get_vulnerability_findings()
 
     assert [item["id"] for item in findings] == ["one", "two"]
+    assert client.graphql.await_args_list[0].args[1]["first"] == 500
     assert client.graphql.await_args_list[1].args[1]["after"] == "cursor-1"
 
 
