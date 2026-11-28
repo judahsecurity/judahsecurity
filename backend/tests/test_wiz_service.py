@@ -182,6 +182,7 @@ async def test_sync_imports_vm_inventory_before_findings(monkeypatch):
 
         class Client:
             virtual_machines_total_count = 1
+            vulnerability_findings_total_count = 0
             findings_truncated = False
 
             async def iter_virtual_machines(self, *, exposed_only):
@@ -189,8 +190,13 @@ async def test_sync_imports_vm_inventory_before_findings(monkeypatch):
                 yield [{"id": "vm-1", "name": "VM one", "providerUniqueId": "i-1",
                         "hasLimitedInternetExposure": True}]
 
-            async def iter_vulnerability_findings(self):
+            async def iter_vulnerability_findings(self, *, filter_by=None):
                 events.append("findings")
+                assert filter_by == {
+                    "assetType": ["VIRTUAL_MACHINE"],
+                    "hasRelatedIssue": True,
+                    "isAssetAccessibleFromInternet": True,
+                }
                 if False:
                     yield []
 
@@ -202,7 +208,7 @@ async def test_sync_imports_vm_inventory_before_findings(monkeypatch):
         result = await sync_integration(db, integration)
         assert result["ok"] is True
         assert result["virtual_machines_seen"] == 1
-        assert events == ["virtual_machines", "findings", "endpoints"]
+        assert events == ["virtual_machines", "endpoints", "findings"]
     engine.dispose()
 
 

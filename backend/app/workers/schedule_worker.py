@@ -793,7 +793,7 @@ class ScheduleWorker:
                         f"Wiz sync (org {integration.organization_id}, "
                         f"'{integration.connection_name}'): {result.get('message')}"
                     )
-                    if result["ok"]:
+                    if result["ok"] or result.get("assets_complete"):
                         graph_result = await asyncio.to_thread(
                             project_and_record_graph, integration.organization_id, "wiz", integration.id
                         )

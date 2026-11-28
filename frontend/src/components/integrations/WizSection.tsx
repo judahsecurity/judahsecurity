@@ -290,8 +290,11 @@ export function WizSection() {
                       {item.last_sync_stats.endpoints_seen || 0} endpoints ({item.last_sync_stats.ai_endpoints_seen || 0} AI), {item.last_sync_stats.virtual_machines_seen || 0} VMs, {item.last_sync_stats.assets_created || 0} new assets, {item.last_sync_stats.assets_retired || 0} removed from the active inventory, {item.last_sync_stats.vulns_created || 0} new findings.
                     </p>
                   )}
-                  {item.last_sync_stats?.findings_truncated === true && item.last_sync_ok && (
-                    <p className="text-xs text-amber-400 mt-1">VM assets use the full Wiz resource inventory. Finding import is limited to the first 50,000 Wiz findings.</p>
+                  {item.last_sync_stats?.findings_scope?.startsWith('related_issues_') && (
+                    <p className="text-xs text-muted-foreground mt-1">Finding import covers Wiz findings linked to issues on {item.internet_exposed_only ? 'internet-accessible ' : ''}VMs. All application endpoints are synced independently.</p>
+                  )}
+                  {item.last_sync_stats?.assets_complete && item.last_sync_ok === false && (
+                    <p className="text-xs text-amber-400 mt-1">Asset snapshot completed; the findings import will retry. Active inventory and graph can still update.</p>
                   )}
                   {item.last_sync_stats?.graph_projection && (
                     <p className={`text-xs mt-1 ${item.last_sync_stats.graph_projection.ok ? 'text-green-400' : 'text-red-400'}`}>
@@ -482,7 +485,7 @@ export function WizSection() {
             <div className="space-y-2">
               {[
                 ['wiz-assets', 'Import assets', 'Creates or enriches VM and application endpoint assets; endpoint records are always retained in the Wiz inventory.', 'import_assets'],
-                ['wiz-vulns', 'Import vulnerability findings', 'Maps CVEs, CVSS scores, severity, affected/fixed versions, and remediation guidance.', 'import_vulnerabilities'],
+                ['wiz-vulns', 'Import vulnerability findings', 'Imports Wiz findings linked to issues on the selected VMs, including CVEs, scores, severity, versions, and remediation.', 'import_vulnerabilities'],
                 ['wiz-exposed', 'Internet-exposed VMs only', 'Imports VMs Wiz marks internet accessible and keeps matching findings.', 'internet_exposed_only'],
                 ['wiz-sync', 'Automatically re-sync', 'Keeps Wiz endpoints and findings current in the background.', 'continuous_sync_enabled'],
               ].map(([id, title, description, key]) => (
