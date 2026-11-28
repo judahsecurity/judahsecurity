@@ -22,7 +22,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.db.database import SessionLocal
-from app.models.asset import Asset, AssetType
+from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.vulnerability import Vulnerability
 from app.models.port_service import PortService
 from app.models.technology import Technology
@@ -297,7 +297,7 @@ class GraphService:
             "type": asset.asset_type.value if asset.asset_type else None,
             "org_id": org_id,
             "root_domain": asset.root_domain,
-            "is_active": getattr(asset, 'is_active', True),
+            "is_active": asset.status not in (AssetStatus.INACTIVE, AssetStatus.ARCHIVED),
             "is_live": getattr(asset, 'is_live', False),
             "first_seen": asset.first_seen.isoformat() if asset.first_seen else None,
             "ars_score": getattr(asset, 'ars_score', None),
@@ -1270,8 +1270,10 @@ class GraphService:
             MATCH path = (center:Asset {{asset_id: $asset_id}})-[*0..{safe_depth}]-(connected)
             WHERE center.organization_id IS NOT NULL
               AND ($org_id IS NULL OR center.organization_id = $org_id)
+              AND coalesce(center.is_active, true)
               AND all(n IN nodes(path) WHERE
-                  n.organization_id IS NULL OR n.organization_id = center.organization_id)
+                  (n.organization_id IS NULL OR n.organization_id = center.organization_id)
+                  AND (NOT n:Asset OR coalesce(n.is_active, true)))
             RETURN path
             LIMIT 200
         """

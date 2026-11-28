@@ -152,7 +152,8 @@ export default function GraphPage() {
       const data = await api.getAssets({ 
         organization_id: orgId, 
         limit: 500,
-        asset_type: 'domain'
+        asset_type: 'domain',
+        active_only: true,
       });
       if (requestId === assetRequestId.current) {
         setAssets(data.items || data || []);
@@ -175,7 +176,7 @@ export default function GraphPage() {
         description: `Synced ${result.assets_synced || 0} assets to Neo4j`,
       });
       await fetchStatus();
-      const assetsRes = await api.getAssets({ organization_id: orgId, limit: 500 }).catch(() => ({ items: [] }));
+      const assetsRes = await api.getAssets({ organization_id: orgId, limit: 500, active_only: true }).catch(() => ({ items: [] }));
       const assetsList = assetsRes?.items ?? assetsRes ?? [];
       setAssets(Array.isArray(assetsList) ? assetsList : []);
       if (selectedAssetId) {

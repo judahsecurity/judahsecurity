@@ -66,6 +66,15 @@ async def test_cursor_pagination_uses_next_and_rejects_repeats():
     await client.http.aclose()
 
     client = CrowdStrikeClient("us-1", "client", "secret")
+    client._request = AsyncMock(return_value={
+        "resources": [{"device_id": "one"}], "meta": {"pagination": {"total": 2}},
+    })
+    with pytest.raises(CrowdStrikeError, match="ended before its reported total"):
+        async for _ in client.hosts():
+            pass
+    await client.http.aclose()
+
+    client = CrowdStrikeClient("us-1", "client", "secret")
     client._request = AsyncMock(return_value={"resources": [], "meta": {"pagination": {"after": "same"}}})
     with pytest.raises(CrowdStrikeError, match="repeated page cursor"):
         async for _ in client._pages("/spotlight/combined/vulnerabilities/v1", params={"limit": 1}, cursor_key="after"):

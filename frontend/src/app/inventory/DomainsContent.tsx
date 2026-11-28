@@ -219,6 +219,7 @@ export default function DomainsContent() {
       const baseParams = {
         organization_id: 1,
         limit: 50000,
+        active_only: true,
         ...(search ? { search } : {}),
       };
       

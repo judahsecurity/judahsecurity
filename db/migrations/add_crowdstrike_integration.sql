@@ -32,8 +32,11 @@ CREATE TABLE IF NOT EXISTS crowdstrike_asset_links (
     source_id VARCHAR(255) NOT NULL,
     cid VARCHAR(100),
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
     CONSTRAINT uq_crowdstrike_source_link UNIQUE (integration_id, source_kind, source_id)
 );
 
 CREATE INDEX IF NOT EXISTS ix_crowdstrike_asset_links_integration_id ON crowdstrike_asset_links (integration_id);
 CREATE INDEX IF NOT EXISTS ix_crowdstrike_asset_links_asset_id ON crowdstrike_asset_links (asset_id);
+
+ALTER TABLE crowdstrike_asset_links ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;

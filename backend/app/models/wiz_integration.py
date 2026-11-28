@@ -72,7 +72,8 @@ class WizIntegration(Base):
             return None
         if self.last_sync_at is None:
             return datetime.utcnow()
-        return self.last_sync_at + timedelta(minutes=self.sync_interval_minutes or 1440)
+        interval = 60 if self.last_sync_ok is False else (self.sync_interval_minutes or 1440)
+        return self.last_sync_at + timedelta(minutes=interval)
 
     def is_sync_due(self, now: datetime | None = None) -> bool:
         sync_state = self.last_sync_stats or {}
@@ -120,3 +121,20 @@ class WizApplicationEndpoint(Base):
 
     integration = relationship("WizIntegration")
     asset = relationship("Asset")
+
+
+class WizAssetLink(Base):
+    """One Wiz VM's current membership in a particular connection."""
+
+    __tablename__ = "wiz_asset_links"
+    __table_args__ = (
+        UniqueConstraint("integration_id", "wiz_id", name="uq_wiz_asset_link_source"),
+        Index("ix_wiz_asset_links_integration_seen", "integration_id", "last_seen"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    integration_id = Column(Integer, ForeignKey("wiz_integrations.id", ondelete="CASCADE"), nullable=False, index=True)
+    asset_id = Column(Integer, ForeignKey("assets.id", ondelete="CASCADE"), nullable=False, index=True)
+    wiz_id = Column(String(255), nullable=False)
+    last_seen = Column(DateTime, nullable=False, default=datetime.utcnow)
+    is_active = Column(Boolean, nullable=False, default=True)

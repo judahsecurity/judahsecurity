@@ -267,6 +267,7 @@ export default function AssetsPage() {
           asset_type: typeFilter !== 'all' ? typeFilter : undefined,
           status: statusFilter !== 'all' ? statusFilter : undefined,
           is_live: true,
+          active_only: statusFilter === 'all',
           collapse_related_ips: true,
           search: search || undefined,
           limit: PAGE_SIZE,

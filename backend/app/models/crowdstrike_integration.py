@@ -54,7 +54,8 @@ class CrowdStrikeIntegration(Base):
     def next_sync_at(self) -> datetime | None:
         if not self.is_active or not self.continuous_sync_enabled:
             return None
-        return (self.last_sync_at or datetime.utcnow()) + (timedelta(minutes=self.sync_interval_minutes) if self.last_sync_at else timedelta())
+        interval = 60 if self.last_sync_ok is False else (self.sync_interval_minutes or 1440)
+        return (self.last_sync_at or datetime.utcnow()) + (timedelta(minutes=interval) if self.last_sync_at else timedelta())
 
     def is_sync_due(self, now: datetime | None = None) -> bool:
         state = self.last_sync_stats or {}
@@ -82,3 +83,4 @@ class CrowdStrikeAssetLink(Base):
     source_id = Column(String(255), nullable=False)
     cid = Column(String(100))
     last_seen = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, nullable=False, default=True)
