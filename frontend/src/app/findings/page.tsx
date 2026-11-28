@@ -87,6 +87,7 @@ import {
 } from '@/components/ui/select';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
+import { CensysMappedFields } from '@/components/integrations/CensysMappedFields';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -174,6 +175,7 @@ interface Finding {
   detection?: ScannerDetection;
   remediation_deadline?: string;
   detected_by?: string;
+  censys_custom?: Record<string, unknown>;
   matcher_name?: string;
   asset_id?: number;
   organization_id?: number;
@@ -2741,6 +2743,7 @@ export default function FindingsPage() {
                   </div>
                 )}
               </div>
+              <CensysMappedFields values={selectedFinding.censys_custom} />
               </>}
               overview={<>
               {selectedFinding?.delphi &&
